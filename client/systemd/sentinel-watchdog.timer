@@ -1,0 +1,11 @@
+# Runs the watchdog check every 30s.
+[Unit]
+Description=Sentinel agent watchdog timer
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
