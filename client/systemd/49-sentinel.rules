@@ -1,0 +1,18 @@
+// Sentinel polkit rule (TAMPER.md level 1/3) — reference copy.
+// The agent (re)writes this to /etc/polkit-1/rules.d/49-sentinel.rules at runtime
+// via tamper::install_polkit(), so the level-3 systemctl-stop clause is added only
+// when level 3 is active. This static copy documents the level-1 baseline.
+//
+// The `sentinel-admin` account and root ALWAYS retain power/stop rights (recovery).
+polkit.addRule(function(action, subject) {
+  if (subject.user == "sentinel-admin" || subject.user == "root") { return polkit.Result.YES; }
+  var power = [
+    "org.freedesktop.login1.power-off",
+    "org.freedesktop.login1.power-off-multiple-sessions",
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.reboot-multiple-sessions",
+    "org.freedesktop.login1.suspend",
+    "org.freedesktop.login1.suspend-multiple-sessions"
+  ];
+  if (power.indexOf(action.id) >= 0) { return polkit.Result.NO; }
+});

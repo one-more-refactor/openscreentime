@@ -1,0 +1,201 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   DESIGN TOKENS — mirrors docs/DESIGN.md verbatim.
+   Dark is the primary theme; light mirrors it (white surfaces, black ink).
+   Theme is chosen by [data-theme] on <html>; a prefers-color-scheme fallback
+   is provided for first paint before JS runs.
+   ========================================================================== */
+:root,
+:root[data-theme="dark"] {
+  /* surfaces — near-pure monochrome */
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #1c1c1c;
+  --line: #2a2a2a;
+  --line-2: #3a3a3a;
+
+  /* ink */
+  --fg: #fafafa;
+  --fg-dim: #9a9a9a;
+  --fg-faint: #5a5a5a;
+
+  /* the one accent — Nothing red */
+  --accent: #d71921;
+  --accent-dim: #7a0f13;
+
+  /* status LEDs */
+  --ok: #37d67a;
+  --warn: #f2c94c;
+  --crit: #d71921;
+  --idle: #5a5a5a;
+
+  --radius: 4px;
+
+  /* dot-grid texture spacing */
+  --dot-gap: 16px;
+  --dot-color: var(--line);
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f4f4;
+  --surface: #ffffff;
+  --surface-2: #ececec;
+  --line: #d6d6d6;
+  --line-2: #bcbcbc;
+
+  --fg: #0a0a0a;
+  --fg-dim: #4a4a4a;
+  --fg-faint: #9a9a9a;
+
+  --accent: #d71921;
+  --accent-dim: #f2b6b8;
+
+  --ok: #1f9d57;
+  --warn: #b8860b;
+  --crit: #d71921;
+  --idle: #b0b0b0;
+
+  --radius: 4px;
+  --dot-gap: 16px;
+  --dot-color: #d0d0d0;
+}
+
+/* prefers-color-scheme fallback when no data-theme is set yet */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f4f4f4;
+    --surface: #ffffff;
+    --surface-2: #ececec;
+    --line: #d6d6d6;
+    --line-2: #bcbcbc;
+    --fg: #0a0a0a;
+    --fg-dim: #4a4a4a;
+    --fg-faint: #9a9a9a;
+    --accent-dim: #f2b6b8;
+    --ok: #1f9d57;
+    --warn: #b8860b;
+    --idle: #b0b0b0;
+    --dot-color: #d0d0d0;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, "Space Mono", "SFMono-Regular", Menlo, Consolas,
+      monospace;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  /* thin monochrome scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--line-2);
+    border-radius: 0;
+  }
+}
+
+@layer components {
+  /* Mono uppercase label — the workhorse "hardware caption" style. */
+  .label {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-dim);
+    font-weight: 400;
+  }
+
+  /* Dot-matrix-ish display type. No remote fonts: we lean on monospace +
+     wide tracking + slight boldness to evoke NDot's engineered look. */
+  .dot {
+    font-family: "Space Mono", ui-monospace, monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The SENTINEL wordmark — extra tracking, dotted underline motif. */
+  .wordmark {
+    font-family: "Space Mono", ui-monospace, monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.42em;
+    font-weight: 700;
+  }
+
+  /* Dot-grid panel texture. */
+  .dotgrid {
+    background-image: radial-gradient(var(--dot-color) 1px, transparent 1px);
+    background-size: var(--dot-gap) var(--dot-gap);
+    background-position: -1px -1px;
+  }
+
+  /* Hairline helpers. */
+  .hairline {
+    border: 1px solid var(--line);
+  }
+
+  /* LED glow. */
+  .led {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    flex: none;
+  }
+  .led-glow-ok {
+    box-shadow: 0 0 6px 0 var(--ok);
+  }
+  .led-glow-warn {
+    box-shadow: 0 0 6px 0 var(--warn);
+  }
+  .led-glow-crit {
+    box-shadow: 0 0 7px 0 var(--crit);
+  }
+  .led-glow-idle {
+    box-shadow: none;
+  }
+
+  /* Focus ring — square, mono. */
+  .focusable:focus-visible {
+    outline: 1px solid var(--fg-dim);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.led-pulse {
+  animation: led-pulse 1.6s ease-in-out infinite;
+}
