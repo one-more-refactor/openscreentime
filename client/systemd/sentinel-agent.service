@@ -1,0 +1,36 @@
+# Sentinel agent — hardened unit (TAMPER.md level 1).
+# Installed to /etc/systemd/system/sentinel-agent.service by `sentinel-agent install-service`.
+[Unit]
+Description=Sentinel zero-trust device management agent
+Documentation=https://sentinel.example/docs
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting (level 1: strong persistence).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sentinel-agent run
+Restart=always
+RestartSec=1
+# Survive OOM pressure — the agent must not be the first thing killed.
+OOMScoreAdjust=-1000
+
+# --- Hardening (TAMPER.md level 1) ---
+# ProtectSystem=strict makes most of the fs read-only; we carve out the paths the
+# agent legitimately writes (config, state, runtime heartbeat, resolver + nft + polkit).
+ProtectSystem=strict
+ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf /etc/polkit-1/rules.d /etc/systemd/logind.conf.d
+RuntimeDirectory=sentinel
+StateDirectory=sentinel
+# ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.
+ProtectHome=false
+# NoNewPrivileges is intentionally OFF: enforcement shells out to nft/resolvectl/chattr.
+NoNewPrivileges=false
+# Watchdog: the agent (or the companion timer) refreshes /run/sentinel/heartbeat.
+# If you build the agent with sd_notify support, enable WatchdogSec here instead of
+# relying on the sentinel-watchdog.timer:
+# WatchdogSec=30
+
+[Install]
+WantedBy=multi-user.target
