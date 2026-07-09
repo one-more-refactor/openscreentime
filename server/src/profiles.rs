@@ -11,9 +11,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::agent::enqueue_command;
 use crate::error::{AppError, AppResult};
-use crate::policy::Policy;
 use crate::state::{AppState, AuthAdmin};
+use sentinel_policy::Policy;
 
 type ProfileRow = (
     Uuid,
@@ -159,6 +160,18 @@ pub async fn update_profile(
             .bind(id)
             .execute(&st.db)
             .await?;
+
+        // Policy changed: tell every device with a user on this profile to
+        // re-pull (WS agents get it pushed; poll agents also catch up via the
+        // heartbeat policy_version).
+        let device_ids: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT DISTINCT device_id FROM device_users WHERE profile_id = $1")
+                .bind(id)
+                .fetch_all(&st.db)
+                .await?;
+        for (device_id,) in device_ids {
+            enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
+        }
     }
 
     let row: ProfileRow = sqlx::query_as(&format!(

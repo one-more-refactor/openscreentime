@@ -175,10 +175,6 @@ impl ServerClient {
             .context("ws connect")?;
         Ok(stream)
     }
-
-    pub fn base(&self) -> &str {
-        &self.base
-    }
 }
 
 /// Best-effort public IP host extracted from the server URL (used by the firewall

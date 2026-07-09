@@ -15,11 +15,6 @@
 use crate::policy::Lockout;
 use crate::util::Exec;
 
-/// Nothing-red accent from DESIGN.md.
-pub const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
-pub const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
-pub const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
-
 /// What the overlay should say + how to dismiss it.
 #[derive(Debug, Clone)]
 pub struct LockSpec {
@@ -41,6 +36,7 @@ pub mod challenge {
             a: i64,
             b: i64,
             op: char,
+            #[allow(dead_code)] // read by `verify` (early-dismiss gate, GUI-only path)
             answer: i64,
         },
         /// Wait out a cooldown before the dismiss button enables.
@@ -84,6 +80,7 @@ pub mod challenge {
 
         /// Verify a typed response (math answer or PIN). `parent_pin` is the
         /// configured PIN for the ParentPin variant.
+        #[allow(dead_code)] // early-dismiss gate for the GUI presenter; covered by tests
         pub fn verify(&self, input: &str, parent_pin: Option<&str>) -> bool {
             match self {
                 Challenge::Math { answer, .. } => input
@@ -201,8 +198,13 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
 #[cfg(feature = "gui")]
 mod gui {
     //! Minimal eframe/egui fullscreen presenter. Compiled only with `--features gui`.
-    use super::{LockSpec, ACCENT, BG, FG};
+    use super::LockSpec;
     use eframe::egui;
+
+    /// Nothing-style palette from DESIGN.md (accent red, near-black bg, off-white fg).
+    const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
+    const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
+    const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
 
     pub fn show(spec: &LockSpec) {
         let spec = spec.clone();

@@ -508,6 +508,19 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                             let _ = agent.client.post_events(&events).await;
                             let _ = agent.client.ack_command(&ack).await;
                         }
+                        // Poll mode has no push channel: a changed policy_version
+                        // is the signal to re-pull and re-apply.
+                        if resp.policy_version != agent.policy_version {
+                            match agent.client.get_policy().await {
+                                Ok(bundle) => match agent.apply_bundle(bundle) {
+                                    Ok(evs) => {
+                                        let _ = agent.client.post_events(&evs).await;
+                                    }
+                                    Err(e) => tracing::warn!("policy re-apply failed: {e}"),
+                                },
+                                Err(e) => tracing::warn!("policy re-pull failed: {e}"),
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("heartbeat failed ({e}); will retry");

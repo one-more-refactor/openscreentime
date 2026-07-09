@@ -4,13 +4,11 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-pub const CONFIG_DIR: &str = "/etc/sentinel";
 pub const CONFIG_PATH: &str = "/etc/sentinel/agent.toml";
 pub const HEARTBEAT_FILE: &str = "/run/sentinel/heartbeat";
-pub const STATE_DIR: &str = "/var/lib/sentinel";
 
 /// On-disk config written at enrollment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,8 +120,4 @@ impl AgentCtx {
 
 pub fn is_root() -> bool {
     users::get_effective_uid() == 0
-}
-
-pub fn state_dir() -> PathBuf {
-    PathBuf::from(STATE_DIR)
 }

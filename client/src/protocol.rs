@@ -3,8 +3,8 @@
 //! payloads as `serde_json::Value`) so the agent tolerates server-side additions.
 //!
 //! `docs/API.md` defines the surfaces; `docs/DATA_MODEL.md` the enums. The exact
-//! WS framing isn't pinned by the docs (the server crate is still empty), so this
-//! module picks an explicit, self-describing tagged JSON envelope.
+//! WS framing isn't pinned by the docs, so this module defines the explicit,
+//! self-describing tagged JSON envelope (mirrored by `server/src/agent.rs`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,8 +18,8 @@ pub const CMD_SSH_CLOSE: &str = "ssh_close";
 pub const CMD_DISCOVER: &str = "discover";
 pub const CMD_SET_TAMPER_LEVEL: &str = "set_tamper_level";
 
-/// Event types (DATA_MODEL.md → `events.type`).
-pub const EV_HEARTBEAT: &str = "heartbeat";
+/// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
+/// `enrolled` also exist but are written server-side, never by the agent).
 pub const EV_TAMPER: &str = "tamper";
 pub const EV_LOCK: &str = "lock";
 pub const EV_UNLOCK: &str = "unlock";
@@ -27,7 +27,6 @@ pub const EV_POLICY_APPLIED: &str = "policy_applied";
 pub const EV_SCREEN_TIME_EXCEEDED: &str = "screen_time_exceeded";
 pub const EV_SCREEN_TIME_EARNED: &str = "screen_time_earned";
 pub const EV_STREAK: &str = "streak";
-pub const EV_ENROLLED: &str = "enrolled";
 pub const EV_DISCOVERY_RESULT: &str = "discovery_result";
 
 /// Severities (DATA_MODEL.md → `events.severity`).

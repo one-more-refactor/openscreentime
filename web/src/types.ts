@@ -111,7 +111,11 @@ export interface DeviceUser {
   os_username: string;
   display_name: string | null;
   profile_id: string;
-  created_at: string;
+  /** joined from profiles on device detail/user responses */
+  profile_name?: string;
+  profile_kind?: ProfileKind;
+  /** present in mock data only; the server does not return it */
+  created_at?: string;
 }
 
 export interface Device {
@@ -128,6 +132,8 @@ export interface Device {
   created_at: string;
   /** present on list + detail responses */
   users?: DeviceUser[];
+  /** present on list responses */
+  online?: boolean;
 }
 
 export interface DeviceDetail extends Device {

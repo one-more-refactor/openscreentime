@@ -4,7 +4,6 @@ import {
   getDiscoveryResults,
   listDevices,
   lockDevice,
-  openSsh,
   scanDiscovery,
   unlockDevice,
 } from "../api";
@@ -16,9 +15,12 @@ import {
   DeviceCard,
   Modal,
   Panel,
+  SshModal,
   Stat,
   StatusLed,
   TextInput,
+  TokenBlock,
+  openSshSession,
 } from "../components";
 import { pad2, relTime } from "../lib/format";
 
@@ -63,24 +65,7 @@ export function Devices() {
     );
   }
   async function onSsh(d: Device) {
-    try {
-      const res = await openSsh(d.id);
-      setSsh(res);
-    } catch {
-      // mock/offline fallback so the flow is demonstrable
-      setSsh({
-        ssh_session: {
-          id: "mock",
-          device_id: d.id,
-          admin_id: "mock",
-          broker_port: 49213,
-          status: "open",
-          created_at: new Date().toISOString(),
-          closed_at: null,
-        },
-        connect_cmd: `ssh -p 49213 ${d.hostname}@broker.sentinel.local`,
-      });
-    }
+    setSsh(await openSshSession(d));
   }
 
   const latestScan = discovery.data?.[0];
@@ -281,51 +266,8 @@ export function Devices() {
         )}
       </Modal>
 
-      {/* SSH session modal */}
-      <Modal
-        open={!!ssh}
-        onClose={() => setSsh(null)}
-        title="REVERSE-SSH SESSION"
-        footer={
-          <Button variant="primary" onClick={() => setSsh(null)}>
-            CLOSE
-          </Button>
-        }
-      >
-        {ssh && (
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-3">
-              <StatusLed tone="ok" label={`SESSION ${ssh.ssh_session.status.toUpperCase()}`} pulse />
-              <span className="label" style={{ color: "var(--fg-faint)" }}>
-                BROKER PORT {ssh.ssh_session.broker_port}
-              </span>
-            </div>
-            <TokenBlock token={ssh.connect_cmd} />
-            <p className="label" style={{ color: "var(--fg-faint)" }}>
-              AGENT DIALS OUT · AUDITED · NO INBOUND LISTENER
-            </p>
-          </div>
-        )}
-      </Modal>
+      <SshModal ssh={ssh} onClose={() => setSsh(null)} />
     </>
-  );
-}
-
-function TokenBlock({ token }: { token: string }) {
-  return (
-    <div
-      className="flex items-center justify-between gap-3 border rounded px-3 py-2.5"
-      style={{ borderColor: "var(--line-2)", background: "var(--bg)" }}
-    >
-      <code className="text-xs text-fg break-all">{token}</code>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => navigator.clipboard?.writeText(token)}
-      >
-        COPY
-      </Button>
-    </div>
   );
 }
 

@@ -71,12 +71,7 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let mut d = device_to_json(r);
-        let user_count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM device_users WHERE device_id = $1")
-                .bind(r.0)
-                .fetch_one(&st.db)
-                .await?;
-        d["user_count"] = json!(user_count);
+        d["users"] = device_users_json(&st.db, r.0).await?;
         d["online"] = json!(st.hub.is_online(r.0).await);
         out.push(d);
     }
