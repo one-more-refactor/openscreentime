@@ -5,7 +5,6 @@ import {
   getDevice,
   listProfiles,
   lockDevice,
-  openSsh,
   unlockDevice,
   updateDevice,
 } from "../api";
@@ -18,9 +17,11 @@ import {
   Modal,
   Panel,
   Select,
+  SshModal,
   StatusLed,
   statusTone,
   Toggle,
+  openSshSession,
 } from "../components";
 import { Empty, Loading } from "./Devices";
 import { relTime } from "../lib/format";
@@ -61,22 +62,7 @@ export function DeviceDetail() {
 
   async function onSsh() {
     if (!d) return;
-    try {
-      setSsh(await openSsh(d.id));
-    } catch {
-      setSsh({
-        ssh_session: {
-          id: "mock",
-          device_id: d.id,
-          admin_id: "mock",
-          broker_port: 49213,
-          status: "open",
-          created_at: new Date().toISOString(),
-          closed_at: null,
-        },
-        connect_cmd: `ssh -p 49213 ${d.hostname}@broker.sentinel.local`,
-      });
-    }
+    setSsh(await openSshSession(d));
   }
 
   return (
@@ -250,41 +236,7 @@ export function DeviceDetail() {
         </div>
       </Modal>
 
-      {/* SSH modal */}
-      <Modal
-        open={!!ssh}
-        onClose={() => setSsh(null)}
-        title="REVERSE-SSH SESSION"
-        footer={
-          <Button variant="primary" onClick={() => setSsh(null)}>
-            CLOSE
-          </Button>
-        }
-      >
-        {ssh && (
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-3">
-              <StatusLed tone="ok" label={`SESSION ${ssh.ssh_session.status.toUpperCase()}`} pulse />
-              <span className="label" style={{ color: "var(--fg-faint)" }}>
-                BROKER PORT {ssh.ssh_session.broker_port}
-              </span>
-            </div>
-            <div
-              className="flex items-center justify-between gap-3 border rounded px-3 py-2.5"
-              style={{ borderColor: "var(--line-2)", background: "var(--bg)" }}
-            >
-              <code className="text-xs text-fg break-all">{ssh.connect_cmd}</code>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => navigator.clipboard?.writeText(ssh.connect_cmd)}
-              >
-                COPY
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <SshModal ssh={ssh} onClose={() => setSsh(null)} />
     </>
   );
 }

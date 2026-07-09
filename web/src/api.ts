@@ -114,11 +114,16 @@ async function read<T>(path: string, fallback: () => T, init?: RequestInit): Pro
 // ---- Auth ------------------------------------------------------------------
 
 export const auth = {
+  // webauthn-rs serializes challenges wrapped in `{ publicKey: {...} }`;
+  // @simplewebauthn/browser wants the inner options object.
   async registerStart(email: string, display_name: string) {
-    return request<PublicKeyCredentialCreationOptionsJSON>(
-      "/api/auth/register/start",
-      { method: "POST", body: JSON.stringify({ email, display_name }) },
-    );
+    const res = await request<{
+      publicKey: PublicKeyCredentialCreationOptionsJSON;
+    }>("/api/auth/register/start", {
+      method: "POST",
+      body: JSON.stringify({ email, display_name }),
+    });
+    return res.publicKey;
   },
 
   async registerFinish(email: string, credential: RegistrationResponseJSON) {
@@ -129,10 +134,13 @@ export const auth = {
   },
 
   async loginStart(email: string) {
-    return request<PublicKeyCredentialRequestOptionsJSON>(
-      "/api/auth/login/start",
-      { method: "POST", body: JSON.stringify({ email }) },
-    );
+    const res = await request<{
+      publicKey: PublicKeyCredentialRequestOptionsJSON;
+    }>("/api/auth/login/start", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    return res.publicKey;
   },
 
   async loginFinish(email: string, credential: AuthenticationResponseJSON) {
@@ -170,11 +178,22 @@ export async function getMe(): Promise<Me> {
 // ---- Devices ---------------------------------------------------------------
 
 export async function listDevices(): Promise<Device[]> {
-  return read<Device[]>("/api/devices", () => mockDevices);
+  const res = await read<{ devices: Device[] }>("/api/devices", () => ({
+    devices: mockDevices,
+  }));
+  return res.devices;
 }
 
 export async function getDevice(id: string): Promise<DeviceDetail> {
-  return read<DeviceDetail>(`/api/devices/${id}`, () => mockDeviceDetail(id));
+  const res = await read<{
+    device: Device;
+    users: DeviceUser[];
+    recent_events: Event[];
+  }>(`/api/devices/${id}`, () => {
+    const m = mockDeviceDetail(id);
+    return { device: m, users: m.users, recent_events: m.recent_events };
+  });
+  return { ...res.device, users: res.users, recent_events: res.recent_events };
 }
 
 export async function createDevice(name: string): Promise<EnrollTokenResponse> {
@@ -188,10 +207,11 @@ export async function updateDevice(
   id: string,
   patch: { name?: string; tamper_level?: TamperLevel },
 ): Promise<Device> {
-  return request<Device>(`/api/devices/${id}`, {
+  const res = await request<{ device: Device }>(`/api/devices/${id}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+  return res.device;
 }
 
 export async function lockDevice(id: string): Promise<void> {
@@ -223,53 +243,59 @@ export async function deleteDevice(id: string): Promise<void> {
 // ---- Device users & profile assignment -------------------------------------
 
 export async function listDeviceUsers(id: string): Promise<DeviceUser[]> {
-  return read<DeviceUser[]>(
+  const res = await read<{ users: DeviceUser[] }>(
     `/api/devices/${id}/users`,
-    () => mockDeviceDetail(id).users,
+    () => ({ users: mockDeviceDetail(id).users }),
   );
+  return res.users;
 }
 
 export async function assignProfile(
   deviceUserId: string,
   profile_id: string,
-): Promise<DeviceUser> {
-  return request<DeviceUser>(`/api/device-users/${deviceUserId}/assign-profile`, {
-    method: "POST",
-    body: JSON.stringify({ profile_id }),
-  });
+): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/device-users/${deviceUserId}/assign-profile`,
+    { method: "POST", body: JSON.stringify({ profile_id }) },
+  );
 }
 
 // ---- Profiles --------------------------------------------------------------
 
 export async function listProfiles(): Promise<Profile[]> {
-  return read<Profile[]>("/api/profiles", () => mockProfiles);
+  const res = await read<{ profiles: Profile[] }>("/api/profiles", () => ({
+    profiles: mockProfiles,
+  }));
+  return res.profiles;
 }
 
 export async function getProfile(id: string): Promise<Profile> {
-  return read<Profile>(
-    `/api/profiles/${id}`,
-    () => mockProfiles.find((p) => p.id === id) ?? mockProfiles[0],
-  );
+  const res = await read<{ profile: Profile }>(`/api/profiles/${id}`, () => ({
+    profile: mockProfiles.find((p) => p.id === id) ?? mockProfiles[0],
+  }));
+  return res.profile;
 }
 
 export async function createProfile(
   name: string,
   policy: Policy,
 ): Promise<Profile> {
-  return request<Profile>("/api/profiles", {
+  const res = await request<{ profile: Profile }>("/api/profiles", {
     method: "POST",
     body: JSON.stringify({ name, kind: "custom", policy }),
   });
+  return res.profile;
 }
 
 export async function updateProfile(
   id: string,
   policy: Policy,
 ): Promise<Profile> {
-  return request<Profile>(`/api/profiles/${id}`, {
+  const res = await request<{ profile: Profile }>(`/api/profiles/${id}`, {
     method: "PUT",
     body: JSON.stringify({ policy }),
   });
+  return res.profile;
 }
 
 export async function deleteProfile(id: string): Promise<void> {
@@ -285,8 +311,35 @@ export async function scanDiscovery(device_id: string): Promise<void> {
   });
 }
 
+/** Raw row from GET /api/discovery/results: a `discovery_result` event whose
+ *  payload carries the found hosts. */
+interface DiscoveryRow {
+  id: string;
+  device_id: string;
+  payload: { hosts?: DiscoveryResult["hosts"] };
+  created_at: string;
+}
+
 export async function getDiscoveryResults(): Promise<DiscoveryResult[]> {
-  return read<DiscoveryResult[]>("/api/discovery/results", () => [mockDiscovery]);
+  const res = await read<{ results: DiscoveryRow[] }>(
+    "/api/discovery/results",
+    () => ({
+      results: [
+        {
+          id: mockDiscovery.id,
+          device_id: mockDiscovery.device_id,
+          payload: { hosts: mockDiscovery.hosts },
+          created_at: mockDiscovery.created_at,
+        },
+      ],
+    }),
+  );
+  return res.results.map((r) => ({
+    id: r.id,
+    device_id: r.device_id,
+    created_at: r.created_at,
+    hosts: r.payload.hosts ?? [],
+  }));
 }
 
 // ---- Events ----------------------------------------------------------------
@@ -305,20 +358,25 @@ export async function listEvents(filter: EventFilter = {}): Promise<Event[]> {
   if (filter.severity) qs.set("severity", filter.severity);
   if (filter.limit) qs.set("limit", String(filter.limit));
   const q = qs.toString();
-  return read<Event[]>(
+  const res = await read<{ events: Event[] }>(
     `/api/events${q ? `?${q}` : ""}`,
-    () =>
-      mockEvents.filter(
+    () => ({
+      events: mockEvents.filter(
         (e) =>
           (!filter.device_id || e.device_id === filter.device_id) &&
           (!filter.type || e.type === filter.type) &&
           (!filter.severity || e.severity === filter.severity),
       ),
+    }),
   );
+  return res.events;
 }
 
 // ---- Passkeys (settings) ---------------------------------------------------
 
 export async function listPasskeys(): Promise<Passkey[]> {
-  return read<Passkey[]>("/api/me/passkeys", () => mockPasskeys);
+  const res = await read<{ passkeys: Passkey[] }>("/api/me/passkeys", () => ({
+    passkeys: mockPasskeys,
+  }));
+  return res.passkeys;
 }

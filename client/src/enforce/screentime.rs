@@ -7,7 +7,7 @@ use crate::policy::{Bedtime, Policy, Window};
 use crate::sysusers;
 use crate::util::Exec;
 use anyhow::Result;
-use chrono::{Datelike, Local, NaiveDate, NaiveTime, Timelike};
+use chrono::{Datelike, Local, NaiveDate, NaiveTime};
 use std::collections::HashMap;
 
 /// Why a user is being locked out.
@@ -70,6 +70,7 @@ impl UsageTracker {
     }
 
     /// Credit earned reward minutes to a user's daily budget.
+    #[allow(dead_code)] // earn-time approval flow not wired yet (see gamify.rs); covered by tests
     pub fn add_earned(&mut self, user: &str, minutes: u32) {
         self.roll_day();
         *self.earned_secs.entry(user.to_string()).or_insert(0) += minutes.saturating_mul(60);
@@ -205,12 +206,6 @@ pub fn freeze_user(exec: &Exec, username: &str, frozen: bool) -> Result<()> {
             }
         }
     }
-}
-
-/// Human-readable "now" for logs.
-pub fn now_label() -> String {
-    let n = Local::now();
-    format!("{:02}:{:02}", n.hour(), n.minute())
 }
 
 #[cfg(test)]

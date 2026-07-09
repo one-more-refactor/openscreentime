@@ -3,6 +3,7 @@
 
 use axum::{extract::State, Json};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -346,6 +347,32 @@ pub async fn me(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<
         "admin": a,
         "tenant": { "id": tenant.0, "name": tenant.1 }
     })))
+}
+
+/// The admin's registered passkeys (metadata only — never the credential itself).
+pub async fn list_passkeys(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+) -> AppResult<Json<Value>> {
+    let rows: Vec<(Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, nickname, created_at, last_used_at FROM webauthn_credentials
+         WHERE admin_id = $1 ORDER BY created_at",
+    )
+    .bind(admin.admin_id)
+    .fetch_all(&st.db)
+    .await?;
+    let passkeys: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.0,
+                "nickname": r.1,
+                "created_at": r.2,
+                "last_used_at": r.3,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "passkeys": passkeys })))
 }
 
 // ---------------------------------------------------------------------------

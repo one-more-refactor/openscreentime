@@ -1,33 +1,35 @@
-//! Shared `Policy` type — the single most important shared contract.
+//! The shared `Policy` document — the single most important shared contract.
 //!
-//! Server stores it (jsonb), web edits it, agent enforces it. Mirrors the
-//! document in `docs/API.md` → Policy exactly. Every sub-object is
-//! `#[serde(default)]` so unknown/missing fields are tolerated for
-//! forward-compat (the same shape must deserialize on web `types.ts` and the
-//! agent).
+//! The server stores it (jsonb), the web edits it (`web/src/types.ts` mirrors
+//! this shape), the agent enforces it. Mirrors `docs/API.md` → Policy exactly.
+//! Every sub-object is `#[serde(default)]` and unknown fields are ignored, so
+//! all components stay forward-compatible with newer policy versions (the docs
+//! require this).
 
 use serde::{Deserialize, Serialize};
 
 fn default_version() -> u32 {
     1
 }
-
 fn default_deny() -> String {
     "default_deny".to_string()
 }
-
 fn default_upstream() -> String {
     "1.1.1.2".to_string()
 }
+fn default_challenge() -> String {
+    "wait".to_string()
+}
 
+/// The full per-user policy document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
-    pub dns: Dns,
+    pub dns: DnsPolicy,
     #[serde(default)]
-    pub firewall: Firewall,
+    pub firewall: FirewallPolicy,
     #[serde(default)]
     pub screen_time: ScreenTime,
     #[serde(default)]
@@ -40,8 +42,8 @@ impl Default for Policy {
     fn default() -> Self {
         Policy {
             version: 1,
-            dns: Dns::default(),
-            firewall: Firewall::default(),
+            dns: DnsPolicy::default(),
+            firewall: FirewallPolicy::default(),
             screen_time: ScreenTime::default(),
             app_limits: Vec::new(),
             gamification: Gamification::default(),
@@ -50,7 +52,7 @@ impl Default for Policy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dns {
+pub struct DnsPolicy {
     #[serde(default = "default_deny")]
     pub mode: String,
     #[serde(default)]
@@ -63,9 +65,9 @@ pub struct Dns {
     pub upstream: String,
 }
 
-impl Default for Dns {
+impl Default for DnsPolicy {
     fn default() -> Self {
-        Dns {
+        DnsPolicy {
             mode: default_deny(),
             allowlist: Vec::new(),
             blocklist: Vec::new(),
@@ -75,8 +77,20 @@ impl Default for Dns {
     }
 }
 
+impl DnsPolicy {
+    /// Zero-trust default-deny is on unless the policy explicitly opts out.
+    pub fn is_default_deny(&self) -> bool {
+        self.mode != "allow_all"
+    }
+    /// `["*"]` means "forward everything to the filtered upstream" (see the
+    /// `default` profile in docs/PROFILES.md).
+    pub fn allows_everything(&self) -> bool {
+        self.allowlist.iter().any(|d| d == "*")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Firewall {
+pub struct FirewallPolicy {
     #[serde(default = "default_deny")]
     pub mode: String,
     #[serde(default)]
@@ -85,13 +99,19 @@ pub struct Firewall {
     pub allow_inbound_ports: Vec<u16>,
 }
 
-impl Default for Firewall {
+impl Default for FirewallPolicy {
     fn default() -> Self {
-        Firewall {
+        FirewallPolicy {
             mode: default_deny(),
             allow_outbound_ports: vec![53, 80, 443],
             allow_inbound_ports: Vec::new(),
         }
+    }
+}
+
+impl FirewallPolicy {
+    pub fn is_default_deny(&self) -> bool {
+        self.mode != "allow_all"
     }
 }
 
@@ -102,15 +122,16 @@ pub struct ScreenTime {
     #[serde(default)]
     pub daily_limit_minutes: u32,
     #[serde(default)]
-    pub schedule: Vec<ScheduleWindow>,
+    pub schedule: Vec<Window>,
     #[serde(default)]
     pub bedtime: Option<Bedtime>,
 }
 
+/// An allowed window. `days` uses 0=Sunday .. 6=Saturday (matches the docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleWindow {
+pub struct Window {
     #[serde(default)]
-    pub days: Vec<u8>, // 0 = Sunday
+    pub days: Vec<u8>,
     #[serde(default)]
     pub start: String, // "HH:MM"
     #[serde(default)]
@@ -165,12 +186,9 @@ pub struct EarnTask {
 pub struct Lockout {
     #[serde(default)]
     pub enabled: bool,
+    /// "math" | "wait" | "parent_pin"
     #[serde(default = "default_challenge")]
-    pub unlock_challenge: String, // "math" | "wait" | "parent_pin"
-}
-
-fn default_challenge() -> String {
-    "wait".to_string()
+    pub unlock_challenge: String,
 }
 
 impl Default for Lockout {
@@ -188,4 +206,42 @@ pub struct Streaks {
     pub enabled: bool,
     #[serde(default)]
     pub nudges: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_kids_preset_and_ignores_unknown_fields() {
+        let raw = r#"{
+            "version": 1,
+            "dns": { "mode": "default_deny", "allowlist": ["wikipedia.org"], "safe_search": true, "upstream": "1.1.1.2" },
+            "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443] },
+            "screen_time": { "enabled": true, "daily_limit_minutes": 60, "schedule": [], "bedtime": {"start":"20:00","end":"07:00"} },
+            "future_field": { "nope": 1 }
+        }"#;
+        let p: Policy = serde_json::from_str(raw).unwrap();
+        assert!(p.dns.is_default_deny());
+        assert_eq!(p.screen_time.daily_limit_minutes, 60);
+        assert_eq!(p.dns.upstream, "1.1.1.2");
+    }
+
+    #[test]
+    fn empty_object_gets_safe_defaults() {
+        let p: Policy = serde_json::from_str("{}").unwrap();
+        assert!(p.dns.is_default_deny());
+        assert!(p.firewall.is_default_deny());
+        assert_eq!(p.dns.mode, "default_deny");
+    }
+
+    #[test]
+    fn round_trip_is_stable() {
+        // The server normalizes stored policies by round-tripping through this
+        // type; serialize(deserialize(x)) must itself re-deserialize cleanly.
+        let p: Policy = serde_json::from_str("{}").unwrap();
+        let s = serde_json::to_string(&p).unwrap();
+        let p2: Policy = serde_json::from_str(&s).unwrap();
+        assert_eq!(serde_json::to_string(&p2).unwrap(), s);
+    }
 }

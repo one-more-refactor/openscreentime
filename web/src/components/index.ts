@@ -13,3 +13,4 @@ export { DeviceCard } from "./DeviceCard";
 export { LockOverlay } from "./LockOverlay";
 export { PolicyEditor } from "./PolicyEditor";
 export { Modal } from "./Modal";
+export { SshModal, TokenBlock, openSshSession } from "./SshModal";

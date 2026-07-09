@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::auth::{gen_token, hash_token};
 use crate::error::{AppError, AppResult};
 use crate::events;
-use crate::policy::Policy;
 use crate::state::{AgentAuth, AppState};
+use sentinel_policy::Policy;
 
 /// Default poll interval handed to agents that fall back to heartbeat polling.
 const POLL_INTERVAL_SECS: u64 = 15;
