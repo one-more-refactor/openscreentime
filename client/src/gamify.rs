@@ -15,6 +15,9 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct Nudge {
     pub kind: String,
+    /// Overlay copy for the nudge; the GUI presenter that renders it is not
+    /// wired in the skeleton (runner only forwards `kind` in streak events).
+    #[allow(dead_code)]
     pub copy: String,
 }
 
@@ -41,6 +44,8 @@ pub fn nudges_for(policy: &Policy) -> Vec<Nudge> {
 /// Earn-time task offer shown on the lockout screen ("EARN 15 MIN — READ FOR 20").
 #[derive(Debug, Clone)]
 pub struct EarnOffer {
+    /// Task id, needed once completion/approval acks are wired (see `earned_event`).
+    #[allow(dead_code)]
     pub id: String,
     pub label: String,
     pub reward_minutes: u32,

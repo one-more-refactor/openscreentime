@@ -56,6 +56,7 @@ interruptions — all from one beautiful monochrome control center.
 | `server/`   | Backend API, auth, policy engine, SSH broker                | Rust, Axum, SQLx, Postgres|
 | `web/`      | Admin control center (the "Nothing" UI)                     | Bun, React, Vite, Tailwind|
 | `client/`   | Linux device agent                                          | Rust                      |
+| `policy/`   | Shared `Policy` document type (used by server + client)     | Rust                      |
 | `docs/`     | Shared API contract, data model, design system, profiles    | Markdown                  |
 
 ## Getting started

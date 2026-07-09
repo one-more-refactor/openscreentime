@@ -27,6 +27,7 @@ register the first admin of a new tenant; hardened later).
 | POST   | `/api/auth/login/finish`    | `{ email, credential }` → sets session cookie           |
 | POST   | `/api/auth/logout`          | clears session                                          |
 | GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
+| GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
 
 Challenge state is held server-side in a short-TTL store keyed by a temporary cookie.
 

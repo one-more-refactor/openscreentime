@@ -2364,6 +2364,7 @@ dependencies = [
  "hostname",
  "rand 0.8.6",
  "reqwest",
+ "sentinel-policy",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2374,6 +2375,13 @@ dependencies = [
  "tracing-subscriber",
  "users",
  "uuid",
+]
+
+[[package]]
+name = "sentinel-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ name = "sentinel-server"
 path = "src/main.rs"
 
 [dependencies]
+sentinel-policy = { path = "../policy" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
 tokio = { version = "1", features = ["full"] }

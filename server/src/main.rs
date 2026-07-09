@@ -11,7 +11,6 @@ mod devices;
 mod discovery;
 mod error;
 mod events;
-mod policy;
 mod presets;
 mod profiles;
 mod ssh;
@@ -101,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login/finish", post(auth::login_finish))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
+        .route("/api/me/passkeys", get(auth::list_passkeys))
         // --- Devices -------------------------------------------------------
         .route(
             "/api/devices",
