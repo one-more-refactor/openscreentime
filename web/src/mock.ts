@@ -21,7 +21,7 @@ import type {
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
-export const kidsPolicy: Policy = {
+const kidsPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -64,7 +64,7 @@ export const kidsPolicy: Policy = {
   },
 };
 
-export const teenPolicy: Policy = {
+const teenPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -105,7 +105,7 @@ export const teenPolicy: Policy = {
   },
 };
 
-export const defaultPolicy: Policy = {
+const defaultPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -353,7 +353,7 @@ export const mockDiscovery: DiscoveryResult = {
   ],
 };
 
-export const mockAdmin: Admin = {
+const mockAdmin: Admin = {
   id: "a-1",
   tenant_id: TENANT_ID,
   email: "parent@home.lan",
@@ -361,7 +361,7 @@ export const mockAdmin: Admin = {
   created_at: "2026-06-01T10:00:00Z",
 };
 
-export const mockTenant: Tenant = {
+const mockTenant: Tenant = {
   id: TENANT_ID,
   name: "Home",
   created_at: "2026-06-01T10:00:00Z",
