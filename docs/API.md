@@ -24,7 +24,7 @@ register the first admin of a new tenant; hardened later).
 | POST   | `/api/auth/register/start`  | `{ email, display_name }` → `CreationChallengeResponse` |
 | POST   | `/api/auth/register/finish` | `{ email, credential }` → sets session, `{ admin }`     |
 | POST   | `/api/auth/login/start`     | `{ email }` → `RequestChallengeResponse`                |
-| POST   | `/api/auth/login/finish`    | `{ email, credential }` → sets session cookie           |
+| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie                  |
 | POST   | `/api/auth/logout`          | clears session                                          |
 | GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
 | GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
