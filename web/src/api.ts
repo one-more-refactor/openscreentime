@@ -143,10 +143,10 @@ export const auth = {
     return res.publicKey;
   },
 
-  async loginFinish(email: string, credential: AuthenticationResponseJSON) {
+  async loginFinish(credential: AuthenticationResponseJSON) {
     return request<void>("/api/auth/login/finish", {
       method: "POST",
-      body: JSON.stringify({ email, credential }),
+      body: JSON.stringify({ credential }),
     });
   },
 
@@ -165,7 +165,7 @@ export const auth = {
   async login(email: string) {
     const options = await this.loginStart(email);
     const credential = await startAuthentication({ optionsJSON: options });
-    return this.loginFinish(email, credential);
+    return this.loginFinish(credential);
   },
 };
 

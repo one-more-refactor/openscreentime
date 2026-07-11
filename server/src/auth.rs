@@ -268,10 +268,10 @@ pub async fn login_start(
     Ok((jar, Json(serde_json::to_value(rcr).unwrap())))
 }
 
+/// Identity comes from the challenge cookie set by `login_start`, so the
+/// body carries only the credential (unknown extra fields are ignored).
 #[derive(Deserialize)]
 pub struct LoginFinishReq {
-    #[allow(dead_code)]
-    pub email: String,
     pub credential: PublicKeyCredential,
 }
 
