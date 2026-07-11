@@ -29,4 +29,3 @@ export function pad2(n: number): string {
 }
 
 export const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
-export const WEEKDAY_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
