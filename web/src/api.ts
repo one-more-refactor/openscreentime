@@ -15,6 +15,7 @@ import {
 } from "@simplewebauthn/browser";
 
 import type {
+  ApiErrorBody,
   Device,
   DeviceDetail,
   DeviceUser,
@@ -72,7 +73,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let code = "http_error";
     let message = `${res.status} ${res.statusText}`;
     try {
-      const body = await res.json();
+      const body = (await res.json()) as Partial<ApiErrorBody>;
       if (body?.error) {
         code = body.error.code ?? code;
         message = body.error.message ?? message;
