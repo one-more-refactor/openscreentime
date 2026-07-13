@@ -36,7 +36,10 @@ pub mod challenge {
             a: i64,
             b: i64,
             op: char,
-            #[allow(dead_code)] // read by `verify` (early-dismiss gate, GUI-only path)
+            /// Read by `verify` — the GUI presenter's early-dismiss gate. Only
+            /// the GUI build actually gates dismissal on it (the headless
+            /// presenter doesn't take input at all), so it's `gui`-only.
+            #[cfg(feature = "gui")]
             answer: i64,
         },
         /// Wait out a cooldown before the dismiss button enables.
@@ -65,6 +68,7 @@ pub mod challenge {
                 a,
                 b,
                 op: '×',
+                #[cfg(feature = "gui")]
                 answer: a * b,
             }
         }
@@ -79,8 +83,10 @@ pub mod challenge {
         }
 
         /// Verify a typed response (math answer or PIN). `parent_pin` is the
-        /// configured PIN for the ParentPin variant.
-        #[allow(dead_code)] // early-dismiss gate for the GUI presenter; covered by tests
+        /// configured PIN for the ParentPin variant. Used by the GUI presenter's
+        /// early-dismiss gate; not reachable from the headless build, which
+        /// never takes typed input, so this is `gui`-only.
+        #[cfg(feature = "gui")]
         pub fn verify(&self, input: &str, parent_pin: Option<&str>) -> bool {
             match self {
                 Challenge::Math { answer, .. } => input
@@ -95,7 +101,7 @@ pub mod challenge {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "gui"))]
     mod tests {
         use super::*;
         #[test]
@@ -178,7 +184,6 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
     #[cfg(feature = "gui")]
     {
         gui::show(spec);
-        return;
     }
 
     // Headless / no-GUI build: broadcast the overlay to the user's TTYs and log it.
@@ -195,9 +200,22 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
     }
 }
 
+/// Show a lightweight streak nudge (bedtime wind-down, break reminder) without
+/// freezing anything. Headless build broadcasts it the same way `present` does
+/// for lockouts; a future GUI presenter could render it as a toast instead.
+pub fn present_nudge(exec: &Exec, nudge: &crate::gamify::Nudge) {
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD NUDGE: {}", nudge.copy);
+        return;
+    }
+    let _ = exec.run("wall", &["-n", &format!("SENTINEL: {}", nudge.copy)]);
+    tracing::info!("nudge ({}): {}", nudge.kind, nudge.copy);
+}
+
 #[cfg(feature = "gui")]
 mod gui {
     //! Minimal eframe/egui fullscreen presenter. Compiled only with `--features gui`.
+    use super::challenge::Challenge;
     use super::LockSpec;
     use eframe::egui;
 
@@ -218,7 +236,12 @@ mod gui {
         if let Err(e) = eframe::run_native(
             "SENTINEL",
             native,
-            Box::new(move |_cc| Ok(Box::new(LockApp { spec: spec.clone() }))),
+            Box::new(move |_cc| {
+                Ok(Box::new(LockApp {
+                    spec: spec.clone(),
+                    input: String::new(),
+                }))
+            }),
         ) {
             tracing::warn!("egui lockout unavailable: {e}");
         }
@@ -226,6 +249,9 @@ mod gui {
 
     struct LockApp {
         spec: LockSpec,
+        /// Typed response for `Math`/`ParentPin` challenges (the early-dismiss
+        /// gate — `Challenge::verify` decides whether it's correct).
+        input: String,
     }
 
     impl eframe::App for LockApp {
@@ -261,7 +287,23 @@ mod gui {
                     if !prompt.is_empty() {
                         ui.colored_label(fg, egui::RichText::new(prompt).size(28.0).monospace());
                     }
-                    ui.add_space(40.0);
+                    // Math / parent-PIN challenges gate the early dismiss on a
+                    // typed answer, verified by `Challenge::verify`. `Wait` and
+                    // `None` have no typed input, so the action button alone
+                    // dismisses (Wait's cooldown isn't separately timed here —
+                    // the tick loop re-freezes if dismissed early and still
+                    // out of policy).
+                    let needs_input =
+                        matches!(self.spec.challenge, Challenge::Math { .. } | Challenge::ParentPin);
+                    if needs_input {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.input)
+                                .hint_text("type your answer")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(16.0);
+                    }
+                    ui.add_space(24.0);
                     if ui
                         .add(
                             egui::Button::new(
@@ -273,7 +315,19 @@ mod gui {
                         )
                         .clicked()
                     {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        // No parent PIN is plumbed through the policy document
+                        // yet, so `ParentPin` challenges never verify — this is
+                        // honest given there's nowhere to configure one.
+                        let unlocked = if needs_input {
+                            self.spec.challenge.verify(&self.input, None)
+                        } else {
+                            true
+                        };
+                        if unlocked {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        } else {
+                            self.input.clear();
+                        }
                     }
                 });
             });

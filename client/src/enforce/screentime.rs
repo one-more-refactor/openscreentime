@@ -69,17 +69,32 @@ impl UsageTracker {
         *self.used_secs.entry(user.to_string()).or_insert(0) += real_secs.saturating_mul(accel);
     }
 
-    /// Credit earned reward minutes to a user's daily budget.
-    #[allow(dead_code)] // earn-time approval flow not wired yet (see gamify.rs); covered by tests
+    /// Credit earned reward minutes to a user's daily budget. Called from the
+    /// runner's `credit_time` command handler once an admin approves an
+    /// earn-request (CONTRACT-PROD.md §4).
     pub fn add_earned(&mut self, user: &str, minutes: u32) {
         self.roll_day();
         *self.earned_secs.entry(user.to_string()).or_insert(0) += minutes.saturating_mul(60);
     }
 
+    /// True when the tracker's accumulated day is still today. The counters only
+    /// roll forward when a seat user is active (`add_active`), so on an idle
+    /// machine past local midnight the maps hold yesterday's totals; readers must
+    /// treat those as zero rather than report them against the new day.
+    fn is_today(&self) -> bool {
+        self.day == Some(Local::now().date_naive())
+    }
+
     pub fn used_minutes(&self, user: &str) -> u32 {
+        if !self.is_today() {
+            return 0;
+        }
         self.used_secs.get(user).copied().unwrap_or(0) / 60
     }
     pub fn earned_minutes(&self, user: &str) -> u32 {
+        if !self.is_today() {
+            return 0;
+        }
         self.earned_secs.get(user).copied().unwrap_or(0) / 60
     }
 
@@ -226,12 +241,13 @@ mod tests {
 
     #[test]
     fn daily_limit_locks_when_exhausted() {
-        let mut policy = Policy::default();
-        policy.screen_time = ScreenTime {
-            enabled: true,
-            daily_limit_minutes: 60,
-            schedule: vec![],
-            bedtime: None,
+        let policy = Policy {
+            screen_time: ScreenTime {
+                enabled: true,
+                daily_limit_minutes: 60,
+                ..Default::default()
+            },
+            ..Default::default()
         };
         let mut t = UsageTracker::new();
         t.add_active("kid", 61 * 60, 1);
@@ -241,12 +257,13 @@ mod tests {
 
     #[test]
     fn earned_time_extends_budget() {
-        let mut policy = Policy::default();
-        policy.screen_time = ScreenTime {
-            enabled: true,
-            daily_limit_minutes: 60,
-            schedule: vec![],
-            bedtime: None,
+        let policy = Policy {
+            screen_time: ScreenTime {
+                enabled: true,
+                daily_limit_minutes: 60,
+                ..Default::default()
+            },
+            ..Default::default()
         };
         let mut t = UsageTracker::new();
         t.add_active("kid", 61 * 60, 1);
