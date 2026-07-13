@@ -234,13 +234,26 @@ pub async fn unlock_device(
 
 // --- Device users -----------------------------------------------------------
 
-type DeviceUserRow = (Uuid, Uuid, String, Option<String>, Uuid, String, String);
+type DeviceUserRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    Uuid,
+    String,
+    String,
+    i32,
+    i32,
+);
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
     let rows: Vec<DeviceUserRow> = sqlx::query_as(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
-                p.name, p.kind \
+                p.name, p.kind, \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0) \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
+         LEFT JOIN screen_time_ledger l \
+                ON l.device_user_id = du.id AND l.day = CURRENT_DATE \
          WHERE du.device_id = $1 ORDER BY du.os_username",
     )
     .bind(device_id)
@@ -257,6 +270,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "profile_id": r.4,
                 "profile_name": r.5,
                 "profile_kind": r.6,
+                "used_minutes_today": r.7 / 60,
+                "earned_minutes_today": r.8 / 60,
             })
         })
         .collect();
