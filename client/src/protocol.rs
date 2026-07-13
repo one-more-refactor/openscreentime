@@ -17,6 +17,8 @@ pub const CMD_SSH_OPEN: &str = "ssh_open";
 pub const CMD_SSH_CLOSE: &str = "ssh_close";
 pub const CMD_DISCOVER: &str = "discover";
 pub const CMD_SET_TAMPER_LEVEL: &str = "set_tamper_level";
+/// Earn-time approval credit (CONTRACT-PROD.md §4): `{os_username, minutes, request_id}`.
+pub const CMD_CREDIT_TIME: &str = "credit_time";
 
 /// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
 /// `enrolled` also exist but are written server-side, never by the agent).
@@ -71,6 +73,15 @@ impl Event {
     }
 }
 
+/// One user's screen-time usage as of "now" (CONTRACT-PROD.md §5). Reported both
+/// in the HTTP heartbeat body and in the WS `heartbeat` frame; the server upserts
+/// it into `screen_time_ledger`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageReport {
+    pub os_username: String,
+    pub used_minutes_today: u32,
+}
+
 /// A command ack (`POST /agent/commands/:id/ack`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandAck {
@@ -82,8 +93,13 @@ pub struct CommandAck {
 }
 
 /// Server → agent frames on the WS bus.
+///
+/// CONTRACT-PROD.md §3 pins the tag field to `"type"` (e.g. `{"type":"ssh_data",...}`);
+/// the frames used to be tagged `"kind"`, which silently disagreed with the documented
+/// wire shape (never noticed because both ends only ever spoke to each other's own
+/// impl). Renamed here to match the contract exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
     Command {
         command: Command,
@@ -93,6 +109,12 @@ pub enum ServerFrame {
         session_id: String,
         data_b64: String,
     },
+    /// Server resizes the PTY (browser terminal resize → `TIOCSWINSZ`).
+    SshResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
     /// Server closes an SSH session.
     SshClose {
         session_id: String,
@@ -101,9 +123,9 @@ pub enum ServerFrame {
     Ping,
 }
 
-/// Agent → server frames on the WS bus.
+/// Agent → server frames on the WS bus. See `ServerFrame` doc for the `"type"` tag note.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentFrame {
     Event {
         event: Event,
@@ -116,8 +138,16 @@ pub enum AgentFrame {
         session_id: String,
         data_b64: String,
     },
-    SshClose {
+    /// The child shell exited; `exit_code` is `None` if it died by signal.
+    SshClosed {
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    /// Periodic per-user usage push. The WS bus has no HTTP heartbeat, so this is
+    /// how a WS-connected agent keeps `screen_time_ledger` current (CONTRACT-PROD.md §5).
+    Heartbeat {
+        usage: Vec<UsageReport>,
     },
     Pong,
 }

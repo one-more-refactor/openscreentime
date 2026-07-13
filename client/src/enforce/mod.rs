@@ -6,7 +6,6 @@ pub mod dns;
 pub mod firewall;
 pub mod screentime;
 
-use crate::client::server_host;
 use crate::config::AgentCtx;
 use crate::policy::Policy;
 use crate::util::Exec;
@@ -20,20 +19,18 @@ use std::sync::Arc;
 /// The skeleton applies the *most restrictive* effective network policy across the
 /// currently active users; per-user network isolation (nftables cgroup/uid match,
 /// split-DNS per session) is noted as future work in the README.
+///
+/// `server_host` is passed in by the caller (rather than derived here from a
+/// server URL) so this module doesn't need to reach into the transport layer
+/// (`client::server_host`) to do its job — the caller already knows it.
 pub fn apply_network_policy(
     ctx: Arc<AgentCtx>,
     exec: &Exec,
-    server_url: &str,
+    server_host: Option<&str>,
     policy: &Policy,
 ) -> Result<()> {
-    let server = server_host(server_url);
     dns::apply(exec, &policy.dns)?;
-    firewall::apply(
-        exec,
-        &policy.firewall,
-        &policy.dns.upstream,
-        server.as_deref(),
-    )?;
+    firewall::apply(exec, &policy.firewall, &policy.dns.upstream, server_host)?;
     tracing::info!(
         dry_run = ctx.dry_run,
         "network policy applied (dns.mode={}, fw.mode={})",

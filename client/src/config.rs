@@ -41,20 +41,11 @@ impl AgentConfig {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: AgentConfig = toml::from_str(&body).context("parsing agent.toml")?;
-        cfg.verify_signature(&body);
+        // Forward path: verify `config_sig` as a real detached signature over the
+        // canonical body, using the server's public key (pinned at enrollment),
+        // and refuse to run on mismatch. Not implemented yet — no verification
+        // happens today, so `config_sig` is inert until this lands.
         Ok(cfg)
-    }
-
-    /// Skeleton integrity check. Production would verify a real signature over the
-    /// canonical body with the server's public key; here we log and warn on mismatch
-    /// so the hook and the `tamper` event path exist and are exercised.
-    fn verify_signature(&self, _body: &str) {
-        match &self.config_sig {
-            Some(_sig) => tracing::debug!(
-                "config signature present (skeleton: not cryptographically verified)"
-            ),
-            None => tracing::debug!("config has no signature (skeleton default)"),
-        }
     }
 
     /// Write root-owned `0600`. Best-effort perms; logs if it can't chmod (e.g. dev/non-root).
