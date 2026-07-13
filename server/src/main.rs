@@ -1,27 +1,32 @@
 //! Sentinel server — Axum + Tokio + SQLx(Postgres) + webauthn-rs.
 //!
 //! Two surfaces (see docs/API.md):
-//!   * Admin API `/api/*`  — session-cookie auth after passkey login.
+//!   * Admin API `/api/*`  — session-cookie auth after passkey login (or OIDC SSO).
 //!   * Agent API `/agent/*` — `Authorization: Bearer <device_token>`.
 
 mod agent;
 mod auth;
+mod auth_oidc;
 mod db;
 mod devices;
 mod discovery;
+mod earn;
 mod error;
 mod events;
 mod presets;
 mod profiles;
+mod rate_limit;
 mod ssh;
 mod state;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     http::{header, HeaderValue, Method},
-    routing::{get, post},
+    middleware,
+    routing::{delete, get, post},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -50,7 +55,14 @@ async fn main() -> anyhow::Result<()> {
     let rp_origin_str =
         std::env::var("RP_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let broker_host = std::env::var("BROKER_HOST").unwrap_or_else(|_| "localhost".into());
+    // Cookies are Secure unless explicitly opted out for plain-http dev.
+    let cookie_secure = std::env::var("SENTINEL_INSECURE_COOKIES").map(|v| v == "1") != Ok(true);
+    // Public base URL (OIDC redirect URI + post-login redirects); falls back
+    // to the WebAuthn RP origin.
+    let public_url = std::env::var("SENTINEL_PUBLIC_URL")
+        .unwrap_or_else(|_| rp_origin_str.clone())
+        .trim_end_matches('/')
+        .to_string();
 
     // Database.
     let pool = db::connect(&database_url).await?;
@@ -63,13 +75,18 @@ async fn main() -> anyhow::Result<()> {
         .rp_name("Sentinel")
         .build()?;
 
+    // OIDC SSO (off unless the SENTINEL_OIDC_* env vars are all set).
+    let oidc = auth_oidc::init_from_env(&public_url).await?;
+
     let state = AppState {
         db: pool,
         webauthn: Arc::new(webauthn),
-        broker_host,
-        sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        cookie_secure,
+        public_url,
         reg_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         auth_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        oidc,
+        rate_limiter: Arc::new(rate_limit::RateLimiter::from_env()),
         hub: Arc::new(Hub::default()),
     };
 
@@ -91,16 +108,36 @@ async fn main() -> anyhow::Result<()> {
         ])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
-    let app = Router::new()
-        .route("/health", get(health))
-        // --- Auth ----------------------------------------------------------
+    // Auth attempt endpoints: 10 req / 60 s / IP.
+    let auth_attempts = Router::new()
         .route("/api/auth/register/start", post(auth::register_start))
         .route("/api/auth/register/finish", post(auth::register_finish))
         .route("/api/auth/login/start", post(auth::login_start))
         .route("/api/auth/login/finish", post(auth::login_finish))
+        .route("/api/auth/oidc/start", get(auth_oidc::start))
+        .route("/api/auth/oidc/callback", get(auth_oidc::callback))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_auth,
+        ));
+
+    // Enrollment: 5 req / 60 s / IP.
+    let enroll = Router::new()
+        .route("/agent/enroll", post(agent::enroll))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_enroll,
+        ));
+
+    let app = Router::new()
+        .route("/health", get(health))
+        // --- Auth ----------------------------------------------------------
+        .merge(auth_attempts)
+        .route("/api/auth/config", get(auth_oidc::auth_config))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
         .route("/api/me/passkeys", get(auth::list_passkeys))
+        .route("/api/me/passkeys/{id}", delete(auth::delete_passkey))
         // --- Devices -------------------------------------------------------
         .route(
             "/api/devices",
@@ -114,12 +151,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
-        .route("/api/devices/{id}/ssh", post(ssh::open_or_close))
+        .route("/api/devices/{id}/ssh", post(ssh::open_session))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
         .route(
             "/api/device-users/{id}/assign-profile",
             post(devices::assign_profile),
         )
+        // --- SSH (browser terminal) ----------------------------------------
+        .route("/api/ssh/{session_id}/ws", get(ssh::ws))
+        .route("/api/ssh/{session_id}/close", post(ssh::close_session))
+        // --- Earn-time requests ---------------------------------------------
+        .route("/api/earn-requests", get(earn::list_requests))
+        .route(
+            "/api/earn-requests/{id}/approve",
+            post(earn::approve_request),
+        )
+        .route("/api/earn-requests/{id}/deny", post(earn::deny_request))
         // --- Profiles ------------------------------------------------------
         .route(
             "/api/profiles",
@@ -137,10 +184,11 @@ async fn main() -> anyhow::Result<()> {
         // --- Events --------------------------------------------------------
         .route("/api/events", get(events::list_events))
         // --- Agent API -----------------------------------------------------
-        .route("/agent/enroll", post(agent::enroll))
+        .merge(enroll)
         .route("/agent/heartbeat", post(agent::heartbeat))
         .route("/agent/policy", get(agent::policy))
         .route("/agent/events", post(agent::push_events))
+        .route("/agent/earn-request", post(earn::create_request))
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
         .with_state(state)
@@ -149,7 +197,11 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("Sentinel server listening on {bind_addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

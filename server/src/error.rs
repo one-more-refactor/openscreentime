@@ -17,9 +17,8 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
-    #[allow(dead_code)] // available for future authorization checks
     #[error("{0}")]
-    Forbidden(String),
+    RateLimited(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -31,7 +30,7 @@ impl AppError {
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
-            AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

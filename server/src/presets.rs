@@ -25,7 +25,7 @@ pub fn kids_policy() -> Value {
             "schedule": [ {"days":[1,2,3,4,5],"start":"15:00","end":"19:00"},
                           {"days":[0,6],"start":"09:00","end":"19:00"} ],
             "bedtime": { "start":"20:00","end":"07:00" } },
-        "app_limits": [ { "match":"steam","daily_limit_minutes":30 } ],
+        "app_limits": [],
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"reading","label":"Read for 20 min","reward_minutes":15},
@@ -47,7 +47,7 @@ pub fn teen_policy() -> Value {
             "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"21:00"},
                           {"days":[0,6],"start":"08:00","end":"22:00"} ],
             "bedtime": { "start":"22:30","end":"06:30" } },
-        "app_limits": [ { "match":"steam","daily_limit_minutes":90 } ],
+        "app_limits": [],
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
@@ -91,4 +91,38 @@ pub fn all_presets() -> Vec<Preset> {
             policy: default_policy(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sentinel_policy::Policy;
+
+    /// Drift guard: every preset must parse into the shared `Policy` type and
+    /// re-serialize to exactly its normalized form. If a preset ever carries a
+    /// field the policy crate doesn't model (which normalization would
+    /// silently drop), this fails.
+    #[test]
+    fn presets_round_trip_through_policy_without_loss() {
+        for preset in all_presets() {
+            let parsed: Policy = serde_json::from_value(preset.policy.clone())
+                .unwrap_or_else(|e| panic!("preset '{}' does not parse: {e}", preset.name));
+            let normalized = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(
+                normalized, preset.policy,
+                "preset '{}' drifts from sentinel_policy::Policy \
+                 (a field is being dropped or defaulted during normalization)",
+                preset.name
+            );
+
+            // And normalization itself must be a fixpoint.
+            let reparsed: Policy = serde_json::from_value(normalized.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reparsed).unwrap(),
+                normalized,
+                "preset '{}' is not stable under repeated normalization",
+                preset.name
+            );
+        }
+    }
 }
