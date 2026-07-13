@@ -36,6 +36,11 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 futures = "0.3"

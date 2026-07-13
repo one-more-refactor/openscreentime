@@ -83,7 +83,7 @@ Server → agent command queue. Agent pulls on heartbeat / WS.
 |-------------|-------------|------------------------------------------------------------|
 | id          | uuid pk     |                                                            |
 | device_id   | uuid fk     |                                                            |
-| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `ssh_open` \| `ssh_close` \| `discover` \| `set_tamper_level` |
+| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `ssh_open` \| `ssh_close` \| `discover` \| `set_tamper_level` \| `credit_time` |
 | payload     | jsonb       | command-specific args                                      |
 | status      | text        | `queued` \| `sent` \| `acked` \| `failed`                  |
 | result      | jsonb       | nullable, agent's response                                 |
@@ -98,7 +98,7 @@ Agent → server telemetry & audit log.
 | tenant_id   | uuid fk     |                                                                |
 | device_id   | uuid fk     | nullable                                                       |
 | device_user_id | uuid fk  | nullable                                                       |
-| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `streak` \| `enrolled` \| `discovery_result` |
+| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `streak` \| `enrolled` \| `discovery_result` \| `ssh` \| `earn_request` |
 | severity    | text        | `info` \| `warn` \| `critical`                                 |
 | payload     | jsonb       |                                                                |
 | created_at  | timestamptz |                                                                |
@@ -115,6 +115,36 @@ Reverse-tunnel bookkeeping for remote shell.
 | created_at   | timestamptz |                                                |
 | closed_at    | timestamptz | nullable                                        |
 
+### `admin_sessions`
+DB-backed admin login sessions (cookie `sentinel_session`). Expired rows are deleted lazily.
+| column      | type        | notes                                        |
+|-------------|-------------|----------------------------------------------|
+| id          | uuid pk     |                                              |
+| token_hash  | text unique | sha256 hex of the cookie value               |
+| admin_id    | uuid fk     | → admins.id (cascade)                        |
+| tenant_id   | uuid fk     | → tenants.id (cascade)                       |
+| created_at  | timestamptz | default now()                                |
+| expires_at  | timestamptz | 30 days after creation (not sliding)         |
+
+### `earn_requests`
+Earn-time approval flow: agent files a request, a parent approves/denies it.
+| column          | type        | notes                                        |
+|-----------------|-------------|----------------------------------------------|
+| id              | uuid pk     |                                              |
+| tenant_id       | uuid fk     |                                              |
+| device_id       | uuid fk     |                                              |
+| device_user_id  | uuid fk     |                                              |
+| task_id         | text        | earn task id from the policy                 |
+| task_label      | text        |                                              |
+| minutes         | int         | 1..240                                       |
+| status          | text        | `pending` \| `approved` \| `denied`          |
+| created_at      | timestamptz |                                              |
+| decided_at      | timestamptz | nullable                                     |
+
+One *pending* request per (device_user, task, day) — the server dedupes by returning the
+existing pending row. Approval upserts `screen_time_ledger.earned_seconds` and enqueues a
+`credit_time` command.
+
 ### `screen_time_ledger`
 Per-user daily balance for the "earn time" mechanic.
 | column          | type        | notes                                     |
@@ -129,6 +159,8 @@ Per-user daily balance for the "earn time" mechanic.
 
 ## Migrations
 
-Live in `server/migrations/` as SQLx migrations (`NNNN_description.sql`). The first migration
-creates all tables above. Seeding the three preset profiles happens in application code when a
-tenant is created (see `PROFILES.md`).
+Live in `server/migrations/` as SQLx migrations (`NNNN_description.sql`). `0001_init.sql`
+creates the original tables; `0002_prod.sql` adds `admin_sessions`, `earn_requests` and extends
+the `commands.type` (`credit_time`) and `events.type` (`ssh`, `earn_request`) CHECK constraints.
+Seeding the three preset profiles happens in application code when a tenant is created (see
+`PROFILES.md`).
