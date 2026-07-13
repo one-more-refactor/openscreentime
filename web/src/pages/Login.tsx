@@ -1,28 +1,53 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { PasskeyButton, TextInput, Button } from "../components";
+import { getAuthConfig } from "../api";
+import { useAsync } from "../lib/useAsync";
+import { isEmail } from "../lib/validate";
+import { DotMatrix, PasskeyButton, TextInput, Button } from "../components";
 import { LockOverlay } from "../components";
+import type { AuthConfig } from "../types";
 
 type Mode = "login" | "register";
+
+const SSO_ERRORS: Record<string, string> = {
+  sso_unknown_account:
+    "That SSO account doesn't match any admin here. Sign in with a passkey, or ask the existing admin to invite you.",
+};
 
 export function Login() {
   const { login, register, mock } = useSession();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const authConfig = useAsync<AuthConfig>(getAuthConfig, []);
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => {
+    const code = params.get("error");
+    return code ? (SSO_ERRORS[code] ?? "Sign-in failed — try again.") : null;
+  });
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  const oidc = authConfig.data?.oidc ?? false;
+  const oidcName = authConfig.data?.oidc_name || "SSO";
 
   async function run() {
+    if (!isEmail(email)) {
+      setEmailError("Enter a valid email address, e.g. parent@example.com.");
+      return;
+    }
+    setEmailError(null);
     setError(null);
     try {
-      if (mode === "login") await login(email);
-      else await register(email, displayName || email);
+      if (mode === "login") await login(email.trim());
+      else await register(email.trim(), displayName.trim() || email.trim());
       navigate("/devices", { replace: true });
     } catch (e) {
       setError(
-        e instanceof Error ? e.message : "PASSKEY CEREMONY FAILED — TRY AGAIN",
+        e instanceof Error && e.message
+          ? e.message
+          : "The passkey ceremony failed — try again.",
       );
     }
   }
@@ -31,9 +56,8 @@ export function Login() {
     <div className="min-h-screen grid lg:grid-cols-2">
       {/* Left: brand + form */}
       <div className="flex flex-col justify-center px-8 sm:px-16 py-12 max-w-lg w-full mx-auto">
-        <div className="flex items-center gap-3 mb-2">
-          <span className="led led-glow-crit led-pulse" style={{ background: "var(--accent)" }} />
-          <span className="wordmark text-2xl text-fg">SENTINEL</span>
+        <div className="mb-2">
+          <DotMatrix text="SENTINEL" dot={4} color="var(--fg)" />
         </div>
         <p className="label mb-10" style={{ color: "var(--fg-faint)" }}>
           ZERO-TRUST DEVICE MANAGEMENT
@@ -68,8 +92,13 @@ export function Login() {
             type="email"
             autoComplete="username webauthn"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (emailError) setEmailError(null);
+            }}
             placeholder="parent@home.lan"
+            aria-invalid={!!emailError}
+            hint={emailError ?? undefined}
           />
           {mode === "register" && (
             <TextInput
@@ -88,12 +117,24 @@ export function Login() {
             />
           </div>
 
+          {oidc && (
+            <a
+              href="/api/auth/oidc/start"
+              className="focusable w-full flex items-center justify-center gap-3 border rounded px-4 py-3 font-mono uppercase tracking-label text-xs text-fg transition-colors hover:border-fg"
+              style={{ borderColor: "var(--line-2)" }}
+            >
+              <span className="led led-glow-ok" style={{ background: "var(--ok)" }} aria-hidden />
+              CONTINUE WITH {oidcName.toUpperCase()}
+            </a>
+          )}
+
           {error && (
             <div
-              className="flex items-center gap-2 border rounded px-3 py-2"
+              className="flex items-start gap-2 border rounded px-3 py-2"
               style={{ borderColor: "var(--accent)" }}
+              role="alert"
             >
-              <span className="led led-glow-crit" style={{ background: "var(--accent)" }} />
+              <span className="led led-glow-crit mt-1" style={{ background: "var(--accent)" }} />
               <span className="text-xs" style={{ color: "var(--accent)" }}>
                 {error}
               </span>
@@ -102,7 +143,7 @@ export function Login() {
 
           {mock && (
             <p className="label" style={{ color: "var(--warn)" }}>
-              BACKEND OFFLINE · ANY PASSKEY PROMPT MAY FAIL — DESIGN-REVIEW MODE
+              DESIGN-REVIEW MODE (VITE_USE_MOCK=1) · PASSKEY PROMPTS MAY FAIL
             </p>
           )}
 
@@ -117,7 +158,7 @@ export function Login() {
         </div>
 
         <p className="label mt-12" style={{ color: "var(--fg-faint)" }}>
-          PASSKEY-ONLY · NO PASSWORDS · WEBAUTHN
+          PASSKEY-FIRST · NO PASSWORDS · WEBAUTHN
         </p>
       </div>
 
