@@ -1,5 +1,6 @@
 import type {
   EarnTask,
+  NetworkLockdown,
   Policy,
   StreakNudge,
   TimeWindow,
@@ -20,14 +21,73 @@ interface Props {
   value: Policy;
   onChange: (next: Policy) => void;
   readOnly?: boolean;
+  /**
+   * Draft parent-PIN edit, kept OUTSIDE the policy object (it's sent to the
+   * API as a separate `parent_pin` field, never round-tripped through
+   * `policy.parent_pin_hash`). `undefined` = untouched (save preserves the
+   * existing PIN); `""` = explicit clear; non-empty = a new PIN to set.
+   */
+  parentPin?: string;
+  onParentPinChange?: (pin: string | undefined) => void;
 }
 
+const LOCKDOWN_TOGGLES: {
+  key: keyof NetworkLockdown;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    key: "force_dns",
+    label: "FORCE DNS",
+    hint: "Block plaintext DNS bypass — routes all lookups through the filtered resolver above.",
+  },
+  {
+    key: "block_doh",
+    label: "BLOCK DoH",
+    hint: "Block DNS-over-HTTPS — stops browsers tunneling lookups past the filter.",
+  },
+  {
+    key: "block_dot",
+    label: "BLOCK DoT",
+    hint: "Block DNS-over-TLS — same bypass, a different encrypted channel.",
+  },
+  {
+    key: "block_tor",
+    label: "BLOCK TOR",
+    hint: "Block Tor — stops the Tor anonymity network and .onion sites.",
+  },
+  {
+    key: "block_vpn",
+    label: "BLOCK VPN",
+    hint: "Block common VPN ports — stops WireGuard, OpenVPN, and IPsec tunnels used to route around filtering.",
+  },
+];
+
+const NO_LOCKDOWN: NetworkLockdown = {
+  force_dns: false,
+  block_doh: false,
+  block_dot: false,
+  block_tor: false,
+  block_vpn: false,
+};
+
 // Structured form over the full Policy jsonb (docs/API.md). Zero-trust framing.
-export function PolicyEditor({ value, onChange, readOnly }: Props) {
+export function PolicyEditor({
+  value,
+  onChange,
+  readOnly,
+  parentPin,
+  onParentPinChange,
+}: Props) {
   // ---- immutable patch helpers ----
   const patch = (p: Partial<Policy>) => onChange({ ...value, ...p });
   const set = <K extends keyof Policy>(key: K, v: Policy[K]) =>
     patch({ [key]: v } as Partial<Policy>);
+
+  const lockdown = value.lockdown ?? NO_LOCKDOWN;
+  const setLockdown = (v: NetworkLockdown) => set("lockdown", v);
+  const pinIsSet = !!value.parent_pin_hash;
+  const clearingPin = parentPin === "";
 
   const ports = (arr: number[]) =>
     arr.map(String);
@@ -119,6 +179,33 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
             placeholder="(none)"
             tone="ok"
           />
+        </div>
+      </Section>
+
+      {/* Network lockdown */}
+      <Section
+        title="NETWORK LOCKDOWN"
+        aside={
+          <span className="label" style={{ color: "var(--fg-faint)" }}>
+            ANTI-BYPASS
+          </span>
+        }
+      >
+        <p className="text-[0.625rem] leading-relaxed" style={{ color: "var(--fg-faint)" }}>
+          Closes off the common ways a device can dodge the filters above. Turn on what applies —
+          each toggle adds its own firewall rule.
+        </p>
+        <div className="grid sm:grid-cols-2 gap-4">
+          {LOCKDOWN_TOGGLES.map(({ key, label, hint }) => (
+            <Toggle
+              key={key}
+              label={label}
+              hint={hint}
+              checked={lockdown[key]}
+              onChange={(v) => setLockdown({ ...lockdown, [key]: v })}
+              disabled={readOnly}
+            />
+          ))}
         </div>
       </Section>
 
@@ -384,6 +471,50 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
               })}
             </div>
           </div>
+        </div>
+      </Section>
+
+      {/* Parent PIN */}
+      <Section
+        title="PARENT PIN"
+        aside={
+          <span
+            className="label"
+            style={{ color: pinIsSet ? "var(--fg)" : "var(--fg-faint)" }}
+          >
+            {pinIsSet ? "PIN IS SET" : "NO PIN SET"}
+          </span>
+        }
+      >
+        <p className="text-[0.625rem] leading-relaxed" style={{ color: "var(--fg-faint)" }}>
+          Used on the device to override a lockout or unlock enforcement when it can't reach the
+          server. Enter a new PIN to set or replace it — the current PIN is never shown here.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <TextInput
+            label={pinIsSet ? "NEW PIN" : "SET PIN"}
+            type="password"
+            autoComplete="new-password"
+            className="max-w-[12rem]"
+            placeholder={clearingPin ? "PIN WILL BE CLEARED" : "••••"}
+            value={clearingPin ? "" : parentPin ?? ""}
+            disabled={readOnly || clearingPin}
+            onChange={(e) => onParentPinChange?.(e.target.value || undefined)}
+            hint={
+              parentPin !== undefined && !clearingPin && parentPin.length < 4
+                ? "Must be at least 4 characters."
+                : undefined
+            }
+          />
+          {!readOnly && (pinIsSet || parentPin !== undefined) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onParentPinChange?.(clearingPin ? undefined : "")}
+            >
+              {clearingPin ? "UNDO CLEAR" : "CLEAR PIN"}
+            </Button>
+          )}
         </div>
       </Section>
     </div>

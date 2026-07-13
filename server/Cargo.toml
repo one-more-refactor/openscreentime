@@ -2,7 +2,7 @@
 name = "sentinel-server"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Sentinel — zero-trust device management platform (server)"
 
 [[bin]]
@@ -28,7 +28,8 @@ serde_json = "1"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 url = "2"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+argon2 = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

@@ -9,7 +9,7 @@
 //! resolv.conf. On non-dnsmasq systems the same config is logged (dry-run) and the
 //! README documents the `systemd-resolved` drop-in equivalent.
 
-use crate::policy::DnsPolicy;
+use crate::policy::{DnsPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
 
@@ -18,7 +18,7 @@ const RESOLV_CONF: &str = "/etc/resolv.conf";
 const LOCAL_RESOLVER: &str = "127.0.0.1";
 
 /// Build the dnsmasq ruleset that realizes the policy.
-pub fn render_dnsmasq(dns: &DnsPolicy) -> String {
+pub fn render_dnsmasq(dns: &DnsPolicy, lockdown: &NetworkLockdown) -> String {
     let mut out = String::new();
     out.push_str("# Managed by sentinel-agent — do not edit.\n");
     out.push_str("no-resolv\n"); // never inherit host resolv.conf upstreams
@@ -67,6 +67,14 @@ pub fn render_dnsmasq(dns: &DnsPolicy) -> String {
         }
     }
 
+    if lockdown.block_tor {
+        // block_tor: NXDOMAIN .onion and the Tor Project bootstrap domains, so a
+        // managed user can't reach hidden services or download a Tor client.
+        out.push_str("# block_tor: Tor hidden services + bootstrap domains\n");
+        out.push_str("address=/onion/0.0.0.0\n");
+        out.push_str("address=/torproject.org/0.0.0.0\n");
+    }
+
     if dns.safe_search {
         // Force safe-search endpoints for the big providers (CNAME rewrites).
         out.push_str("# safe-search enforced\n");
@@ -84,8 +92,8 @@ pub fn render_resolv_conf() -> String {
 }
 
 /// Apply DNS policy and pin resolv.conf.
-pub fn apply(exec: &Exec, dns: &DnsPolicy) -> Result<()> {
-    let conf = render_dnsmasq(dns);
+pub fn apply(exec: &Exec, dns: &DnsPolicy, lockdown: &NetworkLockdown) -> Result<()> {
+    let conf = render_dnsmasq(dns, lockdown);
     exec.write_file(DNSMASQ_CONF, &conf)?;
 
     // Restart whichever local resolver is present. Best-effort: try dnsmasq, then
@@ -140,7 +148,7 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns);
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default());
         assert!(conf.contains("server=/wikipedia.org/1.1.1.2"));
         assert!(conf.contains("server=/edu/1.1.1.2"));
         assert!(conf.contains("address=/#/"));
@@ -156,8 +164,26 @@ mod tests {
             safe_search: false,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns);
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default());
         assert!(conf.contains("server=1.1.1.2"));
         assert!(!conf.contains("address=/#/"));
+    }
+
+    #[test]
+    fn block_tor_emits_onion_and_torproject_blocks() {
+        let dns = DnsPolicy {
+            mode: "default_deny".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: false,
+            upstream: "1.1.1.2".into(),
+        };
+        let lockdown = NetworkLockdown {
+            block_tor: true,
+            ..Default::default()
+        };
+        let conf = render_dnsmasq(&dns, &lockdown);
+        assert!(conf.contains("address=/onion/0.0.0.0"));
+        assert!(conf.contains("address=/torproject.org/0.0.0.0"));
     }
 }

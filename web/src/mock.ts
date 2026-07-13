@@ -62,6 +62,14 @@ const kidsPolicy: Policy = {
     lockout: { enabled: true, unlock_challenge: "math" },
     streaks: { enabled: true, nudges: ["bedtime", "breaks"] },
   },
+  lockdown: {
+    force_dns: true,
+    block_doh: true,
+    block_dot: true,
+    block_tor: true,
+    block_vpn: true,
+  },
+  parent_pin_hash: "$argon2id$v=19$m=19456,t=2,p=1$mockmockmockmock$mockmockmockmockmockmockmockmock",
 };
 
 const teenPolicy: Policy = {

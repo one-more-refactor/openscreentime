@@ -21,6 +21,8 @@ export function Profiles() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Policy | null>(null);
   const [dirty, setDirty] = useState(false);
+  // Draft parent-PIN edit, kept outside the policy object — see PolicyEditor.
+  const [parentPin, setParentPin] = useState<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Profile | null>(null);
@@ -35,6 +37,7 @@ export function Profiles() {
       setSelectedId(list[0].id);
       setDraft(structuredClone(list[0].policy));
       setDirty(false);
+      setParentPin(undefined);
     }
   }, [list, selectedId]);
 
@@ -42,17 +45,19 @@ export function Profiles() {
     setSelectedId(p.id);
     setDraft(structuredClone(p.policy));
     setDirty(false);
+    setParentPin(undefined);
   }
 
   async function save() {
     if (!selected || !draft) return;
     setSaving(true);
     try {
-      const updated = await updateProfile(selected.id, draft);
+      const updated = await updateProfile(selected.id, draft, parentPin);
       profiles.setData((prev) =>
         (prev ?? []).map((x) => (x.id === selected.id ? updated : x)),
       );
       setDirty(false);
+      setParentPin(undefined);
       toast("Policy saved.", "ok");
     } catch (e) {
       toast(errMsg(e, "Couldn't save the policy — your edits are still here, try again."));
@@ -179,6 +184,11 @@ export function Profiles() {
                   value={draft}
                   onChange={(next) => {
                     setDraft(next);
+                    setDirty(true);
+                  }}
+                  parentPin={parentPin}
+                  onParentPinChange={(pin) => {
+                    setParentPin(pin);
                     setDirty(true);
                   }}
                 />

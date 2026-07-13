@@ -12,6 +12,7 @@ mod enforce;
 mod enroll;
 mod gamify;
 mod lockout;
+mod pin;
 mod policy;
 mod protocol;
 mod runner;
@@ -19,6 +20,7 @@ mod service;
 mod ssh;
 mod sysusers;
 mod tamper;
+mod unlock;
 mod util;
 
 use anyhow::Result;
@@ -63,6 +65,15 @@ enum Cmd {
     InstallService,
     /// Show enrollment / service status.
     Status,
+    /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
+    /// (nft table + resolv.conf pin torn down, users un-frozen). Requires root.
+    Unlock {
+        #[arg(long)]
+        pin: String,
+        /// How long to suspend enforcement for, in minutes.
+        #[arg(long, default_value_t = 60)]
+        minutes: u64,
+    },
 }
 
 fn init_tracing() {
@@ -78,6 +89,20 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+
+    // Hidden internal helper spawned by `unlock` to auto-resume enforcement
+    // after the suspend window elapses. Not a real subcommand (kept out of
+    // --help / clap's Cmd enum) since it's an implementation detail, not
+    // something an operator should invoke directly.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
+        let secs: u64 = raw_args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600);
+        return unlock::resume_after(secs);
+    }
+
     let cli = Cli::parse();
     let ctx = AgentCtx::new(cli.dry_run, cli.tamper_max, cli.time_accel);
 
@@ -99,5 +124,6 @@ async fn main() -> Result<()> {
         }
         Cmd::InstallService => service::install_service(ctx),
         Cmd::Status => service::status(),
+        Cmd::Unlock { pin, minutes } => unlock::run(&ctx, &pin, minutes),
     }
 }

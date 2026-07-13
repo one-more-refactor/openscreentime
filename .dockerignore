@@ -1,0 +1,31 @@
+# Keep the build context small and reproducible: never ship local build
+# artifacts, dep caches, or VCS/editor state into the image build.
+# (Podman reads .containerignore; Docker reads .dockerignore — both are provided.)
+
+# Rust build output (rebuilt inside the image; copying it races with a live
+# `cargo build` on the host and bloats the context by GBs).
+**/target/
+
+# Web deps + build output (the image runs `bun install` + `bun run build` fresh).
+web/node_modules/
+web/dist/
+**/node_modules/
+
+# Local env / secrets — must never enter an image layer.
+.env
+server/.env
+**/*.env
+
+# VCS, editor, CI, and docs that the runtime doesn't need.
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+**/*.swp
+
+# The container build files themselves.
+Containerfile
+compose.yaml
+.containerignore
+.dockerignore
