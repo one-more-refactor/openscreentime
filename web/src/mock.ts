@@ -1,8 +1,7 @@
 // ============================================================================
 // Sample data so the UI renders standalone (no backend). Mirrors the preset
-// policies in docs/PROFILES.md verbatim. The API client falls back to this
-// whenever a request fails (backend down) so the control center is reviewable
-// as a pure front-end artifact.
+// policies in docs/PROFILES.md verbatim. Served by the API client ONLY when
+// the build runs with VITE_USE_MOCK=1 (design review).
 // ============================================================================
 
 import type {
@@ -11,6 +10,7 @@ import type {
   DeviceDetail,
   DeviceUser,
   DiscoveryResult,
+  EarnRequest,
   Event,
   Me,
   Passkey,
@@ -185,6 +185,8 @@ function du(
   os_username: string,
   display_name: string | null,
   profile_id: string,
+  used_minutes_today = 0,
+  earned_minutes_today = 0,
 ): DeviceUser {
   return {
     id,
@@ -192,6 +194,8 @@ function du(
     os_username,
     display_name,
     profile_id,
+    used_minutes_today,
+    earned_minutes_today,
     created_at: "2026-06-10T08:00:00Z",
   };
 }
@@ -210,8 +214,8 @@ export const mockDevices: Device[] = [
     last_seen: "2026-07-07T14:58:12Z",
     created_at: "2026-06-10T08:00:00Z",
     users: [
-      du("u-mia", "d-livingroom", "mia", "Mia", "p-kids"),
-      du("u-leo", "d-livingroom", "leo", "Leo", "p-teen"),
+      du("u-mia", "d-livingroom", "mia", "Mia", "p-kids", 48, 15),
+      du("u-leo", "d-livingroom", "leo", "Leo", "p-teen", 96, 0),
     ],
   },
   {
@@ -226,7 +230,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: "2026-07-07T14:40:03Z",
     created_at: "2026-06-12T18:20:00Z",
-    users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen")],
+    users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen", 120, 20)],
   },
   {
     id: "d-loft",
@@ -368,6 +372,69 @@ const mockTenant: Tenant = {
 };
 
 export const mockMe: Me = { admin: mockAdmin, tenant: mockTenant };
+
+export const mockEarnRequests: EarnRequest[] = [
+  {
+    id: "er-1",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-mia",
+    os_username: "mia",
+    task_id: "reading",
+    task_label: "Read for 20 min",
+    minutes: 15,
+    status: "pending",
+    created_at: "2026-07-07T14:02:11Z",
+    decided_at: null,
+    device_name: "Living Room PC",
+    user_display_name: "Mia",
+  },
+  {
+    id: "er-2",
+    tenant_id: TENANT_ID,
+    device_id: "d-studio",
+    device_user_id: "u-noah",
+    os_username: "noah",
+    task_id: "homework",
+    task_label: "Finish homework",
+    minutes: 20,
+    status: "pending",
+    created_at: "2026-07-07T13:45:00Z",
+    decided_at: null,
+    device_name: "Studio Laptop",
+    user_display_name: "Noah",
+  },
+  {
+    id: "er-3",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-leo",
+    os_username: "leo",
+    task_id: "chores",
+    task_label: "Finish chores",
+    minutes: 15,
+    status: "approved",
+    created_at: "2026-07-06T16:20:00Z",
+    decided_at: "2026-07-06T16:24:30Z",
+    device_name: "Living Room PC",
+    user_display_name: "Leo",
+  },
+  {
+    id: "er-4",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-mia",
+    os_username: "mia",
+    task_id: "reading",
+    task_label: "Read for 20 min",
+    minutes: 15,
+    status: "denied",
+    created_at: "2026-07-05T19:02:00Z",
+    decided_at: "2026-07-05T19:10:12Z",
+    device_name: "Living Room PC",
+    user_display_name: "Mia",
+  },
+];
 
 export const mockPasskeys: Passkey[] = [
   { id: "k-1", nickname: "Pixel 8 fingerprint", created_at: "2026-06-01T10:05:00Z", last_used_at: "2026-07-07T09:00:00Z" },

@@ -1,5 +1,4 @@
 import type {
-  AppLimit,
   EarnTask,
   Policy,
   StreakNudge,
@@ -12,6 +11,10 @@ import { TagInput } from "./TagInput";
 import { TimeRange } from "./TimeRange";
 import { Button } from "./Button";
 import { WEEKDAY_LABELS } from "../lib/format";
+import { isDomain, isIp } from "../lib/validate";
+
+const domainError = (v: string) =>
+  isDomain(v) ? null : `"${v}" is not a valid domain — use example.com or *.example.com.`;
 
 interface Props {
   value: Policy;
@@ -59,6 +62,7 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
           onChange={(v) => set("dns", { ...value.dns, allowlist: v })}
           placeholder="school.edu, *.wikipedia.org"
           tone="ok"
+          validate={domainError}
         />
         <TagInput
           label="BLOCKLIST — EXPLICIT BLOCKS"
@@ -66,6 +70,7 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
           onChange={(v) => set("dns", { ...value.dns, blocklist: v })}
           placeholder="add domain"
           tone="crit"
+          validate={domainError}
         />
         <div className="grid sm:grid-cols-2 gap-4 items-start">
           <div className="pt-1">
@@ -83,6 +88,12 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
             onChange={(e) => set("dns", { ...value.dns, upstream: e.target.value })}
             placeholder="1.1.1.2"
             disabled={readOnly}
+            aria-invalid={!isIp(value.dns.upstream)}
+            hint={
+              isIp(value.dns.upstream)
+                ? undefined
+                : "Must be an IP address, e.g. 1.1.1.2."
+            }
           />
         </div>
       </Section>
@@ -208,46 +219,8 @@ export function PolicyEditor({ value, onChange, readOnly }: Props) {
         </div>
       </Section>
 
-      {/* App limits */}
-      <Section title="APP LIMITS">
-        <div className="flex flex-col gap-2">
-          {value.app_limits.map((a, i) => (
-            <AppLimitRow
-              key={i}
-              limit={a}
-              readOnly={readOnly}
-              onChange={(nl) => {
-                const app_limits = value.app_limits.slice();
-                app_limits[i] = nl;
-                set("app_limits", app_limits);
-              }}
-              onRemove={() =>
-                set("app_limits", value.app_limits.filter((_, j) => j !== i))
-              }
-            />
-          ))}
-          {value.app_limits.length === 0 && (
-            <span className="label" style={{ color: "var(--fg-faint)" }}>
-              NO APP LIMITS
-            </span>
-          )}
-          {!readOnly && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="self-start"
-              onClick={() =>
-                set("app_limits", [
-                  ...value.app_limits,
-                  { match: "", daily_limit_minutes: 60 },
-                ])
-              }
-            >
-              + ADD LIMIT
-            </Button>
-          )}
-        </div>
-      </Section>
+      {/* App limits intentionally absent: the agent does not enforce them
+          (contract §9). The field stays in the Policy type for forward compat. */}
 
       {/* Gamification */}
       <Section title="GAMIFICATION">
@@ -527,52 +500,6 @@ function ScheduleRow({
           onClick={onRemove}
           className="ml-auto text-fg-faint hover:text-accent focusable text-xs"
           aria-label="remove window"
-        >
-          ✕
-        </button>
-      )}
-    </div>
-  );
-}
-
-function AppLimitRow({
-  limit,
-  onChange,
-  onRemove,
-  readOnly,
-}: {
-  limit: AppLimit;
-  onChange: (l: AppLimit) => void;
-  onRemove: () => void;
-  readOnly?: boolean;
-}) {
-  return (
-    <div className="flex flex-wrap items-end gap-3">
-      <TextInput
-        label="MATCH"
-        className="flex-1 min-w-[10rem]"
-        value={limit.match}
-        placeholder="steam"
-        disabled={readOnly}
-        onChange={(e) => onChange({ ...limit, match: e.target.value })}
-      />
-      <TextInput
-        label="MINUTES / DAY"
-        type="number"
-        min={0}
-        className="w-32"
-        value={limit.daily_limit_minutes}
-        disabled={readOnly}
-        onChange={(e) =>
-          onChange({ ...limit, daily_limit_minutes: Math.max(0, parseInt(e.target.value || "0", 10)) })
-        }
-      />
-      {!readOnly && (
-        <button
-          type="button"
-          onClick={onRemove}
-          className="text-fg-faint hover:text-accent focusable text-xs pb-2.5"
-          aria-label="remove limit"
         >
           ✕
         </button>

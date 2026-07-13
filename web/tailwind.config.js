@@ -25,8 +25,8 @@ export default {
         DEFAULT: "var(--radius)",
       },
       fontFamily: {
-        mono: ['ui-monospace', '"Space Mono"', '"SFMono-Regular"', 'Menlo', 'Consolas', 'monospace'],
-        dot: ['"Space Mono"', 'ui-monospace', 'monospace'],
+        mono: ['"Space Mono"', 'ui-monospace', '"SFMono-Regular"', 'Menlo', 'Consolas', 'monospace'],
+        dot: ['"DotGothic16"', '"Space Mono"', 'ui-monospace', 'monospace'],
       },
       letterSpacing: {
         label: "0.08em",
