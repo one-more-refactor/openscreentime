@@ -13,6 +13,8 @@ const typeLabel: Record<Event["type"], string> = {
   streak: "STREAK",
   enrolled: "ENROLLED",
   discovery_result: "DISCOVERY",
+  ssh: "SSH",
+  earn_request: "EARN REQUEST",
 };
 
 function summarize(e: Event): string {

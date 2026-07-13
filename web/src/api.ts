@@ -1,8 +1,8 @@
 // ============================================================================
-// Typed API client for the Admin API (docs/API.md). Session-cookie auth via
-// `credentials: "include"`. Degrades gracefully: when the backend is
-// unreachable (dev design review with no server), reads fall back to src/mock.
-// Set VITE_USE_MOCK=1 to force mock mode; VITE_USE_MOCK=0 to disable fallback.
+// Typed API client for the Admin API (docs/API.md + docs/CONTRACT-PROD.md).
+// Session-cookie auth via `credentials: "include"`.
+// Mock mode: reads serve bundled sample data ONLY when the build runs with
+// VITE_USE_MOCK=1 (design review). Production builds never fall back silently.
 // ============================================================================
 
 import {
@@ -16,10 +16,13 @@ import {
 
 import type {
   ApiErrorBody,
+  AuthConfig,
   Device,
   DeviceDetail,
   DeviceUser,
   DiscoveryResult,
+  EarnRequest,
+  EarnRequestStatus,
   EnrollTokenResponse,
   Event,
   EventType,
@@ -36,14 +39,15 @@ import {
   mockDeviceDetail,
   mockDevices,
   mockDiscovery,
+  mockEarnRequests,
   mockEvents,
   mockMe,
   mockPasskeys,
   mockProfiles,
 } from "./mock";
 
-const FORCE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
-const DISABLE_MOCK = import.meta.env.VITE_USE_MOCK === "0";
+/** Design-review mode: bundled sample data instead of network reads. */
+export const usingMock = import.meta.env.VITE_USE_MOCK === "1";
 
 export class ApiError extends Error {
   code: string;
@@ -55,9 +59,6 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
-/** True when the last read fell back to bundled mock data. */
-export let usingMock = FORCE_MOCK;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -88,28 +89,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/**
- * Wrap a read so that, if the network fails (backend down) and mock isn't
- * disabled, we return sample data and flip `usingMock`. Real ApiErrors from a
- * reachable server (401/404/…) propagate — only transport failures fall back.
- */
+/** Read that serves bundled sample data when (and only when) VITE_USE_MOCK=1. */
 async function read<T>(path: string, fallback: () => T, init?: RequestInit): Promise<T> {
-  if (FORCE_MOCK) {
-    usingMock = true;
-    return fallback();
-  }
-  try {
-    const value = await request<T>(path, init);
-    usingMock = false;
-    return value;
-  } catch (err) {
-    const transportFailure = !(err instanceof ApiError);
-    if (transportFailure && !DISABLE_MOCK) {
-      usingMock = true;
-      return fallback();
-    }
-    throw err;
-  }
+  if (usingMock) return fallback();
+  return request<T>(path, init);
 }
 
 // ---- Auth ------------------------------------------------------------------
@@ -170,6 +153,14 @@ export const auth = {
   },
 };
 
+/** GET /api/auth/config — public; reports whether OIDC SSO is available. */
+export async function getAuthConfig(): Promise<AuthConfig> {
+  const res = await read<{ auth: AuthConfig }>("/api/auth/config", () => ({
+    auth: { oidc: true, oidc_name: "Authentik" },
+  }));
+  return res.auth;
+}
+
 // ---- Session ---------------------------------------------------------------
 
 export async function getMe(): Promise<Me> {
@@ -223,6 +214,12 @@ export async function unlockDevice(id: string): Promise<void> {
   return request<void>(`/api/devices/${id}/unlock`, { method: "POST" });
 }
 
+export async function deleteDevice(id: string): Promise<void> {
+  return request<void>(`/api/devices/${id}`, { method: "DELETE" });
+}
+
+// ---- SSH (contract §3) -------------------------------------------------------
+
 export async function openSsh(id: string): Promise<SshSessionResponse> {
   return request<SshSessionResponse>(`/api/devices/${id}/ssh`, {
     method: "POST",
@@ -230,15 +227,17 @@ export async function openSsh(id: string): Promise<SshSessionResponse> {
   });
 }
 
-export async function closeSsh(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/ssh`, {
+export async function closeSsh(sessionId: string): Promise<void> {
+  return request<void>(`/api/ssh/${sessionId}/close`, {
     method: "POST",
-    body: JSON.stringify({ close: true }),
+    body: JSON.stringify({}),
   });
 }
 
-export async function deleteDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}`, { method: "DELETE" });
+/** Cookie-authenticated browser terminal WebSocket URL for a session. */
+export function sshWsUrl(sessionId: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/api/ssh/${sessionId}/ws`;
 }
 
 // ---- Device users & profile assignment -------------------------------------
@@ -270,13 +269,6 @@ export async function listProfiles(): Promise<Profile[]> {
   return res.profiles;
 }
 
-export async function getProfile(id: string): Promise<Profile> {
-  const res = await read<{ profile: Profile }>(`/api/profiles/${id}`, () => ({
-    profile: mockProfiles.find((p) => p.id === id) ?? mockProfiles[0],
-  }));
-  return res.profile;
-}
-
 export async function createProfile(
   name: string,
   policy: Policy,
@@ -301,6 +293,37 @@ export async function updateProfile(
 
 export async function deleteProfile(id: string): Promise<void> {
   return request<void>(`/api/profiles/${id}`, { method: "DELETE" });
+}
+
+// ---- Earn-time approval (contract §4) ---------------------------------------
+
+export async function listEarnRequests(
+  status?: EarnRequestStatus,
+): Promise<EarnRequest[]> {
+  const q = status ? `?status=${status}` : "";
+  const res = await read<{ requests: EarnRequest[] }>(
+    `/api/earn-requests${q}`,
+    () => ({
+      requests: mockEarnRequests.filter((r) => !status || r.status === status),
+    }),
+  );
+  return res.requests;
+}
+
+export async function approveEarnRequest(id: string): Promise<EarnRequest> {
+  const res = await request<{ request: EarnRequest }>(
+    `/api/earn-requests/${id}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return res.request;
+}
+
+export async function denyEarnRequest(id: string): Promise<EarnRequest> {
+  const res = await request<{ request: EarnRequest }>(
+    `/api/earn-requests/${id}/deny`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return res.request;
 }
 
 // ---- Discovery -------------------------------------------------------------
@@ -380,4 +403,10 @@ export async function listPasskeys(): Promise<Passkey[]> {
     passkeys: mockPasskeys,
   }));
   return res.passkeys;
+}
+
+export async function deletePasskey(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/me/passkeys/${id}`, {
+    method: "DELETE",
+  });
 }

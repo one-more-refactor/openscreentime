@@ -2,67 +2,145 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   assignProfile,
+  deleteDevice,
   getDevice,
+  listDeviceUsers,
   listProfiles,
   lockDevice,
   unlockDevice,
   updateDevice,
 } from "../api";
-import type { DeviceDetail as DeviceDetailT, Profile, SshSessionResponse, TamperLevel } from "../types";
+import type {
+  DeviceDetail as DeviceDetailT,
+  DeviceUser,
+  Profile,
+  TamperLevel,
+} from "../types";
 import { useAsync } from "../lib/useAsync";
+import { useToast, errMsg } from "../lib/toast";
 import { PageHeader } from "../layout/Shell";
 import {
   Button,
+  ErrorPanel,
   EventFeed,
   Modal,
   Panel,
   Select,
-  SshModal,
+  SshTerminal,
   StatusLed,
   statusTone,
   Toggle,
-  openSshSession,
 } from "../components";
 import { Empty, Loading } from "./Devices";
-import { relTime } from "../lib/format";
+import { minutesToHm, relTime } from "../lib/format";
 
 export function DeviceDetail() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const device = useAsync<DeviceDetailT>(() => getDevice(id), [id]);
   const profiles = useAsync<Profile[]>(listProfiles, []);
+  // Per-user used/earned minutes today (contract §5).
+  const usage = useAsync<DeviceUser[]>(() => listDeviceUsers(id), [id]);
 
   const [confirmL3, setConfirmL3] = useState(false);
-  const [ssh, setSsh] = useState<SshSessionResponse | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [ssh, setSsh] = useState<{ id: string; name: string } | null>(null);
+  const [lockBusy, setLockBusy] = useState(false);
+  const [tamperBusy, setTamperBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [assignBusy, setAssignBusy] = useState<string | null>(null);
 
   const d = device.data;
   const profileList = profiles.data ?? [];
   const profileName = (pid: string) =>
     profileList.find((p) => p.id === pid)?.name ?? "—";
+  const usageFor = (userId: string) => usage.data?.find((u) => u.id === userId);
 
   if (device.loading) return <Loading />;
+  if (device.error)
+    return (
+      <ErrorPanel
+        title="Couldn't load this device"
+        detail={device.error}
+        onRetry={device.reload}
+      />
+    );
   if (!d) return <Empty label="DEVICE NOT FOUND" />;
 
   async function setTamper(level: TamperLevel) {
     if (!d) return;
-    await updateDevice(d.id, { tamper_level: level }).catch(() => {});
-    device.setData((prev) => (prev ? { ...prev, tamper_level: level } : prev));
+    const prev = d.tamper_level;
+    setTamperBusy(true);
+    device.setData((p) => (p ? { ...p, tamper_level: level } : p));
+    try {
+      await updateDevice(d.id, { tamper_level: level });
+    } catch (e) {
+      device.setData((p) => (p ? { ...p, tamper_level: prev } : p));
+      toast(errMsg(e, "Couldn't change the tamper level — try again."));
+    } finally {
+      setTamperBusy(false);
+    }
   }
 
   async function onLockToggle() {
     if (!d) return;
-    if (d.status === "locked") {
-      await unlockDevice(d.id).catch(() => {});
-      device.setData((prev) => (prev ? { ...prev, status: "online" } : prev));
-    } else {
-      await lockDevice(d.id).catch(() => {});
-      device.setData((prev) => (prev ? { ...prev, status: "locked" } : prev));
+    const wasLocked = d.status === "locked";
+    const prevStatus = d.status;
+    setLockBusy(true);
+    device.setData((p) => (p ? { ...p, status: wasLocked ? "online" : "locked" } : p));
+    try {
+      await (wasLocked ? unlockDevice(d.id) : lockDevice(d.id));
+    } catch (e) {
+      device.setData((p) => (p ? { ...p, status: prevStatus } : p));
+      toast(errMsg(e, `Couldn't ${wasLocked ? "unlock" : "lock"} ${d.name} — try again.`));
+    } finally {
+      setLockBusy(false);
     }
   }
 
-  async function onSsh() {
+  async function onAssign(user: DeviceUser, pid: string) {
     if (!d) return;
-    setSsh(await openSshSession(d));
+    const prevPid = user.profile_id;
+    setAssignBusy(user.id);
+    device.setData((p) =>
+      p
+        ? {
+            ...p,
+            users: p.users.map((x) => (x.id === user.id ? { ...x, profile_id: pid } : x)),
+          }
+        : p,
+    );
+    try {
+      await assignProfile(user.id, pid);
+    } catch (e) {
+      device.setData((p) =>
+        p
+          ? {
+              ...p,
+              users: p.users.map((x) =>
+                x.id === user.id ? { ...x, profile_id: prevPid } : x,
+              ),
+            }
+          : p,
+      );
+      toast(errMsg(e, "Couldn't assign the profile — try again."));
+    } finally {
+      setAssignBusy(null);
+    }
+  }
+
+  async function onDelete() {
+    if (!d) return;
+    setDeleting(true);
+    try {
+      await deleteDevice(d.id);
+      toast(`${d.name} removed.`, "ok");
+      navigate("/devices", { replace: true });
+    } catch (e) {
+      toast(errMsg(e, `Couldn't remove ${d.name} — try again.`));
+      setDeleting(false);
+    }
   }
 
   return (
@@ -75,14 +153,23 @@ export function DeviceDetail() {
             <Button variant="ghost" onClick={() => navigate("/devices")}>
               ← BACK
             </Button>
-            <Button variant="ghost" onClick={onSsh}>
-              SSH
+            <Button
+              variant="ghost"
+              disabled={d.status !== "online" && d.status !== "locked"}
+              title={d.status === "offline" || d.status === "pending" ? "Device is offline" : undefined}
+              onClick={() => setSsh({ id: d.id, name: d.name })}
+            >
+              SHELL
+            </Button>
+            <Button variant="ghost" onClick={() => setConfirmDelete(true)}>
+              REMOVE
             </Button>
             <Button
               variant={d.status === "locked" ? "primary" : "danger"}
-              onClick={onLockToggle}
+              disabled={lockBusy}
+              onClick={() => void onLockToggle()}
             >
-              {d.status === "locked" ? "UNLOCK" : "LOCK"}
+              {lockBusy ? "…" : d.status === "locked" ? "UNLOCK" : "LOCK"}
             </Button>
           </>
         }
@@ -91,7 +178,7 @@ export function DeviceDetail() {
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Left column: identity + users + tamper */}
         <div className="lg:col-span-2 flex flex-col gap-6">
-          <Panel title="IDENTITY">
+          <Panel title="IDENTITY" refCode="ID-01">
             <dl className="grid sm:grid-cols-2 gap-x-8 gap-y-3">
               <Field k="HOSTNAME" v={d.hostname} />
               <Field k="OS" v={d.os} />
@@ -102,63 +189,69 @@ export function DeviceDetail() {
             </dl>
           </Panel>
 
-          <Panel title="USERS · PER-PERSON POLICY">
+          <Panel title="USERS · SCREEN TIME TODAY" refCode="US-01">
             {d.users.length === 0 ? (
               <Empty label="NO OS USERS REPORTED YET" />
             ) : (
               <ul className="flex flex-col">
-                {d.users.map((u) => (
-                  <li
-                    key={u.id}
-                    className="flex items-center gap-4 py-3 border-b last:border-b-0 flex-wrap"
-                    style={{ borderColor: "var(--line)" }}
-                  >
-                    <span className="led" style={{ width: 6, height: 6, background: "var(--fg-faint)" }} />
-                    <div className="min-w-0 flex-1">
-                      <p className="dot text-xs text-fg">{u.display_name ?? u.os_username}</p>
-                      <p className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
-                        {u.os_username}
-                      </p>
-                    </div>
-                    <Select
-                      className="w-48"
-                      value={u.profile_id}
-                      onChange={async (e) => {
-                        const pid = e.target.value;
-                        await assignProfile(u.id, pid).catch(() => {});
-                        device.setData((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                users: prev.users.map((x) =>
-                                  x.id === u.id ? { ...x, profile_id: pid } : x,
-                                ),
-                              }
-                            : prev,
-                        );
-                      }}
+                {d.users.map((u) => {
+                  const stats = usageFor(u.id);
+                  return (
+                    <li
+                      key={u.id}
+                      className="flex flex-col gap-2 py-3 border-b last:border-b-0"
+                      style={{ borderColor: "var(--line)" }}
                     >
-                      {profileList.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name.toUpperCase()}
-                        </option>
-                      ))}
-                    </Select>
-                  </li>
-                ))}
+                      <div className="flex items-center gap-4 flex-wrap">
+                        <div className="min-w-0 flex-1">
+                          <p className="dot text-xs text-fg">
+                            {u.display_name ?? u.os_username}
+                          </p>
+                          <p className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
+                            {u.os_username}
+                          </p>
+                        </div>
+                        <Select
+                          className="w-48"
+                          value={u.profile_id}
+                          disabled={assignBusy === u.id}
+                          aria-label={`Profile for ${u.display_name ?? u.os_username}`}
+                          onChange={(e) => void onAssign(u, e.target.value)}
+                        >
+                          {profileList.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name.toUpperCase()}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                      <UsageBar
+                        used={stats?.used_minutes_today}
+                        earned={stats?.earned_minutes_today}
+                        loading={usage.loading}
+                      />
+                    </li>
+                  );
+                })}
               </ul>
+            )}
+            {usage.error && (
+              <p className="text-[0.6875rem] mt-3" style={{ color: "var(--warn)" }}>
+                Usage data unavailable right now — {usage.error}
+              </p>
             )}
             <p className="label mt-3" style={{ color: "var(--fg-faint)" }}>
               CURRENT: {d.users.map((u) => profileName(u.profile_id)).join(" · ") || "—"}
             </p>
           </Panel>
 
-          <Panel title="TAMPER RESISTANCE">
+          <Panel title="TAMPER RESISTANCE" refCode="TR-01">
             <div className="flex flex-col gap-4">
               <Toggle
                 label="LEVEL 3 — MAXIMUM LOCKDOWN"
                 hint="disable TTY switching, lock systemd unit, physical-mitigation guidance"
                 danger
+                disabled={tamperBusy}
                 checked={d.tamper_level === 3}
                 onChange={(v) => {
                   if (v) setConfirmL3(true);
@@ -176,7 +269,7 @@ export function DeviceDetail() {
 
         {/* Right column: events */}
         <div className="flex flex-col gap-6">
-          <Panel title="RECENT EVENTS">
+          <Panel title="RECENT EVENTS" refCode="EV-01">
             <EventFeed events={d.recent_events} />
             <Link to={`/events?device_id=${d.id}`}>
               <Button variant="ghost" size="sm" className="mt-3 w-full">
@@ -200,6 +293,7 @@ export function DeviceDetail() {
             </Button>
             <Button
               variant="danger"
+              disabled={tamperBusy}
               onClick={async () => {
                 await setTamper(3);
                 setConfirmL3(false);
@@ -236,8 +330,73 @@ export function DeviceDetail() {
         </div>
       </Modal>
 
-      <SshModal ssh={ssh} onClose={() => setSsh(null)} />
+      {/* Delete confirm */}
+      <Modal
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        title="REMOVE DEVICE"
+        danger
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
+              CANCEL
+            </Button>
+            <Button variant="danger" disabled={deleting} onClick={() => void onDelete()}>
+              {deleting ? "REMOVING…" : "REMOVE DEVICE"}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
+          This removes <span className="dot text-fg">{d.name}</span> and its users, policies
+          and history from the control center. The agent on the machine keeps running until
+          it is uninstalled. This cannot be undone.
+        </p>
+      </Modal>
+
+      <SshTerminal target={ssh} onClose={() => setSsh(null)} />
     </>
+  );
+}
+
+// Small stacked usage bar: used minutes (fg) + earned minutes (ok), today.
+function UsageBar({
+  used,
+  earned,
+  loading,
+}: {
+  used?: number;
+  earned?: number;
+  loading: boolean;
+}) {
+  if (loading && used === undefined) {
+    return <span className="label" style={{ color: "var(--fg-faint)" }}>USAGE…</span>;
+  }
+  if (used === undefined && earned === undefined) {
+    return (
+      <span className="label" style={{ color: "var(--fg-faint)" }}>
+        NO USAGE DATA TODAY
+      </span>
+    );
+  }
+  const u = used ?? 0;
+  const e = earned ?? 0;
+  const scale = Math.max(u + e, 120); // bar spans at least 2h so small values stay readable
+  return (
+    <div className="flex items-center gap-3">
+      <div
+        className="flex-1 h-1.5 rounded-[1px] overflow-hidden flex"
+        style={{ background: "var(--line)" }}
+        role="img"
+        aria-label={`Used ${minutesToHm(u)} today, earned ${minutesToHm(e)}`}
+      >
+        <span style={{ width: `${(u / scale) * 100}%`, background: "var(--fg-dim)" }} />
+        <span style={{ width: `${(e / scale) * 100}%`, background: "var(--ok)" }} />
+      </div>
+      <span className="label tabular-nums flex-none" style={{ color: "var(--fg-dim)" }}>
+        {minutesToHm(u)} USED{e > 0 ? ` · +${minutesToHm(e)} EARNED` : ""}
+      </span>
+    </div>
   );
 }
 
