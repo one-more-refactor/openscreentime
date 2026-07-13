@@ -41,6 +41,10 @@ pub struct Agent {
     policy_version: String,
     /// Expected wall-clock at the next tick (clock-skew / time-tamper detection).
     expected_wall: Option<chrono::DateTime<chrono::Utc>>,
+    /// (os_username, task_id) → the local date an earn-request was already sent,
+    /// so the headless auto-request doesn't spam the server more than once a day
+    /// (CONTRACT-PROD.md §4 — the server also dedupes, this just avoids the noise).
+    requested_earn: HashMap<(String, String), chrono::NaiveDate>,
 }
 
 impl Agent {
@@ -62,6 +66,7 @@ impl Agent {
             sessions: HashMap::new(),
             policy_version: String::new(),
             expected_wall: None,
+            requested_earn: HashMap::new(),
         })
     }
 
@@ -97,10 +102,11 @@ impl Agent {
         }
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
+        let server_host = crate::client::server_host(&self.cfg.server_url);
         enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
-            &self.cfg.server_url,
+            server_host.as_deref(),
             &effective,
         )?;
         tracing::info!(
@@ -135,7 +141,20 @@ impl Agent {
 
     /// The periodic enforcement tick: screen-time accounting + lockout + tamper
     /// re-assertion + heartbeat. Returns events to emit.
-    fn enforcement_tick(&mut self) -> Vec<Event> {
+    /// Per-user usage snapshot for the ledger (CONTRACT-PROD.md §5), keyed on the
+    /// users we hold policy for. Shared by the WS `heartbeat` frame and the poll
+    /// HTTP heartbeat so both paths report identically.
+    fn usage_snapshot(&self) -> Vec<crate::client::UsageReport> {
+        self.policies
+            .keys()
+            .map(|u| crate::client::UsageReport {
+                os_username: u.clone(),
+                used_minutes_today: self.tracker.used_minutes(u),
+            })
+            .collect()
+    }
+
+    async fn enforcement_tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         tamper::touch_heartbeat(&self.exec);
 
@@ -173,62 +192,119 @@ impl Agent {
             } else {
                 None
             };
+            let currently_frozen = self.frozen.contains(&user);
 
-            match (lock, self.frozen.contains(&user)) {
-                (Some(reason), false) => {
-                    // New lockout: show overlay, then freeze.
-                    let mut spec = LockSpec::from_lockout(
-                        &policy.gamification.lockout,
-                        &reason.headline(),
-                        &reason.detail(),
-                        &user,
-                    );
-                    // Offer an earn-time task as the primary action when the user
-                    // ran out of daily minutes (Duolingo-style: earn your way back).
-                    if matches!(reason, screentime::LockReason::DailyLimit { .. }) {
-                        if let Some(offer) =
-                            gamify::earn_offers(&policy.gamification).into_iter().next()
-                        {
-                            spec.action =
-                                format!("EARN {} MIN — {}", offer.reward_minutes, offer.label);
+            match decide_freeze(self.device_locked, lock.as_ref(), currently_frozen) {
+                FreezeAction::Freeze => {
+                    if self.device_locked {
+                        // A whole-device admin lock overrides screen-time entirely:
+                        // this user is being (re-)frozen because the device is
+                        // locked, not because of anything screen-time decided.
+                        let spec = LockSpec::from_lockout(
+                            &Default::default(),
+                            "LOCKED",
+                            "THIS DEVICE IS LOCKED BY AN ADMIN",
+                            &user,
+                        );
+                        lockout::present(&self.exec, &spec);
+                    } else if let Some(reason) = &lock {
+                        // New screen-time lockout: show overlay, then freeze.
+                        let mut spec = LockSpec::from_lockout(
+                            &policy.gamification.lockout,
+                            &reason.headline(),
+                            &reason.detail(),
+                            &user,
+                        );
+                        // Offer an earn-time task as the primary action when the
+                        // user ran out of daily minutes (Duolingo-style: earn your
+                        // way back). Headless build has no interactive task picker,
+                        // so the first offer is auto-requested and the copy
+                        // reflects that it's already in flight.
+                        if matches!(reason, screentime::LockReason::DailyLimit { .. }) {
+                            if let Some(offer) =
+                                gamify::earn_offers(&policy.gamification).into_iter().next()
+                            {
+                                spec.action = self
+                                    .auto_request_earn(&user, &offer)
+                                    .await
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "EARN {} MIN — {}",
+                                            offer.reward_minutes, offer.label
+                                        )
+                                    });
+                            }
                         }
+                        // Streak nudges (bedtime/breaks) ride along as events.
+                        for nudge in gamify::nudges_for(&policy) {
+                            lockout::present_nudge(&self.exec, &nudge);
+                            events.push(gamify::streak_event(&user, &nudge.kind, 0));
+                        }
+                        lockout::present(&self.exec, &spec);
+                        let sev = if matches!(reason, screentime::LockReason::Bedtime) {
+                            SEV_WARN
+                        } else {
+                            SEV_INFO
+                        };
+                        events.push(
+                            Event::new(
+                                EV_SCREEN_TIME_EXCEEDED,
+                                sev,
+                                json!({ "reason": reason.headline(), "detail": reason.detail() }),
+                            )
+                            .for_user(&user),
+                        );
                     }
-                    // Streak nudges (bedtime/breaks) ride along as events.
-                    for nudge in gamify::nudges_for(&policy) {
-                        events.push(gamify::streak_event(&user, &nudge.kind, 0));
-                    }
-                    lockout::present(&self.exec, &spec);
                     if let Err(e) = screentime::freeze_user(&self.exec, &user, true) {
                         tracing::warn!("freeze {user} failed: {e}");
                     }
                     self.frozen.insert(user.clone());
-                    let sev = if matches!(reason, screentime::LockReason::Bedtime) {
-                        SEV_WARN
-                    } else {
-                        SEV_INFO
-                    };
-                    events.push(
-                        Event::new(
-                            EV_SCREEN_TIME_EXCEEDED,
-                            sev,
-                            json!({ "reason": reason.headline(), "detail": reason.detail() }),
-                        )
-                        .for_user(&user),
-                    );
                 }
-                (None, true) => {
-                    // Policy now allows: unfreeze.
+                FreezeAction::Unfreeze => {
+                    // Policy now allows (and no admin lock is active): unfreeze.
                     if let Err(e) = screentime::freeze_user(&self.exec, &user, false) {
                         tracing::warn!("unfreeze {user} failed: {e}");
                     }
                     self.frozen.remove(&user);
                     tracing::info!("{user} unlocked (within policy again)");
                 }
-                _ => {}
+                FreezeAction::None => {}
             }
         }
 
         events
+    }
+
+    /// Auto-request an earn-time offer once per (user, task) per day (the server
+    /// also dedupes by returning the existing pending row, but we avoid spamming
+    /// it every tick). Returns the presenter copy to show, if a request was sent
+    /// or already pending today.
+    async fn auto_request_earn(&mut self, user: &str, offer: &gamify::EarnOffer) -> Option<String> {
+        let today = chrono::Local::now().date_naive();
+        let key = (user.to_string(), offer.id.clone());
+        if self.requested_earn.get(&key) == Some(&today) {
+            return Some("REQUEST SENT — WAITING FOR APPROVAL".to_string());
+        }
+        match self
+            .client
+            .post_earn_request(user, &offer.id, &offer.label, offer.reward_minutes)
+            .await
+        {
+            Ok(resp) => {
+                tracing::info!(
+                    "earn-request {} for {user}/{} is {}",
+                    resp.request.id,
+                    offer.id,
+                    resp.request.status
+                );
+                self.requested_earn.insert(key, today);
+                Some("REQUEST SENT — WAITING FOR APPROVAL".to_string())
+            }
+            Err(e) => {
+                tracing::warn!("earn-request for {user}/{} failed: {e}", offer.id);
+                None
+            }
+        }
     }
 
     /// Dispatch one server command. `out_tx` lets SSH sessions stream frames back.
@@ -327,6 +403,38 @@ impl Agent {
                     Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
                 }
             }
+            CMD_CREDIT_TIME => {
+                let os_username = cmd
+                    .payload
+                    .get("os_username")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let minutes = cmd
+                    .payload
+                    .get("minutes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let request_id = cmd
+                    .payload
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if os_username.is_empty() || minutes == 0 {
+                    return (
+                        ack_failed(&cmd.id, "credit_time missing os_username/minutes"),
+                        events,
+                    );
+                }
+                self.tracker.add_earned(&os_username, minutes);
+                // The user's pending requests are now resolved; clear the dedupe
+                // cache so a later same-day lockout sends a fresh request instead
+                // of showing a stale "REQUEST SENT — WAITING FOR APPROVAL".
+                self.requested_earn.retain(|(u, _), _| u != &os_username);
+                events.push(gamify::earned_event(&os_username, &request_id, minutes));
+                json!({ "credited": true, "os_username": os_username, "minutes": minutes })
+            }
             CMD_SSH_CLOSE => {
                 let session_id = cmd
                     .payload
@@ -354,6 +462,41 @@ impl Agent {
             },
             events,
         )
+    }
+}
+
+/// What to do to a user's frozen state this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreezeAction {
+    Freeze,
+    Unfreeze,
+    None,
+}
+
+/// Pure decision logic for the enforcement tick (bug fix: a whole-device admin
+/// lock, once engaged via the `lock` command, must keep every user frozen
+/// regardless of what screen-time enforcement says — it must never be the
+/// screen-time verdict alone that decides to unfreeze someone while
+/// `device_locked` is true). Extracted so it's testable without the rest of the
+/// `Agent` machinery.
+fn decide_freeze(
+    device_locked: bool,
+    screen_time_lock: Option<&screentime::LockReason>,
+    currently_frozen: bool,
+) -> FreezeAction {
+    if device_locked {
+        // Admin lock overrides everything: stay (or become) frozen. Screen-time
+        // verdicts are irrelevant while the device is locked.
+        return if currently_frozen {
+            FreezeAction::None
+        } else {
+            FreezeAction::Freeze
+        };
+    }
+    match (screen_time_lock, currently_frozen) {
+        (Some(_), false) => FreezeAction::Freeze,
+        (None, true) => FreezeAction::Unfreeze,
+        _ => FreezeAction::None,
     }
 }
 
@@ -423,8 +566,14 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                for ev in agent.enforcement_tick() {
+                for ev in agent.enforcement_tick().await {
                     let _ = out_tx.send(AgentFrame::Event { event: ev }).await;
+                }
+                // The WS bus has no HTTP heartbeat, so push usage here — otherwise
+                // screen_time_ledger only ever updates in the degraded poll path.
+                let usage = agent.usage_snapshot();
+                if !usage.is_empty() {
+                    let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
                 }
             }
             msg = read.next() => {
@@ -470,6 +619,15 @@ async fn handle_server_text(
                 sess.feed_b64(&data_b64).await;
             }
         }
+        ServerFrame::SshResize {
+            session_id,
+            cols,
+            rows,
+        } => {
+            if let Some(sess) = agent.sessions.get(&session_id) {
+                sess.resize(cols, rows);
+            }
+        }
         ServerFrame::SshClose { session_id } => {
             if let Some(sess) = agent.sessions.remove(&session_id) {
                 sess.close().await;
@@ -496,12 +654,13 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let events = agent.enforcement_tick();
+                let events = agent.enforcement_tick().await;
                 let _ = agent.client.post_events(&events).await;
             }
             _ = hb.tick() => {
                 let users = crate::sysusers::login_users();
-                match agent.client.heartbeat("online", None, &users).await {
+                let usage = agent.usage_snapshot();
+                match agent.client.heartbeat("online", None, &users, &usage).await {
                     Ok(resp) => {
                         for cmd in resp.commands {
                             let (ack, events) = agent.handle_command(cmd, &out_tx).await;
@@ -529,5 +688,54 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enforce::screentime::LockReason;
+
+    fn daily_limit() -> LockReason {
+        LockReason::DailyLimit {
+            used_min: 60,
+            limit_min: 60,
+        }
+    }
+
+    #[test]
+    fn device_lock_freezes_regardless_of_screen_time_verdict() {
+        // Bug fix: while an admin `lock` is active, a screen-time verdict that
+        // would otherwise unfreeze the user (None = within policy) must NOT
+        // unfreeze them, and a not-yet-frozen user must be frozen.
+        assert_eq!(
+            decide_freeze(true, None, false),
+            FreezeAction::Freeze,
+            "device_locked must freeze a not-yet-frozen user even with no screen-time reason"
+        );
+        assert_eq!(
+            decide_freeze(true, None, true),
+            FreezeAction::None,
+            "device_locked must keep an already-frozen user frozen"
+        );
+        let reason = daily_limit();
+        assert_eq!(
+            decide_freeze(true, Some(&reason), true),
+            FreezeAction::None,
+            "device_locked must keep the user frozen even with an active screen-time reason too"
+        );
+    }
+
+    #[test]
+    fn device_unlocked_follows_screen_time_verdict() {
+        let reason = daily_limit();
+        assert_eq!(decide_freeze(false, Some(&reason), false), FreezeAction::Freeze);
+        assert_eq!(decide_freeze(false, None, true), FreezeAction::Unfreeze);
+        assert_eq!(decide_freeze(false, None, false), FreezeAction::None);
+        assert_eq!(
+            decide_freeze(false, Some(&reason), true),
+            FreezeAction::None,
+            "already frozen + still locked out: no change"
+        );
     }
 }
