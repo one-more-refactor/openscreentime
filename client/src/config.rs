@@ -20,9 +20,6 @@ pub struct AgentConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_tamper")]
     pub tamper_level: u8,
-    /// Optional detached signature over the config body, verified on load (TAMPER.md L1).
-    #[serde(default)]
-    pub config_sig: Option<String>,
 }
 
 fn default_poll() -> u64 {
@@ -41,10 +38,6 @@ impl AgentConfig {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: AgentConfig = toml::from_str(&body).context("parsing agent.toml")?;
-        // Forward path: verify `config_sig` as a real detached signature over the
-        // canonical body, using the server's public key (pinned at enrollment),
-        // and refuse to run on mismatch. Not implemented yet — no verification
-        // happens today, so `config_sig` is inert until this lands.
         Ok(cfg)
     }
 

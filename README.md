@@ -75,6 +75,8 @@ cd client && cargo build --release
 sudo ./target/release/sentinel-agent enroll --server https://... --token <ENROLL_TOKEN>
 ```
 
+For running Sentinel in production on a VPS (rootless Podman compose stack), see [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
 ## Platform support
 
 | Platform | Status                                   |

@@ -269,13 +269,25 @@ export async function listProfiles(): Promise<Profile[]> {
   return res.profiles;
 }
 
+/**
+ * `parent_pin` is sent as a top-level field alongside (not inside) `policy`:
+ * absent/undefined preserves any existing hash, "" clears it, a non-empty
+ * string sets a new one. The server hashes it — the plaintext never round-
+ * trips back.
+ */
 export async function createProfile(
   name: string,
   policy: Policy,
+  parent_pin?: string,
 ): Promise<Profile> {
   const res = await request<{ profile: Profile }>("/api/profiles", {
     method: "POST",
-    body: JSON.stringify({ name, kind: "custom", policy }),
+    body: JSON.stringify({
+      name,
+      kind: "custom",
+      policy,
+      ...(parent_pin !== undefined ? { parent_pin } : {}),
+    }),
   });
   return res.profile;
 }
@@ -283,10 +295,14 @@ export async function createProfile(
 export async function updateProfile(
   id: string,
   policy: Policy,
+  parent_pin?: string,
 ): Promise<Profile> {
   const res = await request<{ profile: Profile }>(`/api/profiles/${id}`, {
     method: "PUT",
-    body: JSON.stringify({ policy }),
+    body: JSON.stringify({
+      policy,
+      ...(parent_pin !== undefined ? { parent_pin } : {}),
+    }),
   });
   return res.profile;
 }

@@ -29,8 +29,14 @@ pub fn apply_network_policy(
     server_host: Option<&str>,
     policy: &Policy,
 ) -> Result<()> {
-    dns::apply(exec, &policy.dns)?;
-    firewall::apply(exec, &policy.firewall, &policy.dns.upstream, server_host)?;
+    dns::apply(exec, &policy.dns, &policy.lockdown)?;
+    firewall::apply(
+        exec,
+        &policy.firewall,
+        &policy.lockdown,
+        &policy.dns.upstream,
+        server_host,
+    )?;
     tracing::info!(
         dry_run = ctx.dry_run,
         "network policy applied (dns.mode={}, fw.mode={})",

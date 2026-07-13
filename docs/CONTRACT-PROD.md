@@ -176,3 +176,45 @@ Env config (all optional; feature off unless all three set):
 All schema changes above land in `server/migrations/0002_prod.sql`: admin_sessions,
 earn_requests, commands CHECK += 'credit_time', events CHECK += 'ssh' and += 'earn_request'
 (used for audit trail of requests/decisions).
+
+## 11. Network lockdown + parent PIN (v1 prod)
+
+Two new fields on the shared Policy document (`sentinel-policy` crate; mirrored in
+`web/src/types.ts`). Both are optional and omitted from serialized output when unset, so
+existing preset JSON stays byte-identical (the preset drift guard depends on this).
+
+### `lockdown` — network anti-bypass toggles
+```
+"lockdown": {
+  "force_dns":  bool,   // drop plaintext DNS (udp/tcp 53) egress to anything but the agent's upstream
+  "block_doh":  bool,   // drop the well-known public DoH resolver IPs (except the configured upstream)
+  "block_dot":  bool,   // drop DNS-over-TLS (tcp/udp 853)
+  "block_tor":  bool,   // drop Tor ports {9001,9030,9050,9051,9150} + NXDOMAIN .onion/torproject.org
+  "block_vpn":  bool    // drop WireGuard 51820, OpenVPN 1194, IPsec/IKE 500/4500
+}
+```
+Enforced by the agent in `enforce/firewall.rs` (nft DROP rules placed before the generic
+accepts, first-match-wins) and `enforce/dns.rs` (Tor domain sink). Omitted entirely when every
+flag is false. Kids preset enables all five; teen enables block_doh/block_dot/block_tor.
+
+### `parent_pin_hash` — local escape hatch
+```
+"parent_pin_hash": "<argon2 PHC string>"   // absent when no PIN set
+```
+Set server-side: the profile create/update request accepts a **plaintext** `parent_pin` field
+(sibling of `name`/`policy`, never inside the policy object). The server argon2-hashes it and
+stores only the hash in the policy jsonb. Semantics: absent `parent_pin` preserves the existing
+hash; `""` clears it; a non-empty value (≥4 chars) sets a new hash. The plaintext is never
+stored or returned.
+
+The agent verifies an entered PIN against this hash locally (works offline): (a) as a master
+override on the lockout overlay, and (b) via `sentinel-agent unlock --pin <PIN> [--minutes N]`,
+which suspends enforcement (tears down the nft table, un-pins resolv.conf) for N minutes. Root
+required for the CLI unlock.
+
+### Fail-closed offline behavior
+The agent tracks last successful server contact. Beyond a grace window
+(`SENTINEL_OFFLINE_GRACE_SECS`, default 900) it keeps the last-known policy fully enforced and
+re-asserts it every loop (so nothing drifts open while the command server is unreachable), emits
+a `network_offline` tamper event once, and a `network_online` event on recovery. It does NOT
+black out all traffic — the device stays usable under its existing strict allowlist.

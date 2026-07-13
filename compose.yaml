@@ -1,0 +1,64 @@
+# Sentinel — production compose stack (rootless Podman / podman-compose, or
+# docker compose). Builds the server+web image from ../Containerfile and runs
+# it behind the operator's EXISTING external reverse proxy (which terminates
+# TLS) — see docs/DEPLOY.md.
+#
+# Usage:
+#   cp .env.example .env   # then edit .env
+#   podman-compose up -d
+#
+# Note: server/docker-compose.yml is a separate, untouched dev-only stack
+# (DB only, for `cargo run` against a local Postgres).
+
+services:
+  db:
+    image: docker.io/library/postgres:15
+    container_name: sentinel-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sentinel}
+    # Prod: keep Postgres internal-only (no host port published). For local
+    # debugging you can temporarily uncomment the next two lines.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    volumes:
+      - sentinel_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: sentinel-server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-sentinel}
+      RP_ID: ${RP_ID:?set RP_ID in .env}
+      RP_ORIGIN: ${RP_ORIGIN:?set RP_ORIGIN in .env}
+      SENTINEL_PUBLIC_URL: ${SENTINEL_PUBLIC_URL:-${RP_ORIGIN}}
+      BIND_ADDR: 0.0.0.0:8080
+      # SENTINEL_INSECURE_COOKIES intentionally NOT set here — cookies stay
+      # Secure in prod. Only set it in .env for local plain-http testing.
+      SENTINEL_INSECURE_COOKIES: ${SENTINEL_INSECURE_COOKIES:-}
+      SENTINEL_OIDC_ISSUER: ${SENTINEL_OIDC_ISSUER:-}
+      SENTINEL_OIDC_CLIENT_ID: ${SENTINEL_OIDC_CLIENT_ID:-}
+      SENTINEL_OIDC_CLIENT_SECRET: ${SENTINEL_OIDC_CLIENT_SECRET:-}
+      SENTINEL_OIDC_NAME: ${SENTINEL_OIDC_NAME:-}
+      RUST_LOG: ${RUST_LOG:-sentinel_server=info,tower_http=info,info}
+    # Bind to loopback only: the app port is reached exclusively via the
+    # host's existing external reverse proxy (which terminates TLS and
+    # forwards to 127.0.0.1:${SENTINEL_PORT}). Do NOT publish on 0.0.0.0.
+    ports:
+      - "127.0.0.1:${SENTINEL_PORT:-8080}:8080"
+
+volumes:
+  sentinel_pgdata:
