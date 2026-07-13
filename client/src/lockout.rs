@@ -24,6 +24,11 @@ pub struct LockSpec {
     pub action: String,             // the single accent-red CTA
     pub challenge: challenge::Challenge,
     pub for_user: String,
+    /// The user's `policy.parent_pin_hash` (argon2 PHC string), carried along so
+    /// a presenter can verify a typed PIN fully offline. `None` = no PIN
+    /// configured — the parent_pin path (both the `parent_pin` challenge and the
+    /// master escape) is simply unavailable.
+    pub parent_pin_hash: Option<String>,
 }
 
 pub mod challenge {
@@ -32,16 +37,7 @@ pub mod challenge {
     #[derive(Debug, Clone)]
     pub enum Challenge {
         /// Solve `a op b = ?`.
-        Math {
-            a: i64,
-            b: i64,
-            op: char,
-            /// Read by `verify` — the GUI presenter's early-dismiss gate. Only
-            /// the GUI build actually gates dismissal on it (the headless
-            /// presenter doesn't take input at all), so it's `gui`-only.
-            #[cfg(feature = "gui")]
-            answer: i64,
-        },
+        Math { a: i64, b: i64, op: char },
         /// Wait out a cooldown before the dismiss button enables.
         Wait { seconds: u32 },
         /// Enter the parent PIN.
@@ -64,13 +60,7 @@ pub mod challenge {
             let mut rng = rand::thread_rng();
             let a = rng.gen_range(6..=12);
             let b = rng.gen_range(3..=9);
-            Challenge::Math {
-                a,
-                b,
-                op: '×',
-                #[cfg(feature = "gui")]
-                answer: a * b,
-            }
+            Challenge::Math { a, b, op: '×' }
         }
 
         pub fn prompt(&self) -> String {
@@ -82,50 +72,103 @@ pub mod challenge {
             }
         }
 
-        /// Verify a typed response (math answer or PIN). `parent_pin` is the
-        /// configured PIN for the ParentPin variant. Used by the GUI presenter's
-        /// early-dismiss gate; not reachable from the headless build, which
-        /// never takes typed input, so this is `gui`-only.
-        #[cfg(feature = "gui")]
-        pub fn verify(&self, input: &str, parent_pin: Option<&str>) -> bool {
+        /// Verify a typed response. Shared by the GUI presenter's early-dismiss
+        /// gate and the headless/CLI recovery path (`sentinel-agent unlock`),
+        /// which is why this is *not* gated behind `--features gui` — the same
+        /// logic must be exercised (and tested) in the default build too.
+        ///
+        /// The parent PIN, when configured (`parent_pin_hash: Some`), is always
+        /// accepted as a master escape regardless of challenge type — a parent
+        /// physically present can always get in. If no PIN is configured, that
+        /// path is unavailable and behavior falls back to the challenge's own
+        /// rule (math answer / wait-only / etc.).
+        ///
+        /// This is the GUI presenter's typed-input gate: only the `gui` feature
+        /// (and tests) exercise it. The headless override path does NOT route
+        /// through here — it verifies the PIN directly (see
+        /// `check_and_consume_pin_override`) so that `Challenge::None`'s
+        /// "no gate" semantics can never turn into an unlock.
+        #[cfg(any(feature = "gui", test))]
+        pub fn verify(&self, input: &str, parent_pin_hash: Option<&str>) -> bool {
+            if let Some(hash) = parent_pin_hash {
+                if crate::pin::verify_pin(input.trim(), hash) {
+                    return true;
+                }
+            }
             match self {
-                Challenge::Math { answer, .. } => input
-                    .trim()
-                    .parse::<i64>()
-                    .map(|v| v == *answer)
-                    .unwrap_or(false),
-                Challenge::ParentPin => parent_pin.map(|p| p == input.trim()).unwrap_or(false),
+                Challenge::Math { a, b, op, .. } => {
+                    let expected = match op {
+                        '×' | '*' => a * b,
+                        '+' => a + b,
+                        '-' => a - b,
+                        _ => return false,
+                    };
+                    input.trim().parse::<i64>().map(|v| v == expected).unwrap_or(false)
+                }
+                // No hash matched above (or none configured): the ParentPin
+                // challenge itself has no other way to verify.
+                Challenge::ParentPin => false,
                 Challenge::Wait { .. } => false, // dismissed by time, not input
                 Challenge::None => true,
             }
         }
     }
 
-    #[cfg(all(test, feature = "gui"))]
+    #[cfg(test)]
     mod tests {
         use super::*;
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+        use argon2::Argon2;
+
+        fn hash_of(pin: &str) -> String {
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::default()
+                .hash_password(pin.as_bytes(), &salt)
+                .expect("hash")
+                .to_string()
+        }
+
         #[test]
         fn math_verifies() {
-            let c = Challenge::Math {
-                a: 7,
-                b: 8,
-                op: '×',
-                answer: 56,
-            };
+            let c = Challenge::Math { a: 7, b: 8, op: '×' };
             assert!(c.verify("56", None));
             assert!(!c.verify("55", None));
         }
+
         #[test]
-        fn pin_verifies() {
+        fn pin_verifies_parent_pin_challenge() {
+            let hash = hash_of("1234");
             let c = Challenge::ParentPin;
-            assert!(c.verify("1234", Some("1234")));
-            assert!(!c.verify("0000", Some("1234")));
+            assert!(c.verify("1234", Some(&hash)));
+            assert!(!c.verify("0000", Some(&hash)));
+        }
+
+        #[test]
+        fn pin_unavailable_when_not_configured() {
+            let c = Challenge::ParentPin;
+            assert!(!c.verify("1234", None));
+        }
+
+        #[test]
+        fn pin_is_a_master_escape_on_any_challenge() {
+            let hash = hash_of("9999");
+            let math = Challenge::Math { a: 2, b: 2, op: '×' };
+            // Wrong math answer, but correct parent PIN still unlocks.
+            assert!(math.verify("9999", Some(&hash)));
+            let wait = Challenge::Wait { seconds: 60 };
+            assert!(wait.verify("9999", Some(&hash)));
         }
     }
 }
 
 impl LockSpec {
-    pub fn from_lockout(cfg: &Lockout, headline: &str, detail: &str, user: &str) -> LockSpec {
+    pub fn from_lockout(
+        cfg: &Lockout,
+        headline: &str,
+        detail: &str,
+        user: &str,
+        parent_pin_hash: Option<String>,
+    ) -> LockSpec {
         let challenge = if cfg.enabled {
             challenge::Challenge::from_kind(&cfg.unlock_challenge)
         } else {
@@ -138,6 +181,7 @@ impl LockSpec {
             action: "TAP TO CONTINUE".to_string(),
             challenge,
             for_user: user.to_string(),
+            parent_pin_hash,
         }
     }
 }
@@ -169,6 +213,35 @@ pub fn render_ascii(spec: &LockSpec) -> String {
     s.push_str(&dot_row);
     s.push('\n');
     s
+}
+
+/// Headless/no-GUI parent-PIN override: with no display to type into, an
+/// attempt is dropped as plaintext at `/run/sentinel/unlock_pin.<user>` (e.g.
+/// by a companion tool acting on the parent's behalf) and consumed here —
+/// read once, deleted regardless of outcome (single-use). Returns `true` only
+/// if a parent PIN is configured AND the attempt matches it.
+///
+/// This MUST fail closed: it verifies the attempt directly against
+/// `parent_pin_hash` rather than delegating to `Challenge::verify`, because the
+/// whole-device admin lock (and any non-gamified lockout) carries
+/// `Challenge::None`, for which `Challenge::verify` returns `true`
+/// unconditionally. Routing an *override* through that would let any dropped
+/// file bypass an admin lock even when no PIN is set — so the direct
+/// hash check is the security boundary here, not the challenge type.
+pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
+    let path = format!("/run/sentinel/unlock_pin.{}", spec.for_user);
+    let Ok(attempt) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&path); // single-use, win or lose
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD VERIFY dropped parent-PIN override for {}", spec.for_user);
+    }
+    // No configured PIN → no override, ever.
+    let Some(hash) = spec.parent_pin_hash.as_deref() else {
+        return false;
+    };
+    crate::pin::verify_pin(attempt.trim(), hash)
 }
 
 /// Present the lockout. Non-blocking: it puts the screen up (or logs it) and
@@ -293,8 +366,14 @@ mod gui {
                     // dismisses (Wait's cooldown isn't separately timed here —
                     // the tick loop re-freezes if dismissed early and still
                     // out of policy).
-                    let needs_input =
-                        matches!(self.spec.challenge, Challenge::Math { .. } | Challenge::ParentPin);
+                    // A parent-PIN input box is also offered on non-ParentPin
+                    // challenges when a PIN is configured, since it's always a
+                    // valid master escape (a parent physically present can
+                    // always get in).
+                    let needs_input = matches!(
+                        self.spec.challenge,
+                        Challenge::Math { .. } | Challenge::ParentPin
+                    ) || self.spec.parent_pin_hash.is_some();
                     if needs_input {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.input)
@@ -315,11 +394,10 @@ mod gui {
                         )
                         .clicked()
                     {
-                        // No parent PIN is plumbed through the policy document
-                        // yet, so `ParentPin` challenges never verify — this is
-                        // honest given there's nowhere to configure one.
                         let unlocked = if needs_input {
-                            self.spec.challenge.verify(&self.input, None)
+                            self.spec
+                                .challenge
+                                .verify(&self.input, self.spec.parent_pin_hash.as_deref())
                         } else {
                             true
                         };

@@ -36,6 +36,16 @@ pub struct Policy {
     pub app_limits: Vec<AppLimit>,
     #[serde(default)]
     pub gamification: Gamification,
+    /// Network lockdown toggles (block DoH/DoT/Tor/VPN, force DNS). Absent =
+    /// all-off; skipped on serialize so presets that don't set it stay byte-
+    /// identical (the drift guard depends on this).
+    #[serde(default, skip_serializing_if = "NetworkLockdown::is_default")]
+    pub lockdown: NetworkLockdown,
+    /// Argon2 hash of the parent PIN, set server-side when an admin saves a PIN
+    /// in the profile editor. The agent verifies entered PINs against this hash
+    /// locally (works with no server connection). Never the plaintext PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pin_hash: Option<String>,
 }
 
 impl Default for Policy {
@@ -47,7 +57,45 @@ impl Default for Policy {
             screen_time: ScreenTime::default(),
             app_limits: Vec::new(),
             gamification: Gamification::default(),
+            lockdown: NetworkLockdown::default(),
+            parent_pin_hash: None,
         }
+    }
+}
+
+/// Network anti-bypass lockdown. Each flag adds explicit firewall/DNS rules on
+/// top of the base allowlist. All default off; the whole struct is omitted from
+/// serialized output when every flag is off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkLockdown {
+    /// Block plaintext DNS (udp/tcp 53) egress to anything but the agent's own
+    /// resolver, so a managed user can't point a browser at 8.8.8.8 directly.
+    #[serde(default)]
+    pub force_dns: bool,
+    /// Drop the well-known public DoH resolver IPs (Cloudflare/Google/Quad9/…)
+    /// so browsers can't tunnel DNS over HTTPS around the local resolver.
+    #[serde(default)]
+    pub block_doh: bool,
+    /// Block DNS-over-TLS (tcp 853).
+    #[serde(default)]
+    pub block_dot: bool,
+    /// Block Tor (known directory-authority/OR ports + `.onion`).
+    #[serde(default)]
+    pub block_tor: bool,
+    /// Block common commercial-VPN ports (WireGuard 51820, OpenVPN 1194,
+    /// IPsec/IKE 500/4500).
+    #[serde(default)]
+    pub block_vpn: bool,
+}
+
+impl NetworkLockdown {
+    /// True when every flag is off — used by `skip_serializing_if`.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+    /// True if any lockdown rule is active.
+    pub fn any(&self) -> bool {
+        self.force_dns || self.block_doh || self.block_dot || self.block_tor || self.block_vpn
     }
 }
 
@@ -233,6 +281,27 @@ mod tests {
         assert!(p.dns.is_default_deny());
         assert!(p.firewall.is_default_deny());
         assert_eq!(p.dns.mode, "default_deny");
+    }
+
+    #[test]
+    fn lockdown_and_pin_absent_by_default_but_parse_when_present() {
+        // Absent: skipped on serialize so presets stay byte-identical.
+        let p: Policy = serde_json::from_str("{}").unwrap();
+        assert!(p.lockdown.is_default());
+        assert!(!p.lockdown.any());
+        assert!(p.parent_pin_hash.is_none());
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(!s.contains("lockdown"), "empty lockdown must not serialize");
+        assert!(!s.contains("parent_pin_hash"));
+
+        // Present: round-trips.
+        let raw = r#"{ "lockdown": { "block_tor": true, "block_doh": true },
+                      "parent_pin_hash": "argon2$abc" }"#;
+        let p: Policy = serde_json::from_str(raw).unwrap();
+        assert!(p.lockdown.block_tor && p.lockdown.block_doh);
+        assert!(!p.lockdown.block_vpn);
+        assert!(p.lockdown.any());
+        assert_eq!(p.parent_pin_hash.as_deref(), Some("argon2$abc"));
     }
 
     #[test]

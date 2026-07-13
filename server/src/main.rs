@@ -18,6 +18,7 @@ mod profiles;
 mod rate_limit;
 mod ssh;
 mod state;
+mod static_web;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -191,9 +192,28 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/earn-request", post(earn::create_request))
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
-        .with_state(state)
-        .layer(cors)
-        .layer(TraceLayer::new_for_http());
+        .with_state(state);
+
+    // Serve the built web UI (see `web/`) as the fallback for any path that
+    // didn't match an /api, /agent, or /health route above — this never
+    // shadows those routes since fallbacks only run on unmatched requests.
+    // No-op (API-only) if SENTINEL_WEB_DIR isn't present, e.g. plain `cargo
+    // run` in dev without a web build.
+    let app = match static_web::web_dir() {
+        Some(dir) => {
+            use tower_http::services::{ServeDir, ServeFile};
+            let index = dir.join("index.html");
+            // Serve real files; any miss falls back to index.html. The 404 that
+            // ServeDir carries through is flipped to 200 by the `spa_ok`
+            // map_response layer below, so client-side routes resolve cleanly.
+            let serve = ServeDir::new(&dir).not_found_service(ServeFile::new(index));
+            app.fallback_service(serve)
+                .layer(axum::middleware::map_response(static_web::spa_ok))
+        }
+        None => app,
+    };
+
+    let app = app.layer(cors).layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("Sentinel server listening on {bind_addr}");

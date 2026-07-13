@@ -78,6 +78,14 @@ export interface GamificationPolicy {
   streaks: StreaksPolicy;
 }
 
+export interface NetworkLockdown {
+  force_dns: boolean;
+  block_doh: boolean;
+  block_dot: boolean;
+  block_tor: boolean;
+  block_vpn: boolean;
+}
+
 export interface Policy {
   version: number;
   dns: DnsPolicy;
@@ -85,6 +93,12 @@ export interface Policy {
   screen_time: ScreenTimePolicy;
   app_limits: AppLimit[];
   gamification: GamificationPolicy;
+  /** Absent (or omitted by the server) means all lockdown flags are off. */
+  lockdown?: NetworkLockdown;
+  /** Argon2 hash of the parent PIN, present only when a PIN is set. Never the
+   * plaintext PIN — the editor writes a new PIN via a separate `parent_pin`
+   * field on the save request, not through this property. */
+  parent_pin_hash?: string | null;
 }
 
 // ---- Entities --------------------------------------------------------------

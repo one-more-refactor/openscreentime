@@ -15,12 +15,41 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 /// How often the enforcement tick runs (screen-time accounting granularity).
 const TICK: Duration = Duration::from_secs(10);
+
+/// Default fail-closed offline grace period: how long the agent tolerates no
+/// server contact (WS message or successful poll/heartbeat) before treating
+/// itself as offline-beyond-grace. Overridable via `SENTINEL_OFFLINE_GRACE_SECS`
+/// (no new Cargo dependency — plain env var).
+const DEFAULT_OFFLINE_GRACE_SECS: u64 = 900;
+
+fn offline_grace_from_env() -> Duration {
+    let secs = std::env::var("SENTINEL_OFFLINE_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_OFFLINE_GRACE_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Server-contact state (TAMPER.md fail-closed offline decision): grace period,
+/// then keep the last-known policy fully (and aggressively) enforced — never a
+/// hard network blackout, since the device must stay usable under its existing
+/// strict allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactState {
+    /// Heard from the server within the last tick.
+    Online,
+    /// No contact for a while, but still within the grace window — not alarming.
+    OfflineWithinGrace,
+    /// Grace period exceeded: emit one alert, re-assert the last-known policy
+    /// every loop so nothing drifts open while the command server is unreachable.
+    OfflineFailClosed,
+}
 
 pub struct Agent {
     ctx: Arc<AgentCtx>,
@@ -45,6 +74,13 @@ pub struct Agent {
     /// so the headless auto-request doesn't spam the server more than once a day
     /// (CONTRACT-PROD.md §4 — the server also dedupes, this just avoids the noise).
     requested_earn: HashMap<(String, String), chrono::NaiveDate>,
+    /// Last time the agent successfully reached the server (WS message received
+    /// or a successful poll/heartbeat) — the fail-closed offline grace clock.
+    last_contact: Instant,
+    /// Current offline/online contact state (see `ContactState`).
+    contact_state: ContactState,
+    /// Configured grace period before we consider ourselves offline-beyond-grace.
+    offline_grace: Duration,
 }
 
 impl Agent {
@@ -67,7 +103,69 @@ impl Agent {
             policy_version: String::new(),
             expected_wall: None,
             requested_earn: HashMap::new(),
+            last_contact: Instant::now(),
+            contact_state: ContactState::Online,
+            offline_grace: offline_grace_from_env(),
         })
+    }
+
+    /// Record successful server contact (WS message received, or a successful
+    /// poll/heartbeat). Resets the fail-closed offline clock.
+    fn record_contact(&mut self) {
+        self.last_contact = Instant::now();
+    }
+
+    /// Fail-closed offline check: once `offline_grace` has elapsed since the
+    /// last successful server contact, emit a `network_offline` tamper event
+    /// (once per offline episode) and aggressively re-assert the last-known
+    /// network policy every tick so nothing drifts open while the command
+    /// server is unreachable. Never blacks out traffic — the device stays
+    /// usable under its existing strict allowlist. Emits `network_online` once
+    /// when contact resumes after having exceeded the grace period.
+    fn offline_grace_check(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        let elapsed = self.last_contact.elapsed();
+        if elapsed > self.offline_grace {
+            if self.contact_state != ContactState::OfflineFailClosed {
+                events.push(tamper::tamper_event(
+                    "network_offline",
+                    SEV_WARN,
+                    &format!(
+                        "no server contact for {}s (grace {}s exceeded); re-asserting \
+                         last-known policy every loop — fail-closed, not a blackout",
+                        elapsed.as_secs(),
+                        self.offline_grace.as_secs()
+                    ),
+                ));
+            }
+            self.contact_state = ContactState::OfflineFailClosed;
+            // Aggressively re-assert the last-known policy (dns + firewall +
+            // resolv pin) so nothing drifts open while unreachable.
+            let effective = self.effective_network_policy();
+            let server_host = crate::client::server_host(&self.cfg.server_url);
+            if let Err(e) = enforce::apply_network_policy(
+                self.ctx.clone(),
+                &self.exec,
+                server_host.as_deref(),
+                &effective,
+            ) {
+                tracing::warn!("offline fail-closed policy re-assert failed: {e}");
+            }
+        } else {
+            if self.contact_state == ContactState::OfflineFailClosed {
+                events.push(tamper::tamper_event(
+                    "network_online",
+                    SEV_INFO,
+                    "server contact resumed after exceeding the offline grace period",
+                ));
+            }
+            self.contact_state = if elapsed <= TICK {
+                ContactState::Online
+            } else {
+                ContactState::OfflineWithinGrace
+            };
+        }
+        events
     }
 
     /// Boot-time enforcement: tamper hardening + initial policy pull + apply.
@@ -82,7 +180,10 @@ impl Agent {
         tamper::touch_heartbeat(&self.exec);
 
         match self.client.get_policy().await {
-            Ok(bundle) => events.extend(self.apply_bundle(bundle)?),
+            Ok(bundle) => {
+                self.record_contact();
+                events.extend(self.apply_bundle(bundle)?)
+            }
             Err(e) => tracing::warn!("initial policy pull failed ({e}); will retry on tick"),
         }
         Ok(events)
@@ -109,6 +210,9 @@ impl Agent {
             server_host.as_deref(),
             &effective,
         )?;
+        // Best-effort cache so `sentinel-agent unlock` can work without a live
+        // agent process or server connection (parent PIN + recovery teardown).
+        crate::policy::save_cache(&effective);
         tracing::info!(
             "policy v{} applied for {} user(s)",
             self.policy_version,
@@ -172,6 +276,28 @@ impl Agent {
 
         // Tamper re-assertion (resolv.conf / nft drift, NM disconnect).
         events.extend(tamper::reassert_all(&self.exec));
+
+        // reassert_all flags a missing nft table (critical event) but can't
+        // rebuild it — it has no policy. Repair it here with the effective
+        // policy so a flush/delete can't leave the device with NO firewall
+        // (fail-open) until the next full policy apply.
+        if enforce::firewall::table_missing(&self.exec) && !self.exec.dry_run() {
+            let effective = self.effective_network_policy();
+            let server_host = crate::client::server_host(&self.cfg.server_url);
+            match enforce::apply_network_policy(
+                self.ctx.clone(),
+                &self.exec,
+                server_host.as_deref(),
+                &effective,
+            ) {
+                Ok(()) => tracing::info!("nft table was missing — re-applied firewall"),
+                Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
+            }
+        }
+
+        // Fail-closed offline grace: alert + aggressively re-assert last-known
+        // policy once we've gone too long without hearing from the server.
+        events.extend(self.offline_grace_check());
         if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
             events.push(ev);
         }
@@ -205,7 +331,26 @@ impl Agent {
                             "LOCKED",
                             "THIS DEVICE IS LOCKED BY AN ADMIN",
                             &user,
+                            policy.parent_pin_hash.clone(),
                         );
+                        // Master escape: the parent PIN always works, even against
+                        // a whole-device admin lock — "a parent physically present
+                        // can always get in". Headless/no-GUI counterpart to the
+                        // GUI overlay's typed-input verify: the PIN attempt is
+                        // dropped at a well-known path (e.g. by a companion tool)
+                        // and consumed here.
+                        if lockout::check_and_consume_pin_override(&self.exec, &spec) {
+                            if let Err(e) = screentime::freeze_user(&self.exec, &user, false) {
+                                tracing::warn!("unfreeze {user} (pin override) failed: {e}");
+                            }
+                            self.frozen.remove(&user);
+                            events.push(tamper::tamper_event(
+                                "parent_pin_override",
+                                SEV_INFO,
+                                &format!("{user} bypassed the device lock via parent-PIN override"),
+                            ));
+                            continue;
+                        }
                         lockout::present(&self.exec, &spec);
                     } else if let Some(reason) = &lock {
                         // New screen-time lockout: show overlay, then freeze.
@@ -214,7 +359,23 @@ impl Agent {
                             &reason.headline(),
                             &reason.detail(),
                             &user,
+                            policy.parent_pin_hash.clone(),
                         );
+                        // Master escape (see the device-locked branch above for
+                        // the full rationale): the parent PIN dismisses any
+                        // lockout, screen-time reason included.
+                        if lockout::check_and_consume_pin_override(&self.exec, &spec) {
+                            if let Err(e) = screentime::freeze_user(&self.exec, &user, false) {
+                                tracing::warn!("unfreeze {user} (pin override) failed: {e}");
+                            }
+                            self.frozen.remove(&user);
+                            events.push(tamper::tamper_event(
+                                "parent_pin_override",
+                                SEV_INFO,
+                                &format!("{user} bypassed a screen-time lockout via parent-PIN override"),
+                            ));
+                            continue;
+                        }
                         // Offer an earn-time task as the primary action when the
                         // user ran out of daily minutes (Duolingo-style: earn your
                         // way back). Headless build has no interactive task picker,
@@ -318,11 +479,16 @@ impl Agent {
             CMD_LOCK => {
                 self.device_locked = true;
                 for user in self.policies.keys().cloned().collect::<Vec<_>>() {
+                    let pin_hash = self
+                        .policies
+                        .get(&user)
+                        .and_then(|p| p.parent_pin_hash.clone());
                     let spec = LockSpec::from_lockout(
                         &Default::default(),
                         "LOCKED",
                         "THIS DEVICE IS LOCKED BY AN ADMIN",
                         &user,
+                        pin_hash,
                     );
                     lockout::present(&self.exec, &spec);
                     let _ = screentime::freeze_user(&self.exec, &user, true);
@@ -349,6 +515,7 @@ impl Agent {
             }
             CMD_APPLY_POLICY => match self.client.get_policy().await {
                 Ok(bundle) => {
+                    self.record_contact();
                     match self.apply_bundle(bundle) {
                         Ok(evs) => events.extend(evs),
                         Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
@@ -579,6 +746,8 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
             msg = read.next() => {
                 let Some(msg) = msg else { break; };
                 let msg = msg?;
+                // Any frame from the server (including a bare Ping) counts as contact.
+                agent.record_contact();
                 match msg {
                     Message::Text(txt) => {
                         if let Err(e) = handle_server_text(agent, &txt, &out_tx).await {
@@ -662,6 +831,7 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                 let usage = agent.usage_snapshot();
                 match agent.client.heartbeat("online", None, &users, &usage).await {
                     Ok(resp) => {
+                        agent.record_contact();
                         for cmd in resp.commands {
                             let (ack, events) = agent.handle_command(cmd, &out_tx).await;
                             let _ = agent.client.post_events(&events).await;
