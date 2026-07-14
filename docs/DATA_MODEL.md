@@ -61,6 +61,7 @@ Policy presets. Ships with three `is_preset=true` rows per tenant on creation: k
 | tamper_level    | int         | 1 (default) or 3                                        |
 | device_token    | text        | bearer token the agent uses (hashed at rest)            |
 | enroll_token    | text        | one-time enrollment token, null after enrollment        |
+| enroll_token_expires_at | timestamptz | 24 h after issue; NULL for rows predating this column (no expiry) |
 | public_ip       | inet        | nullable                                                |
 | last_seen       | timestamptz | nullable                                                |
 | created_at      | timestamptz |                                                         |
@@ -83,7 +84,7 @@ Server → agent command queue. Agent pulls on heartbeat / WS.
 |-------------|-------------|------------------------------------------------------------|
 | id          | uuid pk     |                                                            |
 | device_id   | uuid fk     |                                                            |
-| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `ssh_open` \| `ssh_close` \| `discover` \| `set_tamper_level` \| `credit_time` |
+| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `ssh_open` \| `ssh_close` \| `discover` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
 | payload     | jsonb       | command-specific args                                      |
 | status      | text        | `queued` \| `sent` \| `acked` \| `failed`                  |
 | result      | jsonb       | nullable, agent's response                                 |
@@ -162,5 +163,9 @@ Per-user daily balance for the "earn time" mechanic.
 Live in `server/migrations/` as SQLx migrations (`NNNN_description.sql`). `0001_init.sql`
 creates the original tables; `0002_prod.sql` adds `admin_sessions`, `earn_requests` and extends
 the `commands.type` (`credit_time`) and `events.type` (`ssh`, `earn_request`) CHECK constraints.
-Seeding the three preset profiles happens in application code when a tenant is created (see
-`PROFILES.md`).
+`0003_deny_earn.sql` extends the `commands.type` CHECK constraint to add `deny_earn`, the mirror
+of `credit_time` for the denial path (lets the agent clear its once-per-day earn-request dedupe
+and surface an honest denial instead of a stale "WAITING FOR APPROVAL"). `0004_enroll_token_ttl.sql`
+adds `devices.enroll_token_expires_at` (24 h TTL on enrollment tokens; NULL/no-expiry for rows
+predating the migration, additive with no backfill). Seeding the three preset profiles happens in
+application code when a tenant is created (see `PROFILES.md`).

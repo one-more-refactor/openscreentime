@@ -86,7 +86,21 @@ a minute.
 | `web/`      | Admin control center (the "Nothing" UI)                     | Bun, React, Vite, Tailwind|
 | `client/`   | Linux device agent                                          | Rust                      |
 | `policy/`   | Shared `Policy` document type (used by server + client)     | Rust                      |
-| `docs/`     | Shared API contract, data model, design system, profiles    | Markdown                  |
+| `docs/`     | Full documentation — see the [docs index](docs/README.md)   | Markdown                  |
+
+## Documentation
+
+Organized by audience in [`docs/README.md`](docs/README.md):
+
+- **Parents** — [the day-to-day guide](docs/PARENT-GUIDE.md): profiles, screen time, granting
+  time, the parent PIN, locking, gone-dark devices.
+- **The person being managed** — [`TRANSPARENCY.md`](docs/TRANSPARENCY.md): exactly what your
+  parents can and cannot see and do on your machine. Handing this to your teen is part of the
+  product, not an afterthought.
+- **Operators** — [deploy](docs/DEPLOY.md), [day-2 operations](docs/OPERATIONS.md) (backup,
+  updates, recovery), and the [agent reference](docs/AGENT.md).
+- **Contributors** — [development](docs/DEVELOPMENT.md), [API](docs/API.md),
+  [data model](docs/DATA_MODEL.md), [tamper threat model](docs/TAMPER.md).
 
 ## Getting started
 

@@ -5,7 +5,59 @@ edit clones the policy in place — the preset row stays but its `policy` is mut
 also be duplicated into `custom` profiles.
 
 All presets are **zero-trust**: DNS and firewall are `default_deny`. The difference between them
-is how large the allowlist is, how strict screen-time is, and how much gamification is on.
+is how large the allowlist is, how strict screen-time is, how tight the network lockdown is, and
+how much gamification is on.
+
+## Shared fields
+
+A few `Policy` fields aren't preset-specific dials — they work the same way (or the same
+constraint applies) across `kids`, `teen`, and `default`, so they're documented once here instead
+of being repeated in every section below.
+
+### `dns.upstream`
+
+Must be a literal IP address, never a hostname. `normalize_policy` (`server/src/profiles.rs`)
+rejects any value that doesn't parse as an `IpAddr` before it's ever stored. This isn't
+cosmetic validation: the value is interpolated verbatim into the agent's nftables ruleset
+(`ip daddr <upstream> ...`) on the device, so a hostname, typo, or injected nft syntax could
+abort the whole ruleset load on the box instead of just failing a DNS lookup. All three presets
+use `1.1.1.2` (Cloudflare's filtered/malware-blocking resolver).
+
+### `lockdown` — network anti-bypass
+
+`NetworkLockdown` (`policy/src/lib.rs`) is a set of firewall/DNS rules layered on top of the base
+allowlist to stop a managed user from routing around the policy entirely, plus one escalation
+knob for when the device goes dark:
+
+| Field | Type | Enforces |
+| --- | --- | --- |
+| `force_dns` | bool | Blocks plaintext DNS (UDP/TCP 53) egress to anything but the agent's own resolver, so a browser or OS can't be pointed at `8.8.8.8` directly. |
+| `block_doh` | bool | Drops the well-known public DNS-over-HTTPS resolver IPs (Cloudflare, Google, Quad9, …) so browsers can't tunnel DNS over HTTPS around the local resolver. |
+| `block_dot` | bool | Blocks DNS-over-TLS (TCP 853). |
+| `block_tor` | bool | Blocks Tor — known directory-authority/onion-router ports plus `.onion` resolution. |
+| `block_vpn` | bool | Blocks common commercial-VPN ports: WireGuard `51820`, OpenVPN `1194`, IPsec/IKE `500`/`4500`. |
+| `offline_lockdown_days` | u32 | Days the agent may run without reaching the command server before it escalates to a full parent-PIN lockdown. `0` = never escalate. A device silently cut off from the server is treated as a tamper signal — but because the parent PIN always unlocks locally, a server/VPS outage can never permanently brick the device. |
+
+All five boolean flags default off and `offline_lockdown_days` defaults to `0`. When every field
+is at that default, the entire `lockdown` object is omitted from the stored/serialized policy
+(`NetworkLockdown::is_default` + `skip_serializing_if`) — a profile with no lockdown configured
+has no `lockdown` key at all, which is why the `default` preset below doesn't show one.
+
+### `parent_pin_hash` — parent PIN
+
+The Argon2 hash of the household's parent/master PIN. It's never written directly into policy
+JSON; it's derived from the API's `parent_pin` field on profile create/update requests
+(`server/src/profiles.rs`):
+
+- non-empty string (minimum 4 characters) → hashed with Argon2 server-side and stored as
+  `parent_pin_hash`
+- empty string `""` → clears the PIN (removes `parent_pin_hash`)
+- field omitted entirely → preserves whatever hash was already stored
+
+The agent verifies an entered PIN against this hash locally, so it keeps working with no server
+connection. It's the master unlock on managed devices: a correct PIN grants a 30-minute unlock
+grace. The stored value never contains the plaintext PIN. None of the three presets set a PIN out
+of the box.
 
 ## `kids` — locked down, playful
 
@@ -14,7 +66,11 @@ is how large the allowlist is, how strict screen-time is, and how much gamificat
 - **Firewall:** default-deny; outbound `53, 80, 443` only.
 - **Screen time:** 60 min/day; windows 15:00–19:00 weekdays, 09:00–19:00 weekends; bedtime
   20:00–07:00 hard block.
-- **App limits:** games 30 min/day.
+- **App limits:** none seeded (`app_limits: []`) — per-app limits are configured per-profile in
+  the admin UI, not baked into the preset.
+- **Lockdown:** full anti-bypass posture — `force_dns`, `block_doh`, `block_dot`, `block_tor`,
+  `block_vpn` all `true`; `offline_lockdown_days: 7` (a week of no server contact escalates to a
+  full parent-PIN lockdown).
 - **Gamification:** earn-time ON (reading, chores tasks), lockout ON with `math` challenge,
   streaks ON (bedtime + breaks nudges). Full-screen interruptions enabled.
 
@@ -29,7 +85,8 @@ is how large the allowlist is, how strict screen-time is, and how much gamificat
     "schedule": [ {"days":[1,2,3,4,5],"start":"15:00","end":"19:00"},
                   {"days":[0,6],"start":"09:00","end":"19:00"} ],
     "bedtime": { "start":"20:00","end":"07:00" } },
-  "app_limits": [ { "match":"steam","daily_limit_minutes":30 } ],
+  "app_limits": [],
+  "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": true, "offline_lockdown_days": 7 },
   "gamification": {
     "earn_time": { "enabled": true, "tasks": [
       {"id":"reading","label":"Read for 20 min","reward_minutes":15},
@@ -46,7 +103,11 @@ is how large the allowlist is, how strict screen-time is, and how much gamificat
 - **Firewall:** default-deny; outbound `53, 80, 443` (+ `123` NTP).
 - **Screen time:** 180 min/day; windows to 21:00 weekdays, 22:00 weekends; bedtime
   22:30–06:30.
-- **App limits:** games 90 min/day.
+- **App limits:** none seeded (`app_limits: []`) — same as `kids`, configured per-profile in the
+  UI rather than in the preset.
+- **Lockdown:** DoH, DoT, and Tor blocked (`block_doh`/`block_dot`/`block_tor: true`); DNS isn't
+  forced and VPN ports aren't blocked (`force_dns`/`block_vpn: false`) — older teens get more
+  rope. `offline_lockdown_days: 0`, so there's no offline hard-lockdown escalation.
 - **Gamification:** earn-time ON (lighter rewards), lockout ON with `wait` challenge (cooldown
   instead of math), streaks ON (breaks only).
 
@@ -61,7 +122,8 @@ is how large the allowlist is, how strict screen-time is, and how much gamificat
     "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"21:00"},
                   {"days":[0,6],"start":"08:00","end":"22:00"} ],
     "bedtime": { "start":"22:30","end":"06:30" } },
-  "app_limits": [ { "match":"steam","daily_limit_minutes":90 } ],
+  "app_limits": [],
+  "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
   "gamification": {
     "earn_time": { "enabled": true, "tasks": [
       {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
@@ -75,7 +137,9 @@ is how large the allowlist is, how strict screen-time is, and how much gamificat
 Applied automatically to every `device_user` at enrollment until an admin assigns something
 else. Zero-trust but minimally intrusive: it protects (default-deny DNS/firewall, safe-search)
 without screen-time limits or gamification, so an unclassified account isn't accidentally locked
-out — but also isn't wide open.
+out — but also isn't wide open. It doesn't set `lockdown` at all (every flag would be at its
+default, so the field is omitted entirely — see "Shared fields" above) and doesn't set a
+`parent_pin_hash`.
 
 ```jsonc
 {
