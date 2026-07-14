@@ -5,7 +5,7 @@ small organizations. Enroll devices, lock them down by default (zero-trust), enf
 screen-time policy per person, and nudge healthy habits with Duolingo-style full-screen
 interruptions — all from one beautiful monochrome control center.
 
-> **Status:** Early skeleton. End-to-end vertical slice is the current milestone.
+> **Status:** Working v1, self-hosted. Linux agents (x86_64), under active development.
 
 ---
 
@@ -14,17 +14,46 @@ interruptions — all from one beautiful monochrome control center.
 - **Passkey-only admin auth** — no passwords, ever. WebAuthn/FIDO2 via `webauthn-rs`.
 - **Zero-trust by default** — every enrolled device is **default-deny** for DNS and firewall.
   Nothing is allowed until a policy explicitly allows it.
-- **Per-user policy** — screen time, DNS, app limits and gamification are tracked **per Linux
+- **Per-user policy** — screen time, DNS, app limits, and gamification are tracked **per Linux
   user account**, so shared family computers work correctly.
 - **Preset profiles** — `kids`, `teen`, and `default`, plus custom profiles.
-- **Duolingo-style host UX** — earn screen time via tasks, full-screen lockout when limits are
-  hit, and streaks/habit nudges.
-- **Device discovery & enrollment** — find devices on the network and enroll them with a token.
-- **Remote lockdown** — lock, unlock, or freeze a device from the control center instantly.
-- **Remote SSH** — reach a shell on any enrolled device through a server-brokered reverse
-  tunnel, even when the device is behind NAT.
-- **Tamper resistance** — a root-owned, systemd-hardened agent that resists casual kills,
+- **Screen time with parent controls** — per-user limits, full-screen lockout with pre-warnings,
+  60-second grace, parent PIN override, and daily time credits (earn/grant minutes).
+- **One-liner enrollment** — sha256-verified agent installer served by your own server, with
+  daily self-updates (the previous binary is kept as `.bak` for rollback).
+- **Device tray companion** — desktop status indicator showing policy state, remote-shell
+  transparency, and gone-dark alerts.
+- **Remote lockdown & SSH** — lock, unlock, or freeze devices from the console, or reach a
+  shell on any enrolled device through a server-brokered reverse tunnel, even behind NAT.
+- **Tamper resistance** — root-owned, systemd-hardened agent that resists casual kills,
   auto-restarts, masks user-level power controls, and reports tamper attempts in real time.
+
+## Quick start
+
+### Server (5 minutes)
+
+```bash
+git clone <this-repo-url> sentinel && cd sentinel
+deploy/setup.sh --domain sentinel.example.com
+```
+
+The script generates a `.env` file with random secrets, builds the server and database, and
+starts them. Point your reverse proxy (Caddy, nginx, etc.) at `127.0.0.1:8080`, then open
+`https://sentinel.example.com` — register the first admin with a passkey. After that,
+registration is locked. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for production details.
+
+### Enroll a device (30 seconds)
+
+In the web console, click **ADD DEVICE**. A one-liner appears:
+
+```bash
+curl -fsSL https://sentinel.example.com/install.sh | \
+  sudo SENTINEL_TOKEN=<token> sh -s -- --server https://sentinel.example.com
+```
+
+Paste it on the target machine (Linux, x86_64). The installer downloads and verifies the
+agent (sha256), enrolls, and installs a systemd service. The device appears online within
+a minute.
 
 ## Architecture
 
