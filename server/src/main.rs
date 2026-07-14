@@ -5,6 +5,7 @@
 //!   * Agent API `/agent/*` — `Authorization: Bearer <device_token>`.
 
 mod agent;
+mod agent_dist;
 mod auth;
 mod auth_oidc;
 mod db;
@@ -155,8 +156,21 @@ async fn main() -> anyhow::Result<()> {
             rate_limit::limit_enroll,
         ));
 
+    // Agent distribution (public — the binary isn't a secret; enrollment is the
+    // auth boundary). Rate-limited so it can't amplify bandwidth for free.
+    let agent_dist = Router::new()
+        .route("/api/agent/latest", get(agent_dist::latest))
+        .route("/api/agent/download/{file}", get(agent_dist::download))
+        .route("/install.sh", get(agent_dist::install_sh))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_dist,
+        ));
+
     let app = Router::new()
         .route("/health", get(health))
+        // --- Agent distribution ---------------------------------------------
+        .merge(agent_dist)
         // --- Auth ----------------------------------------------------------
         .merge(auth_attempts)
         .route("/api/auth/config", get(auth_oidc::auth_config))

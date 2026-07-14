@@ -42,6 +42,7 @@ import {
   mockDevices,
   mockDiscovery,
   mockRegenEnrollToken,
+  mockCreateDevice,
   mockEarnRequests,
   mockEvents,
   mockMe,
@@ -192,6 +193,7 @@ export async function getDevice(id: string): Promise<DeviceDetail> {
 }
 
 export async function createDevice(name: string): Promise<EnrollTokenResponse> {
+  if (usingMock) return mockCreateDevice(name);
   return request<EnrollTokenResponse>("/api/devices", {
     method: "POST",
     body: JSON.stringify({ name }),
