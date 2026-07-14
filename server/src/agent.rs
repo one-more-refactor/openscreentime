@@ -33,13 +33,15 @@ const POLL_INTERVAL_SECS: u64 = 15;
 // ---------------------------------------------------------------------------
 
 /// Enqueue a command for a device and, if the agent has a live WS, push it
-/// immediately and mark it `sent`.
-pub async fn enqueue_command(
+/// immediately and mark it `sent`. Returns the command id plus whether the
+/// frame was actually delivered to a live agent (false = stays `queued` until
+/// the agent's next heartbeat/WS connect).
+pub async fn enqueue_command_delivered(
     st: &AppState,
     device_id: Uuid,
     ctype: &str,
     payload: Value,
-) -> AppResult<Uuid> {
+) -> AppResult<(Uuid, bool)> {
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, $3) RETURNING id",
     )
@@ -53,12 +55,24 @@ pub async fn enqueue_command(
         "type": "command",
         "command": { "id": id, "type": ctype, "payload": payload }
     });
-    if st.hub.push(device_id, frame).await {
+    let delivered = st.hub.push(device_id, frame).await;
+    if delivered {
         sqlx::query("UPDATE commands SET status = 'sent' WHERE id = $1")
             .bind(id)
             .execute(&st.db)
             .await?;
     }
+    Ok((id, delivered))
+}
+
+/// `enqueue_command_delivered` for call sites that don't care about delivery.
+pub async fn enqueue_command(
+    st: &AppState,
+    device_id: Uuid,
+    ctype: &str,
+    payload: Value,
+) -> AppResult<Uuid> {
+    let (id, _delivered) = enqueue_command_delivered(st, device_id, ctype, payload).await?;
     Ok(id)
 }
 
@@ -142,20 +156,24 @@ pub async fn enroll(
     State(st): State<AppState>,
     Json(req): Json<EnrollReq>,
 ) -> AppResult<Json<Value>> {
-    // Consume the one-time enroll token.
-    let row: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT id, tenant_id FROM devices WHERE enroll_token = $1")
-            .bind(&req.enroll_token)
-            .fetch_optional(&st.db)
-            .await?;
+    // Consume the one-time enroll token. An expired token is rejected exactly
+    // like a consumed one (24 h TTL; the admin can regenerate while pending).
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, tenant_id FROM devices WHERE enroll_token = $1
+           AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now())",
+    )
+    .bind(&req.enroll_token)
+    .fetch_optional(&st.db)
+    .await?;
     let (device_id, tenant_id) =
-        row.ok_or_else(|| AppError::Unauthorized("invalid or used enroll token".into()))?;
+        row.ok_or_else(|| AppError::Unauthorized("invalid, used or expired enroll token".into()))?;
 
     let device_token = gen_token();
     let token_hash = hash_token(&device_token);
 
     sqlx::query(
-        "UPDATE devices SET device_token = $1, enroll_token = NULL, status = 'online',
+        "UPDATE devices SET device_token = $1, enroll_token = NULL,
+             enroll_token_expires_at = NULL, status = 'online',
              hostname = $2, os = $3, agent_version = $4, last_seen = now()
          WHERE id = $5",
     )
@@ -413,6 +431,10 @@ pub struct AckReq {
 /// Apply a command ack (shared by the HTTP endpoint and the WS `ack` frame).
 /// Any status other than "failed" is normalized to "acked". Returns whether a
 /// matching command row was updated.
+///
+/// Truthful lock state: `devices.status` only flips to `locked`/`online` when
+/// the agent confirms a `lock`/`unlock` — this is where a lock that was merely
+/// queued (device offline at click time) becomes real once applied.
 async fn apply_command_ack(
     db: &sqlx::PgPool,
     device_id: Uuid,
@@ -420,18 +442,40 @@ async fn apply_command_ack(
     status: &str,
     result: Option<&Value>,
 ) -> AppResult<bool> {
-    let status = if status == "failed" { "failed" } else { "acked" };
-    let res = sqlx::query(
+    let status = if status == "failed" {
+        "failed"
+    } else {
+        "acked"
+    };
+    let ctype: Option<String> = sqlx::query_scalar(
         "UPDATE commands SET status = $1, result = $2, acked_at = now()
-         WHERE id = $3 AND device_id = $4",
+         WHERE id = $3 AND device_id = $4 RETURNING type",
     )
     .bind(status)
     .bind(result)
     .bind(command_id)
     .bind(device_id)
-    .execute(db)
+    .fetch_optional(db)
     .await?;
-    Ok(res.rows_affected() > 0)
+
+    if status == "acked" {
+        match ctype.as_deref() {
+            Some("lock") => {
+                sqlx::query("UPDATE devices SET status = 'locked' WHERE id = $1")
+                    .bind(device_id)
+                    .execute(db)
+                    .await?;
+            }
+            Some("unlock") => {
+                sqlx::query("UPDATE devices SET status = 'online' WHERE id = $1")
+                    .bind(device_id)
+                    .execute(db)
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(ctype.is_some())
 }
 
 pub async fn ack_command(
@@ -596,9 +640,8 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
                     .and_then(|s| s.as_str())
                     .unwrap_or("acked");
                 let result = ack.get("result").cloned();
-                let _ =
-                    apply_command_ack(&st.db, agent.device_id, cmd_id, status, result.as_ref())
-                        .await;
+                let _ = apply_command_ack(&st.db, agent.device_id, cmd_id, status, result.as_ref())
+                    .await;
             }
         }
         Some("ssh_data") => {
@@ -675,7 +718,11 @@ fn frame_session_id(v: &Value) -> Option<Uuid> {
 /// Route an agent-side SSH frame into the bridge; the agent's first frame for
 /// a session confirms it (`opening` -> `open`).
 async fn ssh_frame_from_agent(st: &AppState, agent: AgentAuth, session_id: Uuid, msg: SshToAdmin) {
-    match st.hub.ssh_from_agent(session_id, agent.device_id, msg).await {
+    match st
+        .hub
+        .ssh_from_agent(session_id, agent.device_id, msg)
+        .await
+    {
         Some(true) => {
             let _ = sqlx::query(
                 "UPDATE ssh_sessions SET status = 'open'

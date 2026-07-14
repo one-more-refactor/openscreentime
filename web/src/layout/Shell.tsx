@@ -5,6 +5,7 @@ import { useTheme } from "../lib/theme";
 import { listDevices, listEarnRequests } from "../api";
 import type { Device } from "../types";
 import { DotMatrix } from "../components/DotMatrix";
+import { goneDarkDays } from "../lib/format";
 
 const POLL_MS = 20_000;
 
@@ -49,13 +50,13 @@ function FleetStrip({ devices }: { devices: Device[] | null }) {
       ? "fleet-cell fleet-cell-ok"
       : d.status === "locked"
         ? "fleet-cell fleet-cell-locked"
-        : d.status === "pending"
+        : d.status === "pending" || goneDarkDays(d.status, d.last_seen) !== null
           ? "fleet-cell fleet-cell-warn"
           : "fleet-cell";
   return (
     <div
       className="flex items-center gap-2.5"
-      title="One cell per device — green online, red locked, amber pending, dim offline"
+      title="One cell per device — green online, red locked, amber pending or gone dark, dim offline"
     >
       <span className="label hidden sm:inline">FLEET</span>
       <span className="fleet-cells" role="img" aria-label={`Fleet: ${devices.length} devices`}>

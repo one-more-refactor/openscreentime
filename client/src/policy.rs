@@ -36,9 +36,7 @@ fn save_cache_to(policy: &Policy, path: &std::path::Path) -> Result<()> {
 /// Load the cached effective policy (used by `sentinel-agent unlock`).
 pub fn load_cache() -> Result<Policy> {
     let body = std::fs::read_to_string(POLICY_CACHE_PATH).with_context(|| {
-        format!(
-            "reading {POLICY_CACHE_PATH} (no cached policy — has the agent ever applied one?)"
-        )
+        format!("reading {POLICY_CACHE_PATH} (no cached policy — has the agent ever applied one?)")
     })?;
     serde_json::from_str(&body).context("parsing cached policy")
 }

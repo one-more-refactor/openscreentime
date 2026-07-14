@@ -65,9 +65,7 @@ async fn apply_parent_pin(
         // Explicit empty string: clear the pin.
         Some(_) => None,
         // Absent: preserve whatever hash the stored policy already had.
-        None => previous
-            .and_then(|p| p.get("parent_pin_hash"))
-            .cloned(),
+        None => previous.and_then(|p| p.get("parent_pin_hash")).cloned(),
     };
 
     let obj = policy
@@ -348,9 +346,7 @@ mod tests {
     async fn hash_pin_roundtrips_through_argon2_verify() {
         let hash = hash_pin("1234".into()).await.unwrap();
         let parsed = PasswordHash::new(&hash).unwrap();
-        assert!(Argon2::default()
-            .verify_password(b"1234", &parsed)
-            .is_ok());
+        assert!(Argon2::default().verify_password(b"1234", &parsed).is_ok());
         assert!(Argon2::default()
             .verify_password(b"wrong", &parsed)
             .is_err());

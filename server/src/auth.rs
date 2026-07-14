@@ -383,10 +383,7 @@ pub async fn me(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<
 }
 
 /// The admin's registered passkeys (metadata only — never the credential itself).
-pub async fn list_passkeys(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-) -> AppResult<Json<Value>> {
+pub async fn list_passkeys(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     type PasskeyRow = (Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>);
     let rows: Vec<PasskeyRow> = sqlx::query_as(
         "SELECT id, nickname, created_at, last_used_at FROM webauthn_credentials

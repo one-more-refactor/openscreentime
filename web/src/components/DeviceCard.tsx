@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import type { Device } from "../types";
 import { StatusLed, statusTone } from "./StatusLed";
 import { Button } from "./Button";
-import { relTime } from "../lib/format";
+import { goneDarkDays, relTime } from "../lib/format";
 
 interface Props {
   device: Device;
@@ -10,6 +10,8 @@ interface Props {
   refCode?: string;
   /** a mutation for this device is in flight — disable actions */
   busy?: boolean;
+  /** a lock command is queued but not yet applied (device was offline) */
+  lockPending?: boolean;
   onLock?: (d: Device) => void;
   onUnlock?: (d: Device) => void;
   onSsh?: (d: Device) => void;
@@ -22,6 +24,7 @@ export function DeviceCard({
   device,
   refCode,
   busy,
+  lockPending,
   onLock,
   onUnlock,
   onSsh,
@@ -32,6 +35,8 @@ export function DeviceCard({
   const isLocked = device.status === "locked";
   const isPending = device.status === "pending";
   const isOffline = device.status === "offline";
+  // Tamper signal: offline for 7+ days = the agent has probably been silenced.
+  const darkDays = goneDarkDays(device.status, device.last_seen);
 
   return (
     <article
@@ -72,9 +77,23 @@ export function DeviceCard({
               TAMPER L3
             </span>
           )}
-          <span className="label" style={{ color: "var(--fg-faint)" }}>
-            SEEN {relTime(device.last_seen)}
-          </span>
+          {lockPending && (
+            <span
+              className="label border rounded px-1.5 py-0.5"
+              style={{ color: "var(--warn)", borderColor: "var(--warn)" }}
+            >
+              LOCK PENDING
+            </span>
+          )}
+          {darkDays !== null ? (
+            <span className="label" style={{ color: "var(--accent)" }}>
+              GONE DARK {darkDays}d
+            </span>
+          ) : (
+            <span className="label" style={{ color: "var(--fg-faint)" }}>
+              SEEN {relTime(device.last_seen)}
+            </span>
+          )}
         </div>
 
         {users.length > 0 && (

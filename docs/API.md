@@ -66,12 +66,27 @@ Fixed-window, in-memory, per client IP (first `X-Forwarded-For` value when
 |--------|-------------------------------|-------------------------------------------------------------|
 | GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users)         |
 | GET    | `/api/devices/:id`            | detail incl. device_users, recent events                    |
-| POST   | `/api/devices`                | `{ name }` → creates `pending` device + `enroll_token`      |
+| POST   | `/api/devices`                | `{ name }` → creates `pending` device + `enroll_token` (24 h TTL) |
 | PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
-| POST   | `/api/devices/:id/lock`       | enqueue `lock` command                                      |
-| POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command                                    |
+| POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
+| POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
+| POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command → same response shape as lock       |
 | POST   | `/api/devices/:id/ssh`        | open remote shell session → `{ session: { id, device_id, broker_port, status:"opening", created_at } }` |
 | DELETE | `/api/devices/:id`            | de-enroll                                                    |
+
+### Truthful lock state
+
+`devices.status` only flips to `locked`/`online` when the lock/unlock actually takes effect:
+immediately when the command was pushed to a live agent WS (`delivered: true`), otherwise the
+command stays queued (`delivered: false`) and the status flips when the agent reconnects and
+**acks** the command. The UI shows a "LOCK PENDING" chip for queued locks.
+
+### Offline sweeper
+
+A background task (every 60 s) marks devices `offline` whose `status = 'online'` and
+`last_seen` is older than 3 minutes — this catches dead poll-mode agents that never had a WS
+disconnect. `locked` and `pending` are never touched. The web UI escalates devices offline
+for 7+ days to a red "GONE DARK Nd" badge (tamper signal).
 
 ## Remote SSH (browser terminal)
 
@@ -94,6 +109,7 @@ close. Closing the browser WS also closes the session.
 |--------|----------------------------------------------|------------------------------------|
 | GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
 | POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }`                   |
+| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; parent grants extra screen time today: credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id: null }`; audited as an `earn_request` event with `action: "granted"` |
 
 ## Earn-time requests
 
@@ -146,7 +162,10 @@ POST /agent/enroll
 Body: { enroll_token, hostname, os, agent_version, os_users: [{ username, display_name }] }
 → 200 { device_id, device_token, poll_interval_secs }
 ```
-The `enroll_token` is consumed (single use). Server creates `device_users` rows for reported
+The `enroll_token` is consumed (single use) and expires 24 h after issue
+(`devices.enroll_token_expires_at`); an expired token is rejected exactly like a consumed one
+(401). While the device is still `pending`, an admin can regenerate a fresh token via
+`POST /api/devices/:id/enroll-token`. Server creates `device_users` rows for reported
 `os_users`, each assigned the tenant's **default** profile until an admin changes it.
 
 ### Heartbeat (poll model, fallback for WS)
