@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import type { UnlockChallenge } from "../types";
 
 interface Props {
@@ -10,6 +11,19 @@ interface Props {
   /** render inside a device-frame preview instead of true fullscreen */
   preview?: boolean;
 }
+
+// The agent screen is deliberately ALWAYS dark regardless of console theme;
+// scope its own token block here so a global token retune reaches it in one
+// place instead of scattered hex literals.
+const overlayVars: CSSProperties = {
+  ["--lo-bg" as string]: "#000000",
+  ["--lo-dot" as string]: "#242424",
+  ["--lo-fg" as string]: "#fafafa",
+  ["--lo-dim" as string]: "#7a7a7a",
+  ["--lo-faint" as string]: "#5a5a5a",
+  ["--lo-ok" as string]: "var(--ok)",
+  ["--lo-accent" as string]: "var(--accent)",
+};
 
 // Design-reference mock of the host-side full-screen interruption the AGENT
 // renders. Shares the language: black bg, dot grid, one big dot-numeral, one
@@ -33,48 +47,59 @@ export function LockOverlay({
 
   return (
     <div
-      className={`relative overflow-hidden bg-black text-white flex flex-col items-center justify-center text-center select-none ${
+      className={`relative overflow-hidden flex flex-col items-center justify-center text-center select-none ${
         preview ? "rounded aspect-video hairline" : "fixed inset-0 z-50"
       }`}
-      style={{ borderColor: "var(--line-2)" }}
+      style={{
+        ...overlayVars,
+        background: "var(--lo-bg)",
+        color: "var(--lo-fg)",
+        borderColor: "var(--line-2)",
+      }}
     >
       {/* dot grid */}
       <div
         className="absolute inset-0 opacity-60"
         style={{
-          backgroundImage: "radial-gradient(#242424 1px, transparent 1px)",
+          backgroundImage: "radial-gradient(var(--lo-dot) 1px, transparent 1px)",
           backgroundSize: "18px 18px",
         }}
         aria-hidden
       />
 
       <div className="relative z-10 flex flex-col items-center gap-5 px-6">
-        <span className="label" style={{ color: "#7a7a7a", letterSpacing: "0.3em" }}>
+        <span
+          className="label"
+          style={{ color: "var(--lo-dim)", letterSpacing: "0.3em" }}
+        >
           SENTINEL
         </span>
 
         <h1
           className="dot text-2xl"
-          style={{ color: mode === "earn" ? "#37d67a" : "#fafafa" }}
+          style={{ color: mode === "earn" ? "var(--lo-ok)" : "var(--lo-fg)" }}
         >
           {headline}
         </h1>
 
         {mode === "earn" ? (
           <>
-            <span className="dot text-6xl" style={{ color: "#37d67a" }}>
+            <span className="dot text-6xl" style={{ color: "var(--lo-ok)" }}>
               +{earnMinutes}
             </span>
-            <p className="text-xs" style={{ color: "#9a9a9a" }}>
+            <p className="text-xs" style={{ color: "var(--lo-dim)" }}>
               {earnLabel.toUpperCase()}
             </p>
           </>
         ) : (
           <>
-            <span className="dot text-7xl tabular-nums" style={{ color: "#fafafa" }}>
+            <span
+              className="dot text-7xl tabular-nums"
+              style={{ color: "var(--lo-fg)" }}
+            >
               {countdown}
             </span>
-            <p className="label" style={{ color: "#7a7a7a" }}>
+            <p className="label" style={{ color: "var(--lo-dim)" }}>
               {mode === "locked" ? "AWAITING ADMIN UNLOCK" : challengeCopy[challenge]}
             </p>
           </>
@@ -84,9 +109,9 @@ export function LockOverlay({
           type="button"
           className="mt-2 border rounded px-4 py-2 font-mono uppercase tracking-label text-xs"
           style={{
-            borderColor: "#d71921",
-            color: mode === "earn" ? "#fff" : "#d71921",
-            background: mode === "earn" ? "#d71921" : "transparent",
+            borderColor: "var(--lo-accent)",
+            color: mode === "earn" ? "#fff" : "var(--lo-accent)",
+            background: mode === "earn" ? "var(--lo-accent)" : "transparent",
           }}
         >
           {mode === "locked"
@@ -100,7 +125,7 @@ export function LockOverlay({
       {preview && (
         <span
           className="absolute top-2 left-2 label z-10"
-          style={{ color: "#5a5a5a" }}
+          style={{ color: "var(--lo-faint)" }}
         >
           PREVIEW · AGENT GUI
         </span>

@@ -4,7 +4,7 @@ import { listEvents, listDevices } from "../api";
 import type { Device, Event, EventType, Severity } from "../types";
 import { useAsync } from "../lib/useAsync";
 import { PageHeader } from "../layout/Shell";
-import { EventFeed, Panel, Select, Stat } from "../components";
+import { ErrorPanel, EventFeed, Panel, Select, Stat } from "../components";
 import { Loading } from "./Devices";
 import { pad2 } from "../lib/format";
 
@@ -19,6 +19,8 @@ const EVENT_TYPES: EventType[] = [
   "streak",
   "enrolled",
   "discovery_result",
+  "ssh",
+  "earn_request",
 ];
 
 const SEVERITIES: Severity[] = ["info", "warn", "critical"];
@@ -84,9 +86,15 @@ export function Events() {
 
       <Panel
         title="AUDIT LOG"
+        refCode="EV-00 · LIVE"
         aside={
           <div className="flex items-center gap-2 flex-wrap">
+            <label htmlFor="event-search" className="sr-only">
+              Search event payloads
+            </label>
             <input
+              id="event-search"
+              type="search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="SEARCH PAYLOAD…"
@@ -138,7 +146,17 @@ export function Events() {
           </Select>
         </div>
 
-        {events.loading ? <Loading /> : <EventFeed events={filtered} emptyLabel="NO MATCHING EVENTS" />}
+        {events.loading ? (
+          <Loading />
+        ) : events.error ? (
+          <ErrorPanel
+            title="Couldn't load events"
+            detail={events.error}
+            onRetry={events.reload}
+          />
+        ) : (
+          <EventFeed events={filtered} emptyLabel="NO MATCHING EVENTS" />
+        )}
       </Panel>
     </>
   );

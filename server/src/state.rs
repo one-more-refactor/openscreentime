@@ -15,24 +15,20 @@ use webauthn_rs::Webauthn;
 
 use crate::error::AppError;
 
-pub const SESSION_COOKIE: &str = "sid";
+pub const SESSION_COOKIE: &str = "sentinel_session";
 pub const REG_COOKIE: &str = "reg_sid";
 pub const AUTH_COOKIE: &str = "auth_sid";
 
-/// An authenticated admin session.
-#[derive(Clone, Copy)]
-pub struct SessionData {
-    pub admin_id: Uuid,
-    pub tenant_id: Uuid,
-}
+/// How long an unconsumed WebAuthn challenge lives before it's swept. Abandoned
+/// register/login ceremonies would otherwise accumulate in memory forever.
+pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Server-side WebAuthn registration challenge, keyed by a temp cookie.
 pub struct RegChallenge {
-    #[allow(dead_code)] // retained for audit / debugging of the ceremony
-    pub user_id: Uuid,
     pub email: String,
     pub display_name: String,
     pub reg: PasskeyRegistration,
+    pub created: std::time::Instant,
 }
 
 /// Server-side WebAuthn authentication challenge, keyed by a temp cookie.
@@ -40,19 +36,30 @@ pub struct AuthChallenge {
     pub admin_id: Uuid,
     pub tenant_id: Uuid,
     pub auth: PasskeyAuthentication,
+    pub created: std::time::Instant,
 }
 
-/// In-memory bridge for one reverse-SSH session (skeleton).
-///
-/// Production path is a real `ssh -R` from the agent to the broker's embedded
-/// SSH server (see TAMPER.md). Here we keep a channel that a server-side
-/// `ws->pty` bridge / `sentinel ssh` CLI could attach to: bytes the agent
-/// sends over the WS `ssh_data` frame are forwarded to `to_admin`.
-#[allow(dead_code)] // device_id/broker_port kept for the production ssh -R bridge
-pub struct SshBridge {
-    pub device_id: Uuid,
-    pub broker_port: i32,
-    pub to_admin: mpsc::UnboundedSender<Vec<u8>>,
+/// A frame the SSH bridge delivers to the attached admin terminal.
+pub enum SshToAdmin {
+    /// Raw terminal output bytes (already base64-decoded).
+    Data(Vec<u8>),
+    /// The agent-side shell exited (or the session was closed server-side).
+    Closed(Option<i64>),
+}
+
+/// Cap on bytes buffered per SSH session while no admin terminal is attached.
+const SSH_BACKLOG_MAX_BYTES: usize = 256 * 1024;
+
+/// In-memory bridge for one reverse-SSH session: agent WS frames on one side,
+/// the admin's browser-terminal WS on the other. Output that arrives before
+/// the admin attaches is buffered (bounded).
+struct SshBridge {
+    device_id: Uuid,
+    /// Set once the agent has confirmed the session with its first frame.
+    confirmed: bool,
+    to_admin: Option<mpsc::UnboundedSender<SshToAdmin>>,
+    backlog: Vec<SshToAdmin>,
+    backlog_bytes: usize,
 }
 
 /// Hub of live agent WebSocket connections + active SSH bridges.
@@ -90,18 +97,94 @@ impl Hub {
         }
     }
 
-    pub async fn open_ssh(&self, session_id: Uuid, bridge: SshBridge) {
-        self.ssh.write().await.insert(session_id, bridge);
+    /// Register a bridge for a freshly-created (still `opening`) SSH session.
+    pub async fn open_ssh(&self, session_id: Uuid, device_id: Uuid) {
+        self.ssh.write().await.insert(
+            session_id,
+            SshBridge {
+                device_id,
+                confirmed: false,
+                to_admin: None,
+                backlog: Vec::new(),
+                backlog_bytes: 0,
+            },
+        );
     }
 
-    pub async fn close_ssh(&self, session_id: Uuid) {
-        self.ssh.write().await.remove(&session_id);
+    /// Attach the admin terminal to a session; drains buffered agent output
+    /// into `tx`. Returns the session's device_id, or None if unknown.
+    pub async fn attach_ssh_admin(
+        &self,
+        session_id: Uuid,
+        tx: mpsc::UnboundedSender<SshToAdmin>,
+    ) -> Option<Uuid> {
+        let mut ssh = self.ssh.write().await;
+        let bridge = ssh.get_mut(&session_id)?;
+        for msg in bridge.backlog.drain(..) {
+            let _ = tx.send(msg);
+        }
+        bridge.backlog_bytes = 0;
+        bridge.to_admin = Some(tx);
+        Some(bridge.device_id)
     }
 
-    /// Forward a chunk of agent->admin SSH data to whoever is attached.
-    pub async fn ssh_data_from_agent(&self, session_id: Uuid, data: Vec<u8>) {
-        if let Some(b) = self.ssh.read().await.get(&session_id) {
-            let _ = b.to_admin.send(data);
+    /// Deliver an agent-side frame to the attached admin (or buffer it).
+    /// Returns `Some(newly_confirmed)` if the session is known AND owned by
+    /// `from_device` — the first agent frame confirms the session
+    /// (`opening` -> `open`). A frame whose `session_id` belongs to a different
+    /// device is rejected (`None`), so one agent can't inject into or confirm
+    /// another device's terminal by guessing its session id.
+    pub async fn ssh_from_agent(
+        &self,
+        session_id: Uuid,
+        from_device: Uuid,
+        msg: SshToAdmin,
+    ) -> Option<bool> {
+        let mut ssh = self.ssh.write().await;
+        let bridge = ssh.get_mut(&session_id)?;
+        if bridge.device_id != from_device {
+            tracing::warn!(%session_id, "ssh frame from wrong device, dropping");
+            return None;
+        }
+        let newly_confirmed = !bridge.confirmed;
+        bridge.confirmed = true;
+        match &bridge.to_admin {
+            Some(tx) => {
+                let _ = tx.send(msg);
+            }
+            None => {
+                let size = match &msg {
+                    SshToAdmin::Data(d) => d.len(),
+                    SshToAdmin::Closed(_) => 0,
+                };
+                if bridge.backlog_bytes + size <= SSH_BACKLOG_MAX_BYTES {
+                    bridge.backlog_bytes += size;
+                    bridge.backlog.push(msg);
+                } else {
+                    tracing::warn!(%session_id, "ssh backlog full, dropping agent frame");
+                }
+            }
+        }
+        Some(newly_confirmed)
+    }
+
+    /// Tear down a bridge; notifies an attached admin terminal, if any. When
+    /// `from_device` is set, only tears down the session if that device owns it
+    /// (agent-initiated close); admin/server-initiated closes pass `None`.
+    pub async fn close_ssh(&self, session_id: Uuid, from_device: Option<Uuid>) {
+        let mut ssh = self.ssh.write().await;
+        if let Some(bridge) = ssh.get(&session_id) {
+            if let Some(dev) = from_device {
+                if bridge.device_id != dev {
+                    tracing::warn!(%session_id, "ssh close from wrong device, ignoring");
+                    return;
+                }
+            }
+        }
+        if let Some(bridge) = ssh.remove(&session_id) {
+            if let Some(tx) = bridge.to_admin {
+                let _ = tx.send(SshToAdmin::Closed(None));
+            }
         }
     }
 }
@@ -110,22 +193,21 @@ impl Hub {
 pub struct AppState {
     pub db: PgPool,
     pub webauthn: Arc<Webauthn>,
-    pub broker_host: String,
-    pub sessions: Arc<RwLock<HashMap<String, SessionData>>>,
+    /// Session cookies are `Secure` unless SENTINEL_INSECURE_COOKIES=1 (dev).
+    pub cookie_secure: bool,
+    /// Public base URL (SENTINEL_PUBLIC_URL, falls back to the WebAuthn RP
+    /// origin) — used for OIDC redirect URIs and post-login redirects.
+    pub public_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, RegChallenge>>>,
     pub auth_states: Arc<RwLock<HashMap<String, AuthChallenge>>>,
+    pub oidc: Option<Arc<crate::auth_oidc::Oidc>>,
+    pub rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     pub hub: Arc<Hub>,
 }
 
-impl AppState {
-    pub async fn session_from_jar(&self, jar: &CookieJar) -> Option<SessionData> {
-        let sid = jar.get(SESSION_COOKIE)?.value().to_string();
-        self.sessions.read().await.get(&sid).copied()
-    }
-}
-
 /// Extractor: an authenticated admin. Carries tenant_id so every downstream
-/// query can scope by it.
+/// query can scope by it. Sessions live in Postgres (`admin_sessions`), the
+/// cookie value is sha256-hashed at rest like device tokens.
 #[derive(Clone, Copy)]
 pub struct AuthAdmin {
     pub admin_id: Uuid,
@@ -140,14 +222,33 @@ impl FromRequestParts<AppState> for AuthAdmin {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let jar = CookieJar::from_headers(&parts.headers);
-        let s = state
-            .session_from_jar(&jar)
-            .await
+        let token = jar
+            .get(SESSION_COOKIE)
+            .map(|c| c.value().to_string())
             .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
-        Ok(AuthAdmin {
-            admin_id: s.admin_id,
-            tenant_id: s.tenant_id,
-        })
+        let hash = crate::auth::hash_token(&token);
+
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT admin_id, tenant_id FROM admin_sessions
+             WHERE token_hash = $1 AND expires_at > now()",
+        )
+        .bind(&hash)
+        .fetch_optional(&state.db)
+        .await?;
+
+        match row {
+            Some((admin_id, tenant_id)) => Ok(AuthAdmin {
+                admin_id,
+                tenant_id,
+            }),
+            None => {
+                // Opportunistic lazy cleanup of expired sessions.
+                let _ = sqlx::query("DELETE FROM admin_sessions WHERE expires_at < now()")
+                    .execute(&state.db)
+                    .await;
+                Err(AppError::Unauthorized("no session".into()))
+            }
+        }
     }
 }
 

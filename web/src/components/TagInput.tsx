@@ -7,6 +7,8 @@ interface Props {
   placeholder?: string;
   /** show each tag with a tiny leading LED (e.g. allow=ok) */
   tone?: "ok" | "crit" | "neutral";
+  /** return an error message to reject an entry, null to accept */
+  validate?: (v: string) => string | null;
 }
 
 const toneColor = {
@@ -16,14 +18,28 @@ const toneColor = {
 };
 
 // Chip/token input — used for DNS allowlists & port-style lists.
-export function TagInput({ label, values, onChange, placeholder, tone = "neutral" }: Props) {
+export function TagInput({
+  label,
+  values,
+  onChange,
+  placeholder,
+  tone = "neutral",
+  validate,
+}: Props) {
   const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   function commit() {
     const v = draft.trim();
     if (!v) return;
+    const problem = validate?.(v) ?? null;
+    if (problem) {
+      setError(problem);
+      return;
+    }
     if (!values.includes(v)) onChange([...values, v]);
     setDraft("");
+    setError(null);
   }
 
   function onKey(e: KeyboardEvent<HTMLInputElement>) {
@@ -68,13 +84,23 @@ export function TagInput({ label, values, onChange, placeholder, tone = "neutral
         ))}
         <input
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            if (error) setError(null);
+          }}
           onKeyDown={onKey}
           onBlur={commit}
           placeholder={placeholder ?? "add…"}
+          aria-label={label}
+          aria-invalid={!!error}
           className="flex-1 min-w-[6rem] bg-transparent text-sm font-mono text-fg placeholder:text-fg-faint focus:outline-none"
         />
       </div>
+      {error && (
+        <span className="text-[0.625rem]" style={{ color: "var(--accent)" }}>
+          {error}
+        </span>
+      )}
     </div>
   );
 }

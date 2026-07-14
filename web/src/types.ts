@@ -78,6 +78,18 @@ export interface GamificationPolicy {
   streaks: StreaksPolicy;
 }
 
+export interface NetworkLockdown {
+  force_dns: boolean;
+  block_doh: boolean;
+  block_dot: boolean;
+  block_tor: boolean;
+  block_vpn: boolean;
+  /** Days the device may run without reaching the server before it hard-locks
+   * itself (parent PIN always unlocks). 0 = never; omitted when 0 so preset
+   * JSON stays byte-identical with the policy crate's serde output. */
+  offline_lockdown_days?: number;
+}
+
 export interface Policy {
   version: number;
   dns: DnsPolicy;
@@ -85,6 +97,12 @@ export interface Policy {
   screen_time: ScreenTimePolicy;
   app_limits: AppLimit[];
   gamification: GamificationPolicy;
+  /** Absent (or omitted by the server) means all lockdown flags are off. */
+  lockdown?: NetworkLockdown;
+  /** Argon2 hash of the parent PIN, present only when a PIN is set. Never the
+   * plaintext PIN — the editor writes a new PIN via a separate `parent_pin`
+   * field on the save request, not through this property. */
+  parent_pin_hash?: string | null;
 }
 
 // ---- Entities --------------------------------------------------------------
@@ -114,6 +132,9 @@ export interface DeviceUser {
   /** joined from profiles on device detail/user responses */
   profile_name?: string;
   profile_kind?: ProfileKind;
+  /** joined from screen_time_ledger on GET /api/devices/:id/users */
+  used_minutes_today?: number;
+  earned_minutes_today?: number;
   /** present in mock data only; the server does not return it */
   created_at?: string;
 }
@@ -132,8 +153,6 @@ export interface Device {
   created_at: string;
   /** present on list + detail responses */
   users?: DeviceUser[];
-  /** present on list responses */
-  online?: boolean;
 }
 
 export interface DeviceDetail extends Device {
@@ -151,7 +170,9 @@ export type EventType =
   | "screen_time_earned"
   | "streak"
   | "enrolled"
-  | "discovery_result";
+  | "discovery_result"
+  | "ssh"
+  | "earn_request";
 
 export type Severity = "info" | "warn" | "critical";
 
@@ -199,17 +220,53 @@ export interface EnrollTokenResponse {
   enroll_token: string;
 }
 
+/** POST /api/devices/:id/lock | /unlock. `delivered: false` means the command
+ * is queued and the status will only flip once the agent reconnects and acks. */
+export interface LockResponse {
+  command_id: string;
+  queued: boolean;
+  delivered: boolean;
+}
+
+export interface SshSession {
+  id: string;
+  device_id: string;
+  admin_id: string;
+  status: "opening" | "open" | "closed" | "failed";
+  created_at: string;
+  closed_at: string | null;
+}
+
 export interface SshSessionResponse {
-  ssh_session: {
-    id: string;
-    device_id: string;
-    admin_id: string;
-    broker_port: number;
-    status: "opening" | "open" | "closed" | "failed";
-    created_at: string;
-    closed_at: string | null;
-  };
-  connect_cmd: string;
+  session: SshSession;
+}
+
+// ---- Earn-time approval (contract §4) ---------------------------------------
+
+export type EarnRequestStatus = "pending" | "approved" | "denied";
+
+export interface EarnRequest {
+  id: string;
+  tenant_id?: string;
+  device_id: string;
+  device_user_id: string;
+  os_username: string;
+  task_id: string;
+  task_label: string;
+  minutes: number;
+  status: EarnRequestStatus;
+  created_at: string;
+  decided_at: string | null;
+  /** joined by the server for the admin list */
+  device_name?: string;
+  user_display_name?: string | null;
+}
+
+// ---- Auth config (contract §6) ----------------------------------------------
+
+export interface AuthConfig {
+  oidc: boolean;
+  oidc_name: string;
 }
 
 // ---- Discovery -------------------------------------------------------------

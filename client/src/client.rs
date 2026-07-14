@@ -67,6 +67,22 @@ pub struct HeartbeatResponse {
     pub policy_version: String,
 }
 
+pub use crate::protocol::UsageReport;
+
+/// `POST /agent/earn-request` response (CONTRACT-PROD.md §4).
+#[derive(Debug, Deserialize)]
+pub struct EarnRequestResponse {
+    pub request: EarnRequestInfo,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EarnRequestInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+}
+
 #[derive(Clone)]
 pub struct ServerClient {
     http: reqwest::Client,
@@ -78,6 +94,11 @@ impl ServerClient {
     pub fn new(base_url: &str, token: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(format!("sentinel-agent/{AGENT_VERSION}"))
+            // Bound every request. Without this, a blackholed server stalls the
+            // caller indefinitely — including the earn-request POST that runs
+            // inside the enforcement tick on the WS select loop, which would
+            // otherwise wedge enforcement and frame processing behind one hung call.
+            .timeout(std::time::Duration::from_secs(10))
             .build()?;
         Ok(ServerClient {
             http,
@@ -90,17 +111,21 @@ impl ServerClient {
         format!("Bearer {}", self.token)
     }
 
-    /// POST /agent/heartbeat — poll fallback when the WS bus is down.
+    /// POST /agent/heartbeat — poll fallback when the WS bus is down. `usage`
+    /// carries each managed user's used minutes today (CONTRACT-PROD.md §5); the
+    /// server upserts it into `screen_time_ledger`.
     pub async fn heartbeat(
         &self,
         status: &str,
         public_ip: Option<&str>,
         os_users: &[OsUser],
+        usage: &[UsageReport],
     ) -> Result<HeartbeatResponse> {
         let body = json!({
             "status": status,
             "public_ip": public_ip,
             "os_users": os_users,
+            "usage": usage,
         });
         let resp = self
             .http
@@ -110,6 +135,33 @@ impl ServerClient {
             .send()
             .await
             .context("POST /agent/heartbeat")?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /agent/earn-request — auto-requested when a lockout engages and an
+    /// earn-time offer is available (CONTRACT-PROD.md §4).
+    pub async fn post_earn_request(
+        &self,
+        os_username: &str,
+        task_id: &str,
+        task_label: &str,
+        minutes: u32,
+    ) -> Result<EarnRequestResponse> {
+        let body = json!({
+            "os_username": os_username,
+            "task_id": task_id,
+            "task_label": task_label,
+            "minutes": minutes,
+        });
+        let resp = self
+            .http
+            .post(format!("{}/agent/earn-request", self.base))
+            .header("Authorization", self.bearer())
+            .json(&body)
+            .send()
+            .await
+            .context("POST /agent/earn-request")?
             .error_for_status()?;
         Ok(resp.json().await?)
     }

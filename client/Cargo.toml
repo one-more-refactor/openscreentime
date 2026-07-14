@@ -2,7 +2,7 @@
 name = "sentinel-agent"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Sentinel zero-trust device management — Linux client agent"
 license = "MIT"
 
@@ -30,14 +30,27 @@ hostname = "0.4"
 users = "0.11"
 base64 = "0.22"
 rand = "0.8"
+nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
+libc = "0.2"
+argon2 = "0.5"
+# Self-update artifact verification (sha256 pinned by the server manifest).
+sha2 = "0.10"
+hex = "0.4"
 
 # Optional native full-screen GUI for the lockout overlay. Off by default so the
 # agent builds and runs on a headless dev box (see lockout.rs for the stub path).
 eframe = { version = "0.28", optional = true, default-features = false, features = ["default_fonts", "glow"] }
 
+# Optional per-user system-tray helper (`sentinel-agent tray`): StatusNotifierItem
+# icon + desktop notifications. Pure-Rust/DBus (no display libs), but only built
+# with `--features tray` so the headless agent stays lean.
+ksni = { version = "0.2", optional = true }
+notify-rust = { version = "4", optional = true }
+
 [features]
 default = []
 gui = ["dep:eframe"]
+tray = ["dep:ksni", "dep:notify-rust"]
 
 [profile.release]
 opt-level = "z"

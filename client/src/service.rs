@@ -10,10 +10,12 @@ use std::sync::Arc;
 const UNIT: &str = include_str!("../systemd/sentinel-agent.service");
 const WATCHDOG_SERVICE: &str = include_str!("../systemd/sentinel-watchdog.service");
 const WATCHDOG_TIMER: &str = include_str!("../systemd/sentinel-watchdog.timer");
+const TRAY_UNIT: &str = include_str!("../systemd/sentinel-tray.service");
 
 const UNIT_PATH: &str = "/etc/systemd/system/sentinel-agent.service";
 const WATCHDOG_SVC_PATH: &str = "/etc/systemd/system/sentinel-watchdog.service";
 const WATCHDOG_TIMER_PATH: &str = "/etc/systemd/system/sentinel-watchdog.timer";
+const TRAY_UNIT_PATH: &str = "/etc/systemd/user/sentinel-tray.service";
 const BIN_TARGET: &str = "/usr/local/bin/sentinel-agent";
 
 pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
@@ -31,6 +33,12 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     exec.write_file(UNIT_PATH, UNIT)?;
     exec.write_file(WATCHDOG_SVC_PATH, WATCHDOG_SERVICE)?;
     exec.write_file(WATCHDOG_TIMER_PATH, WATCHDOG_TIMER)?;
+    // Best-effort: drop the per-user tray unit so any desktop user can opt in
+    // with `systemctl --user enable --now sentinel-tray` (not auto-enabled;
+    // only useful with a binary built `--features tray`).
+    if let Err(e) = exec.write_file(TRAY_UNIT_PATH, TRAY_UNIT) {
+        tracing::warn!("could not install {TRAY_UNIT_PATH}: {e}");
+    }
     tamper::install_polkit(&exec, 1)?;
 
     exec.run("systemctl", &["daemon-reload"])?;

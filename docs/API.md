@@ -14,22 +14,80 @@ Base URL in dev: `http://localhost:8080`.
 
 ---
 
-## Auth (passkey / WebAuthn)
+## Auth (passkey / WebAuthn + optional OIDC SSO)
 
-Uses `webauthn-rs`. Registration is invite/first-run only in the skeleton (any email can
-register the first admin of a new tenant; hardened later).
+Uses `webauthn-rs`. Registration is first-boot only: while zero admins exist, any email can
+register the first admin (bootstrapping the tenant). Once at least one admin exists,
+`register/start` and `register/finish` refuse with **403 `{ error: { code:
+"registration_closed" } }`** unless `SENTINEL_OPEN_REGISTRATION=1` is set (see
+docs/DEPLOY.md). A logged-in admin adding another passkey to their *own* account (the
+Settings page reuses the register ceremony) is always allowed.
 
 | Method | Path                        | Body / Notes                                            |
 |--------|-----------------------------|---------------------------------------------------------|
+| GET    | `/api/auth/config`          | public → `{ auth: { oidc: bool, oidc_name } }`          |
 | POST   | `/api/auth/register/start`  | `{ email, display_name }` → `CreationChallengeResponse` |
 | POST   | `/api/auth/register/finish` | `{ email, credential }` → sets session, `{ admin }`     |
 | POST   | `/api/auth/login/start`     | `{ email }` → `RequestChallengeResponse`                |
-| POST   | `/api/auth/login/finish`    | `{ email, credential }` → sets session cookie           |
-| POST   | `/api/auth/logout`          | clears session                                          |
+| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie                  |
+| GET    | `/api/auth/oidc/start`      | 302 to the provider's authorize URL                     |
+| GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
+| POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
 | GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
 | GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
+| DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
 
-Challenge state is held server-side in a short-TTL store keyed by a temporary cookie.
+Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
+`sentinel_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
+`SENTINEL_INSECURE_COOKIES=1`. WebAuthn *challenge* state is held server-side in a short-TTL
+in-memory store keyed by a temporary cookie.
+
+### OIDC SSO (e.g. Authentik)
+
+Enabled when `SENTINEL_OIDC_ISSUER`, `SENTINEL_OIDC_CLIENT_ID` and `SENTINEL_OIDC_CLIENT_SECRET`
+are all set (`SENTINEL_OIDC_NAME` optionally labels the login button, default "SSO"). Endpoints
+are discovered at startup from `<issuer>/.well-known/openid-configuration`; authorization-code
+flow with scopes `openid email profile`; redirect URI is
+`<SENTINEL_PUBLIC_URL>/api/auth/oidc/callback` (`SENTINEL_PUBLIC_URL` falls back to `RP_ORIGIN`).
+The callback matches the verified userinfo email against existing admins (any tenant). Fresh
+installs (no admins at all) bootstrap a tenant + admin; an unknown email on a non-empty install
+redirects to `/login?error=sso_unknown_account` (no auto-provisioning); other failures redirect
+to `/login?error=sso_failed`.
+
+### Rate limiting
+
+Fixed-window, in-memory, per client IP (first `X-Forwarded-For` value when
+`SENTINEL_TRUST_PROXY=1`, else the peer address). Over-limit requests get a 429 error envelope.
+
+- auth attempt endpoints (register/login/OIDC start + finish): 10 req / 60 s / IP
+- `/agent/enroll`: 5 req / 60 s / IP
+- agent distribution (`/install.sh`, `/api/agent/latest`, `/api/agent/download/:file`): 30 req / 60 s / IP
+
+---
+
+## Agent distribution (public, no auth)
+
+The production image bundles the headless musl-static agent under `/app/agent`
+(`SENTINEL_AGENT_DIR`); a dev `cargo run` has no bundle and these return 404. The binary is
+not a secret — enrollment (one-time token) is the auth boundary.
+
+| Method | Path                        | Notes                                                     |
+|--------|-----------------------------|-----------------------------------------------------------|
+| GET    | `/api/agent/latest`         | → `{ version, artifacts: [{ target, features, url, sha256 }] }` |
+| GET    | `/api/agent/download/:file` | the artifact bytes (`application/octet-stream`); `:file` must be a bare filename (no `/` or `..`) |
+| GET    | `/install.sh`               | POSIX installer (embedded from `server/install.sh`)       |
+
+Install one-liner (shown in the web enroll modal; the `SENTINEL_TOKEN` env form keeps the
+token out of argv/shell history):
+
+```
+curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+```
+
+The script verifies the manifest's sha256 before installing to
+`/usr/local/bin/sentinel-agent`, then runs `enroll` + `install-service`. The installed agent
+self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by default;
+`SENTINEL_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
 
 ---
 
@@ -39,19 +97,66 @@ Challenge state is held server-side in a short-TTL store keyed by a temporary co
 |--------|-------------------------------|-------------------------------------------------------------|
 | GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users)         |
 | GET    | `/api/devices/:id`            | detail incl. device_users, recent events                    |
-| POST   | `/api/devices`                | `{ name }` → creates `pending` device + `enroll_token`      |
+| POST   | `/api/devices`                | `{ name }` → creates `pending` device + `enroll_token` (24 h TTL) |
 | PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
-| POST   | `/api/devices/:id/lock`       | enqueue `lock` command                                      |
-| POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command                                    |
-| POST   | `/api/devices/:id/ssh`        | open reverse-tunnel session → `{ ssh_session, connect_cmd }`|
+| POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
+| POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
+| POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command → same response shape as lock       |
+| POST   | `/api/devices/:id/ssh`        | open remote shell session → `{ session: { id, device_id, broker_port, status:"opening", created_at } }` |
 | DELETE | `/api/devices/:id`            | de-enroll                                                    |
+
+### Truthful lock state
+
+`devices.status` only flips to `locked`/`online` when the lock/unlock actually takes effect:
+immediately when the command was pushed to a live agent WS (`delivered: true`), otherwise the
+command stays queued (`delivered: false`) and the status flips when the agent reconnects and
+**acks** the command. The UI shows a "LOCK PENDING" chip for queued locks.
+
+### Offline sweeper
+
+A background task (every 60 s) marks devices `offline` whose `status = 'online'` and
+`last_seen` is older than 3 minutes — this catches dead poll-mode agents that never had a WS
+disconnect. `locked` and `pending` are never touched. The web UI escalates devices offline
+for 7+ days to a red "GONE DARK Nd" badge (tamper signal).
+
+## Remote SSH (browser terminal)
+
+A session stays `opening` until the agent's first `ssh_data` frame confirms the shell, then
+becomes `open`. All SSH activity is audited with events of `type = 'ssh'`.
+
+| Method | Path                        | Notes                                                    |
+|--------|-----------------------------|----------------------------------------------------------|
+| GET    | `/api/ssh/:session_id/ws`   | cookie-authenticated WebSocket upgrade for the terminal  |
+| POST   | `/api/ssh/:session_id/close`| → `{ ok: true, session_id }`; sends `ssh_close` to agent |
+
+Browser WS protocol: browser → server **binary frames** are raw keystroke bytes, **text
+frames** are JSON `{"type":"resize","cols":N,"rows":N}`. Server → browser binary frames are
+raw terminal output; a final text frame `{"type":"closed","exit_code":N|null}` precedes the
+close. Closing the browser WS also closes the session.
 
 ## Device users & profile assignment
 
 | Method | Path                                         | Notes                              |
 |--------|----------------------------------------------|------------------------------------|
-| GET    | `/api/devices/:id/users`                     | list OS users on device            |
+| GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
 | POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }`                   |
+| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; parent grants extra screen time today: credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id: null }`; audited as an `earn_request` event with `action: "granted"` |
+
+## Earn-time requests
+
+Filed by the agent when a user picks an earn offer on the lockout screen; decided by a parent
+in the web UI. One open request per (user, task) per day (agent-side duplicates return the
+existing pending row). Requests and decisions are audited with `earn_request` events.
+
+| Method | Path                              | Notes                                             |
+|--------|-----------------------------------|---------------------------------------------------|
+| GET    | `/api/earn-requests`              | `?status=pending` → `{ requests: [...] }` (joined with device name + user display name) |
+| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id }` |
+| POST   | `/api/earn-requests/:id/deny`     | → `{ request }`                                   |
+
+A request: `{ id, device_id, device_name, device_user_id, os_username, display_name, task_id,
+task_label, minutes, status, created_at, decided_at }` with `status` one of
+`pending | approved | denied` (409 when deciding an already-decided request).
 
 ## Profiles
 
@@ -88,16 +193,29 @@ POST /agent/enroll
 Body: { enroll_token, hostname, os, agent_version, os_users: [{ username, display_name }] }
 → 200 { device_id, device_token, poll_interval_secs }
 ```
-The `enroll_token` is consumed (single use). Server creates `device_users` rows for reported
+The `enroll_token` is consumed (single use) and expires 24 h after issue
+(`devices.enroll_token_expires_at`); an expired token is rejected exactly like a consumed one
+(401). While the device is still `pending`, an admin can regenerate a fresh token via
+`POST /api/devices/:id/enroll-token`. Server creates `device_users` rows for reported
 `os_users`, each assigned the tenant's **default** profile until an admin changes it.
 
 ### Heartbeat (poll model, fallback for WS)
 ```
 POST /agent/heartbeat
-Body: { status, public_ip?, metrics?, os_users: [...] }
+Body: { status, public_ip?, usage: [{ os_username, used_minutes_today }], os_users: [...] }
 → 200 { commands: [Command...], policy_version: string }
 ```
+`usage` is upserted into `screen_time_ledger.used_seconds` for today's row per device user.
 Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
+
+### Earn-time request
+```
+POST /agent/earn-request
+Body: { os_username, task_id, task_label, minutes }   // 1 <= minutes <= 240
+→ 200 { request: { id, status: "pending", ... } }
+```
+Deduped per (user, task, day): a repeat while today's request is still pending returns the
+existing row.
 
 ### Policy pull
 ```
@@ -116,9 +234,16 @@ Body: { events: [{ type, severity, device_user?, payload }] }
 ```
 GET /agent/ws   (Upgrade)
 ```
-Bidirectional. Server pushes `Command` messages; agent pushes `Event` + `CommandAck`. Also
-carries reverse-SSH tunnel data frames (see TAMPER.md / SSH section). Falls back to heartbeat
-polling if WS unavailable.
+Bidirectional JSON frames, tagged with `"type"`:
+
+- server → agent: `command { command }`, `ssh_data { session_id, data_b64 }`,
+  `ssh_resize { session_id, cols, rows }`, `ssh_close { session_id }`, `ping`
+- agent → server: `event { event }`, `ack { ack }`,
+  `ssh_data { session_id, data_b64 }`, `ssh_closed { session_id, exit_code? }`, `pong`
+
+`data_b64` carries base64-encoded raw terminal bytes in both directions. The agent's first
+frame for a session flips it `opening` → `open`. Falls back to heartbeat polling if WS is
+unavailable.
 
 ---
 
@@ -150,8 +275,8 @@ This is the single most important shared type. Server stores it, web edits it, a
     ],
     "bedtime": { "start": "21:00", "end": "07:00" }
   },
-  "app_limits": [
-    { "match": "steam", "daily_limit_minutes": 60 }
+  "app_limits": [                    // DEPRECATED: not enforced by the agent; the field
+    { "match": "steam", "daily_limit_minutes": 60 }   // stays in the policy crate for forward compat
   ],
   "gamification": {
     "earn_time": {
