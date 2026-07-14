@@ -62,7 +62,9 @@ async fn main() -> anyhow::Result<()> {
     // Public base URL (OIDC redirect URI + post-login redirects); falls back
     // to the WebAuthn RP origin.
     let public_url = std::env::var("SENTINEL_PUBLIC_URL")
-        .unwrap_or_else(|_| rp_origin_str.clone())
+        .ok()
+        .filter(|v| !v.trim().is_empty()) // "" from `${VAR:-}` in compose = unset
+        .unwrap_or_else(|| rp_origin_str.clone())
         .trim_end_matches('/')
         .to_string();
 
