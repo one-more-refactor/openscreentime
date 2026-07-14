@@ -18,11 +18,11 @@ import {
   ErrorPanel,
   Modal,
   Panel,
+  EnrollCommand,
   SshTerminal,
   Stat,
   StatusLed,
   TextInput,
-  TokenBlock,
 } from "../components";
 import { pad2, relTime } from "../lib/format";
 
@@ -380,18 +380,10 @@ export function Devices() {
           <div className="flex flex-col gap-4">
             <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
               Device <span className="dot text-fg">{enroll.device.name}</span> is{" "}
-              <StatusLed tone="pending" label="PENDING" className="align-middle" />. Run the
-              agent with this single-use token:
+              <StatusLed tone="pending" label="PENDING" className="align-middle" />. Install
+              and enroll the agent with this single-use command:
             </p>
-            <TokenBlock token={enroll.enroll_token} />
-            <pre
-              className="text-[0.6875rem] border rounded p-3 overflow-x-auto"
-              style={{ borderColor: "var(--line)", background: "var(--surface-2)", color: "var(--fg-dim)" }}
-            >
-{`sudo ./sentinel-agent enroll \\
-  --server ${window.location.origin} \\
-  --token ${enroll.enroll_token}`}
-            </pre>
+            <EnrollCommand token={enroll.enroll_token} />
           </div>
         ) : (
           <TextInput

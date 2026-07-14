@@ -20,6 +20,10 @@ pub struct AgentConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_tamper")]
     pub tamper_level: u8,
+    /// Daily self-update from the enrolled server (see `update.rs`). On by
+    /// default; `SENTINEL_NO_SELF_UPDATE=1` also disables it at runtime.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
 }
 
 fn default_poll() -> u64 {
@@ -27,6 +31,9 @@ fn default_poll() -> u64 {
 }
 fn default_tamper() -> u8 {
     1
+}
+fn default_true() -> bool {
+    true
 }
 
 impl AgentConfig {

@@ -20,6 +20,10 @@ use crate::state::AppState;
 const WINDOW: Duration = Duration::from_secs(60);
 const AUTH_MAX: u32 = 10;
 const ENROLL_MAX: u32 = 5;
+/// Agent distribution (`/install.sh`, `/api/agent/latest`, downloads): public
+/// but bounded so the endpoints can't be used as a free bandwidth amplifier.
+/// One install touches ~3 of these; fleets poll the manifest once a day.
+const DIST_MAX: u32 = 30;
 /// Prune dead windows once the bucket map grows past this.
 const PRUNE_THRESHOLD: usize = 10_000;
 
@@ -99,6 +103,11 @@ pub async fn limit_auth(State(st): State<AppState>, req: Request, next: Next) ->
 /// Middleware for `/agent/enroll`: 5 req / 60 s / IP.
 pub async fn limit_enroll(State(st): State<AppState>, req: Request, next: Next) -> Response {
     limit(st, "enroll", ENROLL_MAX, req, next).await
+}
+
+/// Middleware for the agent-distribution endpoints: 30 req / 60 s / IP.
+pub async fn limit_dist(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    limit(st, "dist", DIST_MAX, req, next).await
 }
 
 #[cfg(test)]

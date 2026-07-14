@@ -16,4 +16,5 @@ export { LockOverlay } from "./LockOverlay";
 export { PolicyEditor } from "./PolicyEditor";
 export { Modal } from "./Modal";
 export { TokenBlock } from "./TokenBlock";
+export { EnrollCommand } from "./EnrollCommand";
 export { SshTerminal } from "./SshTerminal";

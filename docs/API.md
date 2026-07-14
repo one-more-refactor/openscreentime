@@ -16,8 +16,12 @@ Base URL in dev: `http://localhost:8080`.
 
 ## Auth (passkey / WebAuthn + optional OIDC SSO)
 
-Uses `webauthn-rs`. Registration is invite/first-run only in the skeleton (any email can
-register the first admin of a new tenant; hardened later).
+Uses `webauthn-rs`. Registration is first-boot only: while zero admins exist, any email can
+register the first admin (bootstrapping the tenant). Once at least one admin exists,
+`register/start` and `register/finish` refuse with **403 `{ error: { code:
+"registration_closed" } }`** unless `SENTINEL_OPEN_REGISTRATION=1` is set (see
+docs/DEPLOY.md). A logged-in admin adding another passkey to their *own* account (the
+Settings page reuses the register ceremony) is always allowed.
 
 | Method | Path                        | Body / Notes                                            |
 |--------|-----------------------------|---------------------------------------------------------|
@@ -57,6 +61,33 @@ Fixed-window, in-memory, per client IP (first `X-Forwarded-For` value when
 
 - auth attempt endpoints (register/login/OIDC start + finish): 10 req / 60 s / IP
 - `/agent/enroll`: 5 req / 60 s / IP
+- agent distribution (`/install.sh`, `/api/agent/latest`, `/api/agent/download/:file`): 30 req / 60 s / IP
+
+---
+
+## Agent distribution (public, no auth)
+
+The production image bundles the headless musl-static agent under `/app/agent`
+(`SENTINEL_AGENT_DIR`); a dev `cargo run` has no bundle and these return 404. The binary is
+not a secret — enrollment (one-time token) is the auth boundary.
+
+| Method | Path                        | Notes                                                     |
+|--------|-----------------------------|-----------------------------------------------------------|
+| GET    | `/api/agent/latest`         | → `{ version, artifacts: [{ target, features, url, sha256 }] }` |
+| GET    | `/api/agent/download/:file` | the artifact bytes (`application/octet-stream`); `:file` must be a bare filename (no `/` or `..`) |
+| GET    | `/install.sh`               | POSIX installer (embedded from `server/install.sh`)       |
+
+Install one-liner (shown in the web enroll modal; the `SENTINEL_TOKEN` env form keeps the
+token out of argv/shell history):
+
+```
+curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+```
+
+The script verifies the manifest's sha256 before installing to
+`/usr/local/bin/sentinel-agent`, then runs `enroll` + `install-service`. The installed agent
+self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by default;
+`SENTINEL_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
 
 ---
 

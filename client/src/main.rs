@@ -23,6 +23,7 @@ mod tamper;
 #[cfg(feature = "tray")]
 mod tray;
 mod unlock;
+mod update;
 mod util;
 
 use anyhow::Result;

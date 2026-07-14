@@ -1021,6 +1021,14 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     let boot_events = agent.bootstrap().await.unwrap_or_default();
     let _ = agent.client.post_events(&boot_events).await;
 
+    // Daily self-update (first check ~2 min in). No-op unless enabled and
+    // running as the installed /usr/local/bin binary — see update.rs.
+    tokio::spawn(crate::update::update_loop(
+        agent.cfg.clone(),
+        agent.client.clone(),
+        agent.exec.clone(),
+    ));
+
     loop {
         match agent.client.connect_ws().await {
             Ok(stream) => {

@@ -462,6 +462,30 @@ export function mockCreditTime(deviceUserId: string, minutes: number): void {
   }
 }
 
+/** Mock for POST /api/devices — creates a pending device + one-time token. */
+export function mockCreateDevice(name: string): EnrollTokenResponse {
+  const id = `mock-dev-${mockDevices.length + 1}`;
+  const dev: Device = {
+    id,
+    tenant_id: TENANT_ID,
+    name,
+    hostname: "",
+    os: "",
+    agent_version: "",
+    status: "pending",
+    tamper_level: 1,
+    public_ip: null,
+    last_seen: null,
+    created_at: new Date().toISOString(),
+    users: [],
+  };
+  mockDevices.push(dev);
+  return {
+    device: dev,
+    enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
+  };
+}
+
 /** Mock for POST /api/devices/:id/enroll-token (pending devices only). */
 export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
   const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
