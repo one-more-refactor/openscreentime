@@ -1,0 +1,150 @@
+# Transparency: what Sentinel actually does on your machine
+
+This document is for you — the person using the managed device, not the parent who set it
+up. It exists because the whole point of Sentinel is that it doesn't lie to you by omission.
+Every claim below is backed by the actual agent code, not marketing copy. If something here
+turns out to be wrong, that's a bug in the product, not an acceptable gap.
+
+## What this is
+
+Sentinel is a program (`sentinel-agent`) that runs as root on this computer, filters network
+traffic, tracks how long you're logged in, and enforces limits your parent sets. It reports
+status back to a server your family controls. It is not hidden — it shows up in your system
+tray (if you have the companion running), in `systemctl status`, and as a running process.
+It does not pretend to be something else.
+
+## What your parents can see
+
+Everything the agent sends the server is one of these, and nothing else:
+
+- **Device status**: online/offline, public IP, agent version, hostname.
+- **The list of OS user accounts on this machine** (usernames, display names, UIDs) — so
+  policy can be applied per person.
+- **Screen time totals**: minutes used today, per OS user. Not per app, not per window —
+  just "logged into an active local session, not idle."
+- **Lock/unlock events**: when the device was locked or unlocked, and by what (admin
+  command, screen-time expiry, PIN override, offline lockdown).
+- **Policy changes**: when a new policy was applied and its version.
+- **Tamper events**: see "what happens if you fight it" below — every detected tamper
+  attempt, with a severity level.
+- **Earn-time requests**: when you pick a task on the lockout screen to earn extra minutes
+  (task name and minutes requested), and how your parent decided it.
+- **Streak/nudge events**: that a bedtime or break nudge fired — not what you were doing
+  when it did.
+- **LAN discovery results** — but only when a parent explicitly triggers a scan (to onboard
+  a new device). It reports IPs, MAC addresses, and open ports of *other devices on your
+  network*, not activity on this one.
+- **Whether a remote shell is currently open** on this device (see below).
+
+That's the complete list. There is no hidden channel — `client/src/client.rs` is the only
+code that talks to the server, and every request body it builds is listed above.
+
+## What they cannot see
+
+Based on reading the entire agent codebase, these are **not implemented** — not hidden
+somewhere else, not planned, not collected and just "not shown to you":
+
+- **No screenshots.** Nothing captures the display.
+- **No keylogging.** Nothing reads keystrokes outside of the lockout screen's own unlock
+  input (which never leaves the device unless it's a parent-PIN check against a hash
+  already cached locally).
+- **No camera or microphone access.** The agent has no code that touches either.
+- **No message or file contents.** The agent doesn't read your browser, chat apps, or
+  documents.
+- **No per-site browsing history sent to the server.** DNS filtering happens locally (a
+  dnsmasq config the agent generates and reloads) — every query is either allowed and
+  forwarded or answered with NXDOMAIN, on your machine, on the spot. The agent does not
+  log which domains you requested and does not ship a query log anywhere.
+
+One honest caveat: the remote shell described below is a **real root shell**, not a
+sandboxed activity viewer. Sentinel itself does not automatically collect any of the things
+above, and there's no background job scraping your files. But if a parent opens a shell and
+manually goes looking through the filesystem, root can read anything on disk — that's true
+of any root shell on any Linux machine, managed or not. Sentinel's actual promise here isn't
+"a shell is technically impossible to misuse" — it's that a shell is **never open without
+you knowing**. That's enforced in the design, not just policy: see the tray section below.
+
+## What they can do remotely
+
+A parent, from the web dashboard, can push these commands to the agent:
+
+- **Lock the whole device**, immediately, no grace period (this is a deliberate parent
+  action, not an automatic enforcement — you get a "LOCKED BY AN ADMIN" screen and every
+  user session is frozen right away).
+- **Unlock it.**
+- **Change policy**: screen time limits, allowed hours, bedtime, DNS allow/block lists,
+  firewall rules, tamper level.
+- **Grant or deny extra time**, including approving/denying an earn-time request you sent.
+- **Scan the local network** to help onboard another device.
+- **Open a remote shell** on this device. The agent never listens for inbound connections —
+  it dials out to the server, which brokers the session to your parent's browser. The shell
+  runs as root.
+
+The remote shell is the most powerful thing a parent can do, so it's the one thing Sentinel
+goes out of its way to never hide. The moment a shell opens:
+
+- Your tray icon (if the companion app is running) shows **"REMOTE SHELL: ACTIVE"** as a
+  persistent, non-dismissable menu item — not a toast that disappears.
+- A critical desktop notification fires: *"A PARENT OPENED A REMOTE SHELL ON THIS DEVICE."*
+- Another notification fires the moment it closes.
+
+There is no code path that opens a shell silently. If you don't have the tray companion
+running, you lose this visibility — that's a reason to run it, not a loophole the design
+intends.
+
+## What you'll experience
+
+- **10 minutes and 2 minutes before your time runs out**, you get a nudge ("good time to
+  finish up" / "wrap up and save now"), once each per day. If bedtime is configured, you
+  also get a wind-down warning up to 15 minutes before it starts.
+- **When your time actually runs out** (daily limit, outside allowed hours, or bedtime), a
+  full-screen lockout appears immediately — but nothing freezes yet. You get **60 seconds**
+  to save your work before the freeze lands. This countdown is shown on screen.
+- **The freeze itself pauses your processes** (a cgroup freeze), it does not kill your
+  session or destroy unsaved work. Screen-time enforcement is explicitly designed to never
+  escalate to terminating your session — only an explicit admin lock (or the offline
+  lockdown below) can do that, and only as a last resort if freezing isn't available.
+- **Getting back in**: solve a short math challenge for a 5-minute breather, wait out a
+  cooldown, request extra time for a task (goes to your parent for approval, and you're
+  told clearly if it's denied instead of being left hanging), or have a parent enter their
+  PIN — which grants 30 minutes and always works as a master override, on any lockout,
+  whether or not that's the configured challenge. A parent physically at the machine can
+  always get you unlocked.
+- **Admin locks are immediate**, with no 60-second grace — that's a deliberate parent
+  action, not an automatic timeout, so the save-your-work courtesy doesn't apply.
+- **Offline hard lockdown**: if your parent has turned this on, and the device genuinely
+  can't reach the server for a set number of days, the device locks itself down the same
+  way an admin lock would. A parent PIN still unlocks it. This exists so that pulling the
+  network cable indefinitely isn't a way to escape limits forever — but it only engages
+  after days of silence, not a brief outage.
+
+## What happens if you fight it
+
+Sentinel is honest that it cannot make tampering physically impossible if you have root and
+physical access to the machine. What it does instead:
+
+- **Local tampering is detected and repaired automatically.** Editing `/etc/resolv.conf`,
+  flushing the firewall table, disconnecting the network, or jumping the system clock are
+  all checked every ~10 seconds. If any of them drifted, the agent puts them back and files
+  a `tamper` event your parent sees, with a severity level.
+- **Shutdown, reboot, and suspend are blocked for you** (not root) by default, via a polkit
+  rule — you can't power off your way around a lockout. An opt-in stricter mode also blocks
+  you from stopping the agent's systemd service and disables switching virtual terminals.
+- **If the agent process dies, systemd restarts it immediately**, and a separate watchdog
+  checks its heartbeat file on a timer and restarts it again if that goes stale — killing
+  the process once doesn't get you anywhere.
+- **If you have root, you can ultimately remove the agent.** No software can prevent that,
+  and Sentinel doesn't claim otherwise — claiming unbypassable enforcement would be a lie.
+  But it is never a silent bypass: the server marks a device offline within minutes of
+  losing contact, and that shows up on your parent's dashboard as plainly as if you'd
+  smashed the laptop. Going dark is visible, not invisible.
+
+## Why it's built this way
+
+The point of Sentinel isn't to spy on you without your knowledge — it's to enforce agreed
+limits (time, content, bedtime) in a way that's checkable. Every mechanism above either
+reports something structural (time used, lock state, a remote session being open) or an
+attempt to bypass enforcement. Nothing reports the content of what you do, say, or look at.
+If you don't trust that, you don't have to take it on faith: the agent's source is what this
+document was written from, line by line, and the tray, the events log, and this file are
+supposed to always agree.

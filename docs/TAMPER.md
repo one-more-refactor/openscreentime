@@ -6,82 +6,151 @@ The managed user may have physical access. If they also have root, **no software
 shutdown or network disconnection truly impossible.** Sentinel's goal is therefore:
 
 1. **Raise the cost** of tampering (make casual bypass hard).
-2. **Detect and report** every tamper attempt in real time.
-3. **Recover automatically** (auto-restart, re-apply policy on boot).
+2. **Detect and report** every tamper attempt.
+3. **Recover automatically** (auto-restart, re-apply policy on drift and on boot).
 
-We do NOT claim unbypassable enforcement. Anti-tamper marketing that claims otherwise is lying.
+We do NOT claim unbypassable enforcement. Anti-tamper marketing that claims otherwise is
+lying. In the same spirit, everything below describes what the code **actually does today** —
+aspirations live in the "What Sentinel does not do" section, not disguised as features.
+The flip side of this doc is [`TRANSPARENCY.md`](TRANSPARENCY.md), which explains the same
+system to the person being managed.
 
 ## Levels
 
-Configured per device via `devices.tamper_level`. Default **1**. **3** is opt-in per device.
+Configured per device via `devices.tamper_level`. Default **1**. **3** is opt-in per device,
+toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can force a floor.
 
 ### Level 1 — Strong deterrence + alerting (DEFAULT)
-- Agent runs as a **root-owned systemd service**, hardened unit:
-  `Restart=always`, `RestartSec=1`, `StartLimitIntervalSec=0` (never give up restarting),
-  `ProtectSystem=strict`, `ProtectHome` off (needs to watch users), `NoNewPrivileges` off
-  (needs nft/dns control), `OOMScoreAdjust=-1000`.
-- **Watchdog:** a second lightweight unit (or systemd `WatchdogSec`) that restarts the agent if
-  its heartbeat file goes stale.
-- **Mask user-level power controls:** polkit rule denying non-root
-  `org.freedesktop.login1.power-off` / `reboot` / `suspend` for managed users; a root escape
-  (`sentinel-admin unlock`) always exists.
-- **Config & binary integrity:** agent binary + config are root-owned `0700`; agent verifies its
-  own config signature on load.
-- **NetworkManager guard:** watch for connection edits / device disconnect via NM D-Bus signals;
-  re-assert managed connection and fire a `tamper` event if a managed user tries to disconnect.
-- **Boot persistence:** systemd unit is `WantedBy=multi-user.target`; policy re-applied on every
-  boot before the graphical target (network-online.target ordering).
-- **Every tamper attempt** (service stop attempt, nft flush, NM disconnect, clock skew) →
-  immediate `tamper` event (severity `warn`/`critical`) over WS, buffered to disk if offline.
+
+- **Hardened root systemd unit** (`client/systemd/sentinel-agent.service`, installed by
+  `sentinel-agent install-service`): `Restart=always`, `RestartSec=1`,
+  `StartLimitIntervalSec=0` (never gives up restarting), `ProtectSystem=strict` with explicit
+  `ReadWritePaths` carve-outs, `ProtectHome` off (must watch user sessions), `NoNewPrivileges`
+  off (shells out to nft/resolvectl/chattr), `OOMScoreAdjust=-1000`.
+- **Watchdog:** a separate `sentinel-watchdog.timer` runs every 30 s and restarts the agent if
+  its heartbeat file (`/run/sentinel/heartbeat`, touched every enforcement tick) is missing or
+  older than 90 s. Killing the agent process buys at most ~30 s.
+- **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-sentinel.rules`) denies
+  `org.freedesktop.login1` power-off / reboot / suspend (and their `-multiple-sessions`
+  variants) to everyone except root and the `sentinel-admin` recovery account.
+- **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
+  re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
+- **Firewall self-repair (fail-closed):** if the sentinel nftables table disappears (e.g.
+  `nft flush ruleset`), the tick emits an `nft_flush` (critical) event **and rebuilds the
+  table from the effective policy** — a flush buys seconds of open network, not a session.
+- **NetworkManager guard:** each tick polls `nmcli` for overall state; if NetworkManager
+  reports disconnected, the agent runs `nmcli networking on` (best-effort) and emits an
+  `nm_disconnect` (warn) event. This is a 10-second poll, not a D-Bus subscription — see
+  "What Sentinel does not do".
+- **Clock-skew detection:** the enforcement tick runs on a monotonic timer, so wall-clock is
+  expected to advance ~10 s per tick. A jump of more than an hour (the classic "set the clock
+  back to dodge bedtime" move) emits a `clock_skew` (warn) event.
+- **Boot persistence:** the unit is `WantedBy=multi-user.target` with
+  `After/Wants=network-online.target`; policy is pulled and re-applied at startup.
+- **Config at rest:** `/etc/sentinel/agent.toml` (device token inside) is root-owned and
+  chmod'd `0600` (best-effort — a failure to chmod is logged, not fatal).
+- **Event delivery:** every tamper event is posted to the server; batches that can't be
+  delivered are **buffered in memory (capped at 512, oldest dropped) and retried every tick**
+  until they land. An agent restart while offline loses the buffer — but the outage itself is
+  visible server-side as gone-dark time, so tampering is never *silent*, even when the
+  fine-grained trail is lost.
 
 ### Level 3 — Maximum lockdown (OPT-IN)
-Everything in level 1 **plus**:
-- Disable extra TTYs / `Ctrl+Alt+F*` switching for managed sessions.
-- Lock the systemd unit against user `systemctl stop` via polkit (only `sentinel-admin` token).
-- Bootloader/firmware **guidance** surfaced in the UI (set GRUB password, BIOS admin password,
-  disable USB boot) — these are physical mitigations we can only advise, not enforce.
-- Kill known escape hatches (recovery shells for managed users, `init=/bin/bash` guidance).
-- **Danger:** level 3 can lock the admin out too. The UI must require an explicit confirm and
-  show the recovery procedure before enabling.
 
-> The `--tamper-max` flag on the agent and the `set_tamper_level` command toggle this. Always
-> keep the `sentinel-admin` recovery path working at every level.
+Everything in level 1 **plus**:
+
+- The polkit rule additionally denies `stop` / `disable` / `mask` of
+  `sentinel-agent.service` via `systemctl` for everyone except root and `sentinel-admin`.
+- A logind drop-in (`/etc/systemd/logind.conf.d/50-sentinel.conf`) sets `ReserveVT=0` and
+  `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
+  processes at logout. `sentinel-admin` can revert it.
+- A `boot_guidance` advisory event tells the admin to set a GRUB password, a BIOS/UEFI admin
+  password, and disable USB boot. **These are recommendations** — bootloader and firmware are
+  physical mitigations software can only advise on, never enforce.
+- **Danger:** level 3 can lock the admin out of their own machine too. The UI requires an
+  explicit confirm; keep the `sentinel-admin` account working before enabling.
+
+## Offline behavior (fail-closed)
+
+Losing sight of the server never opens the network:
+
+- **Grace window** (default 900 s, `SENTINEL_OFFLINE_GRACE_SECS`): past it, the agent emits a
+  `network_offline` event, keeps the last-known policy enforced, and re-asserts DNS + firewall
+  aggressively every tick until contact resumes (`network_online`).
+- **Offline hard-lockdown** (per-policy `lockdown.offline_lockdown_days`, `0` = disabled): a
+  device that hasn't reached the server for N *days* freezes all managed users like an admin
+  lock. The clock survives reboots — last contact is persisted as a wall-clock timestamp in
+  `/var/lib/sentinel/last_contact` — so "keep it powered off for a week, then use it offline
+  forever" doesn't work. The parent PIN still unlocks.
+
+## The escape hatches that always work
+
+Deterrence must never become a hostage situation. At every level:
+
+- **Parent PIN** (argon2 hash in the policy, never plaintext): typed into the lockout overlay
+  (grants 30 minutes), dropped via the root-only file `/run/sentinel/unlock_pin.<user>`, or
+  used with the `sentinel-agent unlock` CLI. Verification is against the hash and **fails
+  closed** — no PIN configured means no PIN unlock.
+- **`sentinel-admin`**: a local account by this name is exempt from every polkit denial
+  (power controls, and the level-3 unit-stop mask).
+- Root can always stop the agent (`systemctl stop` at level 1; at level 3 root remains
+  exempt from the polkit mask). That is by design — see the threat model.
+
+## What Sentinel does not do
+
+Claims you might expect from this category of product that we deliberately do not make:
+
+- **No binary or config signature verification.** The agent trusts what's on its own root-owned
+  disk. Self-updates verify a sha256 pinned in the server's manifest over TLS
+  (see `AGENT.md`); a v2 should pin a minisign key so binaries verify independently of the
+  transport.
+- **The NetworkManager guard is a poll, not a subscription.** It checks `nmcli` once per 10 s
+  tick. A D-Bus `StateChanged`/`DeviceRemoved` subscription with per-connection re-activation
+  is the intended upgrade.
+- **No "recovery shell killing".** Level 3 disables VT switching and surfaces bootloader
+  guidance; it does not (and cannot meaningfully) remove `init=/bin/bash`-style escapes —
+  that's what the GRUB/BIOS password guidance is for.
+- **Physical access + root wins eventually.** The design goal is that it can't win *silently*:
+  the attempt costs real effort, generates tamper events on the way, and the end state is a
+  loudly visible gone-dark device in the console — not a quietly green one.
 
 ## Zero-trust enforcement primitives (Linux)
 
-- **DNS:** agent runs a local resolver (or configures `systemd-resolved` / `dnsmasq`) that under
-  `default_deny` answers only allowlisted names (with wildcard support) and forwards them to the
-  filtered `upstream`; everything else → NXDOMAIN. `/etc/resolv.conf` is pinned & guarded.
-- **Firewall:** `nftables` ruleset, default-deny both directions, allow only policy ports +
-  established/related + loopback + the server + DNS upstream. Ruleset is re-applied on any change.
-- **Screen time / app limits:** per-user session accounting (who is active on seat), enforced by
-  freezing user processes (cgroup freezer) or ending the session when the balance hits zero,
-  after showing the lockout overlay.
+- **DNS:** a local `dnsmasq` instance; under `default_deny` it answers only allowlisted names
+  (wildcards supported), forwards them to the policy's `upstream` (must be a literal IP —
+  enforced server-side), and returns NXDOMAIN for everything else. `/etc/resolv.conf` is
+  pinned and guarded (see above).
+- **Firewall:** an `nftables` table, default-deny, allowing only policy ports +
+  established/related + loopback + the server + the DNS upstream. Applied atomically (one
+  `nft -f` transaction — a malformed rule can't leave the box with *no* table) and rebuilt
+  on drift.
+- **Screen time:** per-user session accounting from logind (seat-active sessions only; idle
+  sessions — `IdleHint=yes` — don't burn budget). At zero balance: warnings beforehand, a
+  60-second save-your-work grace, then the user's processes are frozen via the cgroup v2
+  freezer. Screen-time freezes never fall back to killing the session; only an explicit
+  admin lock may terminate as a last resort.
 
-## Remote SSH (server-brokered reverse tunnel)
+## Remote shell (server-brokered, disclosed)
 
-Devices are behind NAT, so the **agent dials out** to the server; the server brokers a shell.
+Devices sit behind NAT, so the **agent dials out** — it never opens an inbound listener,
+preserving default-deny inbound.
 
-Flow:
-1. Admin clicks **SSH** on a device → `POST /api/devices/:id/ssh`.
-2. Server allocates a `broker_port`, creates an `ssh_session` (`opening`), and enqueues an
-   `ssh_open` command `{ session_id, broker_port }`.
-3. Agent receives it over WS and opens a reverse channel back to the server (either a real
-   `ssh -R` to the broker's embedded SSH server, or a multiplexed data stream over the existing
-   WS that the server bridges to a local listener). Skeleton: multiplex a PTY over WS and expose
-   it via a server-side `ws->pty` bridge + a small `sentinel ssh <device>` CLI; document the
-   `ssh -R` production path.
-4. Server marks session `open` and returns a `connect_cmd` to the admin
-   (e.g. `ssh -p <broker_port> device@broker.sentinel.example`) or opens an in-browser terminal.
-5. `POST /api/devices/:id/ssh` again with `{ close: true }` or session idle timeout → `ssh_close`.
+1. Admin clicks **SSH** on a device → `POST /api/devices/:id/ssh` creates an `ssh_session`
+   row and enqueues an `ssh_open` command.
+2. The agent (over its existing WebSocket) spawns a PTY and bridges it to the server; the
+   admin gets an in-browser terminal (xterm.js) over `GET /api/ssh/:id/ws`.
+3. Closing the terminal (or an explicit close) tears the session down.
 
-All remote-shell sessions are **audited** (`event` rows) and only initiated by an authenticated
-admin. The agent only ever *dials out*; it never opens an inbound listener, preserving the
-firewall's default-deny inbound stance.
+The shell runs as **root** (the agent's own privilege). Two honesty properties are
+load-bearing: every session is **audited** as events, and the device's tray **discloses an
+open remote shell to the person using the machine** while it's live. Known edge: a browser
+that vanishes mid-session can leak the PTY on the agent until an explicit close — acceptable
+for single-admin family use, revisit for multi-admin.
 
 ## Device discovery
 
-`discover` command → agent scans its local subnet (ARP + a light TCP connect sweep on common
-ports) and returns found hosts as a `discovery_result` event: `{ ip, mac, hostname?, open_ports,
-vendor? }`. The control center lists them so an admin can push an enrollment token / QR to
-onboard the next device. No unsolicited scanning — only when an admin triggers it.
+The `discover` command makes the agent scan its local subnet (ARP table + a light TCP connect
+sweep on common ports) and report findings as a `discovery_result` event:
+`{ ip, mac, open_ports }` — the `hostname`/`vendor` fields exist in the shape but are
+currently never populated. Scans run only when an admin triggers one; there is no periodic
+or unsolicited scanning.

@@ -133,7 +133,18 @@ pub struct Agent {
     warned: HashMap<(String, String), chrono::NaiveDate>,
     /// Armed save-your-work countdowns (user → freeze deadline).
     pending_freeze: HashMap<String, Instant>,
+    /// Events that couldn't be delivered yet (server unreachable). Events are
+    /// the audit trail — offline tamper events are exactly the ones that
+    /// matter — so failed posts are kept (capped, oldest dropped) and retried
+    /// every tick until they land. In-memory only: a restart while offline
+    /// loses the buffer, but the outage itself stays visible server-side as
+    /// gone-dark time.
+    pending_events: Vec<Event>,
 }
+
+/// Upper bound on buffered undelivered events (oldest dropped beyond this) —
+/// a week of offline ticks must not become an unbounded allocation.
+const PENDING_EVENTS_CAP: usize = 512;
 
 impl Agent {
     pub fn new(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<Self> {
@@ -164,7 +175,28 @@ impl Agent {
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
             pending_freeze: HashMap::new(),
+            pending_events: Vec::new(),
         })
+    }
+
+    /// Deliver `fresh` events plus any earlier failures. On error the batch is
+    /// kept for the next attempt (see `pending_events`) instead of dropped.
+    async fn flush_events(&mut self, fresh: Vec<Event>) {
+        self.pending_events.extend(fresh);
+        if self.pending_events.is_empty() {
+            return;
+        }
+        if self.pending_events.len() > PENDING_EVENTS_CAP {
+            let excess = self.pending_events.len() - PENDING_EVENTS_CAP;
+            self.pending_events.drain(..excess);
+        }
+        match self.client.post_events(&self.pending_events).await {
+            Ok(()) => self.pending_events.clear(),
+            Err(e) => tracing::debug!(
+                "event post failed, {} buffered for retry: {e}",
+                self.pending_events.len()
+            ),
+        }
     }
 
     /// Record successful server contact (WS message received, or a successful
@@ -1019,7 +1051,7 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     );
 
     let boot_events = agent.bootstrap().await.unwrap_or_default();
-    let _ = agent.client.post_events(&boot_events).await;
+    agent.flush_events(boot_events).await;
 
     // Daily self-update (first check ~2 min in). No-op unless enabled and
     // running as the installed /usr/local/bin binary — see update.rs.
@@ -1072,9 +1104,12 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                for ev in agent.enforcement_tick().await {
-                    let _ = out_tx.send(AgentFrame::Event { event: ev }).await;
-                }
+                // Events go over HTTP (`flush_events`), not a WS frame: a frame
+                // pushed into a dying socket's channel is gone, while the flush
+                // buffer keeps undelivered batches and retries next tick — the
+                // same guarantee in both WS and poll mode.
+                let events = agent.enforcement_tick().await;
+                agent.flush_events(events).await;
                 // The WS bus has no HTTP heartbeat, so push usage here — otherwise
                 // screen_time_ledger only ever updates in the degraded poll path.
                 let usage = agent.usage_snapshot();
@@ -1114,9 +1149,7 @@ async fn handle_server_text(
     match frame {
         ServerFrame::Command { command } => {
             let (ack, events) = agent.handle_command(command, out_tx).await;
-            for ev in events {
-                let _ = out_tx.send(AgentFrame::Event { event: ev }).await;
-            }
+            agent.flush_events(events).await;
             let _ = out_tx.send(AgentFrame::Ack { ack }).await;
         }
         ServerFrame::SshData {
@@ -1163,7 +1196,7 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
         tokio::select! {
             _ = ticker.tick() => {
                 let events = agent.enforcement_tick().await;
-                let _ = agent.client.post_events(&events).await;
+                agent.flush_events(events).await;
             }
             _ = hb.tick() => {
                 let users = crate::sysusers::login_users();
@@ -1173,7 +1206,7 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                         agent.record_contact();
                         for cmd in resp.commands {
                             let (ack, events) = agent.handle_command(cmd, &out_tx).await;
-                            let _ = agent.client.post_events(&events).await;
+                            agent.flush_events(events).await;
                             let _ = agent.client.ack_command(&ack).await;
                         }
                         // Poll mode has no push channel: a changed policy_version
@@ -1182,7 +1215,7 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                             match agent.client.get_policy().await {
                                 Ok(bundle) => match agent.apply_bundle(bundle) {
                                     Ok(evs) => {
-                                        let _ = agent.client.post_events(&evs).await;
+                                        agent.flush_events(evs).await;
                                     }
                                     Err(e) => tracing::warn!("policy re-apply failed: {e}"),
                                 },

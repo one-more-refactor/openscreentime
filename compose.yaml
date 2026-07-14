@@ -46,6 +46,12 @@ services:
       RP_ORIGIN: ${RP_ORIGIN:?set RP_ORIGIN in .env}
       SENTINEL_PUBLIC_URL: ${SENTINEL_PUBLIC_URL:-${RP_ORIGIN}}
       BIND_ADDR: 0.0.0.0:8080
+      # This stack only ever sits behind the host's reverse proxy (the app
+      # port is loopback-published below), so default to trusting the proxy's
+      # X-Forwarded-For: without it the rate limiter keys every visitor by
+      # the proxy's own IP — one shared bucket → spurious 429 lockouts.
+      # Set 0 only if you expose the port directly (not the supported layout).
+      SENTINEL_TRUST_PROXY: ${SENTINEL_TRUST_PROXY:-1}
       # SENTINEL_INSECURE_COOKIES intentionally NOT set here — cookies stay
       # Secure in prod. Only set it in .env for local plain-http testing.
       SENTINEL_INSECURE_COOKIES: ${SENTINEL_INSECURE_COOKIES:-}

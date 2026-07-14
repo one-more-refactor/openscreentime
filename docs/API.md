@@ -12,6 +12,9 @@ with an appropriate HTTP status.
 
 Base URL in dev: `http://localhost:8080`.
 
+`GET /health` — unauthenticated liveness check → `{ "status": "ok", "service":
+"sentinel-server" }`.
+
 ---
 
 ## Auth (passkey / WebAuthn + optional OIDC SSO)
@@ -29,7 +32,7 @@ Settings page reuses the register ceremony) is always allowed.
 | POST   | `/api/auth/register/start`  | `{ email, display_name }` → `CreationChallengeResponse` |
 | POST   | `/api/auth/register/finish` | `{ email, credential }` → sets session, `{ admin }`     |
 | POST   | `/api/auth/login/start`     | `{ email }` → `RequestChallengeResponse`                |
-| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie                  |
+| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie, `{ admin }`     |
 | GET    | `/api/auth/oidc/start`      | 302 to the provider's authorize URL                     |
 | GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
 | POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
@@ -56,8 +59,13 @@ to `/login?error=sso_failed`.
 
 ### Rate limiting
 
-Fixed-window, in-memory, per client IP (first `X-Forwarded-For` value when
-`SENTINEL_TRUST_PROXY=1`, else the peer address). Over-limit requests get a 429 error envelope.
+Fixed-window, in-memory, per client IP (**last** `X-Forwarded-For` value when
+`SENTINEL_TRUST_PROXY=1`, else the peer address). A trusted reverse proxy appends the real peer
+IP to the end of XFF, so the last hop is the only element the client can't forge — keying on the
+first value would let an attacker rotate `X-Forwarded-For` per request and land each one in a
+fresh bucket, defeating the limiter entirely. Over-limit requests get a 429 error envelope.
+`SENTINEL_TRUST_PROXY` defaults to `1` in the prod compose stack (`compose.yaml`), since the
+supported deploy always sits behind the bundled reverse proxy.
 
 - auth attempt endpoints (register/login/OIDC start + finish): 10 req / 60 s / IP
 - `/agent/enroll`: 5 req / 60 s / IP
@@ -95,9 +103,9 @@ self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by 
 
 | Method | Path                          | Notes                                                        |
 |--------|-------------------------------|-------------------------------------------------------------|
-| GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users)         |
-| GET    | `/api/devices/:id`            | detail incl. device_users, recent events                    |
-| POST   | `/api/devices`                | `{ name }` → creates `pending` device + `enroll_token` (24 h TTL) |
+| GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users, per-device `online: bool`) |
+| GET    | `/api/devices/:id`            | detail incl. device_users, recent events, `online: bool`     |
+| POST   | `/api/devices`                | `{ name }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }` |
 | PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
 | POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
 | POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
@@ -139,7 +147,7 @@ close. Closing the browser WS also closes the session.
 | Method | Path                                         | Notes                              |
 |--------|----------------------------------------------|------------------------------------|
 | GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
-| POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }`                   |
+| POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }` → `{ ok: true }`  |
 | POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; parent grants extra screen time today: credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id: null }`; audited as an `earn_request` event with `action: "granted"` |
 
 ## Earn-time requests
@@ -152,9 +160,9 @@ existing pending row). Requests and decisions are audited with `earn_request` ev
 |--------|-----------------------------------|---------------------------------------------------|
 | GET    | `/api/earn-requests`              | `?status=pending` → `{ requests: [...] }` (joined with device name + user display name) |
 | POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id }` |
-| POST   | `/api/earn-requests/:id/deny`     | → `{ request }`                                   |
+| POST   | `/api/earn-requests/:id/deny`     | → `{ request }`; enqueues a `deny_earn` command `{ os_username, task_id, request_id }` so the agent clears its once-per-day dedupe and replaces the stale "WAITING FOR APPROVAL" copy with an honest answer |
 
-A request: `{ id, device_id, device_name, device_user_id, os_username, display_name, task_id,
+A request: `{ id, device_id, device_name, device_user_id, os_username, user_display_name, task_id,
 task_label, minutes, status, created_at, decided_at }` with `status` one of
 `pending | approved | denied` (409 when deciding an already-decided request).
 
@@ -163,16 +171,16 @@ task_label, minutes, status, created_at, decided_at }` with `status` one of
 | Method | Path                    | Notes                                         |
 |--------|-------------------------|-----------------------------------------------|
 | GET    | `/api/profiles`         | list (3 presets + custom)                     |
-| POST   | `/api/profiles`         | `{ name, kind:"custom", policy }`             |
+| POST   | `/api/profiles`         | `{ name, kind:"custom", policy, parent_pin? }` — `parent_pin` (string, min 4 chars) is optional; hashed server-side (Argon2) into `policy.parent_pin_hash`; omitted = no PIN |
 | GET    | `/api/profiles/:id`     |                                               |
-| PUT    | `/api/profiles/:id`     | update policy (presets are cloneable, editable)|
+| PUT    | `/api/profiles/:id`     | update policy (presets are cloneable, editable); accepts optional `parent_pin` — omitted preserves the existing hash, empty string `""` clears it, non-empty (min 4 chars) sets a new hash |
 | DELETE | `/api/profiles/:id`     | custom only                                   |
 
 ## Discovery
 
 | Method | Path                    | Notes                                                       |
 |--------|-------------------------|-------------------------------------------------------------|
-| POST   | `/api/discovery/scan`   | `{ device_id }` — ask an enrolled agent to scan its LAN     |
+| POST   | `/api/discovery/scan`   | `{ device_id }` → `{ command_id }` — ask an enrolled agent to scan its LAN |
 | GET    | `/api/discovery/results`| recent `discovery_result` events (found hosts, open ports)  |
 
 ## Events / audit
@@ -229,6 +237,11 @@ POST /agent/events
 Body: { events: [{ type, severity, device_user?, payload }] }
 → 202
 ```
+The agent posts *all* events this way, in both WS and poll mode — there is no separate "event
+delivery only over WS" path. Batches that fail to POST (server unreachable, etc.) are buffered in
+memory (`client/src/runner.rs` `flush_events`, capped) and retried on the next tick rather than
+dropped. The WS `event` frame (see below) is still accepted by the server for compatibility but is
+not how the current agent sends events.
 
 ### WebSocket bus (preferred transport)
 ```
@@ -237,8 +250,10 @@ GET /agent/ws   (Upgrade)
 Bidirectional JSON frames, tagged with `"type"`:
 
 - server → agent: `command { command }`, `ssh_data { session_id, data_b64 }`,
-  `ssh_resize { session_id, cols, rows }`, `ssh_close { session_id }`, `ping`
-- agent → server: `event { event }`, `ack { ack }`,
+  `ssh_resize { session_id, cols, rows }`, `ssh_close { session_id }`,
+  `ping` (reserved — accepted by the agent, not currently sent by the server)
+- agent → server: `event { event }` (accepted for compatibility; the agent now sends events over
+  HTTP, see below), `ack { ack }`,
   `ssh_data { session_id, data_b64 }`, `ssh_closed { session_id, exit_code? }`, `pong`
 
 `data_b64` carries base64-encoded raw terminal bytes in both directions. The agent's first
