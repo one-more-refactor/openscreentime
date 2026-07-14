@@ -150,6 +150,43 @@ async fn find_admin(db: &sqlx::PgPool, email: &str) -> AppResult<Option<(Uuid, U
 // Registration
 // ---------------------------------------------------------------------------
 
+/// Registration lockdown (docs/DEPLOY.md): once at least one admin exists the
+/// open register endpoints refuse with 403 `registration_closed`, unless
+/// `SENTINEL_OPEN_REGISTRATION=1` re-opens them. First boot (zero admins) is
+/// always open so the first parent can bootstrap the tenant.
+///
+/// Exemption: a logged-in admin adding a passkey to their OWN account (the
+/// Settings page reuses the register ceremony) is always allowed — the check
+/// passes when the request carries a valid session whose admin email matches
+/// the email being registered.
+async fn ensure_registration_allowed(st: &AppState, jar: &CookieJar, email: &str) -> AppResult<()> {
+    if std::env::var("SENTINEL_OPEN_REGISTRATION").map(|v| v == "1") == Ok(true) {
+        return Ok(());
+    }
+    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
+        .fetch_one(&st.db)
+        .await?;
+    if admins == 0 {
+        return Ok(()); // first boot: bootstrap the first admin
+    }
+    // Existing admin adding another passkey to their own account?
+    if let Some(cookie) = jar.get(SESSION_COOKIE) {
+        let session_email: Option<String> = sqlx::query_scalar(
+            "SELECT a.email FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+             WHERE s.token_hash = $1 AND s.expires_at > now()",
+        )
+        .bind(hash_token(cookie.value()))
+        .fetch_optional(&st.db)
+        .await?;
+        if session_email.as_deref() == Some(email) {
+            return Ok(());
+        }
+    }
+    Err(AppError::RegistrationClosed(
+        "registration is closed on this server — an admin already exists".into(),
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct RegisterStartReq {
     pub email: String,
@@ -164,6 +201,7 @@ pub async fn register_start(
     if req.email.trim().is_empty() {
         return Err(AppError::BadRequest("email required".into()));
     }
+    ensure_registration_allowed(&st, &jar, &req.email).await?;
 
     // A new user id for a brand-new admin; if the email already exists we reuse
     // its admin id so a second passkey attaches to the same account.
@@ -208,6 +246,10 @@ pub async fn register_finish(
     jar: CookieJar,
     Json(req): Json<RegisterFinishReq>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
+    // Re-checked here (not just in start): the two calls aren't atomic, and the
+    // finish must never mint a session after the first admin appeared in between.
+    ensure_registration_allowed(&st, &jar, &req.email).await?;
+
     let key = jar
         .get(REG_COOKIE)
         .map(|c| c.value().to_string())

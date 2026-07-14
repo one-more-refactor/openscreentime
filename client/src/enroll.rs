@@ -35,6 +35,7 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         device_token: resp.device_token,
         poll_interval_secs: resp.poll_interval_secs,
         tamper_level: 1,
+        auto_update: true,
     };
     cfg.save()?;
     tracing::info!("wrote {} (0600)", crate::config::CONFIG_PATH);

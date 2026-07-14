@@ -19,6 +19,10 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     RateLimited(String),
+    /// 403 with the stable code `registration_closed`: an admin already exists
+    /// and `SENTINEL_OPEN_REGISTRATION` isn't set (see docs/DEPLOY.md).
+    #[error("{0}")]
+    RegistrationClosed(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -31,6 +35,7 @@ impl AppError {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            AppError::RegistrationClosed(_) => (StatusCode::FORBIDDEN, "registration_closed"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

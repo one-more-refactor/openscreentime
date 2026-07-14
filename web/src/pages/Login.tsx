@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { getAuthConfig } from "../api";
+import { ApiError, getAuthConfig } from "../api";
 import { useAsync } from "../lib/useAsync";
 import { isEmail } from "../lib/validate";
 import { DotMatrix, PasskeyButton, TextInput, Button } from "../components";
@@ -44,6 +44,13 @@ export function Login() {
       else await register(email.trim(), displayName.trim() || email.trim());
       navigate("/devices", { replace: true });
     } catch (e) {
+      if (e instanceof ApiError && e.code === "registration_closed") {
+        setError(
+          "Registration is closed on this server — an admin already exists. " +
+            "Sign in instead, or ask the existing admin for access.",
+        );
+        return;
+      }
       setError(
         e instanceof Error && e.message
           ? e.message

@@ -92,6 +92,34 @@ register if these don't match what the browser sees.
 Database migrations run automatically on every server startup
 (`db::migrate` in `server/src/main.rs`) — no manual migration step needed.
 
+### First admin & registration lockdown
+
+While the database has **zero admins**, the login page's FIRST ADMIN tab is open: register
+with any email + passkey and the tenant is bootstrapped around you. From the moment the
+first admin exists, the register endpoints refuse with `403 registration_closed` — a
+public Sentinel URL can't be hijacked by whoever finds it first thereafter.
+
+To deliberately allow another *new* admin account to register, set
+`SENTINEL_OPEN_REGISTRATION=1` in the server environment, restart, let them register, then
+remove it again. (Logged-in admins can always add more passkeys to their own account via
+Settings; OIDC SSO admin matching is unaffected.)
+
+### Enrolling devices
+
+The image bundles the headless agent binary and serves an installer, so enrolling a device
+is one command (shown, pre-filled, in the web console's ADD DEVICE modal):
+
+```sh
+curl -fsSL https://sentinel.example.com/install.sh | \
+  sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://sentinel.example.com
+```
+
+It downloads the sha256-verified binary to `/usr/local/bin/sentinel-agent`, enrolls, and
+installs the systemd service. Installed agents self-update from the server daily
+(`auto_update = true` in `/etc/sentinel/agent.toml`; `SENTINEL_NO_SELF_UPDATE=1` disables;
+the previous binary is kept as `/usr/local/bin/sentinel-agent.bak` for manual rollback).
+Desktop builds with the gui/tray features are built from source — see docs/DEVELOPMENT.md.
+
 ## Updating
 
 ```sh

@@ -264,3 +264,34 @@ every 5s and renders:
 - **`lockdown.offline_lockdown_days`** (policy crate, already shipped) is now editable in the
   web PolicyEditor; the field is omitted from the serialized policy when 0 so preset JSON stays
   byte-identical.
+
+## 13. Agent distribution + self-update (2026-07-14)
+
+- **Shipped binary:** the container image builds `client/` (default features only) as a
+  true static `x86_64-unknown-linux-musl` binary and stages it under `/app/agent` with a
+  `manifest.json` (`{version, artifacts:[{target, features, url, sha256}]}`). The gui/tray
+  features (eframe/glow; ksni → libdbus-sys) link C system libraries and are NOT musl-built;
+  desktop builds come from source until CI exists. Headless is enforcement-complete.
+- **Serving:** `GET /api/agent/latest`, `GET /api/agent/download/:file` (bare-filename only,
+  traversal rejected), `GET /install.sh` — public, rate-limited 30/60 s/IP
+  (`server/src/agent_dist.rs`; installer source of truth is `server/install.sh`).
+- **Self-update (client `update.rs`):** ~2 min after startup, then daily: fetch the manifest;
+  if `version` is newer than `CARGO_PKG_VERSION` and a `x86_64-linux-musl`/`headless`
+  artifact exists, download → verify sha256 of the exact bytes → stage as
+  `/usr/local/bin/.sentinel-agent.new` → keep old as `sentinel-agent.bak` → atomic rename →
+  emit `tamper` info event `agent_updated` (old→new) → `systemctl restart sentinel-agent`
+  via `Exec` (dry-run safe). Only runs when the process IS `/usr/local/bin/sentinel-agent`
+  and the build is headless x86_64. Gates: `auto_update = true` (agent.toml, default) and
+  `SENTINEL_NO_SELF_UPDATE=1` kill switch.
+- **Trust model v1 (decided):** artifact integrity = sha256-over-TLS from the enrolled
+  server. A compromised server therefore compromises the fleet — this is ALREADY the trust
+  reality (the server can push arbitrary root commands to agents), so self-update does not
+  widen the blast radius. v2 should pin a minisign/ed25519 signing key in the agent so
+  binaries verify independently of the transport.
+- **Rollback:** systemd `Restart=` + the watchdog timer is the safety net for a broken
+  binary; `install-service` re-copies the running binary (unchanged); manual rollback:
+  `mv /usr/local/bin/sentinel-agent.bak /usr/local/bin/sentinel-agent && systemctl restart
+  sentinel-agent`.
+- **Registration lockdown:** register start/finish → 403 `registration_closed` once ≥1 admin
+  exists, unless `SENTINEL_OPEN_REGISTRATION=1`; a valid session whose admin email matches
+  the request email bypasses (Settings add-passkey flow). First boot (0 admins) stays open.
