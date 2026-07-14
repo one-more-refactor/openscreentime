@@ -162,6 +162,76 @@ pub async fn create_request(
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+pub struct CreditTimeReq {
+    pub minutes: i32,
+}
+
+/// POST /api/device-users/:id/credit-time — a parent grants extra screen time
+/// today, no earn request required. Same mechanics as an approved request:
+/// upsert today's ledger row + enqueue a `credit_time` command for the agent
+/// (`request_id: null` — there is no earn request to resolve). Audited as an
+/// `earn_request` event with `action: "granted"`.
+pub async fn credit_time(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(device_user_id): Path<Uuid>,
+    Json(req): Json<CreditTimeReq>,
+) -> AppResult<Json<Value>> {
+    if req.minutes <= 0 || req.minutes > MAX_MINUTES {
+        return Err(AppError::BadRequest(format!(
+            "minutes must be between 1 and {MAX_MINUTES}"
+        )));
+    }
+
+    // Verify the device_user belongs to a device in this tenant.
+    let owner: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT d.id, du.os_username FROM device_users du
+         JOIN devices d ON d.id = du.device_id
+         WHERE du.id = $1 AND d.tenant_id = $2",
+    )
+    .bind(device_user_id)
+    .bind(admin.tenant_id)
+    .fetch_optional(&st.db)
+    .await?;
+    let (device_id, os_username) =
+        owner.ok_or_else(|| AppError::NotFound("device user not found".into()))?;
+
+    // Credit the ledger for today (upsert on (device_user_id, day)).
+    sqlx::query(
+        "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
+         VALUES ($1, CURRENT_DATE, $2)
+         ON CONFLICT (device_user_id, day)
+         DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
+                       + EXCLUDED.earned_seconds",
+    )
+    .bind(device_user_id)
+    .bind(req.minutes * 60)
+    .execute(&st.db)
+    .await?;
+
+    enqueue_command(
+        &st,
+        device_id,
+        "credit_time",
+        json!({ "os_username": os_username, "minutes": req.minutes, "request_id": null }),
+    )
+    .await?;
+
+    events::insert(
+        &st.db,
+        admin.tenant_id,
+        Some(device_id),
+        Some(device_user_id),
+        "earn_request",
+        "info",
+        json!({ "action": "granted", "minutes": req.minutes, "by": admin.admin_id }),
+    )
+    .await?;
+
+    Ok(Json(json!({ "ok": true, "minutes": req.minutes })))
+}
+
+#[derive(Deserialize)]
 pub struct ListQuery {
     pub status: Option<String>,
 }

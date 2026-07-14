@@ -61,8 +61,7 @@ pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>
     let issuer = std::env::var("SENTINEL_OIDC_ISSUER").ok();
     let client_id = std::env::var("SENTINEL_OIDC_CLIENT_ID").ok();
     let client_secret = std::env::var("SENTINEL_OIDC_CLIENT_SECRET").ok();
-    let (Some(issuer), Some(client_id), Some(client_secret)) =
-        (issuer, client_id, client_secret)
+    let (Some(issuer), Some(client_id), Some(client_secret)) = (issuer, client_id, client_secret)
     else {
         return Ok(None);
     };

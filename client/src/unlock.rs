@@ -79,11 +79,16 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     // process — there is no in-memory state to consult).
     for user in sysusers::login_users() {
         if let Err(e) = screentime::freeze_user(exec, &user.username, false, false) {
-            tracing::debug!("unfreeze {} failed (maybe wasn't frozen): {e}", user.username);
+            tracing::debug!(
+                "unfreeze {} failed (maybe wasn't frozen): {e}",
+                user.username
+            );
         }
     }
 
-    tracing::info!("enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen");
+    tracing::info!(
+        "enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen"
+    );
     Ok(())
 }
 

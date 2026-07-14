@@ -218,3 +218,49 @@ The agent tracks last successful server contact. Beyond a grace window
 re-asserts it every loop (so nothing drifts open while the command server is unreachable), emits
 a `network_offline` tamper event once, and a `network_online` event on recovery. It does NOT
 black out all traffic — the device stays usable under its existing strict allowlist.
+
+## 12. Per-user tray companion (`sentinel-agent tray`, feature `tray`)
+
+The root agent publishes an atomically-replaced, world-readable snapshot at
+`/run/sentinel/status.json` every tick (connection state, device/user lock+freeze state,
+`remote_shell_open`, per-user used/remaining minutes). A feature-gated subcommand
+(`cargo build --features tray`, `ksni` + `notify-rust`, session bus only, **no root**) polls it
+every 5s and renders:
+
+- a StatusNotifierItem using themed freedesktop icons (`security-high` online/unlocked,
+  `security-medium` offline-within-grace, `security-low` fail-closed/locked/frozen/lockdown),
+  tooltip `TIME LEFT: NN MIN · ONLINE` (or `NO LIMIT` / `PAUSED`);
+- a read-only menu (time left, connection, `REMOTE SHELL: ACTIVE` when open) plus
+  `ABOUT SENTINEL` → notification "This device is managed. Screen time and network filtering
+  are active.";
+- desktop notifications on state **transitions only**: remaining time crossing ≤10/≤2 min,
+  pending freeze countdown, frozen on/off, fail-closed/back-online, device lock/lockdown
+  on/off, and — transparency promise — remote shell opened/closed.
+
+`install-service` best-effort drops `client/systemd/sentinel-tray.service` into
+`/etc/systemd/user/`; each desktop user opts in with `systemctl --user enable --now sentinel-tray`
+(never auto-enabled).
+
+## 12. Parent daily jobs (2026-07-14)
+
+- **Grant extra time:** `POST /api/device-users/:id/credit-time` body `{ "minutes": 1..=240 }`
+  → `{ ok, minutes }`. Same mechanics as an approved earn request: upserts today's
+  `screen_time_ledger.earned_seconds` and enqueues `credit_time`
+  `{ os_username, minutes, request_id: null }` (no earn request exists — agents already
+  tolerate a null/absent `request_id`). Audited as an `earn_request` event,
+  `payload.action = "granted"`.
+- **Enroll-token TTL + regen:** `devices.enroll_token_expires_at` (migration
+  `0004_enroll_token_ttl.sql`, additive). Tokens are issued with a 24 h TTL on create and via
+  the new `POST /api/devices/:id/enroll-token` (409 unless the device is still `pending`).
+  `/agent/enroll` rejects expired tokens like consumed ones (401).
+- **Truthful lock state:** lock/unlock responses are
+  `{ command_id, queued: true, delivered: bool }`. `devices.status` flips immediately only when
+  the command reached a live agent WS; a queued command flips the status when the agent **acks**
+  it (`lock` acked → `locked`, `unlock` acked → `online`). Web shows a "LOCK PENDING" chip
+  instead of optimistically flipping the card.
+- **Offline sweeper:** background task, every 60 s:
+  `status = 'online' AND last_seen < now() - 3 min` → `offline`. Catches dead poll-mode agents.
+  Web escalates devices offline ≥ 7 days to a red "GONE DARK Nd" badge (card + fleet strip).
+- **`lockdown.offline_lockdown_days`** (policy crate, already shipped) is now editable in the
+  web PolicyEditor; the field is omitted from the serialized policy when 0 so preset JSON stays
+  byte-identical.

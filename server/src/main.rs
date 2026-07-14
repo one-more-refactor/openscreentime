@@ -91,6 +91,31 @@ async fn main() -> anyhow::Result<()> {
         hub: Arc::new(Hub::default()),
     };
 
+    // Offline sweeper: agents on the WS bus flip to offline on disconnect, but
+    // a dead poll-mode agent would stay "online" forever. Sweep anything whose
+    // last_seen went stale ('locked' and 'pending' are left untouched).
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                match sqlx::query(
+                    "UPDATE devices SET status = 'offline'
+                     WHERE status = 'online' AND last_seen < now() - interval '3 minutes'",
+                )
+                .execute(&db)
+                .await
+                {
+                    Ok(res) => {
+                        tracing::debug!(swept = res.rows_affected(), "offline sweep");
+                    }
+                    Err(e) => tracing::warn!(error = %e, "offline sweep failed"),
+                }
+            }
+        });
+    }
+
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
         .allow_origin(
@@ -155,8 +180,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/devices/{id}/ssh", post(ssh::open_session))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
         .route(
+            "/api/devices/{id}/enroll-token",
+            post(devices::regen_enroll_token),
+        )
+        .route(
             "/api/device-users/{id}/assign-profile",
             post(devices::assign_profile),
+        )
+        .route(
+            "/api/device-users/{id}/credit-time",
+            post(earn::credit_time),
         )
         // --- SSH (browser terminal) ----------------------------------------
         .route("/api/ssh/{session_id}/ws", get(ssh::ws))

@@ -107,7 +107,11 @@ pub mod challenge {
                         '-' => a - b,
                         _ => return false,
                     };
-                    input.trim().parse::<i64>().map(|v| v == expected).unwrap_or(false)
+                    input
+                        .trim()
+                        .parse::<i64>()
+                        .map(|v| v == expected)
+                        .unwrap_or(false)
                 }
                 // No hash matched above (or none configured): the ParentPin
                 // challenge itself has no other way to verify.
@@ -134,7 +138,11 @@ pub mod challenge {
 
         #[test]
         fn math_verifies() {
-            let c = Challenge::Math { a: 7, b: 8, op: '×' };
+            let c = Challenge::Math {
+                a: 7,
+                b: 8,
+                op: '×',
+            };
             assert!(c.verify("56", None));
             assert!(!c.verify("55", None));
         }
@@ -156,7 +164,11 @@ pub mod challenge {
         #[test]
         fn pin_is_a_master_escape_on_any_challenge() {
             let hash = hash_of("9999");
-            let math = Challenge::Math { a: 2, b: 2, op: '×' };
+            let math = Challenge::Math {
+                a: 2,
+                b: 2,
+                op: '×',
+            };
             // Wrong math answer, but correct parent PIN still unlocks.
             assert!(math.verify("9999", Some(&hash)));
             let wait = Challenge::Wait { seconds: 60 };
@@ -496,10 +508,7 @@ pub mod gui {
                             // `Challenge::None` (nudge-only) verifies trivially:
                             // it grants nothing and simply closes.
                             if matches!(self.spec.challenge, Challenge::Math { .. }) {
-                                super::write_unlock_grant(
-                                    &self.spec.for_user,
-                                    GRANT_CHALLENGE_MIN,
-                                );
+                                super::write_unlock_grant(&self.spec.for_user, GRANT_CHALLENGE_MIN);
                             }
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if matches!(

@@ -90,7 +90,9 @@ pub fn render_ruleset(
         ));
     }
     if lockdown.block_doh {
-        s.push_str("    # block_doh: known public DNS-over-HTTPS resolvers (except our upstream)\n");
+        s.push_str(
+            "    # block_doh: known public DNS-over-HTTPS resolvers (except our upstream)\n",
+        );
         for ip in DOH_RESOLVERS {
             if *ip == dns_upstream {
                 continue;
@@ -156,9 +158,7 @@ pub fn apply(
     // upstream) aborts the whole load and leaves the last-known-good table in
     // place — never a window with no table (which would fail OPEN). Other tables
     // (docker, etc.) are untouched.
-    let ruleset = format!(
-        "add table inet {NFT_TABLE}\ndelete table inet {NFT_TABLE}\n{body}"
-    );
+    let ruleset = format!("add table inet {NFT_TABLE}\ndelete table inet {NFT_TABLE}\n{body}");
     exec.run_with_stdin("nft", &["-f", "-"], &ruleset)?;
     tracing::info!(
         "firewall applied: default-deny, {} outbound port(s) allowed",
@@ -184,7 +184,12 @@ mod tests {
             allow_outbound_ports: vec![53, 80, 443],
             allow_inbound_ports: vec![],
         };
-        let r = render_ruleset(&fw, &NetworkLockdown::default(), "1.1.1.2", Some("203.0.113.10"));
+        let r = render_ruleset(
+            &fw,
+            &NetworkLockdown::default(),
+            "1.1.1.2",
+            Some("203.0.113.10"),
+        );
         assert!(r.contains("hook input priority 0; policy drop"));
         assert!(r.contains("hook output priority 0; policy drop"));
         assert!(r.contains("ip daddr 1.1.1.2 accept"));
@@ -270,6 +275,9 @@ mod tests {
         let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
         let drop_pos = r.find("tcp dport 853 drop").unwrap();
         let accept_pos = r.find("ip daddr 1.1.1.2 accept").unwrap();
-        assert!(drop_pos < accept_pos, "drop rules must precede the generic accepts");
+        assert!(
+            drop_pos < accept_pos,
+            "drop rules must precede the generic accepts"
+        );
     }
 }

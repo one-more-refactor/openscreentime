@@ -11,6 +11,7 @@ import type {
   DeviceUser,
   DiscoveryResult,
   EarnRequest,
+  EnrollTokenResponse,
   Event,
   Me,
   Passkey,
@@ -448,6 +449,27 @@ export const mockPasskeys: Passkey[] = [
   { id: "k-1", nickname: "Pixel 8 fingerprint", created_at: "2026-06-01T10:05:00Z", last_used_at: "2026-07-07T09:00:00Z" },
   { id: "k-2", nickname: "YubiKey 5C", created_at: "2026-06-02T18:00:00Z", last_used_at: null },
 ];
+
+/** Mock for POST /api/device-users/:id/credit-time: bump today's earned
+ * minutes in-place so the UI reflects the grant on the next read. */
+export function mockCreditTime(deviceUserId: string, minutes: number): void {
+  for (const dev of mockDevices) {
+    const user = dev.users?.find((u) => u.id === deviceUserId);
+    if (user) {
+      user.earned_minutes_today = (user.earned_minutes_today ?? 0) + minutes;
+      return;
+    }
+  }
+}
+
+/** Mock for POST /api/devices/:id/enroll-token (pending devices only). */
+export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
+  const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
+  return {
+    device: dev,
+    enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
+  };
+}
 
 export function mockDeviceDetail(id: string): DeviceDetail {
   const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];

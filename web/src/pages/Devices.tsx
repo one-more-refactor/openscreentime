@@ -41,6 +41,9 @@ export function Devices() {
   const [ssh, setSsh] = useState<{ id: string; name: string } | null>(null);
   const [creating, setCreating] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  // Devices with a queued-but-undelivered lock command (agent offline at click
+  // time) — shown as a "LOCK PENDING" chip until the lock is applied on ack.
+  const [pendingLocks, setPendingLocks] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<Device | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -88,7 +91,39 @@ export function Devices() {
       ),
     );
     try {
-      await (lock ? lockDevice(d.id) : unlockDevice(d.id));
+      const res = await (lock ? lockDevice(d.id) : unlockDevice(d.id));
+      if (res.delivered) {
+        setPendingLocks((prev) => {
+          const next = new Set(prev);
+          next.delete(d.id);
+          return next;
+        });
+      } else {
+        // Truthful lock state: the agent is offline, the command is only
+        // queued — don't show the card as flipped yet.
+        devices.setData((prev) =>
+          (prev ?? []).map((x) =>
+            x.id === d.id ? { ...x, status: prevStatus } : x,
+          ),
+        );
+        if (lock) {
+          setPendingLocks((prev) => new Set(prev).add(d.id));
+          toast(
+            `LOCK QUEUED FOR ${d.name.toUpperCase()} — APPLIES WHEN DEVICE RECONNECTS`,
+            "warn",
+          );
+        } else {
+          setPendingLocks((prev) => {
+            const next = new Set(prev);
+            next.delete(d.id);
+            return next;
+          });
+          toast(
+            `UNLOCK QUEUED FOR ${d.name.toUpperCase()} — APPLIES WHEN DEVICE RECONNECTS`,
+            "warn",
+          );
+        }
+      }
     } catch (e) {
       // roll back
       devices.setData((prev) =>
@@ -207,6 +242,7 @@ export function Devices() {
               device={d}
               refCode={`DV-${pad2(i + 1)}`}
               busy={busyIds.has(d.id)}
+              lockPending={pendingLocks.has(d.id) && d.status !== "locked"}
               onLock={(x) => void setLockState(x, true)}
               onUnlock={(x) => void setLockState(x, false)}
               onSsh={(x) => setSsh({ id: x.id, name: x.name })}
@@ -353,7 +389,7 @@ export function Devices() {
               style={{ borderColor: "var(--line)", background: "var(--surface-2)", color: "var(--fg-dim)" }}
             >
 {`sudo ./sentinel-agent enroll \\
-  --server http://localhost:8080 \\
+  --server ${window.location.origin} \\
   --token ${enroll.enroll_token}`}
             </pre>
           </div>

@@ -159,7 +159,13 @@ pub async fn finalize_close(
     // Prefer a live WS frame; fall back to the command queue when offline.
     let frame = json!({ "type": "ssh_close", "session_id": session_id });
     if !st.hub.push(device_id, frame).await {
-        enqueue_command(st, device_id, "ssh_close", json!({ "session_id": session_id })).await?;
+        enqueue_command(
+            st,
+            device_id,
+            "ssh_close",
+            json!({ "session_id": session_id }),
+        )
+        .await?;
     }
 
     events::insert(
@@ -182,7 +188,14 @@ pub async fn close_session(
     Path(session_id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let (device_id, _status) = get_session(&st.db, session_id, admin.tenant_id).await?;
-    finalize_close(&st, admin.tenant_id, Some(admin.admin_id), session_id, device_id).await?;
+    finalize_close(
+        &st,
+        admin.tenant_id,
+        Some(admin.admin_id),
+        session_id,
+        device_id,
+    )
+    .await?;
     Ok(Json(json!({ "ok": true, "session_id": session_id })))
 }
 
@@ -197,8 +210,7 @@ pub async fn ws(
     if status != "opening" && status != "open" {
         return Err(AppError::Conflict("ssh session is not open".into()));
     }
-    Ok(upgrade
-        .on_upgrade(move |socket| handle_admin_ws(st, admin, session_id, device_id, socket)))
+    Ok(upgrade.on_upgrade(move |socket| handle_admin_ws(st, admin, session_id, device_id, socket)))
 }
 
 async fn handle_admin_ws(
@@ -216,7 +228,9 @@ async fn handle_admin_ws(
         // Bridge is gone (server restart / already torn down).
         let _ = sink
             .send(Message::Text(
-                json!({ "type": "closed", "exit_code": null }).to_string().into(),
+                json!({ "type": "closed", "exit_code": null })
+                    .to_string()
+                    .into(),
             ))
             .await;
         return;
@@ -280,8 +294,14 @@ async fn handle_admin_ws(
 
     // Browser gone (or agent ended it): make sure the session is torn down.
     if !agent_closed {
-        if let Err(e) =
-            finalize_close(&st, admin.tenant_id, Some(admin.admin_id), session_id, device_id).await
+        if let Err(e) = finalize_close(
+            &st,
+            admin.tenant_id,
+            Some(admin.admin_id),
+            session_id,
+            device_id,
+        )
+        .await
         {
             tracing::warn!(%session_id, error = %e, "ssh close after ws end failed");
         }

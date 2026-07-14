@@ -2,17 +2,20 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   assignProfile,
+  creditTime,
   deleteDevice,
   getDevice,
   listDeviceUsers,
   listProfiles,
   lockDevice,
+  regenEnrollToken,
   unlockDevice,
   updateDevice,
 } from "../api";
 import type {
   DeviceDetail as DeviceDetailT,
   DeviceUser,
+  EnrollTokenResponse,
   Profile,
   TamperLevel,
 } from "../types";
@@ -30,6 +33,7 @@ import {
   StatusLed,
   statusTone,
   Toggle,
+  TokenBlock,
 } from "../components";
 import { Empty, Loading } from "./Devices";
 import { minutesToHm, relTime } from "../lib/format";
@@ -47,9 +51,13 @@ export function DeviceDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [ssh, setSsh] = useState<{ id: string; name: string } | null>(null);
   const [lockBusy, setLockBusy] = useState(false);
+  const [lockPending, setLockPending] = useState(false);
   const [tamperBusy, setTamperBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [assignBusy, setAssignBusy] = useState<string | null>(null);
+  const [grantBusy, setGrantBusy] = useState<string | null>(null);
+  const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
+  const [enrollBusy, setEnrollBusy] = useState(false);
 
   const d = device.data;
   const profileList = profiles.data ?? [];
@@ -90,12 +98,50 @@ export function DeviceDetail() {
     setLockBusy(true);
     device.setData((p) => (p ? { ...p, status: wasLocked ? "online" : "locked" } : p));
     try {
-      await (wasLocked ? unlockDevice(d.id) : lockDevice(d.id));
+      const res = await (wasLocked ? unlockDevice(d.id) : lockDevice(d.id));
+      if (res.delivered) {
+        setLockPending(false);
+      } else {
+        // Truthful lock state: the agent is offline — the command is only
+        // queued, so keep the real status and flag the pending lock.
+        device.setData((p) => (p ? { ...p, status: prevStatus } : p));
+        setLockPending(!wasLocked);
+        toast(
+          `${wasLocked ? "UNLOCK" : "LOCK"} QUEUED — APPLIES WHEN DEVICE RECONNECTS`,
+          "warn",
+        );
+      }
     } catch (e) {
       device.setData((p) => (p ? { ...p, status: prevStatus } : p));
       toast(errMsg(e, `Couldn't ${wasLocked ? "unlock" : "lock"} ${d.name} — try again.`));
     } finally {
       setLockBusy(false);
+    }
+  }
+
+  async function onGrantTime(user: DeviceUser, minutes: number) {
+    setGrantBusy(user.id);
+    try {
+      await creditTime(user.id, minutes);
+      const who = (user.display_name ?? user.os_username).toUpperCase();
+      toast(`+${minutes} MIN GRANTED TO ${who} — APPLIES WITHIN ~10S`, "ok");
+      usage.reload();
+    } catch (e) {
+      toast(errMsg(e, "Couldn't grant extra time — try again."));
+    } finally {
+      setGrantBusy(null);
+    }
+  }
+
+  async function onShowEnroll() {
+    if (!d) return;
+    setEnrollBusy(true);
+    try {
+      setEnroll(await regenEnrollToken(d.id));
+    } catch (e) {
+      toast(errMsg(e, "Couldn't generate an enroll token — try again."));
+    } finally {
+      setEnrollBusy(false);
     }
   }
 
@@ -147,12 +193,33 @@ export function DeviceDetail() {
     <>
       <PageHeader
         title={d.name.toUpperCase()}
-        stat={<StatusLed tone={statusTone(d.status)} label={d.status} pulse />}
+        stat={
+          <span className="inline-flex items-center gap-3">
+            <StatusLed tone={statusTone(d.status)} label={d.status} pulse />
+            {lockPending && d.status !== "locked" && (
+              <span
+                className="label border rounded px-1.5 py-0.5"
+                style={{ color: "var(--warn)", borderColor: "var(--warn)" }}
+              >
+                LOCK PENDING
+              </span>
+            )}
+          </span>
+        }
         actions={
           <>
             <Button variant="ghost" onClick={() => navigate("/devices")}>
               ← BACK
             </Button>
+            {d.status === "pending" && (
+              <Button
+                variant="primary"
+                disabled={enrollBusy}
+                onClick={() => void onShowEnroll()}
+              >
+                {enrollBusy ? "GENERATING…" : "SHOW ENROLL COMMAND"}
+              </Button>
+            )}
             <Button
               variant="ghost"
               disabled={d.status !== "online" && d.status !== "locked"}
@@ -230,6 +297,23 @@ export function DeviceDetail() {
                         earned={stats?.earned_minutes_today}
                         loading={usage.loading}
                       />
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="label" style={{ color: "var(--fg-faint)" }}>
+                          GRANT TIME
+                        </span>
+                        {[15, 30, 60].map((m) => (
+                          <Button
+                            key={m}
+                            size="sm"
+                            variant="ghost"
+                            className="font-mono tabular-nums"
+                            disabled={grantBusy === u.id}
+                            onClick={() => void onGrantTime(u, m)}
+                          >
+                            +{m}
+                          </Button>
+                        ))}
+                      </div>
                     </li>
                   );
                 })}
@@ -352,6 +436,37 @@ export function DeviceDetail() {
           and history from the control center. The agent on the machine keeps running until
           it is uninstalled. This cannot be undone.
         </p>
+      </Modal>
+
+      {/* Enroll command (pending devices — token regenerated with a fresh 24 h TTL) */}
+      <Modal
+        open={!!enroll}
+        onClose={() => setEnroll(null)}
+        title="ENROLLMENT TOKEN"
+        footer={
+          <Button variant="primary" onClick={() => setEnroll(null)}>
+            DONE
+          </Button>
+        }
+      >
+        {enroll && (
+          <div className="flex flex-col gap-4">
+            <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
+              Device <span className="dot text-fg">{enroll.device.name}</span> is{" "}
+              <StatusLed tone="pending" label="PENDING" className="align-middle" />. Run the
+              agent with this single-use token (valid 24 h):
+            </p>
+            <TokenBlock token={enroll.enroll_token} />
+            <pre
+              className="text-[0.6875rem] border rounded p-3 overflow-x-auto"
+              style={{ borderColor: "var(--line)", background: "var(--surface-2)", color: "var(--fg-dim)" }}
+            >
+{`sudo ./sentinel-agent enroll \\
+  --server ${window.location.origin} \\
+  --token ${enroll.enroll_token}`}
+            </pre>
+          </div>
+        )}
       </Modal>
 
       <SshTerminal target={ssh} onClose={() => setSsh(null)} />
