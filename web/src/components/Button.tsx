@@ -9,23 +9,22 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   children: ReactNode;
 }
 
-// Mono-outline buttons. `primary` = hairline outline that inverts on hover,
-// `danger` = accent-red (used rarely, for destructive/critical actions).
+// Silkscreen buttons: mono uppercase, hairline outline that sharpens on hover.
+// `danger` = accent-red — reserved for locked/tamper/destructive actions.
 const base =
   "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
 
 const sizes: Record<Size, string> = {
   sm: "text-[0.625rem] px-2.5 py-1",
-  md: "text-[0.6875rem] px-3.5 py-2",
+  md: "text-[0.625rem] px-3.5 py-2",
 };
 
 const variants: Record<Variant, string> = {
   primary:
-    "border-line-2 text-fg bg-transparent hover:bg-fg hover:text-bg hover:border-fg",
+    "border-line-2 text-fg bg-transparent hover:border-fg disabled:hover:border-line-2",
   danger:
-    "border-accent text-accent bg-transparent hover:bg-accent hover:text-white",
-  ghost:
-    "border-transparent text-fg-dim hover:text-fg hover:border-line",
+    "border-accent-dim text-accent bg-transparent hover:border-accent disabled:hover:border-accent-dim",
+  ghost: "border-transparent text-fg-dim hover:text-fg hover:border-line",
 };
 
 export function Button({

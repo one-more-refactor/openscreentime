@@ -3,14 +3,16 @@
 @tailwind utilities;
 
 /* ============================================================================
-   DESIGN TOKENS — mirrors docs/DESIGN.md verbatim.
-   Dark is the primary theme; light mirrors it (white surfaces, black ink).
+   DESIGN TOKENS — Direction 01 "HARDWARE BAY".
+   Panels read like hardware modules: silkscreen ref-codes, registration
+   ticks, LED status language, true 5×7 dot-matrix numerals.
+   Dark is the primary theme; light = silkscreen-on-white, same language.
    Theme is chosen by [data-theme] on <html>; a prefers-color-scheme fallback
    is provided for first paint before JS runs.
    ========================================================================== */
 :root,
 :root[data-theme="dark"] {
-  /* surfaces — near-pure monochrome */
+  /* surfaces — near-pure monochrome (docs/DESIGN.md tokens, no color cast) */
   --bg: #0a0a0a;
   --surface: #141414;
   --surface-2: #1c1c1c;
@@ -22,7 +24,7 @@
   --fg-dim: #9a9a9a;
   --fg-faint: #5a5a5a;
 
-  /* the one accent — Nothing red */
+  /* the one accent — red. locked / tamper / destructive ONLY. */
   --accent: #d71921;
   --accent-dim: #7a0f13;
 
@@ -40,45 +42,31 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #f4f4f4;
+  --bg: #f5f5f5;
   --surface: #ffffff;
-  --surface-2: #ececec;
-  --line: #d6d6d6;
-  --line-2: #bcbcbc;
+  --surface-2: #ededed;
+  --line: #dadada;
+  --line-2: #c4c4c4;
 
-  --fg: #0a0a0a;
-  --fg-dim: #4a4a4a;
-  --fg-faint: #9a9a9a;
+  --fg: #111111;
+  --fg-dim: #5e5e5e;
+  --fg-faint: #9c9c9c;
 
-  --accent: #d71921;
-  --accent-dim: #f2b6b8;
-
-  --ok: #1f9d57;
-  --warn: #b8860b;
-  --crit: #d71921;
-  --idle: #b0b0b0;
-
-  --radius: 4px;
-  --dot-gap: 16px;
-  --dot-color: #d0d0d0;
+  --idle: #b3b3b3;
 }
 
 /* prefers-color-scheme fallback when no data-theme is set yet */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f4f4f4;
+    --bg: #f5f5f5;
     --surface: #ffffff;
-    --surface-2: #ececec;
-    --line: #d6d6d6;
-    --line-2: #bcbcbc;
-    --fg: #0a0a0a;
-    --fg-dim: #4a4a4a;
-    --fg-faint: #9a9a9a;
-    --accent-dim: #f2b6b8;
-    --ok: #1f9d57;
-    --warn: #b8860b;
-    --idle: #b0b0b0;
-    --dot-color: #d0d0d0;
+    --surface-2: #ededed;
+    --line: #dadada;
+    --line-2: #c4c4c4;
+    --fg: #111111;
+    --fg-dim: #5e5e5e;
+    --fg-faint: #9c9c9c;
+    --idle: #b3b3b3;
   }
 }
 
@@ -93,8 +81,10 @@
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font-family: ui-monospace, "Space Mono", "SFMono-Regular", Menlo, Consolas,
+    font-family: "Space Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas,
       monospace;
+    font-size: 13px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
@@ -120,31 +110,40 @@
 }
 
 @layer components {
-  /* Mono uppercase label — the workhorse "hardware caption" style. */
+  /* Mono uppercase label — the workhorse "silkscreen caption" style. */
   .label {
-    font-size: 0.6875rem;
+    font-size: 0.625rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--fg-dim);
     font-weight: 400;
   }
 
-  /* Dot-matrix-ish display type. No remote fonts: we lean on monospace +
-     wide tracking + slight boldness to evoke NDot's engineered look. */
+  /* Display face — Doto (variable round-dot matrix, closest free match to
+     NDot) where a full DotMatrix grid is overkill. Needs weight ≥600 to read
+     crisply at UI sizes; the dots are the point, not a bug. */
   .dot {
-    font-family: "Space Mono", ui-monospace, monospace;
+    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.06em;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 
-  /* The SENTINEL wordmark — extra tracking, dotted underline motif. */
+  /* The SENTINEL wordmark fallback (DotMatrix component is preferred). */
   .wordmark {
-    font-family: "Space Mono", ui-monospace, monospace;
+    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
     text-transform: uppercase;
-    letter-spacing: 0.42em;
-    font-weight: 700;
+    letter-spacing: 0.34em;
+    font-weight: 800;
+  }
+
+  /* Silkscreen ref-code (DV-01) — panel head, top right. */
+  .ref {
+    color: var(--fg-faint);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
   /* Dot-grid panel texture. */
@@ -159,30 +158,97 @@
     border: 1px solid var(--line);
   }
 
-  /* LED glow. */
+  /* 7px registration corner ticks — used by <Panel>. Parent: relative. */
+  .tick {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border-color: var(--line-2);
+    border-style: solid;
+    border-width: 0;
+    pointer-events: none;
+  }
+  .tick-tl { top: -1px; left: -1px; border-top-width: 1px; border-left-width: 1px; }
+  .tick-tr { top: -1px; right: -1px; border-top-width: 1px; border-right-width: 1px; }
+  .tick-bl { bottom: -1px; left: -1px; border-bottom-width: 1px; border-left-width: 1px; }
+  .tick-br { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
+
+  /* LEDs — glow via box-shadow of the LED color. */
   .led {
     display: inline-block;
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 999px;
     flex: none;
   }
   .led-glow-ok {
-    box-shadow: 0 0 6px 0 var(--ok);
+    box-shadow: 0 0 6px 0 color-mix(in srgb, var(--ok) 55%, transparent);
   }
   .led-glow-warn {
-    box-shadow: 0 0 6px 0 var(--warn);
+    box-shadow: 0 0 6px 0 color-mix(in srgb, var(--warn) 55%, transparent);
   }
   .led-glow-crit {
-    box-shadow: 0 0 7px 0 var(--crit);
+    box-shadow: 0 0 7px 0 color-mix(in srgb, var(--crit) 55%, transparent);
   }
   .led-glow-idle {
     box-shadow: none;
   }
 
-  /* Focus ring — square, mono. */
+  /* Fleet glyph strip — one cell per device (the signature). */
+  .fleet-cells {
+    display: flex;
+    gap: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .fleet-cell {
+    width: 6px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--idle);
+    flex: none;
+  }
+  .fleet-cell-ok {
+    background: var(--ok);
+    animation: breathe 3.2s ease-in-out infinite;
+  }
+  .fleet-cell-locked {
+    background: var(--accent);
+  }
+  .fleet-cell-warn {
+    background: var(--warn);
+  }
+
+  /* Dot-matrix (real 5×7 LED grids) — see <DotMatrix>. */
+  .dm {
+    display: inline-flex;
+    gap: 0.5em;
+  }
+  .dm-ch {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 1.5px;
+  }
+  .dm-ch i {
+    width: var(--dot, 4px);
+    height: var(--dot, 4px);
+    border-radius: 50%;
+    background: var(--fg-faint);
+    opacity: 0.28;
+  }
+  .dm-ch i.on {
+    background: currentColor;
+    opacity: 1;
+  }
+  .dm-glow .dm-ch i.on {
+    box-shadow: 0 0 6px color-mix(in srgb, currentColor 60%, transparent);
+  }
+
+  /* Focus ring — square, visible. */
   .focusable:focus-visible {
-    outline: 1px solid var(--fg-dim);
+    outline: 2px solid var(--fg-dim);
     outline-offset: 2px;
   }
 }
@@ -197,5 +263,23 @@
   }
 }
 .led-pulse {
-  animation: led-pulse 1.6s ease-in-out infinite;
+  animation: led-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .led-pulse,
+  .fleet-cell-ok {
+    animation: none !important;
+  }
+}
+
+/* xterm surface inside the SSH terminal modal */
+.ssh-term .xterm {
+  height: 100%;
 }

@@ -1,10 +1,12 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { SessionProvider, useSession } from "./lib/session";
+import { ToastProvider } from "./lib/toast";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
 import { Devices } from "./pages/Devices";
 import { DeviceDetail } from "./pages/DeviceDetail";
 import { Profiles } from "./pages/Profiles";
+import { Approvals } from "./pages/Approvals";
 import { Events } from "./pages/Events";
 import { Settings } from "./pages/Settings";
 import { StatusLed } from "./components";
@@ -26,6 +28,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 export function App() {
   return (
     <SessionProvider>
+      <ToastProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route
@@ -39,11 +42,13 @@ export function App() {
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/:id" element={<DeviceDetail />} />
           <Route path="/profiles" element={<Profiles />} />
+          <Route path="/approvals" element={<Approvals />} />
           <Route path="/events" element={<Events />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
         <Route path="*" element={<Navigate to="/devices" replace />} />
       </Routes>
+      </ToastProvider>
     </SessionProvider>
   );
 }

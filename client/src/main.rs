@@ -12,6 +12,7 @@ mod enforce;
 mod enroll;
 mod gamify;
 mod lockout;
+mod pin;
 mod policy;
 mod protocol;
 mod runner;
@@ -19,6 +20,10 @@ mod service;
 mod ssh;
 mod sysusers;
 mod tamper;
+#[cfg(feature = "tray")]
+mod tray;
+mod unlock;
+mod update;
 mod util;
 
 use anyhow::Result;
@@ -63,6 +68,19 @@ enum Cmd {
     InstallService,
     /// Show enrollment / service status.
     Status,
+    /// Per-user system tray companion: time left, connection state, and
+    /// remote-shell transparency. Runs as the desktop user (no root).
+    #[cfg(feature = "tray")]
+    Tray,
+    /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
+    /// (nft table + resolv.conf pin torn down, users un-frozen). Requires root.
+    Unlock {
+        #[arg(long)]
+        pin: String,
+        /// How long to suspend enforcement for, in minutes.
+        #[arg(long, default_value_t = 60)]
+        minutes: u64,
+    },
 }
 
 fn init_tracing() {
@@ -78,13 +96,45 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+
+    // Hidden internal helper spawned by `unlock` to auto-resume enforcement
+    // after the suspend window elapses. Not a real subcommand (kept out of
+    // --help / clap's Cmd enum) since it's an implementation detail, not
+    // something an operator should invoke directly.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
+        let secs: u64 = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3600);
+        return unlock::resume_after(secs);
+    }
+
+    // Hidden GUI presenter subprocess (spawned detached by the runner so the
+    // blocking egui event loop never stalls the enforcement tick). Decodes a
+    // base64 LockSpec, shows the overlay, and writes an unlock grant on a
+    // verified dismissal.
+    if raw_args.get(1).map(String::as_str) == Some("__lockout") {
+        #[cfg(feature = "gui")]
+        {
+            let b64 = raw_args.get(2).map(String::as_str).unwrap_or("");
+            return lockout::gui::run_from_b64(b64);
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("__lockout requires a build with --features gui");
+        }
+    }
+
     let cli = Cli::parse();
     let ctx = AgentCtx::new(cli.dry_run, cli.tamper_max, cli.time_accel);
 
     if cli.dry_run {
         tracing::info!("DRY-RUN: no host state will be modified");
     }
-    if !ctx.is_root && !cli.dry_run {
+    // The tray companion runs as the desktop user on purpose — no root nag.
+    #[cfg(feature = "tray")]
+    let is_tray = matches!(cli.cmd, Cmd::Tray);
+    #[cfg(not(feature = "tray"))]
+    let is_tray = false;
+    if !ctx.is_root && !cli.dry_run && !is_tray {
         tracing::warn!(
             "not running as root; enforcing subcommands will refuse (use --dry-run to simulate)"
         );
@@ -99,5 +149,8 @@ async fn main() -> Result<()> {
         }
         Cmd::InstallService => service::install_service(ctx),
         Cmd::Status => service::status(),
+        #[cfg(feature = "tray")]
+        Cmd::Tray => tray::run(),
+        Cmd::Unlock { pin, minutes } => unlock::run(&ctx, &pin, minutes),
     }
 }

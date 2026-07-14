@@ -1,8 +1,8 @@
 // ============================================================================
-// Typed API client for the Admin API (docs/API.md). Session-cookie auth via
-// `credentials: "include"`. Degrades gracefully: when the backend is
-// unreachable (dev design review with no server), reads fall back to src/mock.
-// Set VITE_USE_MOCK=1 to force mock mode; VITE_USE_MOCK=0 to disable fallback.
+// Typed API client for the Admin API (docs/API.md + docs/CONTRACT-PROD.md).
+// Session-cookie auth via `credentials: "include"`.
+// Mock mode: reads serve bundled sample data ONLY when the build runs with
+// VITE_USE_MOCK=1 (design review). Production builds never fall back silently.
 // ============================================================================
 
 import {
@@ -15,13 +15,18 @@ import {
 } from "@simplewebauthn/browser";
 
 import type {
+  ApiErrorBody,
+  AuthConfig,
   Device,
   DeviceDetail,
   DeviceUser,
   DiscoveryResult,
+  EarnRequest,
+  EarnRequestStatus,
   EnrollTokenResponse,
   Event,
   EventType,
+  LockResponse,
   Me,
   Passkey,
   Policy,
@@ -32,17 +37,21 @@ import type {
 } from "./types";
 
 import {
+  mockCreditTime,
   mockDeviceDetail,
   mockDevices,
   mockDiscovery,
+  mockRegenEnrollToken,
+  mockCreateDevice,
+  mockEarnRequests,
   mockEvents,
   mockMe,
   mockPasskeys,
   mockProfiles,
 } from "./mock";
 
-const FORCE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
-const DISABLE_MOCK = import.meta.env.VITE_USE_MOCK === "0";
+/** Design-review mode: bundled sample data instead of network reads. */
+export const usingMock = import.meta.env.VITE_USE_MOCK === "1";
 
 export class ApiError extends Error {
   code: string;
@@ -54,9 +63,6 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
-/** True when the last read fell back to bundled mock data. */
-export let usingMock = FORCE_MOCK;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -72,7 +78,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let code = "http_error";
     let message = `${res.status} ${res.statusText}`;
     try {
-      const body = await res.json();
+      const body = (await res.json()) as Partial<ApiErrorBody>;
       if (body?.error) {
         code = body.error.code ?? code;
         message = body.error.message ?? message;
@@ -87,28 +93,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/**
- * Wrap a read so that, if the network fails (backend down) and mock isn't
- * disabled, we return sample data and flip `usingMock`. Real ApiErrors from a
- * reachable server (401/404/…) propagate — only transport failures fall back.
- */
+/** Read that serves bundled sample data when (and only when) VITE_USE_MOCK=1. */
 async function read<T>(path: string, fallback: () => T, init?: RequestInit): Promise<T> {
-  if (FORCE_MOCK) {
-    usingMock = true;
-    return fallback();
-  }
-  try {
-    const value = await request<T>(path, init);
-    usingMock = false;
-    return value;
-  } catch (err) {
-    const transportFailure = !(err instanceof ApiError);
-    if (transportFailure && !DISABLE_MOCK) {
-      usingMock = true;
-      return fallback();
-    }
-    throw err;
-  }
+  if (usingMock) return fallback();
+  return request<T>(path, init);
 }
 
 // ---- Auth ------------------------------------------------------------------
@@ -143,10 +131,10 @@ export const auth = {
     return res.publicKey;
   },
 
-  async loginFinish(email: string, credential: AuthenticationResponseJSON) {
+  async loginFinish(credential: AuthenticationResponseJSON) {
     return request<void>("/api/auth/login/finish", {
       method: "POST",
-      body: JSON.stringify({ email, credential }),
+      body: JSON.stringify({ credential }),
     });
   },
 
@@ -165,9 +153,17 @@ export const auth = {
   async login(email: string) {
     const options = await this.loginStart(email);
     const credential = await startAuthentication({ optionsJSON: options });
-    return this.loginFinish(email, credential);
+    return this.loginFinish(credential);
   },
 };
+
+/** GET /api/auth/config — public; reports whether OIDC SSO is available. */
+export async function getAuthConfig(): Promise<AuthConfig> {
+  const res = await read<{ auth: AuthConfig }>("/api/auth/config", () => ({
+    auth: { oidc: true, oidc_name: "Authentik" },
+  }));
+  return res.auth;
+}
 
 // ---- Session ---------------------------------------------------------------
 
@@ -197,6 +193,7 @@ export async function getDevice(id: string): Promise<DeviceDetail> {
 }
 
 export async function createDevice(name: string): Promise<EnrollTokenResponse> {
+  if (usingMock) return mockCreateDevice(name);
   return request<EnrollTokenResponse>("/api/devices", {
     method: "POST",
     body: JSON.stringify({ name }),
@@ -214,13 +211,33 @@ export async function updateDevice(
   return res.device;
 }
 
-export async function lockDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/lock`, { method: "POST" });
+export async function lockDevice(id: string): Promise<LockResponse> {
+  if (usingMock)
+    return { command_id: "mock-cmd", queued: true, delivered: true };
+  return request<LockResponse>(`/api/devices/${id}/lock`, { method: "POST" });
 }
 
-export async function unlockDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/unlock`, { method: "POST" });
+export async function unlockDevice(id: string): Promise<LockResponse> {
+  if (usingMock)
+    return { command_id: "mock-cmd", queued: true, delivered: true };
+  return request<LockResponse>(`/api/devices/${id}/unlock`, { method: "POST" });
 }
+
+/** Regenerate the one-time enroll token for a still-pending device (24 h TTL).
+ * 409 once the device has enrolled. */
+export async function regenEnrollToken(id: string): Promise<EnrollTokenResponse> {
+  if (usingMock) return mockRegenEnrollToken(id);
+  return request<EnrollTokenResponse>(`/api/devices/${id}/enroll-token`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function deleteDevice(id: string): Promise<void> {
+  return request<void>(`/api/devices/${id}`, { method: "DELETE" });
+}
+
+// ---- SSH (contract §3) -------------------------------------------------------
 
 export async function openSsh(id: string): Promise<SshSessionResponse> {
   return request<SshSessionResponse>(`/api/devices/${id}/ssh`, {
@@ -229,15 +246,17 @@ export async function openSsh(id: string): Promise<SshSessionResponse> {
   });
 }
 
-export async function closeSsh(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/ssh`, {
+export async function closeSsh(sessionId: string): Promise<void> {
+  return request<void>(`/api/ssh/${sessionId}/close`, {
     method: "POST",
-    body: JSON.stringify({ close: true }),
+    body: JSON.stringify({}),
   });
 }
 
-export async function deleteDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}`, { method: "DELETE" });
+/** Cookie-authenticated browser terminal WebSocket URL for a session. */
+export function sshWsUrl(sessionId: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/api/ssh/${sessionId}/ws`;
 }
 
 // ---- Device users & profile assignment -------------------------------------
@@ -248,6 +267,22 @@ export async function listDeviceUsers(id: string): Promise<DeviceUser[]> {
     () => ({ users: mockDeviceDetail(id).users }),
   );
   return res.users;
+}
+
+/** Grant extra screen time today (1–240 min) to one managed user. The server
+ * credits today's ledger and pushes a `credit_time` command to the agent. */
+export async function creditTime(
+  deviceUserId: string,
+  minutes: number,
+): Promise<void> {
+  if (usingMock) {
+    mockCreditTime(deviceUserId, minutes);
+    return;
+  }
+  await request<{ ok: boolean; minutes: number }>(
+    `/api/device-users/${deviceUserId}/credit-time`,
+    { method: "POST", body: JSON.stringify({ minutes }) },
+  );
 }
 
 export async function assignProfile(
@@ -269,20 +304,25 @@ export async function listProfiles(): Promise<Profile[]> {
   return res.profiles;
 }
 
-export async function getProfile(id: string): Promise<Profile> {
-  const res = await read<{ profile: Profile }>(`/api/profiles/${id}`, () => ({
-    profile: mockProfiles.find((p) => p.id === id) ?? mockProfiles[0],
-  }));
-  return res.profile;
-}
-
+/**
+ * `parent_pin` is sent as a top-level field alongside (not inside) `policy`:
+ * absent/undefined preserves any existing hash, "" clears it, a non-empty
+ * string sets a new one. The server hashes it — the plaintext never round-
+ * trips back.
+ */
 export async function createProfile(
   name: string,
   policy: Policy,
+  parent_pin?: string,
 ): Promise<Profile> {
   const res = await request<{ profile: Profile }>("/api/profiles", {
     method: "POST",
-    body: JSON.stringify({ name, kind: "custom", policy }),
+    body: JSON.stringify({
+      name,
+      kind: "custom",
+      policy,
+      ...(parent_pin !== undefined ? { parent_pin } : {}),
+    }),
   });
   return res.profile;
 }
@@ -290,16 +330,51 @@ export async function createProfile(
 export async function updateProfile(
   id: string,
   policy: Policy,
+  parent_pin?: string,
 ): Promise<Profile> {
   const res = await request<{ profile: Profile }>(`/api/profiles/${id}`, {
     method: "PUT",
-    body: JSON.stringify({ policy }),
+    body: JSON.stringify({
+      policy,
+      ...(parent_pin !== undefined ? { parent_pin } : {}),
+    }),
   });
   return res.profile;
 }
 
 export async function deleteProfile(id: string): Promise<void> {
   return request<void>(`/api/profiles/${id}`, { method: "DELETE" });
+}
+
+// ---- Earn-time approval (contract §4) ---------------------------------------
+
+export async function listEarnRequests(
+  status?: EarnRequestStatus,
+): Promise<EarnRequest[]> {
+  const q = status ? `?status=${status}` : "";
+  const res = await read<{ requests: EarnRequest[] }>(
+    `/api/earn-requests${q}`,
+    () => ({
+      requests: mockEarnRequests.filter((r) => !status || r.status === status),
+    }),
+  );
+  return res.requests;
+}
+
+export async function approveEarnRequest(id: string): Promise<EarnRequest> {
+  const res = await request<{ request: EarnRequest }>(
+    `/api/earn-requests/${id}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return res.request;
+}
+
+export async function denyEarnRequest(id: string): Promise<EarnRequest> {
+  const res = await request<{ request: EarnRequest }>(
+    `/api/earn-requests/${id}/deny`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return res.request;
 }
 
 // ---- Discovery -------------------------------------------------------------
@@ -379,4 +454,10 @@ export async function listPasskeys(): Promise<Passkey[]> {
     passkeys: mockPasskeys,
   }));
   return res.passkeys;
+}
+
+export async function deletePasskey(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/me/passkeys/${id}`, {
+    method: "DELETE",
+  });
 }

@@ -20,9 +20,10 @@ pub struct AgentConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_tamper")]
     pub tamper_level: u8,
-    /// Optional detached signature over the config body, verified on load (TAMPER.md L1).
-    #[serde(default)]
-    pub config_sig: Option<String>,
+    /// Daily self-update from the enrolled server (see `update.rs`). On by
+    /// default; `SENTINEL_NO_SELF_UPDATE=1` also disables it at runtime.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
 }
 
 fn default_poll() -> u64 {
@@ -30,6 +31,9 @@ fn default_poll() -> u64 {
 }
 fn default_tamper() -> u8 {
     1
+}
+fn default_true() -> bool {
+    true
 }
 
 impl AgentConfig {
@@ -41,20 +45,7 @@ impl AgentConfig {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: AgentConfig = toml::from_str(&body).context("parsing agent.toml")?;
-        cfg.verify_signature(&body);
         Ok(cfg)
-    }
-
-    /// Skeleton integrity check. Production would verify a real signature over the
-    /// canonical body with the server's public key; here we log and warn on mismatch
-    /// so the hook and the `tamper` event path exist and are exercised.
-    fn verify_signature(&self, _body: &str) {
-        match &self.config_sig {
-            Some(_sig) => tracing::debug!(
-                "config signature present (skeleton: not cryptographically verified)"
-            ),
-            None => tracing::debug!("config has no signature (skeleton default)"),
-        }
     }
 
     /// Write root-owned `0600`. Best-effort perms; logs if it can't chmod (e.g. dev/non-root).

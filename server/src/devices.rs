@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::agent::enqueue_command;
+use crate::agent::{enqueue_command, enqueue_command_delivered};
 use crate::auth::gen_token;
 use crate::error::{AppError, AppResult};
 use crate::events;
@@ -111,8 +111,8 @@ pub async fn create_device(
     }
     let enroll_token = gen_token();
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO devices (tenant_id, name, enroll_token, status)
-         VALUES ($1, $2, $3, 'pending') RETURNING id",
+        "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status)
+         VALUES ($1, $2, $3, now() + interval '24 hours', 'pending') RETURNING id",
     )
     .bind(admin.tenant_id)
     .bind(&req.name)
@@ -121,6 +121,39 @@ pub async fn create_device(
     .await?;
 
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
+    Ok(Json(json!({
+        "device": device_to_json(&row),
+        "enroll_token": enroll_token,
+    })))
+}
+
+/// POST /api/devices/:id/enroll-token — regenerate the one-time enroll token
+/// (fresh 24 h TTL). Only valid while the device is still `pending`: an
+/// enrolled device already holds a bearer token and must be re-created to
+/// re-enroll.
+pub async fn regen_enroll_token(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let row = get_device_row(&st.db, id, admin.tenant_id).await?;
+    if row.6 != "pending" {
+        return Err(AppError::Conflict(
+            "device is already enrolled — enroll tokens exist only while pending".into(),
+        ));
+    }
+
+    let enroll_token = gen_token();
+    sqlx::query(
+        "UPDATE devices SET enroll_token = $1, enroll_token_expires_at = now() + interval '24 hours'
+         WHERE id = $2 AND tenant_id = $3",
+    )
+    .bind(&enroll_token)
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&st.db)
+    .await?;
+
     Ok(Json(json!({
         "device": device_to_json(&row),
         "enroll_token": enroll_token,
@@ -190,11 +223,16 @@ pub async fn lock_device(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     get_device_row(&st.db, id, admin.tenant_id).await?;
-    let cmd_id = enqueue_command(&st, id, "lock", json!({})).await?;
-    sqlx::query("UPDATE devices SET status = 'locked' WHERE id = $1")
-        .bind(id)
-        .execute(&st.db)
-        .await?;
+    // Truthful lock state: only flip status when the command actually reached
+    // a live agent. Otherwise it stays queued; the ack path in agent.rs flips
+    // the status once the device reconnects and applies the lock.
+    let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "lock", json!({})).await?;
+    if delivered {
+        sqlx::query("UPDATE devices SET status = 'locked' WHERE id = $1")
+            .bind(id)
+            .execute(&st.db)
+            .await?;
+    }
     events::insert(
         &st.db,
         admin.tenant_id,
@@ -202,10 +240,12 @@ pub async fn lock_device(
         None,
         "lock",
         "warn",
-        json!({ "by": admin.admin_id }),
+        json!({ "by": admin.admin_id, "delivered": delivered }),
     )
     .await?;
-    Ok(Json(json!({ "command_id": cmd_id })))
+    Ok(Json(
+        json!({ "command_id": cmd_id, "queued": true, "delivered": delivered }),
+    ))
 }
 
 pub async fn unlock_device(
@@ -214,11 +254,14 @@ pub async fn unlock_device(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     get_device_row(&st.db, id, admin.tenant_id).await?;
-    let cmd_id = enqueue_command(&st, id, "unlock", json!({})).await?;
-    sqlx::query("UPDATE devices SET status = 'online' WHERE id = $1")
-        .bind(id)
-        .execute(&st.db)
-        .await?;
+    // Mirror of lock: status flips immediately only on live delivery, else on ack.
+    let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "unlock", json!({})).await?;
+    if delivered {
+        sqlx::query("UPDATE devices SET status = 'online' WHERE id = $1")
+            .bind(id)
+            .execute(&st.db)
+            .await?;
+    }
     events::insert(
         &st.db,
         admin.tenant_id,
@@ -226,21 +269,36 @@ pub async fn unlock_device(
         None,
         "unlock",
         "info",
-        json!({ "by": admin.admin_id }),
+        json!({ "by": admin.admin_id, "delivered": delivered }),
     )
     .await?;
-    Ok(Json(json!({ "command_id": cmd_id })))
+    Ok(Json(
+        json!({ "command_id": cmd_id, "queued": true, "delivered": delivered }),
+    ))
 }
 
 // --- Device users -----------------------------------------------------------
 
-type DeviceUserRow = (Uuid, Uuid, String, Option<String>, Uuid, String, String);
+type DeviceUserRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    Uuid,
+    String,
+    String,
+    i32,
+    i32,
+);
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
     let rows: Vec<DeviceUserRow> = sqlx::query_as(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
-                p.name, p.kind \
+                p.name, p.kind, \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0) \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
+         LEFT JOIN screen_time_ledger l \
+                ON l.device_user_id = du.id AND l.day = CURRENT_DATE \
          WHERE du.device_id = $1 ORDER BY du.os_username",
     )
     .bind(device_id)
@@ -257,6 +315,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "profile_id": r.4,
                 "profile_name": r.5,
                 "profile_kind": r.6,
+                "used_minutes_today": r.7 / 60,
+                "earned_minutes_today": r.8 / 60,
             })
         })
         .collect();

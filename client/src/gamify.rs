@@ -15,9 +15,8 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct Nudge {
     pub kind: String,
-    /// Overlay copy for the nudge; the GUI presenter that renders it is not
-    /// wired in the skeleton (runner only forwards `kind` in streak events).
-    #[allow(dead_code)]
+    /// Overlay copy for the nudge, broadcast headless-style by
+    /// `lockout::present_nudge` (the runner also forwards `kind` in streak events).
     pub copy: String,
 }
 
@@ -44,8 +43,8 @@ pub fn nudges_for(policy: &Policy) -> Vec<Nudge> {
 /// Earn-time task offer shown on the lockout screen ("EARN 15 MIN — READ FOR 20").
 #[derive(Debug, Clone)]
 pub struct EarnOffer {
-    /// Task id, needed once completion/approval acks are wired (see `earned_event`).
-    #[allow(dead_code)]
+    /// Task id: the dedupe key for the once-per-day auto earn-request
+    /// (`runner::Agent::auto_request_earn`) and the payload sent to the server.
     pub id: String,
     pub label: String,
     pub reward_minutes: u32,
@@ -66,10 +65,9 @@ pub fn earn_offers(g: &Gamification) -> Vec<EarnOffer> {
         .collect()
 }
 
-/// Event to emit when a task is completed & approved. The approval trigger
-/// (parent/PIN confirmation that the task was really done) is not wired in the
-/// skeleton — see README "what's stubbed" — so this is exercised only by tests.
-#[allow(dead_code)]
+/// Event to emit when a task is completed & approved — i.e. when the runner
+/// handles a `credit_time` command after an admin approves an earn-request
+/// (CONTRACT-PROD.md §4).
 pub fn earned_event(user: &str, task_id: &str, minutes: u32) -> Event {
     Event::new(
         EV_SCREEN_TIME_EARNED,

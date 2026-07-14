@@ -1,8 +1,7 @@
 // ============================================================================
 // Sample data so the UI renders standalone (no backend). Mirrors the preset
-// policies in docs/PROFILES.md verbatim. The API client falls back to this
-// whenever a request fails (backend down) so the control center is reviewable
-// as a pure front-end artifact.
+// policies in docs/PROFILES.md verbatim. Served by the API client ONLY when
+// the build runs with VITE_USE_MOCK=1 (design review).
 // ============================================================================
 
 import type {
@@ -11,6 +10,8 @@ import type {
   DeviceDetail,
   DeviceUser,
   DiscoveryResult,
+  EarnRequest,
+  EnrollTokenResponse,
   Event,
   Me,
   Passkey,
@@ -21,7 +22,7 @@ import type {
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
-export const kidsPolicy: Policy = {
+const kidsPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -62,9 +63,17 @@ export const kidsPolicy: Policy = {
     lockout: { enabled: true, unlock_challenge: "math" },
     streaks: { enabled: true, nudges: ["bedtime", "breaks"] },
   },
+  lockdown: {
+    force_dns: true,
+    block_doh: true,
+    block_dot: true,
+    block_tor: true,
+    block_vpn: true,
+  },
+  parent_pin_hash: "$argon2id$v=19$m=19456,t=2,p=1$mockmockmockmock$mockmockmockmockmockmockmockmock",
 };
 
-export const teenPolicy: Policy = {
+const teenPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -105,7 +114,7 @@ export const teenPolicy: Policy = {
   },
 };
 
-export const defaultPolicy: Policy = {
+const defaultPolicy: Policy = {
   version: 1,
   dns: {
     mode: "default_deny",
@@ -185,6 +194,8 @@ function du(
   os_username: string,
   display_name: string | null,
   profile_id: string,
+  used_minutes_today = 0,
+  earned_minutes_today = 0,
 ): DeviceUser {
   return {
     id,
@@ -192,6 +203,8 @@ function du(
     os_username,
     display_name,
     profile_id,
+    used_minutes_today,
+    earned_minutes_today,
     created_at: "2026-06-10T08:00:00Z",
   };
 }
@@ -210,8 +223,8 @@ export const mockDevices: Device[] = [
     last_seen: "2026-07-07T14:58:12Z",
     created_at: "2026-06-10T08:00:00Z",
     users: [
-      du("u-mia", "d-livingroom", "mia", "Mia", "p-kids"),
-      du("u-leo", "d-livingroom", "leo", "Leo", "p-teen"),
+      du("u-mia", "d-livingroom", "mia", "Mia", "p-kids", 48, 15),
+      du("u-leo", "d-livingroom", "leo", "Leo", "p-teen", 96, 0),
     ],
   },
   {
@@ -226,7 +239,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: "2026-07-07T14:40:03Z",
     created_at: "2026-06-12T18:20:00Z",
-    users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen")],
+    users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen", 120, 20)],
   },
   {
     id: "d-loft",
@@ -353,7 +366,7 @@ export const mockDiscovery: DiscoveryResult = {
   ],
 };
 
-export const mockAdmin: Admin = {
+const mockAdmin: Admin = {
   id: "a-1",
   tenant_id: TENANT_ID,
   email: "parent@home.lan",
@@ -361,7 +374,7 @@ export const mockAdmin: Admin = {
   created_at: "2026-06-01T10:00:00Z",
 };
 
-export const mockTenant: Tenant = {
+const mockTenant: Tenant = {
   id: TENANT_ID,
   name: "Home",
   created_at: "2026-06-01T10:00:00Z",
@@ -369,10 +382,118 @@ export const mockTenant: Tenant = {
 
 export const mockMe: Me = { admin: mockAdmin, tenant: mockTenant };
 
+export const mockEarnRequests: EarnRequest[] = [
+  {
+    id: "er-1",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-mia",
+    os_username: "mia",
+    task_id: "reading",
+    task_label: "Read for 20 min",
+    minutes: 15,
+    status: "pending",
+    created_at: "2026-07-07T14:02:11Z",
+    decided_at: null,
+    device_name: "Living Room PC",
+    user_display_name: "Mia",
+  },
+  {
+    id: "er-2",
+    tenant_id: TENANT_ID,
+    device_id: "d-studio",
+    device_user_id: "u-noah",
+    os_username: "noah",
+    task_id: "homework",
+    task_label: "Finish homework",
+    minutes: 20,
+    status: "pending",
+    created_at: "2026-07-07T13:45:00Z",
+    decided_at: null,
+    device_name: "Studio Laptop",
+    user_display_name: "Noah",
+  },
+  {
+    id: "er-3",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-leo",
+    os_username: "leo",
+    task_id: "chores",
+    task_label: "Finish chores",
+    minutes: 15,
+    status: "approved",
+    created_at: "2026-07-06T16:20:00Z",
+    decided_at: "2026-07-06T16:24:30Z",
+    device_name: "Living Room PC",
+    user_display_name: "Leo",
+  },
+  {
+    id: "er-4",
+    tenant_id: TENANT_ID,
+    device_id: "d-livingroom",
+    device_user_id: "u-mia",
+    os_username: "mia",
+    task_id: "reading",
+    task_label: "Read for 20 min",
+    minutes: 15,
+    status: "denied",
+    created_at: "2026-07-05T19:02:00Z",
+    decided_at: "2026-07-05T19:10:12Z",
+    device_name: "Living Room PC",
+    user_display_name: "Mia",
+  },
+];
+
 export const mockPasskeys: Passkey[] = [
   { id: "k-1", nickname: "Pixel 8 fingerprint", created_at: "2026-06-01T10:05:00Z", last_used_at: "2026-07-07T09:00:00Z" },
   { id: "k-2", nickname: "YubiKey 5C", created_at: "2026-06-02T18:00:00Z", last_used_at: null },
 ];
+
+/** Mock for POST /api/device-users/:id/credit-time: bump today's earned
+ * minutes in-place so the UI reflects the grant on the next read. */
+export function mockCreditTime(deviceUserId: string, minutes: number): void {
+  for (const dev of mockDevices) {
+    const user = dev.users?.find((u) => u.id === deviceUserId);
+    if (user) {
+      user.earned_minutes_today = (user.earned_minutes_today ?? 0) + minutes;
+      return;
+    }
+  }
+}
+
+/** Mock for POST /api/devices — creates a pending device + one-time token. */
+export function mockCreateDevice(name: string): EnrollTokenResponse {
+  const id = `mock-dev-${mockDevices.length + 1}`;
+  const dev: Device = {
+    id,
+    tenant_id: TENANT_ID,
+    name,
+    hostname: "",
+    os: "",
+    agent_version: "",
+    status: "pending",
+    tamper_level: 1,
+    public_ip: null,
+    last_seen: null,
+    created_at: new Date().toISOString(),
+    users: [],
+  };
+  mockDevices.push(dev);
+  return {
+    device: dev,
+    enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
+  };
+}
+
+/** Mock for POST /api/devices/:id/enroll-token (pending devices only). */
+export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
+  const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
+  return {
+    device: dev,
+    enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
+  };
+}
 
 export function mockDeviceDetail(id: string): DeviceDetail {
   const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];

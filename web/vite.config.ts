@@ -12,6 +12,7 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:8080",
         changeOrigin: true,
+        ws: true, // SSH terminal WebSocket (/api/ssh/:id/ws)
       },
       "/agent": {
         target: "http://localhost:8080",

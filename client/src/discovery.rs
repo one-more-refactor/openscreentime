@@ -91,7 +91,7 @@ pub async fn run() -> Event {
                 mac: mac.clone(),
                 hostname: None,
                 open_ports: open,
-                vendor: mac.as_deref().map(oui_vendor).unwrap_or(None),
+                vendor: None,
             });
         }
     }
@@ -127,17 +127,6 @@ pub async fn run() -> Event {
 
     tracing::info!("discovery: {} host(s) found", hosts.len());
     Event::new(EV_DISCOVERY_RESULT, SEV_INFO, json!({ "hosts": hosts }))
-}
-
-/// Trivial OUI → vendor stub (first three MAC octets). Real build ships an OUI DB.
-fn oui_vendor(mac: &str) -> Option<String> {
-    let prefix = mac.get(0..8)?.to_uppercase();
-    let vendor = match prefix.as_str() {
-        "B8:27:EB" | "DC:A6:32" | "E4:5F:01" => "Raspberry Pi",
-        "F0:18:98" | "A4:83:E7" | "AC:BC:32" => "Apple",
-        _ => return None,
-    };
-    Some(vendor.to_string())
 }
 
 #[cfg(test)]

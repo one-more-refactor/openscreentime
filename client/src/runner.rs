@@ -15,12 +15,74 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 /// How often the enforcement tick runs (screen-time accounting granularity).
 const TICK: Duration = Duration::from_secs(10);
+
+/// Save-your-work countdown between "the lock decision fired" and the actual
+/// cgroup freeze. A freeze with zero warning looks exactly like a kernel hang
+/// and can eat unsaved work — never again. Admin locks stay immediate.
+const FREEZE_GRACE: Duration = Duration::from_secs(60);
+
+/// Minutes granted when a parent PIN arrives via the headless file-drop
+/// override (`/run/sentinel/unlock_pin.<user>`), matching the GUI's PIN grant.
+const PIN_OVERRIDE_GRANT_MIN: u32 = 30;
+
+/// Default fail-closed offline grace period: how long the agent tolerates no
+/// server contact (WS message or successful poll/heartbeat) before treating
+/// itself as offline-beyond-grace. Overridable via `SENTINEL_OFFLINE_GRACE_SECS`
+/// (no new Cargo dependency — plain env var).
+const DEFAULT_OFFLINE_GRACE_SECS: u64 = 900;
+
+fn offline_grace_from_env() -> Duration {
+    let secs = std::env::var("SENTINEL_OFFLINE_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_OFFLINE_GRACE_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
+/// tampering with it requires root, at which point the game is over anyway).
+const LAST_CONTACT_PATH: &str = "/var/lib/sentinel/last_contact";
+
+/// Load the persisted last-contact wall-clock. A fresh install (no file) gets
+/// `now` — the hard-lockdown clock starts at first run, it doesn't punish a
+/// brand-new device for history it doesn't have.
+fn load_last_contact_wall() -> chrono::DateTime<chrono::Utc> {
+    std::fs::read_to_string(LAST_CONTACT_PATH)
+        .ok()
+        .and_then(|s| s.trim().parse::<chrono::DateTime<chrono::Utc>>().ok())
+        .unwrap_or_else(chrono::Utc::now)
+}
+
+fn save_last_contact_wall(ts: chrono::DateTime<chrono::Utc>) {
+    let path = std::path::Path::new(LAST_CONTACT_PATH);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(path, ts.to_rfc3339()) {
+        tracing::debug!("could not persist last-contact timestamp: {e}");
+    }
+}
+
+/// Server-contact state (TAMPER.md fail-closed offline decision): grace period,
+/// then keep the last-known policy fully (and aggressively) enforced — never a
+/// hard network blackout, since the device must stay usable under its existing
+/// strict allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactState {
+    /// Heard from the server within the last tick.
+    Online,
+    /// No contact for a while, but still within the grace window — not alarming.
+    OfflineWithinGrace,
+    /// Grace period exceeded: emit one alert, re-assert the last-known policy
+    /// every loop so nothing drifts open while the command server is unreachable.
+    OfflineFailClosed,
+}
 
 pub struct Agent {
     ctx: Arc<AgentCtx>,
@@ -41,6 +103,36 @@ pub struct Agent {
     policy_version: String,
     /// Expected wall-clock at the next tick (clock-skew / time-tamper detection).
     expected_wall: Option<chrono::DateTime<chrono::Utc>>,
+    /// (os_username, task_id) → the local date an earn-request was already sent,
+    /// so the headless auto-request doesn't spam the server more than once a day
+    /// (CONTRACT-PROD.md §4 — the server also dedupes, this just avoids the noise).
+    requested_earn: HashMap<(String, String), chrono::NaiveDate>,
+    /// Last time the agent successfully reached the server (WS message received
+    /// or a successful poll/heartbeat) — the fail-closed offline grace clock.
+    last_contact: Instant,
+    /// Current offline/online contact state (see `ContactState`).
+    contact_state: ContactState,
+    /// Configured grace period before we consider ourselves offline-beyond-grace.
+    offline_grace: Duration,
+    /// Wall-clock of the last successful server contact, persisted to disk so
+    /// the offline hard-lockdown threshold (days!) survives reboots — `Instant`
+    /// can't, and a device that's been cut off for a week has certainly
+    /// rebooted. Loaded at startup, saved (throttled) on contact.
+    last_contact_wall: chrono::DateTime<chrono::Utc>,
+    /// Last time `last_contact_wall` was flushed to disk (write throttle).
+    last_contact_saved: Instant,
+    /// Whether the offline hard-lockdown (policy `offline_lockdown_days`
+    /// exceeded) is currently engaged — freezes all users like an admin lock;
+    /// the parent PIN still always unlocks.
+    offline_hard_lockdown: bool,
+    /// Verified-unlock grace windows (user → expiry). Fed by overlay grants and
+    /// the parent-PIN file override; while active, the user is treated as
+    /// within policy (screen-time AND admin lock — the parent always wins).
+    unlock_until: HashMap<String, Instant>,
+    /// Pre-lockout warnings already shown today: (user, kind) → local date.
+    warned: HashMap<(String, String), chrono::NaiveDate>,
+    /// Armed save-your-work countdowns (user → freeze deadline).
+    pending_freeze: HashMap<String, Instant>,
 }
 
 impl Agent {
@@ -62,7 +154,125 @@ impl Agent {
             sessions: HashMap::new(),
             policy_version: String::new(),
             expected_wall: None,
+            requested_earn: HashMap::new(),
+            last_contact: Instant::now(),
+            contact_state: ContactState::Online,
+            offline_grace: offline_grace_from_env(),
+            last_contact_wall: load_last_contact_wall(),
+            last_contact_saved: Instant::now(),
+            offline_hard_lockdown: false,
+            unlock_until: HashMap::new(),
+            warned: HashMap::new(),
+            pending_freeze: HashMap::new(),
         })
+    }
+
+    /// Record successful server contact (WS message received, or a successful
+    /// poll/heartbeat). Resets the fail-closed offline clock and (throttled)
+    /// persists the wall-clock for the reboot-surviving hard-lockdown timer.
+    fn record_contact(&mut self) {
+        self.last_contact = Instant::now();
+        self.last_contact_wall = chrono::Utc::now();
+        if self.last_contact_saved.elapsed() > Duration::from_secs(60) {
+            self.last_contact_saved = Instant::now();
+            save_last_contact_wall(self.last_contact_wall);
+        }
+    }
+
+    /// The device-wide offline hard-lockdown threshold: the strictest (smallest
+    /// non-zero) `lockdown.offline_lockdown_days` across all managed users.
+    /// 0 = feature off.
+    fn offline_lockdown_days(&self) -> u32 {
+        self.policies
+            .values()
+            .map(|p| p.lockdown.offline_lockdown_days)
+            .filter(|d| *d > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Escalation past the fail-closed grace: a device that hasn't reached the
+    /// command server for `offline_lockdown_days` DAYS is treated as tampered-
+    /// with (SIM pulled, DNS blackholed, firewall boxed…) and freezes every
+    /// user like an admin lock. The parent PIN always unlocks — a dead VPS can
+    /// never permanently brick the family's laptop.
+    fn offline_hard_lockdown_check(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        let days = self.offline_lockdown_days();
+        let engaged =
+            days > 0 && (chrono::Utc::now() - self.last_contact_wall).num_days() >= i64::from(days);
+        if engaged && !self.offline_hard_lockdown {
+            events.push(tamper::tamper_event(
+                "offline_hard_lockdown",
+                SEV_CRITICAL,
+                &format!(
+                    "no server contact since {} (threshold {days}d) — device locked; \
+                     the parent PIN unlocks",
+                    self.last_contact_wall.format("%Y-%m-%d %H:%M UTC")
+                ),
+            ));
+        } else if !engaged && self.offline_hard_lockdown {
+            events.push(tamper::tamper_event(
+                "offline_hard_lockdown_lifted",
+                SEV_INFO,
+                "server contact resumed — offline hard-lockdown lifted",
+            ));
+        }
+        self.offline_hard_lockdown = engaged;
+        events
+    }
+
+    /// Fail-closed offline check: once `offline_grace` has elapsed since the
+    /// last successful server contact, emit a `network_offline` tamper event
+    /// (once per offline episode) and aggressively re-assert the last-known
+    /// network policy every tick so nothing drifts open while the command
+    /// server is unreachable. Never blacks out traffic — the device stays
+    /// usable under its existing strict allowlist. Emits `network_online` once
+    /// when contact resumes after having exceeded the grace period.
+    fn offline_grace_check(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        let elapsed = self.last_contact.elapsed();
+        if elapsed > self.offline_grace {
+            if self.contact_state != ContactState::OfflineFailClosed {
+                events.push(tamper::tamper_event(
+                    "network_offline",
+                    SEV_WARN,
+                    &format!(
+                        "no server contact for {}s (grace {}s exceeded); re-asserting \
+                         last-known policy every loop — fail-closed, not a blackout",
+                        elapsed.as_secs(),
+                        self.offline_grace.as_secs()
+                    ),
+                ));
+            }
+            self.contact_state = ContactState::OfflineFailClosed;
+            // Aggressively re-assert the last-known policy (dns + firewall +
+            // resolv pin) so nothing drifts open while unreachable.
+            let effective = self.effective_network_policy();
+            let server_host = crate::client::server_host(&self.cfg.server_url);
+            if let Err(e) = enforce::apply_network_policy(
+                self.ctx.clone(),
+                &self.exec,
+                server_host.as_deref(),
+                &effective,
+            ) {
+                tracing::warn!("offline fail-closed policy re-assert failed: {e}");
+            }
+        } else {
+            if self.contact_state == ContactState::OfflineFailClosed {
+                events.push(tamper::tamper_event(
+                    "network_online",
+                    SEV_INFO,
+                    "server contact resumed after exceeding the offline grace period",
+                ));
+            }
+            self.contact_state = if elapsed <= TICK {
+                ContactState::Online
+            } else {
+                ContactState::OfflineWithinGrace
+            };
+        }
+        events
     }
 
     /// Boot-time enforcement: tamper hardening + initial policy pull + apply.
@@ -77,7 +287,10 @@ impl Agent {
         tamper::touch_heartbeat(&self.exec);
 
         match self.client.get_policy().await {
-            Ok(bundle) => events.extend(self.apply_bundle(bundle)?),
+            Ok(bundle) => {
+                self.record_contact();
+                events.extend(self.apply_bundle(bundle)?)
+            }
             Err(e) => tracing::warn!("initial policy pull failed ({e}); will retry on tick"),
         }
         Ok(events)
@@ -97,12 +310,16 @@ impl Agent {
         }
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
+        let server_host = crate::client::server_host(&self.cfg.server_url);
         enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
-            &self.cfg.server_url,
+            server_host.as_deref(),
             &effective,
         )?;
+        // Best-effort cache so `sentinel-agent unlock` can work without a live
+        // agent process or server connection (parent PIN + recovery teardown).
+        crate::policy::save_cache(&effective);
         tracing::info!(
             "policy v{} applied for {} user(s)",
             self.policy_version,
@@ -135,7 +352,20 @@ impl Agent {
 
     /// The periodic enforcement tick: screen-time accounting + lockout + tamper
     /// re-assertion + heartbeat. Returns events to emit.
-    fn enforcement_tick(&mut self) -> Vec<Event> {
+    /// Per-user usage snapshot for the ledger (CONTRACT-PROD.md §5), keyed on the
+    /// users we hold policy for. Shared by the WS `heartbeat` frame and the poll
+    /// HTTP heartbeat so both paths report identically.
+    fn usage_snapshot(&self) -> Vec<crate::client::UsageReport> {
+        self.policies
+            .keys()
+            .map(|u| crate::client::UsageReport {
+                os_username: u.clone(),
+                used_minutes_today: self.tracker.used_minutes(u),
+            })
+            .collect()
+    }
+
+    async fn enforcement_tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         tamper::touch_heartbeat(&self.exec);
 
@@ -153,6 +383,30 @@ impl Agent {
 
         // Tamper re-assertion (resolv.conf / nft drift, NM disconnect).
         events.extend(tamper::reassert_all(&self.exec));
+
+        // reassert_all flags a missing nft table (critical event) but can't
+        // rebuild it — it has no policy. Repair it here with the effective
+        // policy so a flush/delete can't leave the device with NO firewall
+        // (fail-open) until the next full policy apply.
+        if enforce::firewall::table_missing(&self.exec) && !self.exec.dry_run() {
+            let effective = self.effective_network_policy();
+            let server_host = crate::client::server_host(&self.cfg.server_url);
+            match enforce::apply_network_policy(
+                self.ctx.clone(),
+                &self.exec,
+                server_host.as_deref(),
+                &effective,
+            ) {
+                Ok(()) => tracing::info!("nft table was missing — re-applied firewall"),
+                Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
+            }
+        }
+
+        // Fail-closed offline grace: alert + aggressively re-assert last-known
+        // policy once we've gone too long without hearing from the server.
+        events.extend(self.offline_grace_check());
+        // …and the days-scale escalation on top of it (policy-configurable).
+        events.extend(self.offline_hard_lockdown_check());
         if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
             events.push(ev);
         }
@@ -168,67 +422,347 @@ impl Agent {
         for user in users {
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
             let is_active = active.contains(&user);
-            let lock = if is_active {
+            let currently_frozen = self.frozen.contains(&user);
+
+            // 1) Consume verified unlocks FIRST — every tick, every user,
+            // frozen or not. (The old code only consulted the override on the
+            // freeze-transition tick, so once a user was frozen a parent
+            // standing at the machine could never get them out.) Two sources:
+            //   * an overlay grant (GUI already verified PIN/challenge), and
+            //   * the headless parent-PIN file drop (verified here).
+            let granted: Option<(u32, &str)> = if let Some(mins) = lockout::take_unlock_grant(&user)
+            {
+                Some((mins, "lockout-screen unlock"))
+            } else {
+                let spec = LockSpec::from_lockout(
+                    &Default::default(),
+                    "",
+                    "",
+                    &user,
+                    policy.parent_pin_hash.clone(),
+                );
+                lockout::check_and_consume_pin_override(&self.exec, &spec)
+                    .then_some((PIN_OVERRIDE_GRANT_MIN, "parent PIN"))
+            };
+            if let Some((mins, source)) = granted {
+                self.unlock_until.insert(
+                    user.clone(),
+                    Instant::now() + Duration::from_secs(u64::from(mins) * 60),
+                );
+                self.pending_freeze.remove(&user);
+                if currently_frozen {
+                    if let Err(e) = screentime::freeze_user(&self.exec, &user, false, false) {
+                        tracing::warn!("unfreeze {user} (verified unlock) failed: {e}");
+                    }
+                    self.frozen.remove(&user);
+                }
+                events.push(tamper::tamper_event(
+                    "parent_pin_override",
+                    SEV_INFO,
+                    &format!("{user} was unlocked for {mins} min via {source}"),
+                ));
+                continue;
+            }
+
+            // 2) An active grace window suspends enforcement for this user —
+            // including a whole-device admin lock (the parent always wins).
+            let in_grace = self
+                .unlock_until
+                .get(&user)
+                .is_some_and(|t| *t > Instant::now());
+            if !in_grace {
+                self.unlock_until.remove(&user);
+            }
+
+            let lock = if is_active && !in_grace {
                 screentime::evaluate(&policy, &self.tracker, &user)
             } else {
                 None
             };
+            if lock.is_none() {
+                // Lock reason cleared while a save-your-work countdown was
+                // armed (e.g. time credited): disarm it.
+                self.pending_freeze.remove(&user);
+            }
 
-            match (lock, self.frozen.contains(&user)) {
-                (Some(reason), false) => {
-                    // New lockout: show overlay, then freeze.
-                    let mut spec = LockSpec::from_lockout(
-                        &policy.gamification.lockout,
-                        &reason.headline(),
-                        &reason.detail(),
-                        &user,
-                    );
-                    // Offer an earn-time task as the primary action when the user
-                    // ran out of daily minutes (Duolingo-style: earn your way back).
-                    if matches!(reason, screentime::LockReason::DailyLimit { .. }) {
-                        if let Some(offer) =
-                            gamify::earn_offers(&policy.gamification).into_iter().next()
-                        {
-                            spec.action =
-                                format!("EARN {} MIN — {}", offer.reward_minutes, offer.label);
+            // 3) Pre-lockout warnings — the teen must never be surprised by a
+            // freeze. Fires while still within policy.
+            if is_active && !currently_frozen && !self.device_locked && lock.is_none() && !in_grace
+            {
+                self.maybe_warn(&user, &policy, &mut events);
+            }
+
+            let effective_device_locked =
+                (self.device_locked || self.offline_hard_lockdown) && !in_grace;
+            match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
+                FreezeAction::Freeze => {
+                    if effective_device_locked {
+                        // A whole-device lock (admin command, or the offline
+                        // hard-lockdown escalation) overrides screen-time and
+                        // is immediate (and may hard-fall-back to session
+                        // termination — it's an explicit parent action /
+                        // tamper response).
+                        let (headline, detail) = if self.device_locked {
+                            ("LOCKED", "THIS DEVICE IS LOCKED BY AN ADMIN")
+                        } else {
+                            (
+                                "OFFLINE TOO LONG",
+                                "NO SERVER CONTACT FOR DAYS — ASK A PARENT (PIN UNLOCKS)",
+                            )
+                        };
+                        let spec = LockSpec::from_lockout(
+                            &Default::default(),
+                            headline,
+                            detail,
+                            &user,
+                            policy.parent_pin_hash.clone(),
+                        );
+                        lockout::present(&self.exec, &spec);
+                        if let Err(e) = screentime::freeze_user(&self.exec, &user, true, true) {
+                            tracing::warn!("freeze {user} failed: {e}");
                         }
+                        self.frozen.insert(user.clone());
+                    } else if let Some(reason) = &lock {
+                        self.screen_time_lockout(&user, &policy, reason, &mut events)
+                            .await;
                     }
-                    // Streak nudges (bedtime/breaks) ride along as events.
-                    for nudge in gamify::nudges_for(&policy) {
-                        events.push(gamify::streak_event(&user, &nudge.kind, 0));
-                    }
-                    lockout::present(&self.exec, &spec);
-                    if let Err(e) = screentime::freeze_user(&self.exec, &user, true) {
-                        tracing::warn!("freeze {user} failed: {e}");
-                    }
-                    self.frozen.insert(user.clone());
-                    let sev = if matches!(reason, screentime::LockReason::Bedtime) {
-                        SEV_WARN
-                    } else {
-                        SEV_INFO
-                    };
-                    events.push(
-                        Event::new(
-                            EV_SCREEN_TIME_EXCEEDED,
-                            sev,
-                            json!({ "reason": reason.headline(), "detail": reason.detail() }),
-                        )
-                        .for_user(&user),
-                    );
                 }
-                (None, true) => {
-                    // Policy now allows: unfreeze.
-                    if let Err(e) = screentime::freeze_user(&self.exec, &user, false) {
+                FreezeAction::Unfreeze => {
+                    // Policy now allows (and no admin lock is active): unfreeze.
+                    if let Err(e) = screentime::freeze_user(&self.exec, &user, false, false) {
                         tracing::warn!("unfreeze {user} failed: {e}");
                     }
                     self.frozen.remove(&user);
                     tracing::info!("{user} unlocked (within policy again)");
                 }
-                _ => {}
+                FreezeAction::None => {}
             }
         }
 
+        self.write_status_file();
         events
+    }
+
+    /// Screen-time lockout with a save-your-work grace: the first tick with a
+    /// lock reason presents the overlay (earn offer, nudges, event) and arms a
+    /// `FREEZE_GRACE` countdown; the freeze itself only lands once the
+    /// countdown expires. Never terminates the session (soft freeze only).
+    async fn screen_time_lockout(
+        &mut self,
+        user: &str,
+        policy: &Policy,
+        reason: &screentime::LockReason,
+        events: &mut Vec<Event>,
+    ) {
+        match self.pending_freeze.get(user) {
+            None => {
+                // Arm the countdown + present everything ONCE.
+                let mut spec = LockSpec::from_lockout(
+                    &policy.gamification.lockout,
+                    &reason.headline(),
+                    &reason.detail(),
+                    user,
+                    policy.parent_pin_hash.clone(),
+                );
+                // Offer an earn-time task as the primary action when the user
+                // ran out of daily minutes (Duolingo-style: earn your way
+                // back). Headless build has no interactive task picker, so the
+                // first offer is auto-requested and the copy reflects that
+                // it's already in flight.
+                if matches!(reason, screentime::LockReason::DailyLimit { .. }) {
+                    if let Some(offer) =
+                        gamify::earn_offers(&policy.gamification).into_iter().next()
+                    {
+                        spec.action =
+                            self.auto_request_earn(user, &offer)
+                                .await
+                                .unwrap_or_else(|| {
+                                    format!("EARN {} MIN — {}", offer.reward_minutes, offer.label)
+                                });
+                    }
+                }
+                // Streak nudges (bedtime/breaks) ride along as events.
+                for nudge in gamify::nudges_for(policy) {
+                    lockout::present_nudge(&self.exec, &nudge);
+                    events.push(gamify::streak_event(user, &nudge.kind, 0));
+                }
+                lockout::present_nudge(
+                    &self.exec,
+                    &gamify::Nudge {
+                        kind: "freeze_countdown".into(),
+                        copy: format!(
+                            "{} — SCREEN PAUSES IN {} SECONDS. SAVE YOUR WORK.",
+                            reason.headline(),
+                            FREEZE_GRACE.as_secs()
+                        ),
+                    },
+                );
+                lockout::present(&self.exec, &spec);
+                let sev = if matches!(reason, screentime::LockReason::Bedtime) {
+                    SEV_WARN
+                } else {
+                    SEV_INFO
+                };
+                events.push(
+                    Event::new(
+                        EV_SCREEN_TIME_EXCEEDED,
+                        sev,
+                        json!({
+                            "reason": reason.headline(),
+                            "detail": reason.detail(),
+                            "freeze_grace_secs": FREEZE_GRACE.as_secs(),
+                        }),
+                    )
+                    .for_user(user),
+                );
+                self.pending_freeze
+                    .insert(user.to_string(), Instant::now() + FREEZE_GRACE);
+            }
+            Some(deadline) if *deadline <= Instant::now() => {
+                self.pending_freeze.remove(user);
+                if let Err(e) = screentime::freeze_user(&self.exec, user, true, false) {
+                    tracing::warn!("freeze {user} failed: {e}");
+                }
+                self.frozen.insert(user.to_string());
+            }
+            Some(_) => {} // countdown still running
+        }
+    }
+
+    /// Pre-lockout warnings: 10-min and 2-min time-remaining nudges plus a
+    /// bedtime wind-down 15 minutes out, each at most once per user per day.
+    fn maybe_warn(&mut self, user: &str, policy: &Policy, events: &mut Vec<Event>) {
+        let today = chrono::Local::now().date_naive();
+        let fire = |warned: &mut HashMap<(String, String), chrono::NaiveDate>,
+                    exec: &Exec,
+                    kind: &str,
+                    copy: String| {
+            let key = (user.to_string(), kind.to_string());
+            if warned.get(&key) == Some(&today) {
+                return false;
+            }
+            warned.insert(key, today);
+            lockout::present_nudge(
+                exec,
+                &gamify::Nudge {
+                    kind: kind.into(),
+                    copy,
+                },
+            );
+            true
+        };
+
+        if let Some(rem) = self.tracker.remaining_minutes(user, policy) {
+            // Check the tighter threshold first so a user who logs in with
+            // 2 minutes left gets the urgent copy, not the relaxed one.
+            let warn = if rem > 0 && rem <= 2 {
+                Some((
+                    "time_2min",
+                    format!("{rem} MIN LEFT — WRAP UP AND SAVE NOW"),
+                ))
+            } else if rem > 2 && rem <= 10 {
+                Some((
+                    "time_10min",
+                    format!("{rem} MIN LEFT TODAY — GOOD TIME TO FINISH UP"),
+                ))
+            } else {
+                None
+            };
+            if let Some((kind, copy)) = warn {
+                if fire(&mut self.warned, &self.exec, kind, copy) {
+                    events.push(gamify::streak_event(user, kind, 0));
+                }
+            }
+        }
+
+        if let Some(bt) = &policy.screen_time.bedtime {
+            if let Some(mins) = screentime::minutes_until_bedtime(bt, chrono::Local::now().time()) {
+                if (1..=15).contains(&mins)
+                    && fire(
+                        &mut self.warned,
+                        &self.exec,
+                        "bedtime_soon",
+                        format!("BEDTIME IN {mins} MIN — WIND DOWN"),
+                    )
+                {
+                    events.push(gamify::streak_event(user, "bedtime_soon", 0));
+                }
+            }
+        }
+    }
+
+    /// Transparency surface: an atomically-replaced world-readable snapshot at
+    /// `/run/sentinel/status.json` for the per-user tray/companion — time
+    /// remaining, freeze state, server connection, and whether a remote shell
+    /// is open (the teen deserves to know).
+    fn write_status_file(&self) {
+        if self.exec.dry_run() {
+            return;
+        }
+        let users: Vec<serde_json::Value> = self
+            .policies
+            .iter()
+            .map(|(u, p)| {
+                json!({
+                    "name": u,
+                    "used_minutes": self.tracker.used_minutes(u),
+                    "remaining_minutes": self.tracker.remaining_minutes(u, p),
+                    "frozen": self.frozen.contains(u),
+                    "freeze_in_secs": self.pending_freeze.get(u).map(|d|
+                        d.saturating_duration_since(Instant::now()).as_secs()),
+                })
+            })
+            .collect();
+        let status = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "connection": match self.contact_state {
+                ContactState::Online => "online",
+                ContactState::OfflineWithinGrace => "offline",
+                ContactState::OfflineFailClosed => "offline_fail_closed",
+            },
+            "device_locked": self.device_locked,
+            "offline_hard_lockdown": self.offline_hard_lockdown,
+            "remote_shell_open": !self.sessions.is_empty(),
+            "users": users,
+        });
+        let dir = std::path::Path::new("/run/sentinel");
+        let _ = std::fs::create_dir_all(dir);
+        let tmp = dir.join("status.json.tmp");
+        if std::fs::write(&tmp, status.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, dir.join("status.json"));
+        }
+    }
+
+    /// Auto-request an earn-time offer once per (user, task) per day (the server
+    /// also dedupes by returning the existing pending row, but we avoid spamming
+    /// it every tick). Returns the presenter copy to show, if a request was sent
+    /// or already pending today.
+    async fn auto_request_earn(&mut self, user: &str, offer: &gamify::EarnOffer) -> Option<String> {
+        let today = chrono::Local::now().date_naive();
+        let key = (user.to_string(), offer.id.clone());
+        if self.requested_earn.get(&key) == Some(&today) {
+            return Some("REQUEST SENT — WAITING FOR APPROVAL".to_string());
+        }
+        match self
+            .client
+            .post_earn_request(user, &offer.id, &offer.label, offer.reward_minutes)
+            .await
+        {
+            Ok(resp) => {
+                tracing::info!(
+                    "earn-request {} for {user}/{} is {}",
+                    resp.request.id,
+                    offer.id,
+                    resp.request.status
+                );
+                self.requested_earn.insert(key, today);
+                Some("REQUEST SENT — WAITING FOR APPROVAL".to_string())
+            }
+            Err(e) => {
+                tracing::warn!("earn-request for {user}/{} failed: {e}", offer.id);
+                None
+            }
+        }
     }
 
     /// Dispatch one server command. `out_tx` lets SSH sessions stream frames back.
@@ -242,14 +776,19 @@ impl Agent {
             CMD_LOCK => {
                 self.device_locked = true;
                 for user in self.policies.keys().cloned().collect::<Vec<_>>() {
+                    let pin_hash = self
+                        .policies
+                        .get(&user)
+                        .and_then(|p| p.parent_pin_hash.clone());
                     let spec = LockSpec::from_lockout(
                         &Default::default(),
                         "LOCKED",
                         "THIS DEVICE IS LOCKED BY AN ADMIN",
                         &user,
+                        pin_hash,
                     );
                     lockout::present(&self.exec, &spec);
-                    let _ = screentime::freeze_user(&self.exec, &user, true);
+                    let _ = screentime::freeze_user(&self.exec, &user, true, true);
                     self.frozen.insert(user);
                 }
                 events.push(Event::new(
@@ -262,7 +801,7 @@ impl Agent {
             CMD_UNLOCK => {
                 self.device_locked = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {
-                    let _ = screentime::freeze_user(&self.exec, &user, false);
+                    let _ = screentime::freeze_user(&self.exec, &user, false, false);
                 }
                 events.push(Event::new(
                     EV_UNLOCK,
@@ -273,6 +812,7 @@ impl Agent {
             }
             CMD_APPLY_POLICY => match self.client.get_policy().await {
                 Ok(bundle) => {
+                    self.record_contact();
                     match self.apply_bundle(bundle) {
                         Ok(evs) => events.extend(evs),
                         Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
@@ -327,6 +867,72 @@ impl Agent {
                     Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
                 }
             }
+            CMD_CREDIT_TIME => {
+                let os_username = cmd
+                    .payload
+                    .get("os_username")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let minutes = cmd
+                    .payload
+                    .get("minutes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let request_id = cmd
+                    .payload
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if os_username.is_empty() || minutes == 0 {
+                    return (
+                        ack_failed(&cmd.id, "credit_time missing os_username/minutes"),
+                        events,
+                    );
+                }
+                self.tracker.add_earned(&os_username, minutes);
+                // The user's pending requests are now resolved; clear the dedupe
+                // cache so a later same-day lockout sends a fresh request instead
+                // of showing a stale "REQUEST SENT — WAITING FOR APPROVAL".
+                self.requested_earn.retain(|(u, _), _| u != &os_username);
+                events.push(gamify::earned_event(&os_username, &request_id, minutes));
+                json!({ "credited": true, "os_username": os_username, "minutes": minutes })
+            }
+            CMD_DENY_EARN => {
+                let os_username = cmd
+                    .payload
+                    .get("os_username")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let task_id = cmd
+                    .payload
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                // Clear the dedupe so a later lockout can send a fresh request
+                // (a denial should never strand "WAITING FOR APPROVAL" all day).
+                self.requested_earn.retain(|(u, t), _| {
+                    !(u == &os_username && (task_id.is_empty() || t == &task_id))
+                });
+                lockout::present_nudge(
+                    &self.exec,
+                    &gamify::Nudge {
+                        kind: "earn_denied".into(),
+                        copy: format!(
+                            "REQUEST NOT APPROVED THIS TIME{}",
+                            if task_id.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {task_id}")
+                            }
+                        ),
+                    },
+                );
+                json!({ "denied": true, "os_username": os_username, "task_id": task_id })
+            }
             CMD_SSH_CLOSE => {
                 let session_id = cmd
                     .payload
@@ -357,6 +963,41 @@ impl Agent {
     }
 }
 
+/// What to do to a user's frozen state this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreezeAction {
+    Freeze,
+    Unfreeze,
+    None,
+}
+
+/// Pure decision logic for the enforcement tick (bug fix: a whole-device admin
+/// lock, once engaged via the `lock` command, must keep every user frozen
+/// regardless of what screen-time enforcement says — it must never be the
+/// screen-time verdict alone that decides to unfreeze someone while
+/// `device_locked` is true). Extracted so it's testable without the rest of the
+/// `Agent` machinery.
+fn decide_freeze(
+    device_locked: bool,
+    screen_time_lock: Option<&screentime::LockReason>,
+    currently_frozen: bool,
+) -> FreezeAction {
+    if device_locked {
+        // Admin lock overrides everything: stay (or become) frozen. Screen-time
+        // verdicts are irrelevant while the device is locked.
+        return if currently_frozen {
+            FreezeAction::None
+        } else {
+            FreezeAction::Freeze
+        };
+    }
+    match (screen_time_lock, currently_frozen) {
+        (Some(_), false) => FreezeAction::Freeze,
+        (None, true) => FreezeAction::Unfreeze,
+        _ => FreezeAction::None,
+    }
+}
+
 fn ack_failed(id: &str, msg: &str) -> CommandAck {
     tracing::warn!("command {id} failed: {msg}");
     CommandAck {
@@ -379,6 +1020,14 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
 
     let boot_events = agent.bootstrap().await.unwrap_or_default();
     let _ = agent.client.post_events(&boot_events).await;
+
+    // Daily self-update (first check ~2 min in). No-op unless enabled and
+    // running as the installed /usr/local/bin binary — see update.rs.
+    tokio::spawn(crate::update::update_loop(
+        agent.cfg.clone(),
+        agent.client.clone(),
+        agent.exec.clone(),
+    ));
 
     loop {
         match agent.client.connect_ws().await {
@@ -423,13 +1072,21 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                for ev in agent.enforcement_tick() {
+                for ev in agent.enforcement_tick().await {
                     let _ = out_tx.send(AgentFrame::Event { event: ev }).await;
+                }
+                // The WS bus has no HTTP heartbeat, so push usage here — otherwise
+                // screen_time_ledger only ever updates in the degraded poll path.
+                let usage = agent.usage_snapshot();
+                if !usage.is_empty() {
+                    let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
                 }
             }
             msg = read.next() => {
                 let Some(msg) = msg else { break; };
                 let msg = msg?;
+                // Any frame from the server (including a bare Ping) counts as contact.
+                agent.record_contact();
                 match msg {
                     Message::Text(txt) => {
                         if let Err(e) = handle_server_text(agent, &txt, &out_tx).await {
@@ -470,6 +1127,15 @@ async fn handle_server_text(
                 sess.feed_b64(&data_b64).await;
             }
         }
+        ServerFrame::SshResize {
+            session_id,
+            cols,
+            rows,
+        } => {
+            if let Some(sess) = agent.sessions.get(&session_id) {
+                sess.resize(cols, rows);
+            }
+        }
         ServerFrame::SshClose { session_id } => {
             if let Some(sess) = agent.sessions.remove(&session_id) {
                 sess.close().await;
@@ -496,13 +1162,15 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let events = agent.enforcement_tick();
+                let events = agent.enforcement_tick().await;
                 let _ = agent.client.post_events(&events).await;
             }
             _ = hb.tick() => {
                 let users = crate::sysusers::login_users();
-                match agent.client.heartbeat("online", None, &users).await {
+                let usage = agent.usage_snapshot();
+                match agent.client.heartbeat("online", None, &users, &usage).await {
                     Ok(resp) => {
+                        agent.record_contact();
                         for cmd in resp.commands {
                             let (ack, events) = agent.handle_command(cmd, &out_tx).await;
                             let _ = agent.client.post_events(&events).await;
@@ -529,5 +1197,57 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enforce::screentime::LockReason;
+
+    fn daily_limit() -> LockReason {
+        LockReason::DailyLimit {
+            used_min: 60,
+            limit_min: 60,
+        }
+    }
+
+    #[test]
+    fn device_lock_freezes_regardless_of_screen_time_verdict() {
+        // Bug fix: while an admin `lock` is active, a screen-time verdict that
+        // would otherwise unfreeze the user (None = within policy) must NOT
+        // unfreeze them, and a not-yet-frozen user must be frozen.
+        assert_eq!(
+            decide_freeze(true, None, false),
+            FreezeAction::Freeze,
+            "device_locked must freeze a not-yet-frozen user even with no screen-time reason"
+        );
+        assert_eq!(
+            decide_freeze(true, None, true),
+            FreezeAction::None,
+            "device_locked must keep an already-frozen user frozen"
+        );
+        let reason = daily_limit();
+        assert_eq!(
+            decide_freeze(true, Some(&reason), true),
+            FreezeAction::None,
+            "device_locked must keep the user frozen even with an active screen-time reason too"
+        );
+    }
+
+    #[test]
+    fn device_unlocked_follows_screen_time_verdict() {
+        let reason = daily_limit();
+        assert_eq!(
+            decide_freeze(false, Some(&reason), false),
+            FreezeAction::Freeze
+        );
+        assert_eq!(decide_freeze(false, None, true), FreezeAction::Unfreeze);
+        assert_eq!(decide_freeze(false, None, false), FreezeAction::None);
+        assert_eq!(
+            decide_freeze(false, Some(&reason), true),
+            FreezeAction::None,
+            "already frozen + still locked out: no change"
+        );
     }
 }
