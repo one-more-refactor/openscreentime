@@ -58,14 +58,18 @@ struct DiscoveryDoc {
 /// Reads the SENTINEL_OIDC_* env vars; when all three are set, runs discovery
 /// and returns a live config. Returns None when the feature is off.
 pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
-    let issuer = std::env::var("SENTINEL_OIDC_ISSUER").ok();
-    let client_id = std::env::var("SENTINEL_OIDC_CLIENT_ID").ok();
-    let client_secret = std::env::var("SENTINEL_OIDC_CLIENT_SECRET").ok();
-    let (Some(issuer), Some(client_id), Some(client_secret)) = (issuer, client_id, client_secret)
-    else {
+    // Empty counts as unset: compose files commonly pass `${VAR:-}` through,
+    // which arrives as "" — that must disable OIDC, not crash-loop discovery
+    // against an empty issuer URL.
+    let non_empty = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let (Some(issuer), Some(client_id), Some(client_secret)) = (
+        non_empty("SENTINEL_OIDC_ISSUER"),
+        non_empty("SENTINEL_OIDC_CLIENT_ID"),
+        non_empty("SENTINEL_OIDC_CLIENT_SECRET"),
+    ) else {
         return Ok(None);
     };
-    let name = std::env::var("SENTINEL_OIDC_NAME").unwrap_or_else(|_| "SSO".into());
+    let name = non_empty("SENTINEL_OIDC_NAME").unwrap_or_else(|| "SSO".into());
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))

@@ -4,6 +4,30 @@ This is the operator guide for running Sentinel on an internet-exposed VPS
 behind your own reverse proxy. It is not a dev setup guide — see
 `docs/DEVELOPMENT.md` for that.
 
+## Quickstart
+
+```sh
+git clone <this-repo-url> sentinel && cd sentinel
+deploy/setup.sh --domain sentinel.example.com
+```
+
+That generates `.env` with fresh secrets, builds the images, brings the
+stack up, and waits for it to report healthy. Then:
+
+1. Point your reverse proxy at `127.0.0.1:8080` (see below for
+   Caddy/nginx snippets — `deploy/setup.sh` also prints them for your domain).
+2. Open `https://sentinel.example.com` and register the first admin passkey.
+3. Click **ADD DEVICE** in the console and paste the one-liner it gives you
+   on the machine you want to enroll.
+
+Re-run `deploy/setup.sh` any time — it won't touch an existing `.env`, so
+it's safe to use as a rebuild/restart shortcut too. For pulling and
+deploying new versions later, use `deploy/update.sh` (see
+[Updating](#updating)).
+
+The rest of this document covers the same ground in more detail, plus
+troubleshooting.
+
 ## Architecture
 
 - `compose.yaml` (repo root) runs two containers: `db` (Postgres 15) and
@@ -75,19 +99,30 @@ server {
 
 ## First boot
 
+The [Quickstart](#quickstart) above covers the normal path:
+`deploy/setup.sh --domain <your-domain>`. It writes `.env` (generating
+`POSTGRES_PASSWORD` and deriving `RP_ID`/`RP_ORIGIN`/`SENTINEL_PUBLIC_URL`
+from the domain you pass), builds the images, runs `up -d`, and waits for
+`/health`.
+
+If you'd rather set things up by hand (e.g. to point at an external
+Postgres, or to review the generated values before they're used), skip
+`deploy/setup.sh` and instead:
+
 ```sh
 git clone <this-repo-url> sentinel && cd sentinel
 cp .env.example .env
-$EDITOR .env        # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, SENTINEL_PUBLIC_URL
-deploy/build.sh      # builds the server+web image locally on the VPS
-podman-compose up -d # or: podman compose up -d / docker compose up -d
+$EDITOR .env         # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, SENTINEL_PUBLIC_URL
+deploy/build.sh       # builds the server+web image locally on the VPS
+podman-compose up -d  # or: podman compose up -d / docker compose up -d
 podman-compose logs -f server
 ```
 
 `RP_ID` is the bare domain (e.g. `sentinel.example.com`); `RP_ORIGIN` and
 `SENTINEL_PUBLIC_URL` are the full `https://` URL of the reverse proxy —
 **not** an internal container address. WebAuthn/passkeys will fail to
-register if these don't match what the browser sees.
+register if these don't match what the browser sees. See `.env.example`
+for the full list of variables (OIDC SSO, logging, etc.).
 
 Database migrations run automatically on every server startup
 (`db::migrate` in `server/src/main.rs`) — no manual migration step needed.
@@ -124,12 +159,23 @@ Desktop builds with the gui/tray features are built from source — see docs/DEV
 
 ```sh
 cd sentinel
+deploy/update.sh
+```
+
+This does `git pull --ff-only`, rebuilds the images, recreates the server
+container, and waits for `/health` before reporting success. Equivalent by
+hand:
+
+```sh
+cd sentinel
 deploy/build.sh --pull   # git pull --ff-only, then rebuild images
 podman-compose up -d     # recreates the server container with the new image
 ```
 
 `db` data lives in the named volume `sentinel_pgdata` and is untouched by
-rebuilds/updates.
+rebuilds/updates. Already-enrolled agents self-update from the new image
+automatically (within a day) — updating the server is enough, no separate
+device rollout step.
 
 ## Rootless port note
 
