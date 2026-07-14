@@ -103,6 +103,22 @@ async fn main() -> Result<()> {
         return unlock::resume_after(secs);
     }
 
+    // Hidden GUI presenter subprocess (spawned detached by the runner so the
+    // blocking egui event loop never stalls the enforcement tick). Decodes a
+    // base64 LockSpec, shows the overlay, and writes an unlock grant on a
+    // verified dismissal.
+    if raw_args.get(1).map(String::as_str) == Some("__lockout") {
+        #[cfg(feature = "gui")]
+        {
+            let b64 = raw_args.get(2).map(String::as_str).unwrap_or("");
+            return lockout::gui::run_from_b64(b64);
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("__lockout requires a build with --features gui");
+        }
+    }
+
     let cli = Cli::parse();
     let ctx = AgentCtx::new(cli.dry_run, cli.tamper_max, cli.time_accel);
 

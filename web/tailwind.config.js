@@ -26,7 +26,7 @@ export default {
       },
       fontFamily: {
         mono: ['"Space Mono"', 'ui-monospace', '"SFMono-Regular"', 'Menlo', 'Consolas', 'monospace'],
-        dot: ['"DotGothic16"', '"Space Mono"', 'ui-monospace', 'monospace'],
+        dot: ['"Doto Variable"', '"Space Mono"', 'ui-monospace', 'monospace'],
       },
       letterSpacing: {
         label: "0.08em",

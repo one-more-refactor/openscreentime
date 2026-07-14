@@ -86,14 +86,22 @@ pub struct NetworkLockdown {
     /// IPsec/IKE 500/4500).
     #[serde(default)]
     pub block_vpn: bool,
+    /// Days the agent may run without reaching the command server before it
+    /// escalates to a full parent-PIN lockdown (0 = never escalate). A device
+    /// that's been silently cut off is a tamper signal; the parent PIN always
+    /// unlocks, so a server/VPS outage can't permanently brick the device.
+    #[serde(default)]
+    pub offline_lockdown_days: u32,
 }
 
 impl NetworkLockdown {
-    /// True when every flag is off — used by `skip_serializing_if`.
+    /// True when every field is at its default — used by `skip_serializing_if`.
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
-    /// True if any lockdown rule is active.
+    /// True if any network-filtering rule is active. (Note: this is about the
+    /// firewall/DNS bypass rules; `offline_lockdown_days` is a separate
+    /// escalation knob and is intentionally excluded.)
     pub fn any(&self) -> bool {
         self.force_dns || self.block_doh || self.block_dot || self.block_tor || self.block_vpn
     }

@@ -59,7 +59,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((t) => (
           <div
             key={t.id}
-            className="relative flex items-start gap-3 border rounded px-3 py-2.5 font-mono text-xs shadow-lg"
+            className="relative flex items-start gap-3 border rounded px-3 py-2.5 font-mono text-xs"
             style={{
               borderColor: toneColor[t.tone],
               background: "var(--surface)",

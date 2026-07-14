@@ -14,9 +14,12 @@
 
 use crate::policy::Lockout;
 use crate::util::Exec;
+use serde::{Deserialize, Serialize};
 
 /// What the overlay should say + how to dismiss it.
-#[derive(Debug, Clone)]
+/// Serializable so the GUI presenter can run as a detached subprocess
+/// (`sentinel-agent __lockout <b64 json>`) without stalling the tick loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockSpec {
     pub headline: String,           // "TIME'S UP", "BEDTIME"
     pub detail: String,             // "USED 60 / 60 MIN TODAY"
@@ -33,8 +36,9 @@ pub struct LockSpec {
 
 pub mod challenge {
     use rand::Rng;
+    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Challenge {
         /// Solve `a op b = ?`.
         Math { a: i64, b: i64, op: char },
@@ -244,6 +248,37 @@ pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
     crate::pin::verify_pin(attempt.trim(), hash)
 }
 
+/// An unlock the overlay has ALREADY verified (parent PIN typed into the GUI,
+/// or a solved challenge). The GUI presenter runs as a detached root
+/// subprocess, so it hands the verdict to the runner through a root-only file:
+/// `/run/sentinel/unlock_grant.<user>` containing the granted minutes.
+///
+/// Unlike `unlock_pin.<user>` (an *attempt*, verified by the consumer), a
+/// grant is trusted at face value — which is safe only because `/run/sentinel`
+/// is root-owned (0755): no managed user can write there. The verification
+/// already happened in the presenter, against the same argon2 hash.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))] // written by the gui presenter only
+pub fn write_unlock_grant(user: &str, minutes: u32) {
+    let dir = std::path::Path::new("/run/sentinel");
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(format!("unlock_grant.{user}"));
+    if let Err(e) = std::fs::write(&path, minutes.to_string()) {
+        tracing::warn!("could not write unlock grant for {user}: {e}");
+    }
+}
+
+/// Consume a pending unlock grant for `user` (single-use). Returns the granted
+/// minutes. Checked EVERY tick for EVERY managed user — including already-
+/// frozen ones — so a parent standing at the machine can always get in
+/// (the old code only consulted the override on the freeze-transition tick,
+/// which stranded frozen users).
+pub fn take_unlock_grant(user: &str) -> Option<u32> {
+    let path = format!("/run/sentinel/unlock_grant.{user}");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    content.trim().parse::<u32>().ok().map(|m| m.clamp(1, 240))
+}
+
 /// Present the lockout. Non-blocking: it puts the screen up (or logs it) and
 /// returns. The runner keeps the user frozen until policy allows again; the
 /// challenge is what a real GUI presenter would gate the *early* dismiss on.
@@ -254,23 +289,27 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
         return;
     }
 
+    // GUI build: present in a DETACHED subprocess (`sentinel-agent __lockout`)
+    // so eframe's blocking event loop can never stall the enforcement tick.
+    // The subprocess writes an unlock grant on verified dismissal; the runner
+    // consumes it on its next tick.
     #[cfg(feature = "gui")]
     {
-        gui::show(spec);
+        if gui::spawn_detached(spec) {
+            return;
+        }
+        // Fall through to the headless broadcast if spawning failed.
     }
 
     // Headless / no-GUI build: broadcast the overlay to the user's TTYs and log it.
-    #[cfg(not(feature = "gui"))]
-    {
-        let _ = exec.run(
-            "wall",
-            &[
-                "-n",
-                &format!("SENTINEL: {} — {}", spec.headline, spec.detail),
-            ],
-        );
-        tracing::warn!("LOCKOUT ({}): {}\n{}", spec.for_user, spec.headline, screen);
-    }
+    let _ = exec.run(
+        "wall",
+        &[
+            "-n",
+            &format!("SENTINEL: {} — {}", spec.headline, spec.detail),
+        ],
+    );
+    tracing::warn!("LOCKOUT ({}): {}\n{}", spec.for_user, spec.headline, screen);
 }
 
 /// Show a lightweight streak nudge (bedtime wind-down, break reminder) without
@@ -286,16 +325,60 @@ pub fn present_nudge(exec: &Exec, nudge: &crate::gamify::Nudge) {
 }
 
 #[cfg(feature = "gui")]
-mod gui {
+pub mod gui {
     //! Minimal eframe/egui fullscreen presenter. Compiled only with `--features gui`.
     use super::challenge::Challenge;
     use super::LockSpec;
+    use base64::Engine;
     use eframe::egui;
 
     /// Nothing-style palette from DESIGN.md (accent red, near-black bg, off-white fg).
     const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
     const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
     const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
+
+    /// Minutes granted by a verified early dismiss. The parent PIN is the real
+    /// escape hatch (enough to matter); a solved challenge is a short breather
+    /// (Duolingo-style: effort buys a little, not the evening).
+    const GRANT_PARENT_PIN_MIN: u32 = 30;
+    const GRANT_CHALLENGE_MIN: u32 = 5;
+
+    /// Launch the overlay as a detached subprocess of this same binary
+    /// (`sentinel-agent __lockout <b64 json>`). Returns false if it could not
+    /// be spawned (caller falls back to the headless broadcast).
+    pub fn spawn_detached(spec: &LockSpec) -> bool {
+        let Ok(json) = serde_json::to_string(spec) else {
+            return false;
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        match std::process::Command::new(exe)
+            .arg("__lockout")
+            .arg(b64)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("could not spawn lockout GUI subprocess: {e}");
+                false
+            }
+        }
+    }
+
+    /// Entry point of the `__lockout` subprocess: decode the spec and run the
+    /// blocking egui loop. On a verified dismissal it writes an unlock grant
+    /// for the runner to consume.
+    pub fn run_from_b64(b64: &str) -> anyhow::Result<()> {
+        let json = base64::engine::general_purpose::STANDARD.decode(b64.trim())?;
+        let spec: LockSpec = serde_json::from_slice(&json)?;
+        show(&spec);
+        Ok(())
+    }
 
     pub fn show(spec: &LockSpec) {
         let spec = spec.clone();
@@ -394,14 +477,38 @@ mod gui {
                         )
                         .clicked()
                     {
-                        let unlocked = if needs_input {
-                            self.spec
-                                .challenge
-                                .verify(&self.input, self.spec.parent_pin_hash.as_deref())
-                        } else {
-                            true
-                        };
-                        if unlocked {
+                        // A verified dismissal must actually UNLOCK: hand the
+                        // runner an unlock grant, sized by how it was earned.
+                        // (Closing the window alone changes nothing — the tick
+                        // loop re-freezes — which made the challenge feel
+                        // rigged. Never again.)
+                        let pin_ok = self
+                            .spec
+                            .parent_pin_hash
+                            .as_deref()
+                            .map(|h| crate::pin::verify_pin(self.input.trim(), h))
+                            .unwrap_or(false);
+                        let challenge_ok = self.spec.challenge.verify(&self.input, None);
+                        if pin_ok {
+                            super::write_unlock_grant(&self.spec.for_user, GRANT_PARENT_PIN_MIN);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        } else if challenge_ok {
+                            // `Challenge::None` (nudge-only) verifies trivially:
+                            // it grants nothing and simply closes.
+                            if matches!(self.spec.challenge, Challenge::Math { .. }) {
+                                super::write_unlock_grant(
+                                    &self.spec.for_user,
+                                    GRANT_CHALLENGE_MIN,
+                                );
+                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        } else if matches!(
+                            self.spec.challenge,
+                            Challenge::Wait { .. } | Challenge::None
+                        ) {
+                            // Wait/None: the typed box (when shown) is only the
+                            // optional PIN escape — the button alone still
+                            // dismisses, granting nothing.
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else {
                             self.input.clear();
