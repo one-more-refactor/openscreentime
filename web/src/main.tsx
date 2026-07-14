@@ -5,7 +5,7 @@ import { App } from "./App";
 import { applyTheme, getInitialTheme } from "./lib/theme";
 import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
-import "@fontsource/dotgothic16/400.css";
+import "@fontsource-variable/doto/wght.css";
 import "./theme.css";
 
 // Apply persisted theme before first paint.

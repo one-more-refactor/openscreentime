@@ -5,7 +5,7 @@
     "": {
       "name": "sentinel-web",
       "dependencies": {
-        "@fontsource/dotgothic16": "^5.2.8",
+        "@fontsource-variable/doto": "^5.2.10",
         "@fontsource/space-mono": "^5.2.9",
         "@simplewebauthn/browser": "^13.1.0",
         "@xterm/addon-fit": "^0.11.0",
@@ -113,7 +113,7 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.21.5", "", { "os": "win32", "cpu": "x64" }, "sha512-tQd/1efJuzPC6rCFwEvLtci/xNFcTZknmXs98FYDfGE4wP9ClFV98nyKrzJKVPMhdDnjzLhdUyMX4PsQAPjwIw=="],
 
-    "@fontsource/dotgothic16": ["@fontsource/dotgothic16@5.2.8", "", {}, "sha512-kKLp0jtNURDwQwdBBHB7CFs/i5b6MVPNVEOy8EFbdWwKT9xQZbQqYIEjW1nKayqcs0Uh6imBCeUFuIBufEJK4w=="],
+    "@fontsource-variable/doto": ["@fontsource-variable/doto@5.2.10", "", {}, "sha512-9wflNv5TCTaLCtm1W+Iv6gyGW0LS6CezDX1CiRy9pvqOWufT9zAhVhsNSPZ4Z+0YKOma/KDxvxmigSMelI4duw=="],
 
     "@fontsource/space-mono": ["@fontsource/space-mono@5.2.9", "", {}, "sha512-b61faFOHEISQ/pD25G+cfGY9o/WW6lRv6hBQQfpWvEJ4y1V+S4gmth95EVyBE2VL3qDYHeVQ8nBzrplzdXTDDg=="],
 
