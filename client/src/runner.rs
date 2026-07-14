@@ -125,6 +125,13 @@ pub struct Agent {
     /// exceeded) is currently engaged — freezes all users like an admin lock;
     /// the parent PIN still always unlocks.
     offline_hard_lockdown: bool,
+    /// Whether a *confirmed* evasion attempt (sustained firewall tampering, per
+    /// `TamperMonitor`) has locked the device down. Freezes all users like an
+    /// admin lock; cleared by an admin unlock or a parent PIN at the machine.
+    tamper_lockdown: bool,
+    /// Confirmation gate that separates a real, sustained evasion attempt from a
+    /// transient blip before escalating to `tamper_lockdown`.
+    tamper_monitor: tamper::TamperMonitor,
     /// Verified-unlock grace windows (user → expiry). Fed by overlay grants and
     /// the parent-PIN file override; while active, the user is treated as
     /// within policy (screen-time AND admin lock — the parent always wins).
@@ -159,7 +166,8 @@ impl Agent {
             client,
             exec,
             policies: HashMap::new(),
-            tracker: screentime::UsageTracker::new(),
+            // Reboot-surviving: reload the day's usage so a restart can't reset it.
+            tracker: screentime::UsageTracker::load(),
             frozen: HashSet::new(),
             device_locked: false,
             sessions: HashMap::new(),
@@ -172,6 +180,8 @@ impl Agent {
             last_contact_wall: load_last_contact_wall(),
             last_contact_saved: Instant::now(),
             offline_hard_lockdown: false,
+            tamper_lockdown: false,
+            tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
             pending_freeze: HashMap::new(),
@@ -443,11 +453,39 @@ impl Agent {
             events.push(ev);
         }
 
+        // Confirm sustained evasion (vs. a transient blip) and escalate to a
+        // whole-device lockdown. We feed the monitor the tamper-signal kinds
+        // seen this tick; a kind that crosses its confirmation threshold is a
+        // real attempt (the "check it's real, not a packet drop" gate).
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter(|e| e.ev_type == EV_TAMPER)
+            .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .collect();
+        let confirmed = self.tamper_monitor.observe(&kinds);
+        if !confirmed.is_empty() && !self.tamper_lockdown {
+            self.tamper_lockdown = true;
+            tracing::warn!("tamper lockdown engaged: {}", confirmed.join(", "));
+            events.push(tamper::tamper_event(
+                "evasion_confirmed",
+                SEV_CRITICAL,
+                &format!(
+                    "confirmed evasion attempt ({}) — device locked; the parent PIN unlocks",
+                    confirmed.join(", ")
+                ),
+            ));
+        }
+
         // Screen-time: account active seat users, evaluate, freeze/unfreeze.
         let active = screentime::active_seat_users(&self.exec);
         for user in &active {
             self.tracker
                 .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
+        }
+        // Persist the ledger every tick so a restart resumes today's usage
+        // instead of granting a fresh budget (best-effort; skipped in dry-run).
+        if !self.exec.dry_run() {
+            self.tracker.save();
         }
         // Consider every user we have a policy for (so we can also UNfreeze).
         let users: Vec<String> = self.policies.keys().cloned().collect();
@@ -481,6 +519,13 @@ impl Agent {
                     user.clone(),
                     Instant::now() + Duration::from_secs(u64::from(mins) * 60),
                 );
+                // A parent standing at the machine with the PIN has handled the
+                // situation — clear a confirmed-evasion lockdown so the device
+                // isn't stuck locked after they've dealt with it.
+                if self.tamper_lockdown {
+                    self.tamper_lockdown = false;
+                    tracing::info!("tamper lockdown cleared by parent PIN at the device");
+                }
                 self.pending_freeze.remove(&user);
                 if currently_frozen {
                     if let Err(e) = screentime::freeze_user(&self.exec, &user, false, false) {
@@ -524,18 +569,25 @@ impl Agent {
                 self.maybe_warn(&user, &policy, &mut events);
             }
 
-            let effective_device_locked =
-                (self.device_locked || self.offline_hard_lockdown) && !in_grace;
+            let effective_device_locked = (self.device_locked
+                || self.offline_hard_lockdown
+                || self.tamper_lockdown)
+                && !in_grace;
             match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
                 FreezeAction::Freeze => {
                     if effective_device_locked {
-                        // A whole-device lock (admin command, or the offline
-                        // hard-lockdown escalation) overrides screen-time and
-                        // is immediate (and may hard-fall-back to session
-                        // termination — it's an explicit parent action /
-                        // tamper response).
+                        // A whole-device lock (admin command, the offline
+                        // hard-lockdown escalation, or a confirmed evasion
+                        // attempt) overrides screen-time and is immediate (and
+                        // may hard-fall-back to session termination — it's an
+                        // explicit parent action / tamper response).
                         let (headline, detail) = if self.device_locked {
                             ("LOCKED", "THIS DEVICE IS LOCKED BY AN ADMIN")
+                        } else if self.tamper_lockdown {
+                            (
+                                "TAMPERING DETECTED",
+                                "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+                            )
                         } else {
                             (
                                 "OFFLINE TOO LONG",
@@ -754,6 +806,7 @@ impl Agent {
             },
             "device_locked": self.device_locked,
             "offline_hard_lockdown": self.offline_hard_lockdown,
+            "tamper_lockdown": self.tamper_lockdown,
             "remote_shell_open": !self.sessions.is_empty(),
             "users": users,
         });
@@ -832,6 +885,8 @@ impl Agent {
             }
             CMD_UNLOCK => {
                 self.device_locked = false;
+                // An admin unlock also lifts a confirmed-evasion lockdown.
+                self.tamper_lockdown = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {
                     let _ = screentime::freeze_user(&self.exec, &user, false, false);
                 }
@@ -924,6 +979,9 @@ impl Agent {
                     );
                 }
                 self.tracker.add_earned(&os_username, minutes);
+                if !self.exec.dry_run() {
+                    self.tracker.save();
+                }
                 // The user's pending requests are now resolved; clear the dedupe
                 // cache so a later same-day lockout sends a fresh request instead
                 // of showing a stale "REQUEST SENT — WAITING FOR APPROVAL".
