@@ -158,6 +158,22 @@ pub fn in_bedtime(bt: &Bedtime, now: NaiveTime) -> bool {
     }
 }
 
+/// Minutes until bedtime starts (handles start times past midnight relative to
+/// `now`). `Some(0)` while bedtime is already in effect; `None` if the policy's
+/// times don't parse. Used for the pre-bedtime wind-down nudge.
+pub fn minutes_until_bedtime(bt: &Bedtime, now: NaiveTime) -> Option<i64> {
+    let start = parse_hm(&bt.start)?;
+    parse_hm(&bt.end)?; // both must parse for bedtime to be enforceable at all
+    if in_bedtime(bt, now) {
+        return Some(0);
+    }
+    let mut mins = (start - now).num_minutes();
+    if mins < 0 {
+        mins += 24 * 60;
+    }
+    Some(mins)
+}
+
 pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) -> bool {
     schedule.iter().any(|w| {
         if !w.days.contains(&weekday_sun0) {
@@ -171,6 +187,11 @@ pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) 
 }
 
 /// Users currently active on a local seat (loginctl). Empty on headless/no-logind.
+/// Sessions logind reports as idle (`IdleHint=yes`) are excluded so time spent
+/// away from the keyboard (dinner, an open lid) doesn't burn the daily budget —
+/// enforcement should be predictable, and "I wasn't even using it" is a
+/// legitimate complaint. DEs that never set the hint report `IdleHint=no`, so
+/// the fallback is the old behavior (count it).
 pub fn active_seat_users(exec: &Exec) -> Vec<String> {
     let listing = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
     let mut users = Vec::new();
@@ -184,11 +205,21 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
         let user = cols[2];
         let state = exec.probe(
             "loginctl",
-            &["show-session", session, "-p", "Active", "-p", "Remote"],
+            &[
+                "show-session",
+                session,
+                "-p",
+                "Active",
+                "-p",
+                "Remote",
+                "-p",
+                "IdleHint",
+            ],
         );
         let active = state.contains("Active=yes");
         let remote = state.contains("Remote=yes");
-        if active && !remote && !users.contains(&user.to_string()) {
+        let idle = state.contains("IdleHint=yes");
+        if active && !remote && !idle && !users.contains(&user.to_string()) {
             users.push(user.to_string());
         }
     }
@@ -196,7 +227,12 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
 }
 
 /// Freeze all processes of a user via the cgroup v2 freezer. Reversible.
-pub fn freeze_user(exec: &Exec, username: &str, frozen: bool) -> Result<()> {
+///
+/// `hard` controls the fallback when the freezer is unavailable: an admin
+/// whole-device lock (`hard = true`) may terminate the session as a last
+/// resort, but screen-time enforcement (`hard = false`) must NEVER destroy a
+/// kid's unsaved work over a time limit — it logs and stays best-effort.
+pub fn freeze_user(exec: &Exec, username: &str, frozen: bool, hard: bool) -> Result<()> {
     let Some(uid) = sysusers::uid_of(username) else {
         anyhow::bail!("unknown user {username}");
     };
@@ -211,15 +247,19 @@ pub fn freeze_user(exec: &Exec, username: &str, frozen: bool) -> Result<()> {
             tracing::info!("user {} freeze={}", username, frozen);
             Ok(())
         }
-        Err(e) => {
-            tracing::warn!("cgroup freeze unavailable ({e}); falling back to loginctl");
-            if frozen {
-                exec.run("loginctl", &["terminate-user", username])
-                    .map(|_| ())
-            } else {
-                Ok(())
-            }
+        Err(e) if frozen && hard => {
+            tracing::warn!("cgroup freeze unavailable ({e}); admin lock falls back to loginctl");
+            exec.run("loginctl", &["terminate-user", username])
+                .map(|_| ())
         }
+        Err(e) if frozen => {
+            tracing::warn!(
+                "cgroup freeze unavailable ({e}); screen-time lock NOT escalating to \
+                 terminate-user (would destroy unsaved work)"
+            );
+            Ok(())
+        }
+        Err(_) => Ok(()),
     }
 }
 
@@ -253,6 +293,42 @@ mod tests {
         t.add_active("kid", 61 * 60, 1);
         let r = evaluate(&policy, &t, "kid");
         assert!(matches!(r, Some(LockReason::DailyLimit { .. })));
+    }
+
+    #[test]
+    fn minutes_until_bedtime_handles_wrap_and_in_effect() {
+        let bt = Bedtime {
+            start: "22:30".into(),
+            end: "06:30".into(),
+        };
+        // 15 minutes out → wind-down window.
+        assert_eq!(
+            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(22, 15, 0).unwrap()),
+            Some(15)
+        );
+        // Already in bedtime (both sides of midnight) → 0.
+        assert_eq!(
+            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(23, 0, 0).unwrap()),
+            Some(0)
+        );
+        assert_eq!(
+            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(3, 0, 0).unwrap()),
+            Some(0)
+        );
+        // Morning, bedtime tonight → wraps forward, not negative.
+        assert_eq!(
+            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(7, 30, 0).unwrap()),
+            Some(15 * 60)
+        );
+        // Unparseable policy times → None.
+        let bad = Bedtime {
+            start: "late".into(),
+            end: "06:30".into(),
+        };
+        assert_eq!(
+            minutes_until_bedtime(&bad, NaiveTime::from_hms_opt(12, 0, 0).unwrap()),
+            None
+        );
     }
 
     #[test]

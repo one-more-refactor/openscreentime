@@ -26,7 +26,7 @@ pub fn kids_policy() -> Value {
                           {"days":[0,6],"start":"09:00","end":"19:00"} ],
             "bedtime": { "start":"20:00","end":"07:00" } },
         "app_limits": [],
-        "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": true },
+        "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": true, "offline_lockdown_days": 7 },
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"reading","label":"Read for 20 min","reward_minutes":15},
@@ -49,7 +49,7 @@ pub fn teen_policy() -> Value {
                           {"days":[0,6],"start":"08:00","end":"22:00"} ],
             "bedtime": { "start":"22:30","end":"06:30" } },
         "app_limits": [],
-        "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false },
+        "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"homework","label":"Finish homework","reward_minutes":20} ] },

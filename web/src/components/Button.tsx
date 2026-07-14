@@ -12,7 +12,7 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 // Silkscreen buttons: mono uppercase, hairline outline that sharpens on hover.
 // `danger` = accent-red — reserved for locked/tamper/destructive actions.
 const base =
-  "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded-[2px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
+  "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
 
 const sizes: Record<Size, string> = {
   sm: "text-[0.625rem] px-2.5 py-1",

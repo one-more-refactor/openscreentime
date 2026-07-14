@@ -12,17 +12,17 @@
    ========================================================================== */
 :root,
 :root[data-theme="dark"] {
-  /* surfaces */
-  --bg: #0a0b0c;
-  --surface: #121416;
-  --surface-2: #191c1f;
-  --line: #24282b;
-  --line-2: #33383c;
+  /* surfaces — near-pure monochrome (docs/DESIGN.md tokens, no color cast) */
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #1c1c1c;
+  --line: #2a2a2a;
+  --line-2: #3a3a3a;
 
   /* ink */
-  --fg: #f2f4f3;
-  --fg-dim: #8a9096;
-  --fg-faint: #4d5257;
+  --fg: #fafafa;
+  --fg-dim: #9a9a9a;
+  --fg-faint: #5a5a5a;
 
   /* the one accent — red. locked / tamper / destructive ONLY. */
   --accent: #d71921;
@@ -32,9 +32,9 @@
   --ok: #37d67a;
   --warn: #f2c94c;
   --crit: #d71921;
-  --idle: #565b60;
+  --idle: #5a5a5a;
 
-  --radius: 3px;
+  --radius: 4px;
 
   /* dot-grid texture spacing */
   --dot-gap: 16px;
@@ -42,31 +42,31 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #f4f5f4;
+  --bg: #f5f5f5;
   --surface: #ffffff;
-  --surface-2: #eceeed;
-  --line: #d8dbd9;
-  --line-2: #c2c6c4;
+  --surface-2: #ededed;
+  --line: #dadada;
+  --line-2: #c4c4c4;
 
-  --fg: #111413;
-  --fg-dim: #5c6260;
-  --fg-faint: #9aa09d;
+  --fg: #111111;
+  --fg-dim: #5e5e5e;
+  --fg-faint: #9c9c9c;
 
-  --idle: #b0b5b2;
+  --idle: #b3b3b3;
 }
 
 /* prefers-color-scheme fallback when no data-theme is set yet */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f4f5f4;
+    --bg: #f5f5f5;
     --surface: #ffffff;
-    --surface-2: #eceeed;
-    --line: #d8dbd9;
-    --line-2: #c2c6c4;
-    --fg: #111413;
-    --fg-dim: #5c6260;
-    --fg-faint: #9aa09d;
-    --idle: #b0b5b2;
+    --surface-2: #ededed;
+    --line: #dadada;
+    --line-2: #c4c4c4;
+    --fg: #111111;
+    --fg-dim: #5e5e5e;
+    --fg-faint: #9c9c9c;
+    --idle: #b3b3b3;
   }
 }
 
@@ -119,21 +119,23 @@
     font-weight: 400;
   }
 
-  /* Display face — DotGothic16 where a full DotMatrix grid is overkill. */
+  /* Display face — Doto (variable round-dot matrix, closest free match to
+     NDot) where a full DotMatrix grid is overkill. Needs weight ≥600 to read
+     crisply at UI sizes; the dots are the point, not a bug. */
   .dot {
-    font-family: "DotGothic16", "Space Mono", ui-monospace, monospace;
+    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    font-weight: 400;
+    letter-spacing: 0.06em;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 
   /* The SENTINEL wordmark fallback (DotMatrix component is preferred). */
   .wordmark {
-    font-family: "DotGothic16", "Space Mono", ui-monospace, monospace;
+    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
     text-transform: uppercase;
-    letter-spacing: 0.42em;
-    font-weight: 400;
+    letter-spacing: 0.34em;
+    font-weight: 800;
   }
 
   /* Silkscreen ref-code (DV-01) — panel head, top right. */

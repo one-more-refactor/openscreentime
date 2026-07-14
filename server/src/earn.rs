@@ -252,6 +252,25 @@ async fn decide(st: AppState, admin: AuthAdmin, id: Uuid, approve: bool) -> AppR
             json!({ "os_username": os_username, "minutes": minutes, "request_id": id }),
         )
         .await?;
+    } else {
+        // Mirror of the approve path: tell the agent about the denial so it
+        // can clear its once-per-day dedupe (the teen may re-ask) and replace
+        // the stale "WAITING FOR APPROVAL" copy with an honest answer.
+        let (os_username, task_id): (String, String) = sqlx::query_as(
+            "SELECT du.os_username, er.task_id
+             FROM earn_requests er JOIN device_users du ON du.id = er.device_user_id
+             WHERE er.id = $1",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        enqueue_command(
+            &st,
+            device_id,
+            "deny_earn",
+            json!({ "os_username": os_username, "task_id": task_id, "request_id": id }),
+        )
+        .await?;
     }
 
     events::insert(

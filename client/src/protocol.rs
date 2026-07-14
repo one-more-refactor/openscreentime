@@ -19,6 +19,10 @@ pub const CMD_DISCOVER: &str = "discover";
 pub const CMD_SET_TAMPER_LEVEL: &str = "set_tamper_level";
 /// Earn-time approval credit (CONTRACT-PROD.md §4): `{os_username, minutes, request_id}`.
 pub const CMD_CREDIT_TIME: &str = "credit_time";
+/// Earn-time denial (mirror of `credit_time`): `{os_username, task_id, request_id}`.
+/// Lets the agent clear its once-per-day dedupe so the teen can re-ask, and
+/// tell them they were denied instead of leaving "WAITING FOR APPROVAL" up all day.
+pub const CMD_DENY_EARN: &str = "deny_earn";
 
 /// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
 /// `enrolled` also exist but are written server-side, never by the agent).
