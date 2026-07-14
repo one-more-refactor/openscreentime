@@ -34,8 +34,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn from_env() -> Self {
-        let trust_proxy =
-            std::env::var("SENTINEL_TRUST_PROXY").map(|v| v == "1") == Ok(true);
+        let trust_proxy = std::env::var("SENTINEL_TRUST_PROXY").map(|v| v == "1") == Ok(true);
         RateLimiter {
             trust_proxy,
             buckets: Mutex::new(HashMap::new()),
@@ -131,10 +130,8 @@ mod tests {
             buckets: Mutex::new(HashMap::new()),
         };
         let mut req = Request::new(axum::body::Body::empty());
-        req.headers_mut().insert(
-            "x-forwarded-for",
-            "203.0.113.9, 10.0.0.5".parse().unwrap(),
-        );
+        req.headers_mut()
+            .insert("x-forwarded-for", "203.0.113.9, 10.0.0.5".parse().unwrap());
         assert_eq!(rl.client_key(&req), "10.0.0.5");
     }
 }

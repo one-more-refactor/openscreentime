@@ -84,6 +84,10 @@ export interface NetworkLockdown {
   block_dot: boolean;
   block_tor: boolean;
   block_vpn: boolean;
+  /** Days the device may run without reaching the server before it hard-locks
+   * itself (parent PIN always unlocks). 0 = never; omitted when 0 so preset
+   * JSON stays byte-identical with the policy crate's serde output. */
+  offline_lockdown_days?: number;
 }
 
 export interface Policy {
@@ -214,6 +218,14 @@ export interface Me {
 export interface EnrollTokenResponse {
   device: Device;
   enroll_token: string;
+}
+
+/** POST /api/devices/:id/lock | /unlock. `delivered: false` means the command
+ * is queued and the status will only flip once the agent reconnects and acks. */
+export interface LockResponse {
+  command_id: string;
+  queued: boolean;
+  delivered: boolean;
 }
 
 export interface SshSession {

@@ -1,0 +1,315 @@
+//! `tray` subcommand — the per-user system tray companion (feature `tray`).
+//!
+//! Runs AS THE DESKTOP USER (not root): it only reads the world-readable
+//! status snapshot the root agent writes to `/run/sentinel/status.json`
+//! every tick, and talks to the session bus (StatusNotifierItem via `ksni`,
+//! desktop notifications via `notify-rust`).
+//!
+//! This is the transparency surface promised in the design docs: the person
+//! using the device can always see how much time is left, whether the device
+//! is online/locked, and — most importantly — whether a parent has a remote
+//! shell open right now. Notifications fire on state *transitions* only
+//! (previous snapshot is diffed against the next), never repeatedly.
+
+use anyhow::Result;
+use serde::Deserialize;
+use std::time::Duration;
+
+const STATUS_PATH: &str = "/run/sentinel/status.json";
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------------
+// Status snapshot (schema mirrors runner::write_status_file)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct Status {
+    #[serde(default)]
+    connection: String,
+    #[serde(default)]
+    device_locked: bool,
+    #[serde(default)]
+    offline_hard_lockdown: bool,
+    #[serde(default)]
+    remote_shell_open: bool,
+    #[serde(default)]
+    users: Vec<UserStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct UserStatus {
+    name: String,
+    #[serde(default)]
+    used_minutes: u64,
+    /// `None` = no daily limit configured.
+    #[serde(default)]
+    remaining_minutes: Option<i64>,
+    #[serde(default)]
+    frozen: bool,
+    /// Countdown to an imminent session freeze, if one is pending.
+    #[serde(default)]
+    freeze_in_secs: Option<u64>,
+}
+
+impl Status {
+    fn user<'a>(&'a self, name: &str) -> Option<&'a UserStatus> {
+        self.users.iter().find(|u| u.name == name)
+    }
+}
+
+fn read_status() -> Option<Status> {
+    let raw = std::fs::read_to_string(STATUS_PATH).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Tray model
+// ---------------------------------------------------------------------------
+
+struct SentinelTray {
+    /// Desktop user we render for; matched against `status.users[]`.
+    username: String,
+    /// `None` when the status file is missing/unreadable (agent not running).
+    status: Option<Status>,
+}
+
+impl SentinelTray {
+    fn me(&self) -> Option<&UserStatus> {
+        self.status.as_ref().and_then(|s| s.user(&self.username))
+    }
+
+    /// "TIME LEFT: NN MIN" / "NO LIMIT" / "PAUSED" — the headline for the
+    /// current user, or a device-level line when we are not a managed user.
+    fn time_line(&self) -> String {
+        match self.me() {
+            Some(u) if u.frozen => "PAUSED".to_string(),
+            Some(u) => match u.remaining_minutes {
+                Some(m) => format!("TIME LEFT: {} MIN", m.max(0)),
+                None => "NO LIMIT".to_string(),
+            },
+            None => "DEVICE MANAGED".to_string(),
+        }
+    }
+
+    fn connection_line(&self) -> &'static str {
+        match self.status.as_ref().map(|s| s.connection.as_str()) {
+            Some("online") => "ONLINE",
+            Some("offline_fail_closed") => "OFFLINE — LOCKED",
+            Some(_) => "OFFLINE",
+            None => "AGENT NOT RUNNING",
+        }
+    }
+
+    /// Anything that means "restricted right now" for this user/device.
+    fn restricted(&self) -> bool {
+        let Some(s) = &self.status else { return false };
+        s.connection == "offline_fail_closed"
+            || s.device_locked
+            || s.offline_hard_lockdown
+            || self.me().is_some_and(|u| u.frozen)
+    }
+}
+
+impl ksni::Tray for SentinelTray {
+    fn id(&self) -> String {
+        "sentinel".into()
+    }
+
+    fn title(&self) -> String {
+        "SENTINEL".into()
+    }
+
+    fn icon_name(&self) -> String {
+        // Themed freedesktop icon names — no bundled assets.
+        let name = match &self.status {
+            None => "security-medium",
+            Some(_) if self.restricted() => "security-low",
+            Some(s) if s.connection == "online" => "security-high",
+            Some(_) => "security-medium",
+        };
+        name.into()
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "SENTINEL".into(),
+            description: format!("{} · {}", self.time_line(), self.connection_line()),
+            ..Default::default()
+        }
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::*;
+        let mut items: Vec<ksni::MenuItem<Self>> = vec![
+            StandardItem {
+                label: self.time_line(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: format!("CONNECTION: {}", self.connection_line()),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        ];
+        if self.status.as_ref().is_some_and(|s| s.remote_shell_open) {
+            // Surveillance transparency: never hide an open remote shell.
+            items.push(
+                StandardItem {
+                    label: "REMOTE SHELL: ACTIVE".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(MenuItem::Separator);
+        items.push(
+            StandardItem {
+                label: "ABOUT SENTINEL".into(),
+                activate: Box::new(|_: &mut Self| {
+                    notify(
+                        "SENTINEL",
+                        "This device is managed. Screen time and network filtering are active.",
+                        false,
+                    );
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (transitions only)
+// ---------------------------------------------------------------------------
+
+fn notify(summary: &str, body: &str, critical: bool) {
+    let mut n = notify_rust::Notification::new();
+    n.appname("SENTINEL")
+        .summary(summary)
+        .body(body)
+        .icon("security-medium");
+    if critical {
+        n.urgency(notify_rust::Urgency::Critical);
+    }
+    if let Err(e) = n.show() {
+        tracing::debug!("notification failed: {e}");
+    }
+}
+
+/// Diff two consecutive snapshots and fire notifications for the transitions
+/// we care about. Both sides must be present: on startup (or while the agent
+/// is down) we stay silent instead of "catching up" on stale state.
+fn notify_transitions(username: &str, prev: &Status, next: &Status) {
+    // Per-user transitions.
+    if let (Some(p), Some(n)) = (prev.user(username), next.user(username)) {
+        // Low-time thresholds: treat "no limit" as infinite.
+        let pm = p.remaining_minutes.unwrap_or(i64::MAX);
+        let nm = n.remaining_minutes.unwrap_or(i64::MAX);
+        for threshold in [10, 2] {
+            if pm > threshold && nm <= threshold && !n.frozen {
+                notify(
+                    &format!("{} MIN LEFT TODAY", nm.max(0)),
+                    "SAVE YOUR WORK",
+                    threshold <= 2,
+                );
+                break; // one time-warning per tick is enough
+            }
+        }
+        if p.freeze_in_secs.is_none() {
+            if let Some(secs) = n.freeze_in_secs {
+                notify(&format!("SCREEN PAUSES IN {secs}S"), "SAVE YOUR WORK", true);
+            }
+        }
+        match (p.frozen, n.frozen) {
+            (false, true) => notify("TIME'S UP", "EARN MORE OR ASK A PARENT", true),
+            (true, false) => notify("YOU'RE BACK", "HAVE FUN", false),
+            _ => {}
+        }
+    }
+
+    // Device-level transitions.
+    if prev.connection != next.connection {
+        if next.connection == "offline_fail_closed" {
+            notify(
+                "OFFLINE TOO LONG",
+                "THE DEVICE IS RESTRICTED UNTIL IT RECONNECTS",
+                true,
+            );
+        } else if next.connection == "online" {
+            notify("BACK ONLINE", "CONNECTION TO THE SERVER RESTORED", false);
+        }
+    }
+    // Transparency is a core promise: always announce remote shells.
+    match (prev.remote_shell_open, next.remote_shell_open) {
+        (false, true) => notify(
+            "REMOTE SHELL OPENED",
+            "A PARENT OPENED A REMOTE SHELL ON THIS DEVICE",
+            true,
+        ),
+        (true, false) => notify("REMOTE SHELL CLOSED", "THE REMOTE SESSION HAS ENDED", false),
+        _ => {}
+    }
+    match (prev.device_locked, next.device_locked) {
+        (false, true) => notify("DEVICE LOCKED", "A PARENT LOCKED THIS DEVICE", true),
+        (true, false) => notify("DEVICE UNLOCKED", "THIS DEVICE IS UNLOCKED AGAIN", false),
+        _ => {}
+    }
+    match (prev.offline_hard_lockdown, next.offline_hard_lockdown) {
+        (false, true) => notify("LOCKDOWN ACTIVE", "THE DEVICE IS IN OFFLINE LOCKDOWN", true),
+        (true, false) => notify("LOCKDOWN LIFTED", "NORMAL USE HAS RESUMED", false),
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Blocking loop: spawn the ksni DBus service, then poll the status file
+/// every 5s, pushing updates into the tray via the service handle.
+pub fn run() -> Result<()> {
+    let username = std::env::var("USER")
+        .ok()
+        .or_else(current_username)
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot determine the current user ($USER unset and no uid entry)")
+        })?;
+    tracing::info!("tray starting for user {username} (reading {STATUS_PATH})");
+
+    let mut prev = read_status();
+    if prev.is_none() {
+        tracing::warn!("{STATUS_PATH} not readable yet — is sentinel-agent running?");
+    }
+
+    let service = ksni::TrayService::new(SentinelTray {
+        username: username.clone(),
+        status: prev.clone(),
+    });
+    let handle = service.handle();
+    service.spawn();
+
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+        let next = read_status();
+        if let (Some(p), Some(n)) = (&prev, &next) {
+            if p != n {
+                notify_transitions(&username, p, n);
+            }
+        }
+        if prev != next {
+            let for_tray = next.clone();
+            handle.update(move |t| t.status = for_tray);
+        }
+        prev = next;
+    }
+}
+
+fn current_username() -> Option<String> {
+    users::get_current_username().map(|s| s.to_string_lossy().into_owned())
+}

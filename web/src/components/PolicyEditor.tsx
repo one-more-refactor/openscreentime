@@ -31,8 +31,10 @@ interface Props {
   onParentPinChange?: (pin: string | undefined) => void;
 }
 
+type LockdownFlag = "force_dns" | "block_doh" | "block_dot" | "block_tor" | "block_vpn";
+
 const LOCKDOWN_TOGGLES: {
-  key: keyof NetworkLockdown;
+  key: LockdownFlag;
   label: string;
   hint: string;
 }[] = [
@@ -207,6 +209,22 @@ export function PolicyEditor({
             />
           ))}
         </div>
+        <TextInput
+          label="OFFLINE HARD-LOCKDOWN AFTER (DAYS)"
+          type="number"
+          min={0}
+          className="max-w-[16rem]"
+          value={lockdown.offline_lockdown_days ?? 0}
+          disabled={readOnly}
+          onChange={(e) => {
+            const days = Math.max(0, parseInt(e.target.value || "0", 10));
+            // Omit the field when 0 so the serialized policy stays byte-
+            // identical with the crate's skip-default serde output.
+            const { offline_lockdown_days: _drop, ...flags } = lockdown;
+            setLockdown(days > 0 ? { ...flags, offline_lockdown_days: days } : flags);
+          }}
+          hint="0 = never. If the device can't reach this server for N days it locks itself; the parent PIN always unlocks."
+        />
       </Section>
 
       {/* Screen time */}

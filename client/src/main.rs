@@ -20,6 +20,8 @@ mod service;
 mod ssh;
 mod sysusers;
 mod tamper;
+#[cfg(feature = "tray")]
+mod tray;
 mod unlock;
 mod util;
 
@@ -65,6 +67,10 @@ enum Cmd {
     InstallService,
     /// Show enrollment / service status.
     Status,
+    /// Per-user system tray companion: time left, connection state, and
+    /// remote-shell transparency. Runs as the desktop user (no root).
+    #[cfg(feature = "tray")]
+    Tray,
     /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
     /// (nft table + resolv.conf pin torn down, users un-frozen). Requires root.
     Unlock {
@@ -96,10 +102,7 @@ async fn main() -> Result<()> {
     // something an operator should invoke directly.
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
-        let secs: u64 = raw_args
-            .get(2)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3600);
+        let secs: u64 = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3600);
         return unlock::resume_after(secs);
     }
 
@@ -125,7 +128,12 @@ async fn main() -> Result<()> {
     if cli.dry_run {
         tracing::info!("DRY-RUN: no host state will be modified");
     }
-    if !ctx.is_root && !cli.dry_run {
+    // The tray companion runs as the desktop user on purpose — no root nag.
+    #[cfg(feature = "tray")]
+    let is_tray = matches!(cli.cmd, Cmd::Tray);
+    #[cfg(not(feature = "tray"))]
+    let is_tray = false;
+    if !ctx.is_root && !cli.dry_run && !is_tray {
         tracing::warn!(
             "not running as root; enforcing subcommands will refuse (use --dry-run to simulate)"
         );
@@ -140,6 +148,8 @@ async fn main() -> Result<()> {
         }
         Cmd::InstallService => service::install_service(ctx),
         Cmd::Status => service::status(),
+        #[cfg(feature = "tray")]
+        Cmd::Tray => tray::run(),
         Cmd::Unlock { pin, minutes } => unlock::run(&ctx, &pin, minutes),
     }
 }

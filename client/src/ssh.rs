@@ -162,7 +162,10 @@ impl SshSession {
     /// EOF, reaps the child, and sends `ssh_closed` on its own.
     pub async fn close(self) {
         if let Err(e) = signal::kill(self.pid, Signal::SIGHUP) {
-            tracing::debug!("ssh session {} kill failed (already gone?): {e}", self.session_id);
+            tracing::debug!(
+                "ssh session {} kill failed (already gone?): {e}",
+                self.session_id
+            );
         }
         tracing::info!("ssh session {} closed", self.session_id);
     }

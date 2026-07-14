@@ -26,6 +26,7 @@ import type {
   EnrollTokenResponse,
   Event,
   EventType,
+  LockResponse,
   Me,
   Passkey,
   Policy,
@@ -36,9 +37,11 @@ import type {
 } from "./types";
 
 import {
+  mockCreditTime,
   mockDeviceDetail,
   mockDevices,
   mockDiscovery,
+  mockRegenEnrollToken,
   mockEarnRequests,
   mockEvents,
   mockMe,
@@ -206,12 +209,26 @@ export async function updateDevice(
   return res.device;
 }
 
-export async function lockDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/lock`, { method: "POST" });
+export async function lockDevice(id: string): Promise<LockResponse> {
+  if (usingMock)
+    return { command_id: "mock-cmd", queued: true, delivered: true };
+  return request<LockResponse>(`/api/devices/${id}/lock`, { method: "POST" });
 }
 
-export async function unlockDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}/unlock`, { method: "POST" });
+export async function unlockDevice(id: string): Promise<LockResponse> {
+  if (usingMock)
+    return { command_id: "mock-cmd", queued: true, delivered: true };
+  return request<LockResponse>(`/api/devices/${id}/unlock`, { method: "POST" });
+}
+
+/** Regenerate the one-time enroll token for a still-pending device (24 h TTL).
+ * 409 once the device has enrolled. */
+export async function regenEnrollToken(id: string): Promise<EnrollTokenResponse> {
+  if (usingMock) return mockRegenEnrollToken(id);
+  return request<EnrollTokenResponse>(`/api/devices/${id}/enroll-token`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function deleteDevice(id: string): Promise<void> {
@@ -248,6 +265,22 @@ export async function listDeviceUsers(id: string): Promise<DeviceUser[]> {
     () => ({ users: mockDeviceDetail(id).users }),
   );
   return res.users;
+}
+
+/** Grant extra screen time today (1–240 min) to one managed user. The server
+ * credits today's ledger and pushes a `credit_time` command to the agent. */
+export async function creditTime(
+  deviceUserId: string,
+  minutes: number,
+): Promise<void> {
+  if (usingMock) {
+    mockCreditTime(deviceUserId, minutes);
+    return;
+  }
+  await request<{ ok: boolean; minutes: number }>(
+    `/api/device-users/${deviceUserId}/credit-time`,
+    { method: "POST", body: JSON.stringify({ minutes }) },
+  );
 }
 
 export async function assignProfile(
