@@ -13,7 +13,7 @@ use crate::{discovery, gamify, ssh, tamper};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -147,11 +147,36 @@ pub struct Agent {
     /// loses the buffer, but the outage itself stays visible server-side as
     /// gone-dark time.
     pending_events: Vec<Event>,
+    /// Recent user-facing notifications published to the status snapshot for the
+    /// per-user tray to deliver as desktop notifications. See [`UserNotification`].
+    notifications: VecDeque<UserNotification>,
+    /// Monotonic id for the next notification (so the tray shows each once).
+    notif_seq: u64,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
 /// a week of offline ticks must not become an unbounded allocation.
 const PENDING_EVENTS_CAP: usize = 512;
+
+/// A normal (non-blocking) user-facing message the per-user tray should show as
+/// a desktop notification. Full-screen takeovers are reserved for the moments
+/// that actually block the screen (a lock, or the freeze countdown); everything
+/// else — an approval, a denial, a heads-up — rides this channel. The agent runs
+/// as root and has no session bus, so the tray is what actually displays these;
+/// the monotonic `id` lets it show each exactly once.
+#[derive(Debug, Clone)]
+struct UserNotification {
+    id: u64,
+    title: String,
+    body: String,
+    critical: bool,
+    user: Option<String>,
+}
+
+/// How many recent notifications the status snapshot carries. The tray polls
+/// every 5s and ticks are 10s, so a handful is plenty of overlap to never miss
+/// one; older entries age out.
+const NOTIFY_QUEUE_CAP: usize = 16;
 
 impl Agent {
     pub fn new(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<Self> {
@@ -186,7 +211,33 @@ impl Agent {
             warned: HashMap::new(),
             pending_freeze: HashMap::new(),
             pending_events: Vec::new(),
+            notifications: VecDeque::new(),
+            notif_seq: 0,
         })
+    }
+
+    /// Publish a normal (non-blocking) desktop notification for the tray to
+    /// deliver. `user = None` means device-wide. Also emits the headless
+    /// `wall`/log fallback so a machine with no tray isn't left silent.
+    fn notify_user(&mut self, user: Option<&str>, title: &str, body: &str, critical: bool) {
+        self.notif_seq += 1;
+        self.notifications.push_back(UserNotification {
+            id: self.notif_seq,
+            title: title.to_string(),
+            body: body.to_string(),
+            critical,
+            user: user.map(str::to_string),
+        });
+        while self.notifications.len() > NOTIFY_QUEUE_CAP {
+            self.notifications.pop_front();
+        }
+        lockout::present_nudge(
+            &self.exec,
+            &gamify::Nudge {
+                kind: "notification".into(),
+                copy: format!("{title} — {body}"),
+            },
+        );
     }
 
     /// Deliver `fresh` events plus any earlier failures. On error the batch is
@@ -670,17 +721,9 @@ impl Agent {
                     lockout::present_nudge(&self.exec, &nudge);
                     events.push(gamify::streak_event(user, &nudge.kind, 0));
                 }
-                lockout::present_nudge(
-                    &self.exec,
-                    &gamify::Nudge {
-                        kind: "freeze_countdown".into(),
-                        copy: format!(
-                            "{} — SCREEN PAUSES IN {} SECONDS. SAVE YOUR WORK.",
-                            reason.headline(),
-                            FREEZE_GRACE.as_secs()
-                        ),
-                    },
-                );
+                // The full-screen overlay now shows a live save-your-work
+                // countdown itself (no more static "PAUSES IN 60 SECONDS" text).
+                spec.countdown_secs = Some(FREEZE_GRACE.as_secs() as u32);
                 lockout::present(&self.exec, &spec);
                 let sev = if matches!(reason, screentime::LockReason::Bedtime) {
                     SEV_WARN
@@ -809,6 +852,13 @@ impl Agent {
             "tamper_lockdown": self.tamper_lockdown,
             "remote_shell_open": !self.sessions.is_empty(),
             "users": users,
+            "notifications": self.notifications.iter().map(|n| json!({
+                "id": n.id,
+                "title": n.title,
+                "body": n.body,
+                "urgency": if n.critical { "critical" } else { "normal" },
+                "user": n.user,
+            })).collect::<Vec<_>>(),
         });
         let dir = std::path::Path::new("/run/sentinel");
         let _ = std::fs::create_dir_all(dir);
@@ -986,6 +1036,13 @@ impl Agent {
                 // cache so a later same-day lockout sends a fresh request instead
                 // of showing a stale "REQUEST SENT — WAITING FOR APPROVAL".
                 self.requested_earn.retain(|(u, _), _| u != &os_username);
+                // Tell the kid — an approval used to be silent to them.
+                self.notify_user(
+                    Some(&os_username),
+                    "TIME GRANTED",
+                    &format!("+{minutes} MIN — YOU'RE BACK"),
+                    false,
+                );
                 events.push(gamify::earned_event(&os_username, &request_id, minutes));
                 json!({ "credited": true, "os_username": os_username, "minutes": minutes })
             }
@@ -1007,19 +1064,11 @@ impl Agent {
                 self.requested_earn.retain(|(u, t), _| {
                     !(u == &os_username && (task_id.is_empty() || t == &task_id))
                 });
-                lockout::present_nudge(
-                    &self.exec,
-                    &gamify::Nudge {
-                        kind: "earn_denied".into(),
-                        copy: format!(
-                            "REQUEST NOT APPROVED THIS TIME{}",
-                            if task_id.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" — {task_id}")
-                            }
-                        ),
-                    },
+                self.notify_user(
+                    Some(&os_username),
+                    "REQUEST NOT APPROVED",
+                    "MAYBE LATER — ASK A PARENT",
+                    false,
                 );
                 json!({ "denied": true, "os_username": os_username, "task_id": task_id })
             }
