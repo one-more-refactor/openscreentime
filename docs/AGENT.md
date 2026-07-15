@@ -118,6 +118,7 @@ Two subcommands are intentionally hidden — not in `--help`, not real
 | `/var/lib/sentinel/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
 | `/var/lib/sentinel/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
 | `~/.config/sentinel/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `sentinel-agent pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
+| `/run/user/<uid>/sentinel/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
 
 ### Config fields
 

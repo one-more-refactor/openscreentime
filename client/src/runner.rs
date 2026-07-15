@@ -158,6 +158,16 @@ pub struct Agent {
 /// a week of offline ticks must not become an unbounded allocation.
 const PENDING_EVENTS_CAP: usize = 512;
 
+/// The per-user on-demand earn-request marker. The kid's tray drops a file here
+/// (in its own `/run/user/<uid>`, which only that user and root can touch); the
+/// root agent consumes it. Returns `None` if the username has no uid.
+fn ondemand_earn_marker(user: &str) -> Option<std::path::PathBuf> {
+    let uid = crate::sysusers::uid_of(user)?;
+    Some(std::path::PathBuf::from(format!(
+        "/run/user/{uid}/sentinel/earn_request"
+    )))
+}
+
 /// A normal (non-blocking) user-facing message the per-user tray should show as
 /// a desktop notification. Full-screen takeovers are reserved for the moments
 /// that actually block the screen (a lock, or the freeze countdown); everything
@@ -674,6 +684,9 @@ impl Agent {
             }
         }
 
+        // On-demand "request more time" markers dropped by users' trays.
+        self.check_ondemand_earn().await;
+
         self.write_status_file();
         events
     }
@@ -865,6 +878,38 @@ impl Agent {
         let tmp = dir.join("status.json.tmp");
         if std::fs::write(&tmp, status.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, dir.join("status.json"));
+        }
+    }
+
+    /// Consume any on-demand "request more time" markers a user's tray dropped
+    /// in its own runtime dir, and turn each into an earn-request. This is the
+    /// spoof-proof privilege bridge: the unprivileged tray can only write inside
+    /// `/run/user/<uid>` (its own, 0700), and only root (this agent) reads it —
+    /// so a request is authentically from that user. Deduped per day like the
+    /// automatic lockout path.
+    async fn check_ondemand_earn(&mut self) {
+        let users: Vec<String> = self.policies.keys().cloned().collect();
+        for user in users {
+            let Some(path) = ondemand_earn_marker(&user) else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&path); // single-use
+            let policy = self.policies.get(&user).cloned().unwrap_or_default();
+            // Use the first configured earn offer, or a plain "more time" ask.
+            let offer = gamify::earn_offers(&policy.gamification)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| gamify::EarnOffer {
+                    id: "more_time".into(),
+                    label: "More screen time".into(),
+                    reward_minutes: 15,
+                });
+            if let Some(copy) = self.auto_request_earn(&user, &offer).await {
+                self.notify_user(Some(&user), "REQUEST SENT", &copy, false);
+            }
         }
     }
 

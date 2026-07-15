@@ -250,6 +250,20 @@ impl ksni::Tray for SentinelTray {
             }
         }
 
+        // The managed user can ask for more time straight from the tray. Shown
+        // whenever this user is managed (has a status entry).
+        if self.me().is_some() {
+            items.push(MenuItem::Separator);
+            items.push(
+                StandardItem {
+                    label: "REQUEST MORE TIME".into(),
+                    activate: Box::new(|_: &mut Self| request_more_time()),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
@@ -272,6 +286,26 @@ impl ksni::Tray for SentinelTray {
 // ---------------------------------------------------------------------------
 // Notifications (transitions only)
 // ---------------------------------------------------------------------------
+
+/// Drop an on-demand "request more time" marker in this user's own runtime dir
+/// for the root agent to pick up and turn into an earn-request. Writing here is
+/// the only channel the unprivileged tray has to the root agent — and it's
+/// spoof-proof, since `/run/user/<uid>` is the user's own 0700 directory.
+fn request_more_time() {
+    let uid = users::get_current_uid();
+    let dir = std::path::PathBuf::from(format!("/run/user/{uid}/sentinel"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::debug!("could not create runtime dir for earn request: {e}");
+        notify("COULDN'T SEND", "Try again in a moment", false);
+        return;
+    }
+    if let Err(e) = std::fs::write(dir.join("earn_request"), b"1") {
+        tracing::debug!("could not write earn-request marker: {e}");
+        notify("COULDN'T SEND", "Try again in a moment", false);
+        return;
+    }
+    notify("REQUEST SENT", "Asked for more time — waiting for a parent", false);
+}
 
 fn notify(summary: &str, body: &str, critical: bool) {
     let mut n = notify_rust::Notification::new();
