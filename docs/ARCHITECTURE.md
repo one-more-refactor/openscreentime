@@ -77,6 +77,12 @@ one origin and no production CORS. Responsibilities:
   the agent (`GET /api/ssh/:id/ws`), so an operator can reach a shell behind NAT.
 - **Anti-cheat checks** — cross-checks each heartbeat against known state and
   records an `evasion` event when they disagree (see [Anti-cheat](#anti-cheat)).
+- **Parent companion surface** — a scoped, revocable bearer token
+  (`parent_access_tokens`) an admin mints from Settings, accepted only on the
+  narrow `/api/parent/*` routes (list pending time requests, approve/deny, read
+  alerts). It is not a session and not tied to a passkey; it cannot reach
+  policy, devices, SSH, or admin settings. This is the auth the tray
+  parent-mode and phone web-push alerts build on.
 
 The extractors in `state.rs` are the auth "middleware": a handler that takes
 `AuthAdmin` gets admin-session auth for free; one that takes `AgentAuth` gets
