@@ -1,125 +1,136 @@
-# Sentinel — Zero-Trust Device Management
+<div align="center">
 
-A clean, [Nothing](https://nothing.tech)-style device management platform for families and
-small organizations. Enroll devices, lock them down by default (zero-trust), enforce DNS &
-screen-time policy per person, and nudge healthy habits with Duolingo-style full-screen
-interruptions — all from one beautiful monochrome control center.
+<img src="docs/assets/deploy-demo.gif" alt="Deploy Sentinel and enroll a device in two commands" width="820">
 
-> **Status:** Working v1, self-hosted. Linux agents (x86_64), under active development.
+### Zero-trust device management for families — self-hosted, honest, and yours.
+
+Enroll a device, lock it down by default, enforce screen-time and DNS per person,
+and approve requests from your phone or your desk. One monochrome control center,
+on **your** infrastructure — no cloud, no accounts, no telemetry.
+
+![Rust](https://img.shields.io/badge/Rust-1.85+-0a0a0a?style=flat-square&logo=rust&logoColor=white)
+&nbsp;![Postgres](https://img.shields.io/badge/Postgres-16-0a0a0a?style=flat-square&logo=postgresql&logoColor=white)
+&nbsp;![Self-hosted](https://img.shields.io/badge/self--hosted-rootless%20Podman-0a0a0a?style=flat-square)
+&nbsp;![Auth](https://img.shields.io/badge/auth-passkey--only-0a0a0a?style=flat-square)
+&nbsp;![Default deny](https://img.shields.io/badge/default-deny-d71921?style=flat-square)
+
+</div>
 
 ---
 
-## What it does
+## Two commands
 
-- **Passkey-only admin auth** — no passwords, ever. WebAuthn/FIDO2 via `webauthn-rs`.
-- **Zero-trust by default** — every enrolled device is **default-deny** for DNS and firewall.
-  Nothing is allowed until a policy explicitly allows it.
-- **Per-user policy** — screen time, DNS, app limits, and gamification are tracked **per Linux
-  user account**, so shared family computers work correctly.
-- **Preset profiles** — `kids`, `teen`, and `default`, plus custom profiles.
-- **Screen time with parent controls** — per-user limits, full-screen lockout with pre-warnings,
-  60-second grace, parent PIN override, and daily time credits (earn/grant minutes).
-- **One-liner enrollment** — sha256-verified agent installer served by your own server, with
-  daily self-updates (the previous binary is kept as `.bak` for rollback).
-- **Device tray companion** — desktop status indicator showing policy state, remote-shell
-  transparency, and gone-dark alerts.
-- **Remote lockdown & SSH** — lock, unlock, or freeze devices from the console, or reach a
-  shell on any enrolled device through a server-brokered reverse tunnel, even behind NAT.
-- **Tamper resistance** — root-owned, systemd-hardened agent that resists casual kills,
-  auto-restarts, masks user-level power controls, and reports tamper attempts in real time.
-
-## Quick start
-
-### Server (5 minutes)
+Everything below is the whole first run — a server, then a managed device.
 
 ```bash
+# 1 · stand up the server (writes .env, builds, starts, waits for health)
 git clone <this-repo-url> sentinel && cd sentinel
 deploy/setup.sh --domain sentinel.example.com
+
+# 2 · on the device you want to manage — the console hands you this line
+curl -fsSL https://sentinel.example.com/install.sh | sudo sh
 ```
 
-The script generates a `.env` file with random secrets, builds the server and database, and
-starts them. Point your reverse proxy (Caddy, nginx, etc.) at `127.0.0.1:8080`, then open
-`https://sentinel.example.com` — register the first admin with a passkey. After that,
-registration is locked. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for production details.
+Open `https://sentinel.example.com`, register the first admin with a passkey
+(registration locks the moment you do), and the device shows up online within a
+minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production details.
 
-### Enroll a device (30 seconds)
+## What it does
 
-In the web console, click **ADD DEVICE**. A one-liner appears:
+**Enforcement, per person, on real Linux devices**
+- **Zero-trust by default** — every enrolled device is **default-deny** for DNS and
+  firewall (nftables). Nothing is allowed until a policy says so.
+- **Per-Linux-user policy** — screen time, DNS, and app rules are tracked per user
+  account, so a shared family computer just works.
+- **Screen time that can't be gamed** — a persistent usage ledger survives restarts,
+  and the day boundary is forward-only, so neither a reboot nor a clock set-back
+  hands out free time. When time's up the screen pauses, with a 60-second
+  save-your-work countdown.
 
-```bash
-curl -fsSL https://sentinel.example.com/install.sh | \
-  sudo SENTINEL_TOKEN=<token> sh -s -- --server https://sentinel.example.com
-```
+**Fair to both sides**
+- **Request & approve** — the kid asks for more time from their tray; a parent
+  approves from the web console, a **paired tray on their own machine**, or a
+  one-way **phone alert** (Discord / Slack / Telegram — send-only, nobody writes
+  back to a bot).
+- **Radically transparent** — a first-run intro tells the kid exactly what a parent
+  can and can't see, and the tray always shows when a remote shell is open. What the
+  software can't do, it says so.
 
-Paste it on the target machine (Linux, x86_64). The installer downloads and verifies the
-agent (sha256), enrolls, and installs a systemd service. The device appears online within
-a minute.
+**Anti-cheat, both ends**
+- The agent **confirms** tampering before it reacts — a sustained attack on the
+  firewall locks the device with an honest "tampering detected" screen; a transient
+  blip does not. The server independently flags a client under-reporting its usage.
+
+**Operate it like you mean it**
+- **Passkey-only admin auth** (WebAuthn/FIDO2) — no passwords to steal. Optional OIDC SSO.
+- **One-liner enrollment**, sha256-verified, with daily self-updates and a kept-`.bak` rollback.
+- **Remote lockdown & SSH** — lock/unlock from the console, or reach a shell on any
+  device through a server-brokered reverse tunnel, even behind NAT.
 
 ## Architecture
 
 ```
                  ┌───────────────────────────────┐
-                 │   Web Control Center (Bun)     │   React + Tailwind
+                 │   Web Control Center           │   React + Tailwind (Bun)
                  │   Nothing-style monochrome UI  │   Passkey login
                  └───────────────┬───────────────┘
-                                 │ HTTPS / JSON  (admin API)
+                                 │ HTTPS / JSON  (admin + parent API)
                  ┌───────────────▼───────────────┐
                  │        Server (Rust)           │   Axum + SQLx + Postgres
-                 │  - Passkey auth (webauthn-rs)  │   Multi-tenant
-                 │  - Device registry & policy    │   Command queue
-                 │  - Reverse-tunnel SSH broker   │   WebSocket agent bus
+                 │  passkey auth · policy engine  │   multi-tenant
+                 │  command queue · SSH broker    │   WebSocket agent bus
+                 │  anti-cheat · phone alerts     │
                  └───────────────┬───────────────┘
-                                 │ HTTPS + WS  (agent API)
+                                 │ HTTPS + WS  (agent API, device-token bearer)
                  ┌───────────────▼───────────────┐
-                 │     Linux Agent (Rust)         │   Static binary, systemd
-                 │  - Zero-trust DNS + firewall   │   Per-user enforcement
-                 │  - Screen-time + gamification  │   Full-screen lockout UI
-                 │  - Tamper resistance           │   Reverse SSH endpoint
+                 │     Linux Agent (Rust)         │   static binary, systemd
+                 │  zero-trust DNS + firewall     │   per-user enforcement
+                 │  screen-time + usage ledger    │   full-screen lockout UI
+                 │  tamper resistance             │   reverse-SSH endpoint · tray
                  └────────────────────────────────┘
 ```
+
+Full technical map (data flows, enforcement model, anti-cheat design, trust
+boundaries): **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
 
 ## Monorepo layout
 
 | Path        | What                                                        | Stack                     |
 |-------------|-------------------------------------------------------------|---------------------------|
-| `server/`   | Backend API, auth, policy engine, SSH broker                | Rust, Axum, SQLx, Postgres|
+| `server/`   | Backend API, auth, policy engine, SSH broker, anti-cheat    | Rust, Axum, SQLx, Postgres|
 | `web/`      | Admin control center (the "Nothing" UI)                     | Bun, React, Vite, Tailwind|
 | `client/`   | Linux device agent                                          | Rust                      |
-| `policy/`   | Shared `Policy` document type (used by server + client)     | Rust                      |
+| `policy/`   | Shared `Policy` document (used by server **and** client)    | Rust                      |
 | `docs/`     | Full documentation — see the [docs index](docs/README.md)   | Markdown                  |
 
 ## Documentation
 
 Organized by audience in [`docs/README.md`](docs/README.md):
 
-- **Parents** — [the day-to-day guide](docs/PARENT-GUIDE.md): profiles, screen time, granting
-  time, the parent PIN, locking, gone-dark devices.
-- **The person being managed** — [`TRANSPARENCY.md`](docs/TRANSPARENCY.md): exactly what your
-  parents can and cannot see and do on your machine. Handing this to your teen is part of the
-  product, not an afterthought.
-- **Operators** — [deploy](docs/DEPLOY.md), [day-2 operations](docs/OPERATIONS.md) (backup,
-  updates, recovery), and the [agent reference](docs/AGENT.md).
-- **Contributors** — [architecture](docs/ARCHITECTURE.md) (start here),
-  [development](docs/DEVELOPMENT.md), [API](docs/API.md),
+- **Start here** — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md): how it all fits together.
+- **Parents** — [the day-to-day guide](docs/PARENT-GUIDE.md): profiles, screen time,
+  granting time, the parent PIN, locking, gone-dark devices.
+- **The person being managed** — [`TRANSPARENCY.md`](docs/TRANSPARENCY.md): exactly what
+  your parents can and cannot see. (The kid also gets a short version as a first-run
+  intro on the device.)
+- **Operators** — [deploy](docs/DEPLOY.md), [day-2 operations](docs/OPERATIONS.md), and
+  the [agent reference](docs/AGENT.md).
+- **Contributors** — [development](docs/DEVELOPMENT.md), [API](docs/API.md),
   [data model](docs/DATA_MODEL.md), [tamper threat model](docs/TAMPER.md).
 
-## Getting started
+## Develop it locally
 
-See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the full dev-loop. TL;DR:
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the full loop. TL;DR:
 
 ```bash
-# 1. Server + Postgres
-cd server && docker compose up -d db && cargo run
-
-# 2. Web control center
-cd web && bun install && bun run dev
-
-# 3. Linux agent (on a device you want to manage)
-cd client && cargo build --release
-sudo ./target/release/sentinel-agent enroll --server https://... --token <ENROLL_TOKEN>
+cd server && docker compose up -d db && cargo run   # server + Postgres
+cd web && bun install && bun run dev                # control center
+cd client && cargo build --release                  # the Linux agent
 ```
 
-For running Sentinel in production on a VPS (rootless Podman compose stack), see [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Testing an agent without touching a real host? Run it `--dry-run` (it logs every
+enforcement action instead of applying it), or drop it in a throwaway container as
+root — see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## Platform support
 
@@ -131,12 +142,13 @@ For running Sentinel in production on a VPS (rootless Podman compose stack), see
 | Android  | 🕗 Coming soon (DeviceOwner + VPN app)   |
 | iOS      | 🕗 Coming soon (MDM profile)             |
 
-## Security & honesty note
+## Honesty note
 
-On a device where a user has **physical access and root**, shutdown and network disconnection
-can never be made *truly* impossible — only expensive and detectable. Sentinel's tamper
-resistance is **strong deterrence + real-time alerting** by default (level 1), with an opt-in
-**maximum-lockdown** mode (level 3). See [`docs/TAMPER.md`](docs/TAMPER.md).
+On a device where someone has **physical access and root**, shutdown and network
+disconnection can never be made *truly* impossible — only expensive and detectable.
+Sentinel's tamper resistance is **strong deterrence + real-time alerting** by default,
+with an opt-in **maximum-lockdown** mode. It never claims otherwise, and it always
+keeps a recovery path. See [`docs/TAMPER.md`](docs/TAMPER.md).
 
 ## License
 
