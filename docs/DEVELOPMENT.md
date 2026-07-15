@@ -81,14 +81,31 @@ Always build from within `client/`. Feature flags (`client/Cargo.toml`):
 6. Click **Lock** → agent shows full-screen lock. Click **SSH** → tunnel session opens.
 
 ## Testing
-- Client: `cd client && cargo test` — 28 tests (enforcement runner, lockout challenges, PIN
-  hashing, tamper levels, SSH PTY, self-update ordering, and more).
-- Server: `cd server && cargo test` — 7 tests, including
+- Client: `cd client && cargo test` — 36 tests (enforcement runner, usage ledger +
+  clock-set-back defense, tamper confirmation monitor, lockout challenges, PIN hashing,
+  tamper levels, SSH PTY, self-update ordering, and more). Add `--features tray` for 38
+  (the tray notification selection).
+- Server: `cd server && cargo test` — 11 tests, including
   `presets::tests::presets_round_trip_through_policy_without_loss` — the preset drift canary.
   Any new field added to `Policy` must round-trip through the presets without loss, or this test
   fails; treat a failure here as "a Policy field isn't wired into presets," not a flaky test.
 - Web: `cd web && bun run typecheck` (`tsc -b --noEmit`) and `bun run build` (`tsc -b && vite
   build`) — both must be clean.
+
+### Testing an agent without a real host
+The agent enforces on the host (nftables, DNS, cgroup freezer), so don't run real
+enforcement on your workstation. Two safe options:
+- **`--dry-run`** — the agent logs every action it *would* take (`WOULD RUN: nft …`,
+  `WOULD WRITE /etc/resolv.conf …`) and touches nothing. Safe as non-root, anywhere.
+- **A throwaway container as root** — exercises the *full* loop (enroll → policy pull →
+  enforcement decisions → heartbeat → events) in isolation. `enroll` needs the tenant to
+  have a `default` preset profile, or it 404s:
+  ```bash
+  podman run --rm --network host -v "$PWD/client/target/debug/sentinel-agent":/usr/local/bin/sentinel-agent:ro \
+    docker.io/library/archlinux bash -c '
+      sentinel-agent enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
+      sentinel-agent --dry-run --time-accel 60 run'
+  ```
 
 ## Repo conventions
 - Rust: `cargo fmt` + `cargo clippy` clean. Errors via `anyhow`/`thiserror`. Async on Tokio.
