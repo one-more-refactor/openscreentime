@@ -31,9 +31,29 @@ struct Status {
     #[serde(default)]
     offline_hard_lockdown: bool,
     #[serde(default)]
+    tamper_lockdown: bool,
+    #[serde(default)]
     remote_shell_open: bool,
     #[serde(default)]
     users: Vec<UserStatus>,
+    /// Normal (non-blocking) notifications published by the agent for the tray
+    /// to deliver. Consumed by monotonic `id` so each shows exactly once.
+    #[serde(default)]
+    notifications: Vec<TrayNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct TrayNotification {
+    id: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    urgency: String,
+    /// Target user, or `None`/absent = device-wide.
+    #[serde(default)]
+    user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -106,6 +126,7 @@ impl SentinelTray {
         s.connection == "offline_fail_closed"
             || s.device_locked
             || s.offline_hard_lockdown
+            || s.tamper_lockdown
             || self.me().is_some_and(|u| u.frozen)
     }
 }
@@ -265,6 +286,46 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
         (true, false) => notify("LOCKDOWN LIFTED", "NORMAL USE HAS RESUMED", false),
         _ => {}
     }
+    match (prev.tamper_lockdown, next.tamper_lockdown) {
+        (false, true) => notify(
+            "TAMPERING DETECTED",
+            "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+            true,
+        ),
+        (true, false) => notify("TAMPER LOCK LIFTED", "NORMAL USE HAS RESUMED", false),
+        _ => {}
+    }
+}
+
+/// Pure selection: the notifications this user hasn't seen yet (id above the
+/// high-water mark, targeted at them or device-wide), plus the new high-water
+/// mark. Split out from delivery so the logic is testable without a session bus.
+fn select_notifications<'a>(
+    username: &str,
+    notifs: &'a [TrayNotification],
+    last_id: u64,
+) -> (Vec<&'a TrayNotification>, u64) {
+    let mut high = last_id;
+    let mut show = Vec::new();
+    for n in notifs {
+        high = high.max(n.id);
+        let for_me = n.user.as_deref().is_none_or(|u| u == username);
+        if n.id > last_id && for_me {
+            show.push(n);
+        }
+    }
+    (show, high)
+}
+
+/// Deliver any agent-published notifications this user hasn't seen yet and
+/// return the new high-water mark. On the very first read we prime the mark to
+/// the newest id instead of replaying the backlog.
+fn deliver_notifications(username: &str, status: &Status, last_id: u64) -> u64 {
+    let (show, high) = select_notifications(username, &status.notifications, last_id);
+    for n in show {
+        notify(&n.title, &n.body, n.urgency == "critical");
+    }
+    high
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +348,13 @@ pub fn run() -> Result<()> {
         tracing::warn!("{STATUS_PATH} not readable yet — is sentinel-agent running?");
     }
 
+    // High-water mark for the notification queue: prime to whatever is already
+    // present so a tray starting up mid-day doesn't replay the backlog.
+    let mut last_notif_id = prev
+        .as_ref()
+        .and_then(|s| s.notifications.iter().map(|n| n.id).max())
+        .unwrap_or(0);
+
     let service = ksni::TrayService::new(SentinelTray {
         username: username.clone(),
         status: prev.clone(),
@@ -302,6 +370,9 @@ pub fn run() -> Result<()> {
                 notify_transitions(&username, p, n);
             }
         }
+        if let Some(n) = &next {
+            last_notif_id = deliver_notifications(&username, n, last_notif_id);
+        }
         if prev != next {
             let for_tray = next.clone();
             handle.update(move |t| t.status = for_tray);
@@ -312,4 +383,43 @@ pub fn run() -> Result<()> {
 
 fn current_username() -> Option<String> {
     users::get_current_username().map(|s| s.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notif(id: u64, user: Option<&str>) -> TrayNotification {
+        TrayNotification {
+            id,
+            title: "T".into(),
+            body: "B".into(),
+            urgency: "normal".into(),
+            user: user.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn shows_only_new_targeted_or_broadcast() {
+        let notifs = vec![
+            notif(1, Some("kid")),   // already seen
+            notif(2, Some("kid")),   // new, mine
+            notif(3, Some("other")), // new, not mine
+            notif(4, None),          // new, broadcast
+        ];
+        let (show, high) = select_notifications("kid", &notifs, 1);
+        let ids: Vec<u64> = show.iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![2, 4]);
+        assert_eq!(high, 4);
+    }
+
+    #[test]
+    fn priming_to_newest_suppresses_backlog() {
+        let notifs = vec![notif(1, None), notif(2, None), notif(3, None)];
+        // Prime as the run loop does: last_id = max present.
+        let last = notifs.iter().map(|n| n.id).max().unwrap();
+        let (show, high) = select_notifications("kid", &notifs, last);
+        assert!(show.is_empty());
+        assert_eq!(high, 3);
+    }
 }
