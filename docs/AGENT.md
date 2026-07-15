@@ -85,7 +85,8 @@ Subcommands:
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
 | `install-service` | — | Copies the running binary to `/usr/local/bin/sentinel-agent`, writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload` + enables/starts `sentinel-agent.service` and `sentinel-watchdog.timer`. Requires root. |
 | `status` | — | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active sentinel-agent.service`. Safe non-root. |
-| `tray` | — | *(feature `tray` only)* Per-user tray companion — see [Build features matrix](#build-features-matrix). Runs as the desktop user, never root. |
+| `pair` | `--server <URL>` `--token <TOKEN>` | Stores a scoped **parent access token** (minted in the web console → Settings → Parent access) at `~/.config/sentinel/parent.toml` (`0600`). Enables the tray's parent mode. Runs as the desktop user, never root. |
+| `tray` | — | *(feature `tray` only)* Per-user tray companion — see [Build features matrix](#build-features-matrix). With a `pair`ed token it also shows and approves time requests. Runs as the desktop user, never root. |
 | `unlock` | `--pin <PIN>` `--minutes <N>` (default 60) | Parent-PIN recovery: verifies the PIN against the cached policy, offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Requires root. See [Lockout](#lockout-gui--wall-fallback). |
 
 Two subcommands are intentionally hidden — not in `--help`, not real
@@ -116,6 +117,7 @@ Two subcommands are intentionally hidden — not in `--help`, not real
 | `/run/sentinel/unlock_grant.<user>` | root-only dir (0755) — no managed user can write here | written by the `__lockout` GUI subprocess on a verified dismissal; consumed by `run` every tick | An **already-verified** unlock, trusted at face value (safe only because `/run/sentinel` is root-owned). Value is minutes granted, clamped to 1–240: 30 for a parent-PIN dismiss, 5 for a solved math challenge, single-use. |
 | `/var/lib/sentinel/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
 | `/var/lib/sentinel/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
+| `~/.config/sentinel/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `sentinel-agent pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
 
 ### Config fields
 
@@ -172,7 +174,7 @@ additive; `default = []`.
 |---|---|---|
 | *(none — headless, what the server ships)* | — | Full enforcement (DNS, firewall, screen time, tamper hardening, self-update). Lockout/nudge screens render as a `wall`-broadcast text overlay (see `render_ascii`) instead of a graphical window. No `tray` subcommand. |
 | `gui` | `eframe`/`egui` | The `__lockout` subprocess renders a real fullscreen window (black bg, monospace, accent-red CTA) instead of falling back to `wall`. Enables the parent-PIN / math-challenge typed-input box and the verified-unlock grant flow (`unlock_grant.<user>`). Self-update refuses to run on a `gui` build. |
-| `tray` | `ksni` (StatusNotifierItem) + `notify-rust` | The `tray` subcommand: a per-user, non-root system tray icon + desktop notifications reading `/run/sentinel/status.json`. Self-update refuses to run on a `tray` build. |
+| `tray` | `ksni` (StatusNotifierItem) + `notify-rust` | The `tray` subcommand: a per-user, non-root system tray icon + desktop notifications reading `/run/sentinel/status.json`. In **parent mode** (after `sentinel-agent pair`) a background worker also polls `/api/parent/*` to show pending time requests + alerts and approve/deny them from the menu. Self-update refuses to run on a `tray` build. |
 
 Both `gui` and `tray` can be combined (`--features gui,tray`) for a full
 desktop build. The `install-service` unit files are the same regardless of

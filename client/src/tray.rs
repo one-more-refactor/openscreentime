@@ -11,12 +11,23 @@
 //! shell open right now. Notifications fire on state *transitions* only
 //! (previous snapshot is diffed against the next), never repeatedly.
 
+use crate::parent;
 use anyhow::Result;
 use serde::Deserialize;
+use std::sync::mpsc;
 use std::time::Duration;
 
 const STATUS_PATH: &str = "/run/sentinel/status.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often parent mode polls the server for pending requests + alerts.
+const PARENT_POLL: Duration = Duration::from_secs(15);
+
+/// An approve/deny the parent triggered from the tray menu, handed to the
+/// worker thread (which owns the HTTP client) to carry out.
+enum ParentAction {
+    Approve(String),
+    Deny(String),
+}
 
 // ---------------------------------------------------------------------------
 // Status snapshot (schema mirrors runner::write_status_file)
@@ -91,6 +102,12 @@ struct SentinelTray {
     username: String,
     /// `None` when the status file is missing/unreadable (agent not running).
     status: Option<Status>,
+    /// Parent-mode: pending time requests (kept current by the worker thread).
+    /// Empty unless this machine is paired (`sentinel-agent pair`).
+    pending: Vec<parent::api::PendingReq>,
+    /// `Some` in parent mode — menu actions send approve/deny here for the
+    /// worker to execute against the server.
+    action_tx: Option<mpsc::Sender<ParentAction>>,
 }
 
 impl SentinelTray {
@@ -186,6 +203,53 @@ impl ksni::Tray for SentinelTray {
                 .into(),
             );
         }
+
+        // Parent mode: pending time requests, each with approve/deny.
+        if self.action_tx.is_some() && !self.pending.is_empty() {
+            items.push(MenuItem::Separator);
+            items.push(
+                StandardItem {
+                    label: format!("{} TIME REQUEST(S)", self.pending.len()),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            for r in &self.pending {
+                let approve_id = r.id.clone();
+                let deny_id = r.id.clone();
+                items.push(
+                    SubMenu {
+                        label: format!("{} · +{} MIN · {}", r.who(), r.minutes, r.task_label),
+                        submenu: vec![
+                            StandardItem {
+                                label: format!("APPROVE +{} MIN", r.minutes),
+                                activate: Box::new(move |t: &mut Self| {
+                                    if let Some(tx) = &t.action_tx {
+                                        let _ = tx.send(ParentAction::Approve(approve_id.clone()));
+                                    }
+                                }),
+                                ..Default::default()
+                            }
+                            .into(),
+                            StandardItem {
+                                label: "DENY".into(),
+                                activate: Box::new(move |t: &mut Self| {
+                                    if let Some(tx) = &t.action_tx {
+                                        let _ = tx.send(ParentAction::Deny(deny_id.clone()));
+                                    }
+                                }),
+                                ..Default::default()
+                            }
+                            .into(),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+        }
+
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
@@ -332,6 +396,100 @@ fn deliver_notifications(username: &str, status: &Status, last_id: u64) -> u64 {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Parent-mode worker: owns the HTTP client and a tokio runtime, polls the
+/// server for pending requests + alerts every `PARENT_POLL`, notifies on new
+/// ones, keeps the tray's pending list current, and carries out approve/deny
+/// actions the menu sends. Runs on its own thread so it never blocks the ksni
+/// service or the status poll.
+fn spawn_parent_worker(
+    cfg: parent::ParentConfig,
+    handle: ksni::Handle<SentinelTray>,
+    rx: mpsc::Receiver<ParentAction>,
+) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("parent worker: could not start runtime: {e}");
+                return;
+            }
+        };
+        let client = reqwest::Client::new();
+        let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_alerts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Skip notifications on the first pass so a companion starting up doesn't
+        // announce the entire existing backlog.
+        let mut primed = false;
+
+        loop {
+            // Act on a queued approve/deny immediately; otherwise wake to poll.
+            match rx.recv_timeout(PARENT_POLL) {
+                Ok(action) => {
+                    let (id, approve) = match action {
+                        ParentAction::Approve(id) => (id, true),
+                        ParentAction::Deny(id) => (id, false),
+                    };
+                    match rt.block_on(parent::api::decide(&client, &cfg, &id, approve)) {
+                        Ok(()) => notify(
+                            if approve { "APPROVED" } else { "DENIED" },
+                            "Time request updated",
+                            false,
+                        ),
+                        Err(e) => {
+                            tracing::warn!("parent decide failed: {e}");
+                            notify("COULDN'T UPDATE", "Check the connection and try again", false);
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            match rt.block_on(parent::api::pending(&client, &cfg)) {
+                Ok(pending) => {
+                    if primed {
+                        for r in &pending {
+                            if !seen_pending.contains(&r.id) {
+                                notify(
+                                    &format!("{} WANTS +{} MIN", r.who().to_uppercase(), r.minutes),
+                                    &format!("{} · {}", r.task_label, r.device_name),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    seen_pending = pending.iter().map(|r| r.id.clone()).collect();
+                    handle.update(move |t: &mut SentinelTray| t.pending = pending.clone());
+                }
+                Err(e) => tracing::debug!("parent pending poll failed: {e}"),
+            }
+
+            match rt.block_on(parent::api::alerts(&client, &cfg)) {
+                Ok(alerts) => {
+                    if primed {
+                        for a in &alerts {
+                            if a.severity == "critical" && !seen_alerts.contains(&a.id) {
+                                let msg = a
+                                    .payload
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or(&a.etype);
+                                notify(&format!("ALERT · {}", a.etype.to_uppercase()), msg, true);
+                            }
+                        }
+                    }
+                    seen_alerts = alerts.iter().map(|a| a.id.clone()).collect();
+                }
+                Err(e) => tracing::debug!("parent alerts poll failed: {e}"),
+            }
+            primed = true;
+        }
+    });
+}
+
 /// Blocking loop: spawn the ksni DBus service, then poll the status file
 /// every 5s, pushing updates into the tray via the service handle.
 pub fn run() -> Result<()> {
@@ -355,12 +513,29 @@ pub fn run() -> Result<()> {
         .and_then(|s| s.notifications.iter().map(|n| n.id).max())
         .unwrap_or(0);
 
+    // Parent mode is enabled iff this machine has been paired.
+    let parent_cfg = parent::ParentConfig::load();
+    let (tray_tx, worker_rx) = match parent_cfg {
+        Some(_) => {
+            let (tx, rx) = mpsc::channel::<ParentAction>();
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
+
     let service = ksni::TrayService::new(SentinelTray {
         username: username.clone(),
         status: prev.clone(),
+        pending: Vec::new(),
+        action_tx: tray_tx,
     });
     let handle = service.handle();
     service.spawn();
+
+    if let (Some(cfg), Some(rx)) = (parent_cfg, worker_rx) {
+        tracing::info!("parent mode enabled (paired with {})", cfg.server_url);
+        spawn_parent_worker(cfg, handle.clone(), rx);
+    }
 
     loop {
         std::thread::sleep(POLL_INTERVAL);

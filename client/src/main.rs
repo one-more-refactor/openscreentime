@@ -12,6 +12,7 @@ mod enforce;
 mod enroll;
 mod gamify;
 mod lockout;
+mod parent;
 mod pin;
 mod policy;
 mod protocol;
@@ -68,8 +69,18 @@ enum Cmd {
     InstallService,
     /// Show enrollment / service status.
     Status,
+    /// Pair this machine as a parent companion: store a scoped parent access
+    /// token (minted in the web console → Settings → Parent access) so the tray
+    /// can show + approve time requests. Runs as the desktop user (no root).
+    Pair {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        token: String,
+    },
     /// Per-user system tray companion: time left, connection state, and
-    /// remote-shell transparency. Runs as the desktop user (no root).
+    /// remote-shell transparency. With a parent pairing (`pair`), also shows and
+    /// approves time requests. Runs as the desktop user (no root).
     #[cfg(feature = "tray")]
     Tray,
     /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
@@ -129,12 +140,12 @@ async fn main() -> Result<()> {
     if cli.dry_run {
         tracing::info!("DRY-RUN: no host state will be modified");
     }
-    // The tray companion runs as the desktop user on purpose — no root nag.
+    // The tray companion and `pair` run as the desktop user on purpose — no root nag.
     #[cfg(feature = "tray")]
-    let is_tray = matches!(cli.cmd, Cmd::Tray);
+    let is_user_cmd = matches!(cli.cmd, Cmd::Tray | Cmd::Pair { .. });
     #[cfg(not(feature = "tray"))]
-    let is_tray = false;
-    if !ctx.is_root && !cli.dry_run && !is_tray {
+    let is_user_cmd = matches!(cli.cmd, Cmd::Pair { .. });
+    if !ctx.is_root && !cli.dry_run && !is_user_cmd {
         tracing::warn!(
             "not running as root; enforcing subcommands will refuse (use --dry-run to simulate)"
         );
@@ -149,6 +160,7 @@ async fn main() -> Result<()> {
         }
         Cmd::InstallService => service::install_service(ctx),
         Cmd::Status => service::status(),
+        Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
         Cmd::Unlock { pin, minutes } => unlock::run(&ctx, &pin, minutes),
