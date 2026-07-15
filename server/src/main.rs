@@ -6,6 +6,7 @@
 
 mod agent;
 mod agent_dist;
+mod alerts;
 mod auth;
 mod auth_oidc;
 mod db;
@@ -119,6 +120,10 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    // Phone alerts: one-way chat-bot messages on tamper/lockdown + time
+    // requests. No-op unless a channel is configured in the environment.
+    alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
 
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
