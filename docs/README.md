@@ -24,6 +24,7 @@ where a limitation exists, the doc says so instead of rounding up.
 
 | Doc | What it answers |
 |---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The technical map: the four components, data flows, the enforcement model, the anti-cheat design, and the trust boundaries. Start here. |
 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | The dev loop: server + web + agent locally, mock mode, cargo features, tests. |
 | [`API.md`](API.md) | Every HTTP endpoint and WebSocket frame, request/response shapes, auth, rate limits. |
 | [`DATA_MODEL.md`](DATA_MODEL.md) | The Postgres schema, table by table, and the migration history. |
