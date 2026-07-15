@@ -571,6 +571,11 @@ pub fn run() -> Result<()> {
         spawn_parent_worker(cfg, handle.clone(), rx);
     }
 
+    // First-run intro (skippable child-facing cards), shown once. Only on a
+    // gui+tray build — the intro window needs the gui presenter.
+    #[cfg(feature = "gui")]
+    maybe_show_intro();
+
     loop {
         std::thread::sleep(POLL_INTERVAL);
         let next = read_status();
@@ -592,6 +597,28 @@ pub fn run() -> Result<()> {
 
 fn current_username() -> Option<String> {
     users::get_current_username().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// Show the first-run intro once, as a detached subprocess so it never blocks
+/// the tray. No-op if it's already been seen.
+#[cfg(feature = "gui")]
+fn maybe_show_intro() {
+    if crate::intro::already_seen() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    match std::process::Command::new(exe)
+        .arg("__intro")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {} // the subprocess marks itself seen when it closes
+        Err(e) => tracing::debug!("could not spawn first-run intro: {e}"),
+    }
 }
 
 #[cfg(test)]

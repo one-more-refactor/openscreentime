@@ -11,6 +11,8 @@ mod discovery;
 mod enforce;
 mod enroll;
 mod gamify;
+#[cfg(feature = "gui")]
+mod intro;
 mod lockout;
 mod parent;
 mod pin;
@@ -131,6 +133,19 @@ async fn main() -> Result<()> {
         #[cfg(not(feature = "gui"))]
         {
             anyhow::bail!("__lockout requires a build with --features gui");
+        }
+    }
+
+    // Hidden first-run intro subprocess (spawned detached by the tray on first
+    // launch). Shows the skippable child-facing cards, then marks itself seen.
+    if raw_args.get(1).map(String::as_str) == Some("__intro") {
+        #[cfg(feature = "gui")]
+        {
+            return intro::run();
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("__intro requires a build with --features gui");
         }
     }
 
