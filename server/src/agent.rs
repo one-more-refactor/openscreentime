@@ -217,14 +217,62 @@ pub struct UsageEntry {
     pub used_minutes_today: i32,
 }
 
+/// A reported daily total may dip this far below the recorded total without
+/// being flagged — absorbs clock jitter and the minute-granularity of the wire
+/// format. A larger drop is a real regression (a wiped or rolled-back client
+/// ledger) worth an `evasion` event.
+const USAGE_REGRESSION_SECS: i32 = 300;
+
 /// Upsert today's per-user usage into the screen-time ledger. Shared by the HTTP
-/// heartbeat and the WS `heartbeat` frame so both report identically.
+/// heartbeat and the WS `heartbeat` frame so both report identically. Also the
+/// server-side anti-cheat hook: the client ledger only ever moves forward within
+/// a day, so a heartbeat reporting *less* than we've already recorded means the
+/// counter was reset behind our back. The monotonic GREATEST clamp neutralizes
+/// the cheat (the total can't go down); this records it so it isn't invisible.
 async fn upsert_usage(
     db: &sqlx::PgPool,
+    tenant_id: Uuid,
     device_id: Uuid,
     usage: &[UsageEntry],
 ) -> Result<(), sqlx::Error> {
     for u in usage {
+        let new_seconds = u.used_minutes_today.max(0) * 60;
+
+        // Read the recorded total for today BEFORE the GREATEST clamp hides a drop.
+        let prev: Option<(Uuid, i32)> = sqlx::query_as(
+            "SELECT stl.device_user_id, stl.used_seconds
+             FROM screen_time_ledger stl
+             JOIN device_users du ON du.id = stl.device_user_id
+             WHERE du.device_id = $1 AND du.os_username = $2 AND stl.day = CURRENT_DATE",
+        )
+        .bind(device_id)
+        .bind(&u.os_username)
+        .fetch_optional(db)
+        .await?;
+
+        if let Some((device_user_id, prev_seconds)) = prev {
+            if new_seconds + USAGE_REGRESSION_SECS < prev_seconds {
+                // Best-effort audit; a failed insert must not drop the heartbeat.
+                let _ = events::insert(
+                    db,
+                    tenant_id,
+                    Some(device_id),
+                    Some(device_user_id),
+                    "evasion",
+                    "warn",
+                    json!({
+                        "kind": "usage_regression",
+                        "os_username": u.os_username,
+                        "reported_seconds": new_seconds,
+                        "ledger_seconds": prev_seconds,
+                        "message": "reported usage dropped below the recorded daily total; \
+                                    counter clamped (possible client-ledger reset)",
+                    }),
+                )
+                .await;
+            }
+        }
+
         sqlx::query(
             // used_seconds is monotonic within a day: take the max so an agent
             // whose in-memory counter reset (reboot / process restart) reports a
@@ -237,7 +285,7 @@ async fn upsert_usage(
         )
         .bind(device_id)
         .bind(&u.os_username)
-        .bind(u.used_minutes_today.max(0) * 60)
+        .bind(new_seconds)
         .execute(db)
         .await?;
     }
@@ -281,7 +329,7 @@ pub async fn heartbeat(
     }
 
     // Persist today's per-user usage into the screen-time ledger.
-    upsert_usage(&st.db, agent.device_id, &req.usage).await?;
+    upsert_usage(&st.db, agent.tenant_id, agent.device_id, &req.usage).await?;
 
     // Return queued/sent (undelivered-or-unacked) commands and mark them sent.
     let cmds = pull_pending_commands(&st.db, agent.device_id).await?;
@@ -701,7 +749,7 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             // the ledger stays current in the normal (non-poll) path.
             if let Some(usage) = v.get("usage") {
                 if let Ok(entries) = serde_json::from_value::<Vec<UsageEntry>>(usage.clone()) {
-                    let _ = upsert_usage(&st.db, agent.device_id, &entries).await;
+                    let _ = upsert_usage(&st.db, agent.tenant_id, agent.device_id, &entries).await;
                 }
             }
         }

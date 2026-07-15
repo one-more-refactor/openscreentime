@@ -6,6 +6,7 @@
 
 mod agent;
 mod agent_dist;
+mod alerts;
 mod auth;
 mod auth_oidc;
 mod db;
@@ -14,6 +15,7 @@ mod discovery;
 mod earn;
 mod error;
 mod events;
+mod parent;
 mod presets;
 mod profiles;
 mod rate_limit;
@@ -119,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Phone alerts: one-way chat-bot messages on tamper/lockdown + time
+    // requests. No-op unless a channel is configured in the environment.
+    alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
+
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
         .allow_origin(
@@ -169,6 +175,20 @@ async fn main() -> anyhow::Result<()> {
             rate_limit::limit_dist,
         ));
 
+    // Parent companion API (ParentAuth bearer): 60 req / 60 s / IP.
+    let parent_api = Router::new()
+        .route("/api/parent/earn-requests", get(parent::list_earn_requests))
+        .route(
+            "/api/parent/earn-requests/{id}/approve",
+            post(parent::approve),
+        )
+        .route("/api/parent/earn-requests/{id}/deny", post(parent::deny))
+        .route("/api/parent/alerts", get(parent::alerts))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_parent,
+        ));
+
     let app = Router::new()
         .route("/health", get(health))
         // --- Agent distribution ---------------------------------------------
@@ -217,6 +237,12 @@ async fn main() -> anyhow::Result<()> {
             post(earn::approve_request),
         )
         .route("/api/earn-requests/{id}/deny", post(earn::deny_request))
+        // --- Parent access tokens (admin manages) --------------------------
+        .route(
+            "/api/parent-tokens",
+            get(parent::list_tokens).post(parent::mint_token),
+        )
+        .route("/api/parent-tokens/{id}", delete(parent::revoke_token))
         // --- Profiles ------------------------------------------------------
         .route(
             "/api/profiles",
@@ -241,6 +267,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/earn-request", post(earn::create_request))
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
+        // --- Parent companion API ------------------------------------------
+        .merge(parent_api)
         .with_state(state);
 
     // Serve the built web UI (see `web/`) as the fallback for any path that

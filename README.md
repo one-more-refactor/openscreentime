@@ -99,7 +99,8 @@ Organized by audience in [`docs/README.md`](docs/README.md):
   product, not an afterthought.
 - **Operators** — [deploy](docs/DEPLOY.md), [day-2 operations](docs/OPERATIONS.md) (backup,
   updates, recovery), and the [agent reference](docs/AGENT.md).
-- **Contributors** — [development](docs/DEVELOPMENT.md), [API](docs/API.md),
+- **Contributors** — [architecture](docs/ARCHITECTURE.md) (start here),
+  [development](docs/DEVELOPMENT.md), [API](docs/API.md),
   [data model](docs/DATA_MODEL.md), [tamper threat model](docs/TAMPER.md).
 
 ## Getting started

@@ -13,6 +13,8 @@ use crate::enforce::{dns, firewall};
 use crate::protocol::{Event, EV_TAMPER, SEV_CRITICAL, SEV_WARN};
 use crate::util::Exec;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-sentinel.rules";
 /// The recovery account that must always retain power/stop rights at every level.
@@ -144,6 +146,95 @@ pub fn tamper_event(kind: &str, severity: &str, message: &str) -> Event {
     )
 }
 
+/// How many consecutive ticks a monitored signal must persist before it counts
+/// as a *confirmed* evasion attempt rather than a transient blip. `None` for a
+/// signal means "detect, repair, and report, but never auto-lock" — reserved
+/// for kinds with common benign causes.
+///
+/// Only `nft_flush` escalates today: our nftables table is root-owned, we own
+/// it exclusively, and we atomically rebuild it every tick, so if it's *still*
+/// gone a tick later something with root is actively deleting it faster than we
+/// can heal it — a real, sustained attack, not a one-off collateral flush from
+/// firewalld/NetworkManager (which our repair absorbs, resetting the counter).
+///
+/// Deliberately NOT escalated: `clock_skew` (a laptop resuming from a long
+/// suspend jumps the wall clock exactly like a clock-set would, and an RTC-less
+/// machine's first NTP sync is a legitimate large jump — the clock cheat is
+/// instead defused in the usage ledger, see `UsageTracker::roll_day`),
+/// `nm_disconnect` (roaming / a dropped packet), and `resolv_conf_drift`
+/// (systemd-resolved / DHCP legitimately rewrite it; we just re-pin).
+fn confirm_threshold(kind: &str) -> Option<u32> {
+    match kind {
+        "nft_flush" => Some(2),
+        _ => None,
+    }
+}
+
+/// The set of signal kinds the confirmation monitor tracks. Extend alongside
+/// [`confirm_threshold`].
+const MONITORED: &[&str] = &["nft_flush"];
+
+/// Separates a real, sustained evasion attempt from a transient technical blip
+/// (a dropped packet, a one-off collateral firewall flush). A monitored signal
+/// must repeat across `confirm_threshold` consecutive enforcement ticks before
+/// it's reported as confirmed; any tick the signal is absent resets its streak.
+#[derive(Debug)]
+pub struct TamperMonitor {
+    strikes: HashMap<String, u32>,
+    started: Instant,
+}
+
+impl Default for TamperMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TamperMonitor {
+    pub fn new() -> Self {
+        TamperMonitor {
+            strikes: HashMap::new(),
+            started: Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_started(started: Instant) -> Self {
+        TamperMonitor {
+            strikes: HashMap::new(),
+            started,
+        }
+    }
+
+    /// Feed the tamper-signal kinds observed this tick. Returns the kinds that
+    /// *just* crossed their confirmation threshold (report + lock down once).
+    /// Boot grace: signals in the first two minutes of agent uptime are ignored
+    /// so a device settling after a restart/resume can't self-trigger.
+    pub fn observe(&mut self, kinds: &[&str]) -> Vec<String> {
+        const BOOT_GRACE: Duration = Duration::from_secs(120);
+        let mut confirmed = Vec::new();
+        let booting = self.started.elapsed() < BOOT_GRACE;
+        let seen: HashSet<&str> = kinds.iter().copied().collect();
+        for &kind in MONITORED {
+            let Some(threshold) = confirm_threshold(kind) else {
+                continue;
+            };
+            if seen.contains(kind) && !booting {
+                let n = self.strikes.entry(kind.to_string()).or_insert(0);
+                if *n < threshold {
+                    *n += 1;
+                    if *n == threshold {
+                        confirmed.push(kind.to_string());
+                    }
+                }
+            } else {
+                self.strikes.remove(kind);
+            }
+        }
+        confirmed
+    }
+}
+
 /// Level 3 bootloader/firmware guidance (advisory — we can only recommend).
 pub fn level3_boot_guidance_event() -> Event {
     Event::new(
@@ -174,5 +265,49 @@ mod tests {
     fn level1_does_not_mask_systemctl_stop() {
         let r = render_polkit_rule(1);
         assert!(!r.contains("sentinel-agent.service"));
+    }
+
+    #[test]
+    fn single_flush_is_not_confirmed() {
+        // One missing-table tick could be a collateral flush we heal next tick;
+        // it must not lock the device on its own.
+        let mut m = TamperMonitor::with_started(Instant::now() - Duration::from_secs(600));
+        assert!(m.observe(&["nft_flush"]).is_empty());
+    }
+
+    #[test]
+    fn sustained_flush_confirms_once() {
+        let mut m = TamperMonitor::with_started(Instant::now() - Duration::from_secs(600));
+        assert!(m.observe(&["nft_flush"]).is_empty()); // strike 1
+        let hit = m.observe(&["nft_flush"]); // strike 2 → confirmed
+        assert_eq!(hit, vec!["nft_flush".to_string()]);
+        // Already confirmed: doesn't re-fire while it persists.
+        assert!(m.observe(&["nft_flush"]).is_empty());
+    }
+
+    #[test]
+    fn a_clear_tick_resets_the_streak() {
+        let mut m = TamperMonitor::with_started(Instant::now() - Duration::from_secs(600));
+        assert!(m.observe(&["nft_flush"]).is_empty()); // strike 1
+        assert!(m.observe(&[]).is_empty()); // healed → reset
+        assert!(m.observe(&["nft_flush"]).is_empty()); // back to strike 1, not confirmed
+    }
+
+    #[test]
+    fn boot_grace_suppresses_early_signals() {
+        // Fresh start: a signal during the settle window is ignored.
+        let mut m = TamperMonitor::new();
+        assert!(m.observe(&["nft_flush"]).is_empty());
+        assert!(m.observe(&["nft_flush"]).is_empty());
+    }
+
+    #[test]
+    fn clock_skew_never_auto_locks() {
+        // A wall-clock jump (suspend/resume, RTC-less NTP sync) must never trip
+        // the lockdown path — it's handled in the ledger, not here.
+        let mut m = TamperMonitor::with_started(Instant::now() - Duration::from_secs(600));
+        for _ in 0..10 {
+            assert!(m.observe(&["clock_skew"]).is_empty());
+        }
     }
 }

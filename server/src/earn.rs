@@ -236,12 +236,14 @@ pub struct ListQuery {
     pub status: Option<String>,
 }
 
-/// GET /api/earn-requests?status= — newest first, joined with device + user.
-pub async fn list_requests(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-    Query(q): Query<ListQuery>,
-) -> AppResult<Json<Value>> {
+/// Earn-requests for a tenant (optionally filtered by status), newest first,
+/// joined with device + user. Shared by the admin console and the parent
+/// companion so both see the same shape.
+pub async fn list_for_tenant(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    status: Option<String>,
+) -> AppResult<Value> {
     let rows: Vec<RequestRow> = sqlx::query_as(&format!(
         "SELECT {REQUEST_COLS} FROM earn_requests er
          JOIN devices d ON d.id = er.device_id
@@ -249,13 +251,22 @@ pub async fn list_requests(
          WHERE er.tenant_id = $1 AND ($2::text IS NULL OR er.status = $2)
          ORDER BY er.created_at DESC LIMIT 200"
     ))
-    .bind(admin.tenant_id)
-    .bind(q.status)
-    .fetch_all(&st.db)
+    .bind(tenant_id)
+    .bind(status)
+    .fetch_all(db)
     .await?;
-    Ok(Json(json!({
+    Ok(json!({
         "requests": rows.into_iter().map(request_to_json).collect::<Vec<_>>()
-    })))
+    }))
+}
+
+/// GET /api/earn-requests?status= — newest first, joined with device + user.
+pub async fn list_requests(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Query(q): Query<ListQuery>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(list_for_tenant(&st.db, admin.tenant_id, q.status).await?))
 }
 
 /// POST /api/earn-requests/:id/approve
@@ -264,7 +275,7 @@ pub async fn approve_request(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    decide(st, admin, id, true).await
+    decide(st, admin.tenant_id, id, true, json!({ "admin_id": admin.admin_id })).await
 }
 
 /// POST /api/earn-requests/:id/deny
@@ -273,10 +284,19 @@ pub async fn deny_request(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    decide(st, admin, id, false).await
+    decide(st, admin.tenant_id, id, false, json!({ "admin_id": admin.admin_id })).await
 }
 
-async fn decide(st: AppState, admin: AuthAdmin, id: Uuid, approve: bool) -> AppResult<Json<Value>> {
+/// Approve or deny an earn-request within `tenant_id`. Shared by the admin
+/// console and the parent companion; `by` describes who decided (recorded on
+/// the audit event). Credits the ledger and enqueues `credit_time`/`deny_earn`.
+pub async fn decide(
+    st: AppState,
+    tenant_id: Uuid,
+    id: Uuid,
+    approve: bool,
+    by: Value,
+) -> AppResult<Json<Value>> {
     let status = if approve { "approved" } else { "denied" };
 
     let updated: Option<(Uuid, Uuid, i32)> = sqlx::query_as(
@@ -286,13 +306,13 @@ async fn decide(st: AppState, admin: AuthAdmin, id: Uuid, approve: bool) -> AppR
     )
     .bind(status)
     .bind(id)
-    .bind(admin.tenant_id)
+    .bind(tenant_id)
     .fetch_optional(&st.db)
     .await?;
 
     let Some((device_id, device_user_id, minutes)) = updated else {
         // Distinguish "gone" from "already decided".
-        fetch_request(&st.db, id, admin.tenant_id).await?;
+        fetch_request(&st.db, id, tenant_id).await?;
         return Err(AppError::Conflict("earn request already decided".into()));
     };
 
@@ -345,15 +365,15 @@ async fn decide(st: AppState, admin: AuthAdmin, id: Uuid, approve: bool) -> AppR
 
     events::insert(
         &st.db,
-        admin.tenant_id,
+        tenant_id,
         Some(device_id),
         Some(device_user_id),
         "earn_request",
         "info",
-        json!({ "action": status, "request_id": id, "minutes": minutes, "by": admin.admin_id }),
+        json!({ "action": status, "request_id": id, "minutes": minutes, "by": by }),
     )
     .await?;
 
-    let row = fetch_request(&st.db, id, admin.tenant_id).await?;
+    let row = fetch_request(&st.db, id, tenant_id).await?;
     Ok(Json(json!({ "request": request_to_json(row) })))
 }

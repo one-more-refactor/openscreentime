@@ -83,6 +83,26 @@ pub async fn recent_for_device(
         .collect::<Vec<_>>()))
 }
 
+/// Recent noteworthy events for a tenant — warnings and criticals only
+/// (tamper, evasion, locks, screen-time exceeded, etc.), newest first. This is
+/// what the parent companion polls for its alerts feed.
+pub async fn recent_alerts(db: &sqlx::PgPool, tenant_id: Uuid, limit: i64) -> AppResult<Value> {
+    let rows: Vec<EventRow> = sqlx::query_as(
+        "SELECT id, tenant_id, device_id, device_user_id, type, severity, payload, created_at
+         FROM events
+         WHERE tenant_id = $1 AND severity IN ('warn','critical')
+         ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(tenant_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    Ok(json!(rows
+        .into_iter()
+        .map(event_to_json)
+        .collect::<Vec<_>>()))
+}
+
 #[derive(Deserialize)]
 pub struct EventsQuery {
     pub device_id: Option<Uuid>,

@@ -29,6 +29,8 @@ import type {
   LockResponse,
   Me,
   Passkey,
+  ParentToken,
+  MintedParentToken,
   Policy,
   Profile,
   Severity,
@@ -458,6 +460,28 @@ export async function listPasskeys(): Promise<Passkey[]> {
 
 export async function deletePasskey(id: string): Promise<void> {
   await request<{ ok: boolean }>(`/api/me/passkeys/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// ---- Parent access tokens ---------------------------------------------------
+
+export async function listParentTokens(): Promise<ParentToken[]> {
+  const res = await read<{ tokens: ParentToken[] }>("/api/parent-tokens", () => ({
+    tokens: [],
+  }));
+  return res.tokens;
+}
+
+export async function mintParentToken(label: string): Promise<MintedParentToken> {
+  return request<MintedParentToken>("/api/parent-tokens", {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+}
+
+export async function revokeParentToken(id: string): Promise<void> {
+  await request<{ revoked: boolean }>(`/api/parent-tokens/${id}`, {
     method: "DELETE",
   });
 }

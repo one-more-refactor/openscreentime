@@ -252,6 +252,57 @@ impl FromRequestParts<AppState> for AuthAdmin {
     }
 }
 
+/// Extractor: a paired parent companion, via `Authorization: Bearer
+/// <parent_token>`. The token is sha256-hashed and matched against
+/// `parent_access_tokens` (not revoked). Scope is fixed by the `/api/parent/*`
+/// routes that accept it — approve/deny earn-requests and read alerts, nothing
+/// else. Touches `last_used_at` best-effort so the admin can see stale tokens.
+#[derive(Clone, Copy)]
+pub struct ParentAuth {
+    #[allow(dead_code)] // carried for audit payloads / future per-token scoping
+    pub token_id: Uuid,
+    pub tenant_id: Uuid,
+}
+
+impl FromRequestParts<AppState> for ParentAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Unauthorized("missing bearer token".into()))?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| AppError::Unauthorized("malformed authorization header".into()))?;
+        let hash = crate::auth::hash_token(token);
+
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT id, tenant_id FROM parent_access_tokens
+             WHERE token_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(&hash)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (token_id, tenant_id) =
+            row.ok_or_else(|| AppError::Unauthorized("invalid parent token".into()))?;
+        // Best-effort last-used stamp; never fail the request over it.
+        let _ = sqlx::query("UPDATE parent_access_tokens SET last_used_at = now() WHERE id = $1")
+            .bind(token_id)
+            .execute(&state.db)
+            .await;
+        Ok(ParentAuth {
+            token_id,
+            tenant_id,
+        })
+    }
+}
+
 /// Extractor: an authenticated agent (device), via `Authorization: Bearer
 /// <device_token>`. The token is sha256-hashed and matched against
 /// `devices.device_token`.
