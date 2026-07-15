@@ -11,12 +11,23 @@
 //! shell open right now. Notifications fire on state *transitions* only
 //! (previous snapshot is diffed against the next), never repeatedly.
 
+use crate::parent;
 use anyhow::Result;
 use serde::Deserialize;
+use std::sync::mpsc;
 use std::time::Duration;
 
 const STATUS_PATH: &str = "/run/sentinel/status.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often parent mode polls the server for pending requests + alerts.
+const PARENT_POLL: Duration = Duration::from_secs(15);
+
+/// An approve/deny the parent triggered from the tray menu, handed to the
+/// worker thread (which owns the HTTP client) to carry out.
+enum ParentAction {
+    Approve(String),
+    Deny(String),
+}
 
 // ---------------------------------------------------------------------------
 // Status snapshot (schema mirrors runner::write_status_file)
@@ -31,9 +42,29 @@ struct Status {
     #[serde(default)]
     offline_hard_lockdown: bool,
     #[serde(default)]
+    tamper_lockdown: bool,
+    #[serde(default)]
     remote_shell_open: bool,
     #[serde(default)]
     users: Vec<UserStatus>,
+    /// Normal (non-blocking) notifications published by the agent for the tray
+    /// to deliver. Consumed by monotonic `id` so each shows exactly once.
+    #[serde(default)]
+    notifications: Vec<TrayNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct TrayNotification {
+    id: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    urgency: String,
+    /// Target user, or `None`/absent = device-wide.
+    #[serde(default)]
+    user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -71,6 +102,12 @@ struct SentinelTray {
     username: String,
     /// `None` when the status file is missing/unreadable (agent not running).
     status: Option<Status>,
+    /// Parent-mode: pending time requests (kept current by the worker thread).
+    /// Empty unless this machine is paired (`sentinel-agent pair`).
+    pending: Vec<parent::api::PendingReq>,
+    /// `Some` in parent mode — menu actions send approve/deny here for the
+    /// worker to execute against the server.
+    action_tx: Option<mpsc::Sender<ParentAction>>,
 }
 
 impl SentinelTray {
@@ -106,6 +143,7 @@ impl SentinelTray {
         s.connection == "offline_fail_closed"
             || s.device_locked
             || s.offline_hard_lockdown
+            || s.tamper_lockdown
             || self.me().is_some_and(|u| u.frozen)
     }
 }
@@ -165,6 +203,67 @@ impl ksni::Tray for SentinelTray {
                 .into(),
             );
         }
+
+        // Parent mode: pending time requests, each with approve/deny.
+        if self.action_tx.is_some() && !self.pending.is_empty() {
+            items.push(MenuItem::Separator);
+            items.push(
+                StandardItem {
+                    label: format!("{} TIME REQUEST(S)", self.pending.len()),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            for r in &self.pending {
+                let approve_id = r.id.clone();
+                let deny_id = r.id.clone();
+                items.push(
+                    SubMenu {
+                        label: format!("{} · +{} MIN · {}", r.who(), r.minutes, r.task_label),
+                        submenu: vec![
+                            StandardItem {
+                                label: format!("APPROVE +{} MIN", r.minutes),
+                                activate: Box::new(move |t: &mut Self| {
+                                    if let Some(tx) = &t.action_tx {
+                                        let _ = tx.send(ParentAction::Approve(approve_id.clone()));
+                                    }
+                                }),
+                                ..Default::default()
+                            }
+                            .into(),
+                            StandardItem {
+                                label: "DENY".into(),
+                                activate: Box::new(move |t: &mut Self| {
+                                    if let Some(tx) = &t.action_tx {
+                                        let _ = tx.send(ParentAction::Deny(deny_id.clone()));
+                                    }
+                                }),
+                                ..Default::default()
+                            }
+                            .into(),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+        }
+
+        // The managed user can ask for more time straight from the tray. Shown
+        // whenever this user is managed (has a status entry).
+        if self.me().is_some() {
+            items.push(MenuItem::Separator);
+            items.push(
+                StandardItem {
+                    label: "REQUEST MORE TIME".into(),
+                    activate: Box::new(|_: &mut Self| request_more_time()),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
@@ -187,6 +286,26 @@ impl ksni::Tray for SentinelTray {
 // ---------------------------------------------------------------------------
 // Notifications (transitions only)
 // ---------------------------------------------------------------------------
+
+/// Drop an on-demand "request more time" marker in this user's own runtime dir
+/// for the root agent to pick up and turn into an earn-request. Writing here is
+/// the only channel the unprivileged tray has to the root agent — and it's
+/// spoof-proof, since `/run/user/<uid>` is the user's own 0700 directory.
+fn request_more_time() {
+    let uid = users::get_current_uid();
+    let dir = std::path::PathBuf::from(format!("/run/user/{uid}/sentinel"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::debug!("could not create runtime dir for earn request: {e}");
+        notify("COULDN'T SEND", "Try again in a moment", false);
+        return;
+    }
+    if let Err(e) = std::fs::write(dir.join("earn_request"), b"1") {
+        tracing::debug!("could not write earn-request marker: {e}");
+        notify("COULDN'T SEND", "Try again in a moment", false);
+        return;
+    }
+    notify("REQUEST SENT", "Asked for more time — waiting for a parent", false);
+}
 
 fn notify(summary: &str, body: &str, critical: bool) {
     let mut n = notify_rust::Notification::new();
@@ -265,11 +384,145 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
         (true, false) => notify("LOCKDOWN LIFTED", "NORMAL USE HAS RESUMED", false),
         _ => {}
     }
+    match (prev.tamper_lockdown, next.tamper_lockdown) {
+        (false, true) => notify(
+            "TAMPERING DETECTED",
+            "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+            true,
+        ),
+        (true, false) => notify("TAMPER LOCK LIFTED", "NORMAL USE HAS RESUMED", false),
+        _ => {}
+    }
+}
+
+/// Pure selection: the notifications this user hasn't seen yet (id above the
+/// high-water mark, targeted at them or device-wide), plus the new high-water
+/// mark. Split out from delivery so the logic is testable without a session bus.
+fn select_notifications<'a>(
+    username: &str,
+    notifs: &'a [TrayNotification],
+    last_id: u64,
+) -> (Vec<&'a TrayNotification>, u64) {
+    let mut high = last_id;
+    let mut show = Vec::new();
+    for n in notifs {
+        high = high.max(n.id);
+        let for_me = n.user.as_deref().is_none_or(|u| u == username);
+        if n.id > last_id && for_me {
+            show.push(n);
+        }
+    }
+    (show, high)
+}
+
+/// Deliver any agent-published notifications this user hasn't seen yet and
+/// return the new high-water mark. On the very first read we prime the mark to
+/// the newest id instead of replaying the backlog.
+fn deliver_notifications(username: &str, status: &Status, last_id: u64) -> u64 {
+    let (show, high) = select_notifications(username, &status.notifications, last_id);
+    for n in show {
+        notify(&n.title, &n.body, n.urgency == "critical");
+    }
+    high
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// Parent-mode worker: owns the HTTP client and a tokio runtime, polls the
+/// server for pending requests + alerts every `PARENT_POLL`, notifies on new
+/// ones, keeps the tray's pending list current, and carries out approve/deny
+/// actions the menu sends. Runs on its own thread so it never blocks the ksni
+/// service or the status poll.
+fn spawn_parent_worker(
+    cfg: parent::ParentConfig,
+    handle: ksni::Handle<SentinelTray>,
+    rx: mpsc::Receiver<ParentAction>,
+) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("parent worker: could not start runtime: {e}");
+                return;
+            }
+        };
+        let client = reqwest::Client::new();
+        let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_alerts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Skip notifications on the first pass so a companion starting up doesn't
+        // announce the entire existing backlog.
+        let mut primed = false;
+
+        loop {
+            // Act on a queued approve/deny immediately; otherwise wake to poll.
+            match rx.recv_timeout(PARENT_POLL) {
+                Ok(action) => {
+                    let (id, approve) = match action {
+                        ParentAction::Approve(id) => (id, true),
+                        ParentAction::Deny(id) => (id, false),
+                    };
+                    match rt.block_on(parent::api::decide(&client, &cfg, &id, approve)) {
+                        Ok(()) => notify(
+                            if approve { "APPROVED" } else { "DENIED" },
+                            "Time request updated",
+                            false,
+                        ),
+                        Err(e) => {
+                            tracing::warn!("parent decide failed: {e}");
+                            notify("COULDN'T UPDATE", "Check the connection and try again", false);
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            match rt.block_on(parent::api::pending(&client, &cfg)) {
+                Ok(pending) => {
+                    if primed {
+                        for r in &pending {
+                            if !seen_pending.contains(&r.id) {
+                                notify(
+                                    &format!("{} WANTS +{} MIN", r.who().to_uppercase(), r.minutes),
+                                    &format!("{} · {}", r.task_label, r.device_name),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    seen_pending = pending.iter().map(|r| r.id.clone()).collect();
+                    handle.update(move |t: &mut SentinelTray| t.pending = pending.clone());
+                }
+                Err(e) => tracing::debug!("parent pending poll failed: {e}"),
+            }
+
+            match rt.block_on(parent::api::alerts(&client, &cfg)) {
+                Ok(alerts) => {
+                    if primed {
+                        for a in &alerts {
+                            if a.severity == "critical" && !seen_alerts.contains(&a.id) {
+                                let msg = a
+                                    .payload
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or(&a.etype);
+                                notify(&format!("ALERT · {}", a.etype.to_uppercase()), msg, true);
+                            }
+                        }
+                    }
+                    seen_alerts = alerts.iter().map(|a| a.id.clone()).collect();
+                }
+                Err(e) => tracing::debug!("parent alerts poll failed: {e}"),
+            }
+            primed = true;
+        }
+    });
+}
 
 /// Blocking loop: spawn the ksni DBus service, then poll the status file
 /// every 5s, pushing updates into the tray via the service handle.
@@ -287,12 +540,41 @@ pub fn run() -> Result<()> {
         tracing::warn!("{STATUS_PATH} not readable yet — is sentinel-agent running?");
     }
 
+    // High-water mark for the notification queue: prime to whatever is already
+    // present so a tray starting up mid-day doesn't replay the backlog.
+    let mut last_notif_id = prev
+        .as_ref()
+        .and_then(|s| s.notifications.iter().map(|n| n.id).max())
+        .unwrap_or(0);
+
+    // Parent mode is enabled iff this machine has been paired.
+    let parent_cfg = parent::ParentConfig::load();
+    let (tray_tx, worker_rx) = match parent_cfg {
+        Some(_) => {
+            let (tx, rx) = mpsc::channel::<ParentAction>();
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
+
     let service = ksni::TrayService::new(SentinelTray {
         username: username.clone(),
         status: prev.clone(),
+        pending: Vec::new(),
+        action_tx: tray_tx,
     });
     let handle = service.handle();
     service.spawn();
+
+    if let (Some(cfg), Some(rx)) = (parent_cfg, worker_rx) {
+        tracing::info!("parent mode enabled (paired with {})", cfg.server_url);
+        spawn_parent_worker(cfg, handle.clone(), rx);
+    }
+
+    // First-run intro (skippable child-facing cards), shown once. Only on a
+    // gui+tray build — the intro window needs the gui presenter.
+    #[cfg(feature = "gui")]
+    maybe_show_intro();
 
     loop {
         std::thread::sleep(POLL_INTERVAL);
@@ -301,6 +583,9 @@ pub fn run() -> Result<()> {
             if p != n {
                 notify_transitions(&username, p, n);
             }
+        }
+        if let Some(n) = &next {
+            last_notif_id = deliver_notifications(&username, n, last_notif_id);
         }
         if prev != next {
             let for_tray = next.clone();
@@ -312,4 +597,65 @@ pub fn run() -> Result<()> {
 
 fn current_username() -> Option<String> {
     users::get_current_username().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// Show the first-run intro once, as a detached subprocess so it never blocks
+/// the tray. No-op if it's already been seen.
+#[cfg(feature = "gui")]
+fn maybe_show_intro() {
+    if crate::intro::already_seen() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    match std::process::Command::new(exe)
+        .arg("__intro")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {} // the subprocess marks itself seen when it closes
+        Err(e) => tracing::debug!("could not spawn first-run intro: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notif(id: u64, user: Option<&str>) -> TrayNotification {
+        TrayNotification {
+            id,
+            title: "T".into(),
+            body: "B".into(),
+            urgency: "normal".into(),
+            user: user.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn shows_only_new_targeted_or_broadcast() {
+        let notifs = vec![
+            notif(1, Some("kid")),   // already seen
+            notif(2, Some("kid")),   // new, mine
+            notif(3, Some("other")), // new, not mine
+            notif(4, None),          // new, broadcast
+        ];
+        let (show, high) = select_notifications("kid", &notifs, 1);
+        let ids: Vec<u64> = show.iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![2, 4]);
+        assert_eq!(high, 4);
+    }
+
+    #[test]
+    fn priming_to_newest_suppresses_backlog() {
+        let notifs = vec![notif(1, None), notif(2, None), notif(3, None)];
+        // Prime as the run loop does: last_id = max present.
+        let last = notifs.iter().map(|n| n.id).max().unwrap();
+        let (show, high) = select_notifications("kid", &notifs, last);
+        assert!(show.is_empty());
+        assert_eq!(high, 3);
+    }
 }

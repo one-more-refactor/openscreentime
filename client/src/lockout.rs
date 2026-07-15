@@ -27,6 +27,11 @@ pub struct LockSpec {
     pub action: String,             // the single accent-red CTA
     pub challenge: challenge::Challenge,
     pub for_user: String,
+    /// When set, the overlay shows a live "SCREEN PAUSES IN Ns" countdown from
+    /// this many seconds (the save-your-work grace before a screen-time freeze).
+    /// `None` for immediate locks that have no grace. Defaults to `None`.
+    #[serde(default)]
+    pub countdown_secs: Option<u32>,
     /// The user's `policy.parent_pin_hash` (argon2 PHC string), carried along so
     /// a presenter can verify a typed PIN fully offline. `None` = no PIN
     /// configured — the parent_pin path (both the `parent_pin` challenge and the
@@ -198,6 +203,7 @@ impl LockSpec {
             challenge,
             for_user: user.to_string(),
             parent_pin_hash,
+            countdown_secs: None,
         }
     }
 }
@@ -405,9 +411,13 @@ pub mod gui {
             "SENTINEL",
             native,
             Box::new(move |_cc| {
+                let deadline = spec
+                    .countdown_secs
+                    .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(u64::from(s)));
                 Ok(Box::new(LockApp {
                     spec: spec.clone(),
                     input: String::new(),
+                    deadline,
                 }))
             }),
         ) {
@@ -420,6 +430,8 @@ pub mod gui {
         /// Typed response for `Math`/`ParentPin` challenges (the early-dismiss
         /// gate — `Challenge::verify` decides whether it's correct).
         input: String,
+        /// When the save-your-work grace ends (drives the live countdown line).
+        deadline: Option<std::time::Instant>,
     }
 
     impl eframe::App for LockApp {
@@ -450,6 +462,21 @@ pub mod gui {
                             .size(22.0)
                             .monospace(),
                     );
+                    // Live save-your-work countdown, if this is a graced lockout.
+                    if let Some(deadline) = self.deadline {
+                        let remaining = deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_secs();
+                        ui.add_space(20.0);
+                        ui.colored_label(
+                            accent,
+                            egui::RichText::new(format!("SCREEN PAUSES IN {remaining}S"))
+                                .size(30.0)
+                                .monospace(),
+                        );
+                        // Keep ticking even without input events.
+                        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    }
                     ui.add_space(40.0);
                     let prompt = self.spec.challenge.prompt();
                     if !prompt.is_empty() {

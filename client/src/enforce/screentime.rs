@@ -8,7 +8,15 @@ use crate::sysusers;
 use crate::util::Exec;
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate, NaiveTime};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+
+/// Reboot-surviving usage ledger. Without this, a `systemctl restart` (crash,
+/// watchdog kick, self-update — or a kid who guesses the trick) drops the
+/// in-memory counters to zero and hands out a fresh daily budget. Root-owned
+/// dir; the systemd unit already lists it under `ReadWritePaths`.
+pub const LEDGER_PATH: &str = "/var/lib/sentinel/usage_ledger.json";
 
 /// Why a user is being locked out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +49,9 @@ impl LockReason {
 }
 
 /// Accumulates active seconds per user, resetting at local midnight. `earned`
-/// seconds (from the gamify tasks) extend the daily budget.
-#[derive(Debug, Default)]
+/// seconds (from the gamify tasks) extend the daily budget. Serialized to
+/// [`LEDGER_PATH`] so it survives an agent restart.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UsageTracker {
     day: Option<NaiveDate>,
     used_secs: HashMap<String, u32>,
@@ -50,16 +59,72 @@ pub struct UsageTracker {
 }
 
 impl UsageTracker {
+    /// Fresh, empty tracker. The running agent uses [`load`](Self::load) instead
+    /// so a restart resumes the day; kept for tests and callers that want a
+    /// clean slate.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Load the persisted ledger, or a fresh one if it's missing/corrupt.
+    pub fn load() -> Self {
+        Self::load_from(Path::new(LEDGER_PATH))
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist the ledger (best-effort, atomic rename). Callers gate on dry-run.
+    pub fn save(&self) {
+        self.save_to(Path::new(LEDGER_PATH));
+    }
+
+    pub fn save_to(&self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(body) = serde_json::to_string(self) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, &body).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
+    }
+
+    /// Roll to a new day ONLY when the wall clock has genuinely advanced past
+    /// the day we're accounting for. This is forward-only on purpose: setting
+    /// the clock *backward* (to earlier today or to yesterday) used to make
+    /// `self.day != today` and wipe the counters — an instant free-time cheat.
+    /// Now a backward jump keeps the existing day and its accumulated usage;
+    /// the clock jump itself is separately surfaced as a tamper event.
     fn roll_day(&mut self) {
         let today = Local::now().date_naive();
-        if self.day != Some(today) {
+        let advanced = match self.day {
+            Some(d) => today > d,
+            None => true,
+        };
+        if advanced {
             self.day = Some(today);
             self.used_secs.clear();
             self.earned_secs.clear();
+        }
+    }
+
+    /// Whether the accumulated counters still apply to the current wall-clock
+    /// day. True when the clock has NOT advanced past the accounting day — this
+    /// covers both the same-day case and a backward clock jump (a set-back must
+    /// not zero the reported usage). False once the clock genuinely crosses into
+    /// a later day but no seat user has been active yet to roll the counters, so
+    /// readers report 0 for the new day rather than yesterday's stale totals.
+    fn counters_current(&self) -> bool {
+        match self.day {
+            Some(d) => Local::now().date_naive() <= d,
+            None => false,
         }
     }
 
@@ -77,22 +142,14 @@ impl UsageTracker {
         *self.earned_secs.entry(user.to_string()).or_insert(0) += minutes.saturating_mul(60);
     }
 
-    /// True when the tracker's accumulated day is still today. The counters only
-    /// roll forward when a seat user is active (`add_active`), so on an idle
-    /// machine past local midnight the maps hold yesterday's totals; readers must
-    /// treat those as zero rather than report them against the new day.
-    fn is_today(&self) -> bool {
-        self.day == Some(Local::now().date_naive())
-    }
-
     pub fn used_minutes(&self, user: &str) -> u32 {
-        if !self.is_today() {
+        if !self.counters_current() {
             return 0;
         }
         self.used_secs.get(user).copied().unwrap_or(0) / 60
     }
     pub fn earned_minutes(&self, user: &str) -> u32 {
-        if !self.is_today() {
+        if !self.counters_current() {
             return 0;
         }
         self.earned_secs.get(user).copied().unwrap_or(0) / 60
@@ -345,5 +402,51 @@ mod tests {
         t.add_active("kid", 61 * 60, 1);
         t.add_earned("kid", 15);
         assert!(evaluate(&policy, &t, "kid").is_none());
+    }
+
+    #[test]
+    fn ledger_survives_a_restart() {
+        // A round-trip through disk must preserve the day's usage, so a restart
+        // (crash / self-update / watchdog kick) can't hand out a fresh budget.
+        let dir = std::env::temp_dir().join(format!("sentinel-ledger-{}", std::process::id()));
+        let path = dir.join("usage_ledger.json");
+        let mut t = UsageTracker::new();
+        t.add_active("kid", 40 * 60, 1);
+        t.save_to(&path);
+
+        let reloaded = UsageTracker::load_from(&path);
+        assert_eq!(reloaded.used_minutes("kid"), 40);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clock_set_back_does_not_reset_usage() {
+        // Simulate a full day's usage recorded for today, then a clock set back
+        // to yesterday. roll_day is forward-only, so the counters (and the
+        // reported minutes) must NOT reset — the set-back cheat is defused.
+        let mut t = UsageTracker::new();
+        t.add_active("kid", 55 * 60, 1);
+        assert_eq!(t.used_minutes("kid"), 55);
+
+        // Pretend the clock jumped backward: the accounting day is now in the
+        // future relative to "today".
+        t.day = Some(Local::now().date_naive() + chrono::Duration::days(1));
+        t.add_active("kid", 60, 1); // a tick after the set-back
+        // Still counted against the same budget, never wiped.
+        assert!(t.used_minutes("kid") >= 55);
+    }
+
+    #[test]
+    fn new_day_forward_gives_fresh_budget() {
+        // The legitimate case: yesterday's totals must not bleed into today.
+        let mut t = UsageTracker::new();
+        t.day = Some(Local::now().date_naive() - chrono::Duration::days(1));
+        t.used_secs.insert("kid".into(), 60 * 60);
+        // Before any activity today, readers see 0 (stale yesterday ignored).
+        assert_eq!(t.used_minutes("kid"), 0);
+        // First active tick rolls the day and starts fresh: only the new time
+        // counts, yesterday's hour is gone.
+        t.add_active("kid", 2 * 60, 1);
+        assert_eq!(t.used_minutes("kid"), 2);
     }
 }

@@ -143,6 +143,18 @@ console (`goneDarkDays`, `web/src/lib/format.ts`). Nothing emails or pages
 you about it — check the console, or poll `GET /api/devices` and compute
 the same threshold yourself if you want proactive alerting.
 
+**Phone alerts (optional).** For active pushes to your phone, point Sentinel at
+a chat channel you already have — a Discord/Slack incoming webhook, or a
+Telegram bot — via `.env` (`SENTINEL_ALERT_WEBHOOK`, or
+`SENTINEL_TELEGRAM_BOT_TOKEN` + `SENTINEL_TELEGRAM_CHAT_ID`; see
+`.env.example`). A background worker (`server/src/alerts.rs`) then sends a short,
+one-way message on each confirmed tamper / device lockdown and each new time
+request — it never reads anything back. It's best-effort and global to the
+deployment: the high-water mark is in memory, so a message that would have
+fired during a server restart isn't resent (the console and the tray remain the
+durable record). For a multi-tenant host, all tenants' alerts go to the one
+configured channel.
+
 ## Recovering access
 
 **Lost all admin passkeys.** Registration locks the moment the first admin

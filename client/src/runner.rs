@@ -13,7 +13,7 @@ use crate::{discovery, gamify, ssh, tamper};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -125,6 +125,13 @@ pub struct Agent {
     /// exceeded) is currently engaged — freezes all users like an admin lock;
     /// the parent PIN still always unlocks.
     offline_hard_lockdown: bool,
+    /// Whether a *confirmed* evasion attempt (sustained firewall tampering, per
+    /// `TamperMonitor`) has locked the device down. Freezes all users like an
+    /// admin lock; cleared by an admin unlock or a parent PIN at the machine.
+    tamper_lockdown: bool,
+    /// Confirmation gate that separates a real, sustained evasion attempt from a
+    /// transient blip before escalating to `tamper_lockdown`.
+    tamper_monitor: tamper::TamperMonitor,
     /// Verified-unlock grace windows (user → expiry). Fed by overlay grants and
     /// the parent-PIN file override; while active, the user is treated as
     /// within policy (screen-time AND admin lock — the parent always wins).
@@ -140,11 +147,46 @@ pub struct Agent {
     /// loses the buffer, but the outage itself stays visible server-side as
     /// gone-dark time.
     pending_events: Vec<Event>,
+    /// Recent user-facing notifications published to the status snapshot for the
+    /// per-user tray to deliver as desktop notifications. See [`UserNotification`].
+    notifications: VecDeque<UserNotification>,
+    /// Monotonic id for the next notification (so the tray shows each once).
+    notif_seq: u64,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
 /// a week of offline ticks must not become an unbounded allocation.
 const PENDING_EVENTS_CAP: usize = 512;
+
+/// The per-user on-demand earn-request marker. The kid's tray drops a file here
+/// (in its own `/run/user/<uid>`, which only that user and root can touch); the
+/// root agent consumes it. Returns `None` if the username has no uid.
+fn ondemand_earn_marker(user: &str) -> Option<std::path::PathBuf> {
+    let uid = crate::sysusers::uid_of(user)?;
+    Some(std::path::PathBuf::from(format!(
+        "/run/user/{uid}/sentinel/earn_request"
+    )))
+}
+
+/// A normal (non-blocking) user-facing message the per-user tray should show as
+/// a desktop notification. Full-screen takeovers are reserved for the moments
+/// that actually block the screen (a lock, or the freeze countdown); everything
+/// else — an approval, a denial, a heads-up — rides this channel. The agent runs
+/// as root and has no session bus, so the tray is what actually displays these;
+/// the monotonic `id` lets it show each exactly once.
+#[derive(Debug, Clone)]
+struct UserNotification {
+    id: u64,
+    title: String,
+    body: String,
+    critical: bool,
+    user: Option<String>,
+}
+
+/// How many recent notifications the status snapshot carries. The tray polls
+/// every 5s and ticks are 10s, so a handful is plenty of overlap to never miss
+/// one; older entries age out.
+const NOTIFY_QUEUE_CAP: usize = 16;
 
 impl Agent {
     pub fn new(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<Self> {
@@ -159,7 +201,8 @@ impl Agent {
             client,
             exec,
             policies: HashMap::new(),
-            tracker: screentime::UsageTracker::new(),
+            // Reboot-surviving: reload the day's usage so a restart can't reset it.
+            tracker: screentime::UsageTracker::load(),
             frozen: HashSet::new(),
             device_locked: false,
             sessions: HashMap::new(),
@@ -172,11 +215,39 @@ impl Agent {
             last_contact_wall: load_last_contact_wall(),
             last_contact_saved: Instant::now(),
             offline_hard_lockdown: false,
+            tamper_lockdown: false,
+            tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
             pending_freeze: HashMap::new(),
             pending_events: Vec::new(),
+            notifications: VecDeque::new(),
+            notif_seq: 0,
         })
+    }
+
+    /// Publish a normal (non-blocking) desktop notification for the tray to
+    /// deliver. `user = None` means device-wide. Also emits the headless
+    /// `wall`/log fallback so a machine with no tray isn't left silent.
+    fn notify_user(&mut self, user: Option<&str>, title: &str, body: &str, critical: bool) {
+        self.notif_seq += 1;
+        self.notifications.push_back(UserNotification {
+            id: self.notif_seq,
+            title: title.to_string(),
+            body: body.to_string(),
+            critical,
+            user: user.map(str::to_string),
+        });
+        while self.notifications.len() > NOTIFY_QUEUE_CAP {
+            self.notifications.pop_front();
+        }
+        lockout::present_nudge(
+            &self.exec,
+            &gamify::Nudge {
+                kind: "notification".into(),
+                copy: format!("{title} — {body}"),
+            },
+        );
     }
 
     /// Deliver `fresh` events plus any earlier failures. On error the batch is
@@ -443,11 +514,39 @@ impl Agent {
             events.push(ev);
         }
 
+        // Confirm sustained evasion (vs. a transient blip) and escalate to a
+        // whole-device lockdown. We feed the monitor the tamper-signal kinds
+        // seen this tick; a kind that crosses its confirmation threshold is a
+        // real attempt (the "check it's real, not a packet drop" gate).
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter(|e| e.ev_type == EV_TAMPER)
+            .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .collect();
+        let confirmed = self.tamper_monitor.observe(&kinds);
+        if !confirmed.is_empty() && !self.tamper_lockdown {
+            self.tamper_lockdown = true;
+            tracing::warn!("tamper lockdown engaged: {}", confirmed.join(", "));
+            events.push(tamper::tamper_event(
+                "evasion_confirmed",
+                SEV_CRITICAL,
+                &format!(
+                    "confirmed evasion attempt ({}) — device locked; the parent PIN unlocks",
+                    confirmed.join(", ")
+                ),
+            ));
+        }
+
         // Screen-time: account active seat users, evaluate, freeze/unfreeze.
         let active = screentime::active_seat_users(&self.exec);
         for user in &active {
             self.tracker
                 .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
+        }
+        // Persist the ledger every tick so a restart resumes today's usage
+        // instead of granting a fresh budget (best-effort; skipped in dry-run).
+        if !self.exec.dry_run() {
+            self.tracker.save();
         }
         // Consider every user we have a policy for (so we can also UNfreeze).
         let users: Vec<String> = self.policies.keys().cloned().collect();
@@ -481,6 +580,13 @@ impl Agent {
                     user.clone(),
                     Instant::now() + Duration::from_secs(u64::from(mins) * 60),
                 );
+                // A parent standing at the machine with the PIN has handled the
+                // situation — clear a confirmed-evasion lockdown so the device
+                // isn't stuck locked after they've dealt with it.
+                if self.tamper_lockdown {
+                    self.tamper_lockdown = false;
+                    tracing::info!("tamper lockdown cleared by parent PIN at the device");
+                }
                 self.pending_freeze.remove(&user);
                 if currently_frozen {
                     if let Err(e) = screentime::freeze_user(&self.exec, &user, false, false) {
@@ -524,18 +630,25 @@ impl Agent {
                 self.maybe_warn(&user, &policy, &mut events);
             }
 
-            let effective_device_locked =
-                (self.device_locked || self.offline_hard_lockdown) && !in_grace;
+            let effective_device_locked = (self.device_locked
+                || self.offline_hard_lockdown
+                || self.tamper_lockdown)
+                && !in_grace;
             match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
                 FreezeAction::Freeze => {
                     if effective_device_locked {
-                        // A whole-device lock (admin command, or the offline
-                        // hard-lockdown escalation) overrides screen-time and
-                        // is immediate (and may hard-fall-back to session
-                        // termination — it's an explicit parent action /
-                        // tamper response).
+                        // A whole-device lock (admin command, the offline
+                        // hard-lockdown escalation, or a confirmed evasion
+                        // attempt) overrides screen-time and is immediate (and
+                        // may hard-fall-back to session termination — it's an
+                        // explicit parent action / tamper response).
                         let (headline, detail) = if self.device_locked {
                             ("LOCKED", "THIS DEVICE IS LOCKED BY AN ADMIN")
+                        } else if self.tamper_lockdown {
+                            (
+                                "TAMPERING DETECTED",
+                                "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+                            )
                         } else {
                             (
                                 "OFFLINE TOO LONG",
@@ -570,6 +683,9 @@ impl Agent {
                 FreezeAction::None => {}
             }
         }
+
+        // On-demand "request more time" markers dropped by users' trays.
+        self.check_ondemand_earn().await;
 
         self.write_status_file();
         events
@@ -618,17 +734,9 @@ impl Agent {
                     lockout::present_nudge(&self.exec, &nudge);
                     events.push(gamify::streak_event(user, &nudge.kind, 0));
                 }
-                lockout::present_nudge(
-                    &self.exec,
-                    &gamify::Nudge {
-                        kind: "freeze_countdown".into(),
-                        copy: format!(
-                            "{} — SCREEN PAUSES IN {} SECONDS. SAVE YOUR WORK.",
-                            reason.headline(),
-                            FREEZE_GRACE.as_secs()
-                        ),
-                    },
-                );
+                // The full-screen overlay now shows a live save-your-work
+                // countdown itself (no more static "PAUSES IN 60 SECONDS" text).
+                spec.countdown_secs = Some(FREEZE_GRACE.as_secs() as u32);
                 lockout::present(&self.exec, &spec);
                 let sev = if matches!(reason, screentime::LockReason::Bedtime) {
                     SEV_WARN
@@ -754,14 +862,54 @@ impl Agent {
             },
             "device_locked": self.device_locked,
             "offline_hard_lockdown": self.offline_hard_lockdown,
+            "tamper_lockdown": self.tamper_lockdown,
             "remote_shell_open": !self.sessions.is_empty(),
             "users": users,
+            "notifications": self.notifications.iter().map(|n| json!({
+                "id": n.id,
+                "title": n.title,
+                "body": n.body,
+                "urgency": if n.critical { "critical" } else { "normal" },
+                "user": n.user,
+            })).collect::<Vec<_>>(),
         });
         let dir = std::path::Path::new("/run/sentinel");
         let _ = std::fs::create_dir_all(dir);
         let tmp = dir.join("status.json.tmp");
         if std::fs::write(&tmp, status.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, dir.join("status.json"));
+        }
+    }
+
+    /// Consume any on-demand "request more time" markers a user's tray dropped
+    /// in its own runtime dir, and turn each into an earn-request. This is the
+    /// spoof-proof privilege bridge: the unprivileged tray can only write inside
+    /// `/run/user/<uid>` (its own, 0700), and only root (this agent) reads it —
+    /// so a request is authentically from that user. Deduped per day like the
+    /// automatic lockout path.
+    async fn check_ondemand_earn(&mut self) {
+        let users: Vec<String> = self.policies.keys().cloned().collect();
+        for user in users {
+            let Some(path) = ondemand_earn_marker(&user) else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&path); // single-use
+            let policy = self.policies.get(&user).cloned().unwrap_or_default();
+            // Use the first configured earn offer, or a plain "more time" ask.
+            let offer = gamify::earn_offers(&policy.gamification)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| gamify::EarnOffer {
+                    id: "more_time".into(),
+                    label: "More screen time".into(),
+                    reward_minutes: 15,
+                });
+            if let Some(copy) = self.auto_request_earn(&user, &offer).await {
+                self.notify_user(Some(&user), "REQUEST SENT", &copy, false);
+            }
         }
     }
 
@@ -832,6 +980,8 @@ impl Agent {
             }
             CMD_UNLOCK => {
                 self.device_locked = false;
+                // An admin unlock also lifts a confirmed-evasion lockdown.
+                self.tamper_lockdown = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {
                     let _ = screentime::freeze_user(&self.exec, &user, false, false);
                 }
@@ -924,10 +1074,20 @@ impl Agent {
                     );
                 }
                 self.tracker.add_earned(&os_username, minutes);
+                if !self.exec.dry_run() {
+                    self.tracker.save();
+                }
                 // The user's pending requests are now resolved; clear the dedupe
                 // cache so a later same-day lockout sends a fresh request instead
                 // of showing a stale "REQUEST SENT — WAITING FOR APPROVAL".
                 self.requested_earn.retain(|(u, _), _| u != &os_username);
+                // Tell the kid — an approval used to be silent to them.
+                self.notify_user(
+                    Some(&os_username),
+                    "TIME GRANTED",
+                    &format!("+{minutes} MIN — YOU'RE BACK"),
+                    false,
+                );
                 events.push(gamify::earned_event(&os_username, &request_id, minutes));
                 json!({ "credited": true, "os_username": os_username, "minutes": minutes })
             }
@@ -949,19 +1109,11 @@ impl Agent {
                 self.requested_earn.retain(|(u, t), _| {
                     !(u == &os_username && (task_id.is_empty() || t == &task_id))
                 });
-                lockout::present_nudge(
-                    &self.exec,
-                    &gamify::Nudge {
-                        kind: "earn_denied".into(),
-                        copy: format!(
-                            "REQUEST NOT APPROVED THIS TIME{}",
-                            if task_id.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" — {task_id}")
-                            }
-                        ),
-                    },
+                self.notify_user(
+                    Some(&os_username),
+                    "REQUEST NOT APPROVED",
+                    "MAYBE LATER — ASK A PARENT",
+                    false,
                 );
                 json!({ "denied": true, "os_username": os_username, "task_id": task_id })
             }
