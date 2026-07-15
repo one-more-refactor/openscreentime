@@ -208,6 +208,22 @@ export interface Passkey {
   last_used_at: string | null;
 }
 
+/** A scoped parent access token (the raw value is never returned after mint). */
+export interface ParentToken {
+  id: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked: boolean;
+}
+
+/** Response from minting a parent token — `token` is shown exactly once. */
+export interface MintedParentToken {
+  id: string;
+  label: string;
+  token: string;
+}
+
 export interface Me {
   admin: Admin;
   tenant: Tenant;
