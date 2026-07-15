@@ -24,6 +24,10 @@ const ENROLL_MAX: u32 = 5;
 /// but bounded so the endpoints can't be used as a free bandwidth amplifier.
 /// One install touches ~3 of these; fleets poll the manifest once a day.
 const DIST_MAX: u32 = 30;
+/// Parent companion API (`/api/parent/*`): token-authenticated, but a companion
+/// polling for requests/alerts shouldn't hammer the server. Generous enough for
+/// a 15–30s poll plus a burst of approvals.
+const PARENT_MAX: u32 = 60;
 /// Prune dead windows once the bucket map grows past this.
 const PRUNE_THRESHOLD: usize = 10_000;
 
@@ -108,6 +112,11 @@ pub async fn limit_enroll(State(st): State<AppState>, req: Request, next: Next) 
 /// Middleware for the agent-distribution endpoints: 30 req / 60 s / IP.
 pub async fn limit_dist(State(st): State<AppState>, req: Request, next: Next) -> Response {
     limit(st, "dist", DIST_MAX, req, next).await
+}
+
+/// Middleware for the parent companion API: 60 req / 60 s / IP.
+pub async fn limit_parent(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    limit(st, "parent", PARENT_MAX, req, next).await
 }
 
 #[cfg(test)]
