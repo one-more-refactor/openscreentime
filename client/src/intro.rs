@@ -103,10 +103,7 @@ fn show() {
                             .monospace(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(egui::RichText::new("SKIP").monospace())
-                            .clicked()
-                        {
+                        if ui.button(egui::RichText::new("SKIP").monospace()).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
@@ -121,7 +118,10 @@ fn show() {
                 ui.add_space(40.0);
                 let label = if last { "DONE" } else { "NEXT" };
                 if ui
-                    .add(egui::Button::new(egui::RichText::new(label).size(18.0).monospace()).fill(accent))
+                    .add(
+                        egui::Button::new(egui::RichText::new(label).size(18.0).monospace())
+                            .fill(accent),
+                    )
                     .clicked()
                 {
                     if last {

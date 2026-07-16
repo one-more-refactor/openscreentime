@@ -66,10 +66,7 @@ type TokenRow = (
 
 /// GET /api/parent-tokens — list the tenant's parent tokens (never the raw
 /// value; it isn't recoverable).
-pub async fn list_tokens(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-) -> AppResult<Json<Value>> {
+pub async fn list_tokens(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     let rows: Vec<TokenRow> = sqlx::query_as(
         "SELECT id, label, created_at, last_used_at, revoked_at
          FROM parent_access_tokens
@@ -132,8 +129,14 @@ pub async fn approve(
     parent: ParentAuth,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    crate::earn::decide(st, parent.tenant_id, id, true, json!({ "parent_token": parent.token_id }))
-        .await
+    crate::earn::decide(
+        st,
+        parent.tenant_id,
+        id,
+        true,
+        json!({ "parent_token": parent.token_id }),
+    )
+    .await
 }
 
 /// POST /api/parent/earn-requests/:id/deny
@@ -142,8 +145,14 @@ pub async fn deny(
     parent: ParentAuth,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    crate::earn::decide(st, parent.tenant_id, id, false, json!({ "parent_token": parent.token_id }))
-        .await
+    crate::earn::decide(
+        st,
+        parent.tenant_id,
+        id,
+        false,
+        json!({ "parent_token": parent.token_id }),
+    )
+    .await
 }
 
 /// GET /api/parent/alerts — recent warnings + criticals (tamper, evasion,

@@ -8,6 +8,11 @@ Enroll a device, lock it down by default, enforce screen-time and DNS per person
 and approve requests from your phone or your desk. One monochrome control center,
 on **your** infrastructure — no cloud, no accounts, no telemetry.
 
+[![CI](https://img.shields.io/github/actions/workflow/status/one-more-refactor/sentinel/ci.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=CI&color=0a0a0a)](https://github.com/one-more-refactor/sentinel/actions/workflows/ci.yml)
+&nbsp;[![Build](https://img.shields.io/github/actions/workflow/status/one-more-refactor/sentinel/build.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=Build&color=0a0a0a)](https://github.com/one-more-refactor/sentinel/actions/workflows/build.yml)
+&nbsp;[![Release](https://img.shields.io/github/v/release/one-more-refactor/sentinel?style=flat-square&logo=github&logoColor=white&color=0a0a0a&label=Release)](https://github.com/one-more-refactor/sentinel/releases/latest)
+&nbsp;[![GHCR](https://img.shields.io/badge/ghcr.io-sentinel-0a0a0a?style=flat-square&logo=github&logoColor=white)](https://github.com/one-more-refactor/sentinel/pkgs/container/sentinel)
+
 ![Rust](https://img.shields.io/badge/Rust-1.85+-0a0a0a?style=flat-square&logo=rust&logoColor=white)
 &nbsp;![Postgres](https://img.shields.io/badge/Postgres-16-0a0a0a?style=flat-square&logo=postgresql&logoColor=white)
 &nbsp;![Self-hosted](https://img.shields.io/badge/self--hosted-rootless%20Podman-0a0a0a?style=flat-square)

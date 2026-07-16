@@ -1,0 +1,428 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# ─────────────────────────────────────────────────────────────
+# Jobs:
+#   1. build-server   → sentinel-server binary (glibc, x86_64)
+#   2. build-agent    → sentinel-agent binary  (musl-static, x86_64)
+#   3. build-web      → dist/ + Playwright screenshots of the UI
+#   4. container      → multi-stage OCI image, pushed to GHCR
+#   5. release        → GitHub Release with all binaries attached (tag-only)
+# ─────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. Server binary ───────────────────────────────────────
+  build-server:
+    name: "🖥️ Build server binary"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - name: Build release
+        working-directory: server
+        run: |
+          cargo build --release 2>&1 | tee /tmp/server-build.txt
+          strip target/release/sentinel-server
+          ls -lh target/release/sentinel-server
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-server-${{ github.sha }}
+          path: server/target/release/sentinel-server
+          retention-days: 30
+
+      - name: "📋 Step summary"
+        if: always()
+        working-directory: server
+        run: |
+          echo "## 🖥️ Server binary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f target/release/sentinel-server ]; then
+            SIZE=$(ls -lh target/release/sentinel-server | awk '{print $5}')
+            echo "| | |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 Binary size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🏗️ Target | \`x86_64-unknown-linux-gnu\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔗 Linking | dynamic (glibc) |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Build log</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -50 /tmp/server-build.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+  # ── 2. Agent binary (musl-static) ──────────────────────────
+  build-agent:
+    name: "🤖 Build agent binary (musl-static)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools jq
+
+      - name: Build release (musl, headless)
+        working-directory: client
+        run: cargo build --release --target x86_64-unknown-linux-musl 2>&1 | tee /tmp/agent-build.txt
+
+      - name: Stage versioned artifact + manifest
+        working-directory: client
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "sentinel-agent") | .version')
+          FILE="sentinel-agent-${VERSION}-x86_64-musl"
+          mkdir -p ../dist-agent
+          cp target/x86_64-unknown-linux-musl/release/sentinel-agent "../dist-agent/${FILE}"
+          SHA256=$(sha256sum "../dist-agent/${FILE}" | cut -d' ' -f1)
+          jq -n \
+            --arg version "$VERSION" \
+            --arg file "$FILE" \
+            --arg sha256 "$SHA256" \
+            '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}]}' \
+            > ../dist-agent/manifest.json
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "AGENT_FILE=$FILE" >> $GITHUB_ENV
+          ls -lh "../dist-agent/${FILE}"
+          cat ../dist-agent/manifest.json
+
+      - name: Upload agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-agent-${{ github.sha }}
+          path: dist-agent/
+          retention-days: 30
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 🤖 Agent binary (musl-static)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "dist-agent/${{ env.AGENT_FILE }}" ]; then
+            SIZE=$(ls -lh "dist-agent/${{ env.AGENT_FILE }}" | awk '{print $5}')
+            echo "| | |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 Binary size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🏗️ Target | \`x86_64-unknown-linux-musl\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔗 Linking | **static** (musl) |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📋 Version | \`${{ env.VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Build log</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -50 /tmp/agent-build.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+  # ── 3. Web build + Playwright screenshots ──────────────────
+  build-web:
+    name: "🌐 Build web + UI screenshots"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Build (mock mode — no backend needed)
+        working-directory: web
+        run: VITE_USE_MOCK=1 bun run build
+
+      - name: Install Playwright + Chromium
+        run: |
+          bun add -g playwright@latest
+          bunx playwright install chromium --with-deps
+
+      # Serve the built SPA locally, then screenshot every major page
+      - name: Screenshot UI pages
+        run: |
+          mkdir -p screenshots
+
+          # Serve dist in background
+          cd web
+          bunx --bun serve -p 4173 dist &
+          SERVER_PID=$!
+          echo "Waiting for server…"
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:4173 > /dev/null && break
+            sleep 1
+          done
+
+          cd ..
+
+          # Playwright inline script — screenshots all major routes
+          bunx playwright screenshot \
+            --browser chromium \
+            --full-page \
+            --viewport-size "1440,900" \
+            http://localhost:4173 \
+            screenshots/00-login.png
+
+          # We use the mock build, so navigate to authenticated pages directly
+          for route in devices profiles events settings; do
+            bunx playwright screenshot \
+              --browser chromium \
+              --full-page \
+              --viewport-size "1440,900" \
+              "http://localhost:4173/${route}" \
+              "screenshots/$(printf '%02d' $RANDOM)-${route}.png" || true
+          done
+
+          kill $SERVER_PID 2>/dev/null || true
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ github.sha }}
+          path: web/dist/
+          retention-days: 30
+
+      - name: Upload UI screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots-${{ github.sha }}
+          path: screenshots/
+          retention-days: 30
+
+      - name: "📋 Step summary — UI preview"
+        if: always()
+        run: |
+          echo "## 🌐 Web build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Bundle sizes
+          if [ -d web/dist ]; then
+            TOTAL=$(du -sh web/dist | cut -f1)
+            echo "| Asset | Size |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 Total dist | \`$TOTAL\` |" >> $GITHUB_STEP_SUMMARY
+            for f in web/dist/assets/*.js; do
+              [ -f "$f" ] || continue
+              S=$(du -sh "$f" | cut -f1)
+              N=$(basename "$f")
+              echo "| 📜 \`$N\` | \`$S\` |" >> $GITHUB_STEP_SUMMARY
+            done
+            for f in web/dist/assets/*.css; do
+              [ -f "$f" ] || continue
+              S=$(du -sh "$f" | cut -f1)
+              N=$(basename "$f")
+              echo "| 🎨 \`$N\` | \`$S\` |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📸 UI Screenshots" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Screenshots captured from the mock-mode build (no backend required)." >> $GITHUB_STEP_SUMMARY
+          echo "> Download the **ui-screenshots** artifact to view them." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List screenshots taken
+          if [ -d screenshots ] && ls screenshots/*.png 2>/dev/null; then
+            echo "| File |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|" >> $GITHUB_STEP_SUMMARY
+            for f in screenshots/*.png; do
+              echo "| 🖼️ \`$(basename "$f")\` |" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "_No screenshots captured (Playwright may have failed)._" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ── 4. Container image ─────────────────────────────────────
+  container:
+    name: "📦 Build & push container image"
+    runs-on: ubuntu-latest
+    needs: [build-server, build-agent, build-web]
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 📦 Container image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏷️ Registry | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔑 Digest | \`${{ steps.build-push.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags pushed:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ── 5. GitHub Release (tags only) ──────────────────────────
+  release:
+    name: "🚀 GitHub Release"
+    runs-on: ubuntu-latest
+    needs: [build-server, build-agent, build-web, container]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: sentinel-server-${{ github.sha }}
+          path: release-assets/
+
+      - name: Download agent artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sentinel-agent-${{ github.sha }}
+          path: release-assets/agent/
+
+      - name: Download UI screenshots
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-screenshots-${{ github.sha }}
+          path: release-assets/screenshots/
+
+      - name: Prepare checksums
+        working-directory: release-assets
+        run: |
+          chmod +x sentinel-server
+          sha256sum sentinel-server > SHA256SUMS
+          sha256sum agent/sentinel-agent-* >> SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Extract changelog excerpt
+        id: changelog
+        run: |
+          TAG="${{ github.ref_name }}"
+          # Try to pull the relevant section from CHANGELOG.md if it exists
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk "/^## \[?${TAG#v}\]?/,/^## /" CHANGELOG.md | head -50 | tail -n +2 | head -48)
+          else
+            NOTES="See commit history for changes."
+          fi
+          # Store in a file to avoid quoting issues
+          echo "$NOTES" > /tmp/release-notes.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Sentinel ${{ github.ref_name }}"
+          body_path: /tmp/release-notes.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            release-assets/sentinel-server
+            release-assets/agent/sentinel-agent-*
+            release-assets/agent/manifest.json
+            release-assets/SHA256SUMS
+            release-assets/screenshots/*.png
+
+      - name: "📋 Step summary"
+        run: |
+          echo "## 🚀 Release ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Asset | |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖥️ \`sentinel-server\` | x86_64-linux-gnu |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🤖 \`sentinel-agent-*-x86_64-musl\` | static, any Linux |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📋 \`manifest.json\` | agent update manifest |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔐 \`SHA256SUMS\` | checksums |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖼️ UI screenshots | attached to release |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Container: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
