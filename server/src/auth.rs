@@ -93,14 +93,45 @@ fn temp_cookie(name: &'static str, value: String, secure: bool) -> Cookie<'stati
 // Tenant bootstrap
 // ---------------------------------------------------------------------------
 
+/// Advisory-lock key that serializes tenant/admin bootstraps so two concurrent
+/// first-boot registrations can't each create an org (a TOCTOU on the
+/// "registration closes after the first admin" invariant).
+const ADMIN_BOOTSTRAP_LOCK: i64 = 0x5E17_0001;
+
 /// Creates a tenant, seeds the three preset profiles verbatim, and creates the
 /// first admin. Returns (tenant_id, admin_id).
+///
+/// `require_first` enforces the single-org bootstrap invariant: when set, the
+/// call refuses (under a serializing advisory lock) if any admin already exists.
+/// Callers pass `true` for the closed-registration first-boot path so a race
+/// between two first registrations produces exactly one org; open-registration,
+/// which intentionally allows additional orgs, passes `false`.
 pub async fn create_tenant_with_admin(
     db: &sqlx::PgPool,
     email: &str,
     display_name: &str,
+    require_first: bool,
 ) -> AppResult<(Uuid, Uuid)> {
     let mut tx = db.begin().await.map_err(AppError::from)?;
+
+    // Serialize bootstraps: a first-boot race would otherwise let two callers
+    // that both saw zero admins each insert an org.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ADMIN_BOOTSTRAP_LOCK)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::from)?;
+    if require_first {
+        let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
+        if admins > 0 {
+            return Err(AppError::RegistrationClosed(
+                "registration is closed on this server — an admin already exists".into(),
+            ));
+        }
+    }
 
     let tenant_id: Uuid = sqlx::query_scalar("INSERT INTO tenants (name) VALUES ($1) RETURNING id")
         .bind(format!("{display_name}'s org"))
@@ -150,6 +181,11 @@ async fn find_admin(db: &sqlx::PgPool, email: &str) -> AppResult<Option<(Uuid, U
 // Registration
 // ---------------------------------------------------------------------------
 
+/// Whether `SENTINEL_OPEN_REGISTRATION=1` re-opens self-registration.
+fn open_registration() -> bool {
+    std::env::var("SENTINEL_OPEN_REGISTRATION").map(|v| v == "1") == Ok(true)
+}
+
 /// Registration lockdown (docs/DEPLOY.md): once at least one admin exists the
 /// open register endpoints refuse with 403 `registration_closed`, unless
 /// `SENTINEL_OPEN_REGISTRATION=1` re-opens them. First boot (zero admins) is
@@ -159,17 +195,20 @@ async fn find_admin(db: &sqlx::PgPool, email: &str) -> AppResult<Option<(Uuid, U
 /// Settings page reuses the register ceremony) is always allowed — the check
 /// passes when the request carries a valid session whose admin email matches
 /// the email being registered.
-async fn ensure_registration_allowed(st: &AppState, jar: &CookieJar, email: &str) -> AppResult<()> {
-    if std::env::var("SENTINEL_OPEN_REGISTRATION").map(|v| v == "1") == Ok(true) {
-        return Ok(());
-    }
-    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
-        .fetch_one(&st.db)
-        .await?;
-    if admins == 0 {
-        return Ok(()); // first boot: bootstrap the first admin
-    }
-    // Existing admin adding another passkey to their own account?
+///
+/// Returns whether the caller is authorized to attach a passkey to an
+/// ALREADY-EXISTING admin account with this email. That is true ONLY for the
+/// authenticated self-add-passkey path. Open-registration and first-boot may
+/// create NEW accounts but must NOT graft onto an existing email — otherwise an
+/// attacker in open-registration mode could register a passkey against a
+/// victim admin's address and take the account over.
+async fn ensure_registration_allowed(
+    st: &AppState,
+    jar: &CookieJar,
+    email: &str,
+) -> AppResult<bool> {
+    // Existing admin adding another passkey to their own account? Authorized to
+    // graft onto that existing account (this is the whole point of the flow).
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         let session_email: Option<String> = sqlx::query_scalar(
             "SELECT a.email FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
@@ -179,8 +218,17 @@ async fn ensure_registration_allowed(st: &AppState, jar: &CookieJar, email: &str
         .fetch_optional(&st.db)
         .await?;
         if session_email.as_deref() == Some(email) {
-            return Ok(());
+            return Ok(true);
         }
+    }
+    if open_registration() {
+        return Ok(false); // may register a NEW account, never graft an existing one
+    }
+    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
+        .fetch_one(&st.db)
+        .await?;
+    if admins == 0 {
+        return Ok(false); // first boot: bootstrap the first (new) admin
     }
     Err(AppError::RegistrationClosed(
         "registration is closed on this server — an admin already exists".into(),
@@ -201,11 +249,19 @@ pub async fn register_start(
     if req.email.trim().is_empty() {
         return Err(AppError::BadRequest("email required".into()));
     }
-    ensure_registration_allowed(&st, &jar, &req.email).await?;
+    let may_graft = ensure_registration_allowed(&st, &jar, &req.email).await?;
 
     // A new user id for a brand-new admin; if the email already exists we reuse
-    // its admin id so a second passkey attaches to the same account.
+    // its admin id so a second passkey attaches to the same account — but only
+    // when the caller is authorized to touch that existing account. Otherwise
+    // refuse, so open-registration can't be used to graft onto (take over) an
+    // existing admin.
     let existing = find_admin(&st.db, &req.email).await?;
+    if existing.is_some() && !may_graft {
+        return Err(AppError::Conflict(
+            "an account with this email already exists".into(),
+        ));
+    }
     let user_id = existing
         .as_ref()
         .map(|(id, _, _)| *id)
@@ -248,7 +304,7 @@ pub async fn register_finish(
 ) -> AppResult<(CookieJar, Json<Value>)> {
     // Re-checked here (not just in start): the two calls aren't atomic, and the
     // finish must never mint a session after the first admin appeared in between.
-    ensure_registration_allowed(&st, &jar, &req.email).await?;
+    let may_graft = ensure_registration_allowed(&st, &jar, &req.email).await?;
 
     let key = jar
         .get(REG_COOKIE)
@@ -270,10 +326,27 @@ pub async fn register_finish(
         .finish_passkey_registration(&req.credential, &challenge.reg)
         .map_err(|e| AppError::BadRequest(format!("webauthn: {e}")))?;
 
-    // Ensure the admin (and tenant + presets) exist.
-    let (tenant_id, admin_id) = match find_admin(&st.db, &req.email).await? {
+    // Ensure the admin (and tenant + presets) exist. Grafting a passkey onto an
+    // existing account is only allowed for the authorized self-add path; without
+    // that authorization a matching email must not attach (account-takeover
+    // guard, mirroring register_start).
+    let existing = find_admin(&st.db, &req.email).await?;
+    if existing.is_some() && !may_graft {
+        return Err(AppError::Conflict(
+            "an account with this email already exists".into(),
+        ));
+    }
+    let (tenant_id, admin_id) = match existing {
         Some((admin_id, tenant_id, _)) => (tenant_id, admin_id),
-        None => create_tenant_with_admin(&st.db, &req.email, &challenge.display_name).await?,
+        None => {
+            create_tenant_with_admin(
+                &st.db,
+                &req.email,
+                &challenge.display_name,
+                !open_registration(),
+            )
+            .await?
+        }
     };
 
     let cred_id = passkey.cred_id().as_ref().to_vec();

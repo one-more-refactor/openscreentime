@@ -44,10 +44,16 @@ impl AlertConfig {
             (Some(t), Some(c)) => Some((t, c)),
             _ => None,
         };
-        AlertConfig {
-            webhook: clean(webhook),
-            telegram,
-        }
+        // Only accept an http(s) webhook URL: a stray value with some other
+        // scheme (or garbage) must disable the channel, not be POSTed to.
+        let webhook = clean(webhook).filter(|u| match url::Url::parse(u) {
+            Ok(p) => matches!(p.scheme(), "http" | "https"),
+            Err(_) => {
+                tracing::warn!("ignoring SENTINEL_ALERT_WEBHOOK: not a valid http(s) URL");
+                false
+            }
+        });
+        AlertConfig { webhook, telegram }
     }
 
     pub fn enabled(&self) -> bool {
@@ -56,11 +62,20 @@ impl AlertConfig {
 
     /// Send `text` to every configured channel. Best-effort: a failure on one
     /// channel is logged and never propagated (alerts must not break anything).
+    ///
+    /// Callers must pass text whose user/device-controlled parts have been run
+    /// through [`sanitize`]; `allowed_mentions` additionally disables Discord
+    /// `@everyone`/`@here`/role pings so a crafted name/message can't ping.
     async fn send(&self, client: &reqwest::Client, text: &str) {
         if let Some(url) = &self.webhook {
             // Discord uses `content`, Slack uses `text` — send both; each ignores
-            // the key it doesn't know.
-            let body = json!({ "content": text, "text": text });
+            // the key it doesn't know. `allowed_mentions: {parse: []}` tells
+            // Discord to resolve no mentions from the content.
+            let body = json!({
+                "content": text,
+                "text": text,
+                "allowed_mentions": { "parse": [] },
+            });
             if let Err(e) = client.post(url).json(&body).send().await {
                 tracing::warn!("alert webhook failed: {e}");
             }
@@ -104,8 +119,36 @@ pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
     });
 }
 
+/// Neutralize user/device-controlled text before it goes into an outbound chat
+/// message: replace control characters (newline/CR structure-spoofing) with
+/// spaces and bound the length. Device names, usernames, task labels, and event
+/// `payload.message` are all attacker-influenceable (a rooted managed device can
+/// push a `critical` event with an arbitrary message), so every such field is
+/// sanitized before interpolation. Mass-mention pings are separately disabled
+/// via `allowed_mentions` on the webhook body.
+fn sanitize(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() > 200 {
+        let mut out: String = trimmed.chars().take(199).collect();
+        out.push('…');
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// (id, type, payload, created_at, device name) for a critical event.
-type EventRow = (Uuid, String, serde_json::Value, DateTime<Utc>, Option<String>);
+type EventRow = (
+    Uuid,
+    String,
+    serde_json::Value,
+    DateTime<Utc>,
+    Option<String>,
+);
 /// (os_username, display_name, task_label, minutes, created_at) for a request.
 type EarnRow = (String, Option<String>, String, i32, DateTime<Utc>);
 
@@ -118,35 +161,33 @@ async fn drain_events(
     since: DateTime<Utc>,
 ) -> DateTime<Utc> {
     let rows: Vec<EventRow> = match sqlx::query_as(
-            "SELECT e.id, e.type, e.payload, e.created_at, d.name
+        "SELECT e.id, e.type, e.payload, e.created_at, d.name
              FROM events e LEFT JOIN devices d ON d.id = e.device_id
              WHERE e.severity = 'critical' AND e.created_at > $1
              ORDER BY e.created_at LIMIT 50",
-        )
-        .bind(since)
-        .fetch_all(db)
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("alert event query failed: {e}");
-                return since;
-            }
-        };
+    )
+    .bind(since)
+    .fetch_all(db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("alert event query failed: {e}");
+            return since;
+        }
+    };
 
     let mut high = since;
     for (_, etype, payload, created_at, device) in rows {
         high = high.max(created_at);
-        let msg = payload
+        let raw_msg = payload
             .get("message")
             .and_then(|m| m.as_str())
-            .unwrap_or(&etype);
-        let dev = device.as_deref().unwrap_or("a device");
-        cfg.send(
-            client,
-            &format!("⚠ Sentinel — {dev}: {msg}"),
-        )
-        .await;
+            .unwrap_or(etype.as_str());
+        let msg = sanitize(raw_msg);
+        let dev = sanitize(device.as_deref().unwrap_or("a device"));
+        cfg.send(client, &format!("⚠ Sentinel — {dev}: {msg}"))
+            .await;
     }
     high
 }
@@ -178,10 +219,15 @@ async fn drain_earn(
     let mut high = since;
     for (os_username, display_name, task_label, minutes, created_at) in rows {
         high = high.max(created_at);
-        let who = display_name.filter(|s| !s.is_empty()).unwrap_or(os_username);
+        let who = sanitize(
+            &display_name
+                .filter(|s| !s.is_empty())
+                .unwrap_or(os_username),
+        );
+        let label = sanitize(&task_label);
         cfg.send(
             client,
-            &format!("⏳ {who} is asking for +{minutes} min ({task_label}). Approve it in Sentinel."),
+            &format!("⏳ {who} is asking for +{minutes} min ({label}). Approve it in Sentinel."),
         )
         .await;
     }
@@ -205,6 +251,27 @@ mod tests {
         let cfg = AlertConfig::build(Some("https://hooks.example/x".into()), None, None);
         assert!(cfg.enabled());
         assert!(cfg.telegram.is_none());
+    }
+
+    #[test]
+    fn sanitize_strips_control_chars_and_bounds_length() {
+        // Newlines/CR (structure-spoofing) collapse to spaces.
+        assert_eq!(
+            super::sanitize("hi\nthere\r\n@everyone"),
+            "hi there  @everyone"
+        );
+        // Length is bounded so a device can't blast a huge message.
+        let long = "a".repeat(500);
+        assert!(super::sanitize(&long).chars().count() <= 200);
+    }
+
+    #[test]
+    fn non_http_webhook_is_rejected() {
+        // A non-http(s) scheme disables the channel rather than being POSTed to.
+        assert!(!AlertConfig::build(Some("file:///etc/passwd".into()), None, None).enabled());
+        assert!(!AlertConfig::build(Some("not a url".into()), None, None).enabled());
+        // A normal https webhook still enables.
+        assert!(AlertConfig::build(Some("https://hooks.example/x".into()), None, None).enabled());
     }
 
     #[test]
@@ -253,6 +320,9 @@ mod tests {
 
         let req = server.join().unwrap();
         assert!(req.contains("POST"), "should be a POST: {req}");
-        assert!(req.contains("hello-alert"), "body should carry the message: {req}");
+        assert!(
+            req.contains("hello-alert"),
+            "body should carry the message: {req}"
+        );
     }
 }
