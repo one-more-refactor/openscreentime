@@ -266,7 +266,9 @@ pub async fn list_requests(
     admin: AuthAdmin,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(list_for_tenant(&st.db, admin.tenant_id, q.status).await?))
+    Ok(Json(
+        list_for_tenant(&st.db, admin.tenant_id, q.status).await?,
+    ))
 }
 
 /// POST /api/earn-requests/:id/approve
@@ -275,7 +277,14 @@ pub async fn approve_request(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    decide(st, admin.tenant_id, id, true, json!({ "admin_id": admin.admin_id })).await
+    decide(
+        st,
+        admin.tenant_id,
+        id,
+        true,
+        json!({ "admin_id": admin.admin_id }),
+    )
+    .await
 }
 
 /// POST /api/earn-requests/:id/deny
@@ -284,7 +293,14 @@ pub async fn deny_request(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    decide(st, admin.tenant_id, id, false, json!({ "admin_id": admin.admin_id })).await
+    decide(
+        st,
+        admin.tenant_id,
+        id,
+        false,
+        json!({ "admin_id": admin.admin_id }),
+    )
+    .await
 }
 
 /// Approve or deny an earn-request within `tenant_id`. Shared by the admin

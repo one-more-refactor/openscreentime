@@ -31,8 +31,8 @@ pub fn config_path() -> Option<PathBuf> {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
     };
-    let base = non_empty("XDG_CONFIG_HOME")
-        .or_else(|| non_empty("HOME").map(|h| h.join(".config")))?;
+    let base =
+        non_empty("XDG_CONFIG_HOME").or_else(|| non_empty("HOME").map(|h| h.join(".config")))?;
     Some(base.join("sentinel").join("parent.toml"))
 }
 
@@ -130,7 +130,10 @@ pub mod api {
         Ok(wrap.requests)
     }
 
-    pub async fn alerts(client: &reqwest::Client, cfg: &ParentConfig) -> anyhow::Result<Vec<Alert>> {
+    pub async fn alerts(
+        client: &reqwest::Client,
+        cfg: &ParentConfig,
+    ) -> anyhow::Result<Vec<Alert>> {
         #[derive(Deserialize)]
         struct Wrap {
             alerts: Vec<Alert>,

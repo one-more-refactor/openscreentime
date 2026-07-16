@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0          # cleaner cache, smaller artifacts
+  RUST_BACKTRACE: short
+
+# ─────────────────────────────────────────────────────────────
+# Jobs run in parallel; server-test needs Postgres so it has its
+# own service container. Everything else is dependency-free.
+# ─────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. Policy crate ────────────────────────────────────────
+  policy:
+    name: "📜 Policy — fmt / clippy / test"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: policy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: policy
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-features 2>&1 | tee /tmp/policy-test.txt
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 📜 Policy crate" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/policy-test.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ── 2. Server ──────────────────────────────────────────────
+  server:
+    name: "🖥️ Server — fmt / clippy / test"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://sentinel:sentinel@localhost:5432/sentinel
+      RP_ID: localhost
+      RP_ORIGIN: http://localhost:5173
+      SENTINEL_INSECURE_COOKIES: "1"
+      RUST_LOG: "sentinel_server=debug"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres --locked
+
+      - name: Run migrations
+        run: sqlx migrate run
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-features -- --nocapture 2>&1 | tee /tmp/server-test.txt
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 🖥️ Server" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          # Extract pass/fail counts
+          PASSED=$(grep -c "^test .* ok$" /tmp/server-test.txt 2>/dev/null || echo 0)
+          FAILED=$(grep -c "^test .* FAILED$" /tmp/server-test.txt 2>/dev/null || echo 0)
+          echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Full output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/server-test.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+  # ── 3. Client agent ────────────────────────────────────────
+  client:
+    name: "🤖 Client — fmt / clippy / test (all features)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+
+      # eframe (gui feature) needs these at link time
+      - name: Install GUI deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxkbcommon-dev libwayland-dev \
+            libdbus-1-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test (default features)
+        run: cargo test -- --nocapture 2>&1 | tee /tmp/client-test-default.txt
+
+      - name: test (tray feature)
+        run: cargo test --features tray -- --nocapture 2>&1 | tee /tmp/client-test-tray.txt
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 🤖 Client agent" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for label in "default" "tray"; do
+            FILE="/tmp/client-test-${label}.txt"
+            PASSED=$(grep -c "^test .* ok$" "$FILE" 2>/dev/null || echo 0)
+            FAILED=$(grep -c "^test .* FAILED$" "$FILE" 2>/dev/null || echo 0)
+            echo "### \`--features ${label}\`" >> $GITHUB_STEP_SUMMARY
+            echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "<details><summary>Full test output (default)</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/client-test-default.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+  # ── 4. Web ─────────────────────────────────────────────────
+  web:
+    name: "🌐 Web — typecheck / build"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck 2>&1 | tee /tmp/web-typecheck.txt
+
+      - name: Build
+        run: bun run build 2>&1 | tee /tmp/web-build.txt
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ github.sha }}
+          path: web/dist/
+          retention-days: 7
+
+      - name: "📋 Step summary"
+        if: always()
+        run: |
+          echo "## 🌐 Web" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Bundle size from dist
+          if [ -d dist ]; then
+            TOTAL=$(du -sh dist | cut -f1)
+            JS_SIZE=$(find dist/assets -name "*.js" -exec du -cb {} + 2>/dev/null | tail -1 | cut -f1 | numfmt --to=iec || echo "?")
+            CSS_SIZE=$(find dist/assets -name "*.css" -exec du -cb {} + 2>/dev/null | tail -1 | cut -f1 | numfmt --to=iec || echo "?")
+            echo "| Asset | Size |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 Total dist | \`$TOTAL\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📜 JS bundles | \`$JS_SIZE\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🎨 CSS | \`$CSS_SIZE\` |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "<details><summary>Build output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/web-build.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+  # ── 5. CI gate ─────────────────────────────────────────────
+  ci-ok:
+    name: "✅ CI gate"
+    needs: [policy, server, client, web]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "policy: ${{ needs.policy.result }}"
+          echo "server: ${{ needs.server.result }}"
+          echo "client: ${{ needs.client.result }}"
+          echo "web:    ${{ needs.web.result }}"
+
+          if [[ "${{ needs.policy.result }}" != "success" || \
+                "${{ needs.server.result }}" != "success" || \
+                "${{ needs.client.result }}" != "success" || \
+                "${{ needs.web.result }}"    != "success" ]]; then
+            echo "::error::One or more CI jobs failed."
+            exit 1
+          fi
+
+          echo "## ✅ All checks passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 📜 Policy | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖥️ Server | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🤖 Client | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 Web    | ✅ |" >> $GITHUB_STEP_SUMMARY
