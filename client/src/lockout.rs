@@ -275,12 +275,16 @@ pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
 /// grant is trusted at face value — which is safe only because `/run/sentinel`
 /// is root-owned (0755): no managed user can write there. The verification
 /// already happened in the presenter, against the same argon2 hash.
+/// `kind` is `"pin"` (parent PIN — a parent present, never rate-limited) or
+/// `"challenge"` (a solved self-serve challenge — the runner caps how many of
+/// these it honors per day so the trivial math can't be re-solved to defeat the
+/// limit). The grant file is `"<kind>:<minutes>"`.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))] // written by the gui presenter only
-pub fn write_unlock_grant(user: &str, minutes: u32) {
+pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
     let dir = std::path::Path::new("/run/sentinel");
     let _ = std::fs::create_dir_all(dir);
     let path = dir.join(format!("unlock_grant.{user}"));
-    if let Err(e) = std::fs::write(&path, minutes.to_string()) {
+    if let Err(e) = std::fs::write(&path, format!("{kind}:{minutes}")) {
         tracing::warn!("could not write unlock grant for {user}: {e}");
     }
 }
@@ -290,11 +294,20 @@ pub fn write_unlock_grant(user: &str, minutes: u32) {
 /// frozen ones — so a parent standing at the machine can always get in
 /// (the old code only consulted the override on the freeze-transition tick,
 /// which stranded frozen users).
-pub fn take_unlock_grant(user: &str) -> Option<u32> {
+/// Returns `(minutes, kind)`. `kind` is `"pin"` or `"challenge"`; legacy/plain
+/// numeric content is read as `"pin"` (uncapped) so a real grant is never
+/// wrongly dropped — the safe direction for an unlock is to let the user in.
+pub fn take_unlock_grant(user: &str) -> Option<(u32, String)> {
     let path = format!("/run/sentinel/unlock_grant.{user}");
     let content = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
-    content.trim().parse::<u32>().ok().map(|m| m.clamp(1, 240))
+    let content = content.trim();
+    let (kind, mins) = match content.split_once(':') {
+        Some((k, m)) => (k.trim(), m.trim()),
+        None => ("pin", content),
+    };
+    let minutes = mins.parse::<u32>().ok()?.clamp(1, 240);
+    Some((minutes, kind.to_string()))
 }
 
 /// Present the lockout. Non-blocking: it puts the screen up (or logs it) and
@@ -362,8 +375,16 @@ pub mod gui {
     const GRANT_CHALLENGE_MIN: u32 = 5;
 
     /// Launch the overlay as a detached subprocess of this same binary
-    /// (`sentinel-agent __lockout <b64 json>`). Returns false if it could not
+    /// (`sentinel-agent __lockout <spec-file>`). Returns false if it could not
     /// be spawned (caller falls back to the headless broadcast).
+    ///
+    /// The spec carries `parent_pin_hash` (the argon2 PHC of the master-unlock
+    /// PIN), so it MUST NOT travel on argv — `/proc/<pid>/cmdline` is
+    /// world-readable, which would hand the hash to any local user (e.g. the
+    /// locked-out managed user on a second VT) for offline brute-force of the
+    /// low-entropy PIN. Instead the spec is staged in a root-only (0600) file
+    /// under root-owned `/run/sentinel` and only its *path* — not a secret — is
+    /// passed on argv; the child reads it once and unlinks it.
     pub fn spawn_detached(spec: &LockSpec) -> bool {
         let Ok(json) = serde_json::to_string(spec) else {
             return false;
@@ -372,9 +393,12 @@ pub mod gui {
         let Ok(exe) = std::env::current_exe() else {
             return false;
         };
+        let Some(spec_path) = stage_spec_file(&spec.for_user, b64.as_bytes()) else {
+            return false;
+        };
         match std::process::Command::new(exe)
             .arg("__lockout")
-            .arg(b64)
+            .arg(&spec_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -382,17 +406,46 @@ pub mod gui {
         {
             Ok(_) => true,
             Err(e) => {
+                let _ = std::fs::remove_file(&spec_path);
                 tracing::warn!("could not spawn lockout GUI subprocess: {e}");
                 false
             }
         }
     }
 
-    /// Entry point of the `__lockout` subprocess: decode the spec and run the
-    /// blocking egui loop. On a verified dismissal it writes an unlock grant
-    /// for the runner to consume.
-    pub fn run_from_b64(b64: &str) -> anyhow::Result<()> {
-        let json = base64::engine::general_purpose::STANDARD.decode(b64.trim())?;
+    /// Stage the base64 lock spec in a private, root-only file and return its
+    /// path. 0600 in the root-owned `/run/sentinel` means no managed user can
+    /// read the `parent_pin_hash` the spec contains.
+    fn stage_spec_file(user: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = std::path::Path::new("/run/sentinel");
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join(format!("lockspec.{user}"));
+        // Drop any stale file so create_new (hence mode 0600) applies to a fresh
+        // file we own, rather than reusing one with looser bits.
+        let _ = std::fs::remove_file(&path);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| tracing::warn!("could not stage lockout spec: {e}"))
+            .ok()?;
+        f.write_all(bytes)
+            .map_err(|e| tracing::warn!("could not write lockout spec: {e}"))
+            .ok()?;
+        Some(path)
+    }
+
+    /// Entry point of the `__lockout` subprocess: read the staged spec file
+    /// (single-use — unlinked immediately so the hash never lingers on disk),
+    /// decode it, and run the blocking egui loop. On a verified dismissal it
+    /// writes an unlock grant for the runner to consume.
+    pub fn run_from_spec_file(path: &str) -> anyhow::Result<()> {
+        let raw = std::fs::read(path)?;
+        let _ = std::fs::remove_file(path); // single-use
+        let json = base64::engine::general_purpose::STANDARD.decode(raw.trim_ascii())?;
         let spec: LockSpec = serde_json::from_slice(&json)?;
         show(&spec);
         Ok(())
@@ -411,9 +464,9 @@ pub mod gui {
             "SENTINEL",
             native,
             Box::new(move |_cc| {
-                let deadline = spec
-                    .countdown_secs
-                    .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(u64::from(s)));
+                let deadline = spec.countdown_secs.map(|s| {
+                    std::time::Instant::now() + std::time::Duration::from_secs(u64::from(s))
+                });
                 Ok(Box::new(LockApp {
                     spec: spec.clone(),
                     input: String::new(),
@@ -529,13 +582,21 @@ pub mod gui {
                             .unwrap_or(false);
                         let challenge_ok = self.spec.challenge.verify(&self.input, None);
                         if pin_ok {
-                            super::write_unlock_grant(&self.spec.for_user, GRANT_PARENT_PIN_MIN);
+                            super::write_unlock_grant(
+                                &self.spec.for_user,
+                                GRANT_PARENT_PIN_MIN,
+                                "pin",
+                            );
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if challenge_ok {
                             // `Challenge::None` (nudge-only) verifies trivially:
                             // it grants nothing and simply closes.
                             if matches!(self.spec.challenge, Challenge::Math { .. }) {
-                                super::write_unlock_grant(&self.spec.for_user, GRANT_CHALLENGE_MIN);
+                                super::write_unlock_grant(
+                                    &self.spec.for_user,
+                                    GRANT_CHALLENGE_MIN,
+                                    "challenge",
+                                );
                             }
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if matches!(
