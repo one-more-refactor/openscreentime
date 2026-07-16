@@ -1,9 +1,17 @@
 //! In-memory fixed-window rate limiting for the unauthenticated surfaces
 //! (`/api/auth/*` login/register/OIDC attempts and `/agent/enroll`).
 //!
-//! Keyed by client IP: the first `X-Forwarded-For` value when
-//! `SENTINEL_TRUST_PROXY=1`, otherwise the peer address. Over-limit requests
-//! get a 429 with the standard error envelope.
+//! Keyed by client IP: the *last* `X-Forwarded-For` value (the hop the trusted
+//! proxy appended — the only one a client can't forge) when
+//! `SENTINEL_TRUST_PROXY=1`, otherwise the peer address. Over-limit requests get
+//! a 429 with the standard error envelope.
+//!
+//! Correctness depends on `SENTINEL_TRUST_PROXY` matching the deployment: set it
+//! only when a reverse proxy actually fronts the server (the supported layout,
+//! and the compose default). If it is set while requests can reach the server
+//! directly, a client controls the last XFF hop and can rotate it to dodge the
+//! limit; if it is unset while behind a proxy, every client collapses onto the
+//! proxy's IP and shares one bucket. See docs/DEPLOY.md.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

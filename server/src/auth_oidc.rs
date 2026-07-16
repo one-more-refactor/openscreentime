@@ -17,7 +17,7 @@ use axum::{
     response::Redirect,
     Json,
 };
-use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -28,6 +28,23 @@ use crate::state::AppState;
 
 /// `state` parameters expire after this.
 const STATE_TTL: Duration = Duration::from_secs(600);
+
+/// Cookie that binds the OIDC `state` to the browser that started the flow.
+/// Without it, `state` existing server-side is not proof the SAME browser began
+/// the login, which enables login-CSRF / session fixation (an attacker primes a
+/// state+code for their own account and makes the victim complete the callback).
+const OIDC_STATE_COOKIE: &str = "oidc_state";
+
+/// Short-lived, HttpOnly cookie carrying the in-flight `state`. SameSite=Lax so
+/// it still rides the top-level GET redirect back from the IdP.
+fn state_cookie(value: String, secure: bool) -> Cookie<'static> {
+    Cookie::build((OIDC_STATE_COOKIE, value))
+        .path("/api/auth/oidc")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .build()
+}
 
 struct PendingState {
     created: Instant,
@@ -162,7 +179,7 @@ pub async fn auth_config(State(st): State<AppState>) -> Json<Value> {
 }
 
 /// GET /api/auth/oidc/start — 302 to the provider's authorize URL.
-pub async fn start(State(st): State<AppState>) -> AppResult<Redirect> {
+pub async fn start(State(st): State<AppState>, jar: CookieJar) -> AppResult<(CookieJar, Redirect)> {
     let oidc = st
         .oidc
         .as_ref()
@@ -177,7 +194,10 @@ pub async fn start(State(st): State<AppState>) -> AppResult<Redirect> {
         .append_pair("redirect_uri", &oidc.redirect_uri)
         .append_pair("scope", "openid email profile")
         .append_pair("state", &state);
-    Ok(Redirect::temporary(url.as_str()))
+    // Bind the flow to this browser: the callback requires this cookie to equal
+    // the returned `state`.
+    let jar = jar.add(state_cookie(state, st.cookie_secure));
+    Ok((jar, Redirect::temporary(url.as_str())))
 }
 
 #[derive(Deserialize)]
@@ -222,9 +242,20 @@ pub async fn callback(
         (jar, Redirect::temporary(&to))
     };
 
+    // The state bound to THIS browser in `start`. Clear it on every path out.
+    let cookie_state = jar.get(OIDC_STATE_COOKIE).map(|c| c.value().to_string());
+    let jar = jar.remove(state_cookie(String::new(), st.cookie_secure));
+
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Ok(fail(jar, "sso_failed"));
     };
+    // CSRF / login-fixation guard: the returned `state` must match the cookie
+    // set when this browser began the flow. A cross-site forced callback (with
+    // an attacker's code+state) won't carry the matching cookie.
+    if cookie_state.as_deref() != Some(state.as_str()) {
+        tracing::warn!("oidc callback state does not match the browser cookie");
+        return Ok(fail(jar, "sso_failed"));
+    }
     let Some(redirect_to) = oidc.take_state(&state).await else {
         return Ok(fail(jar, "sso_failed"));
     };
@@ -281,7 +312,7 @@ pub async fn callback(
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| email.split('@').next().unwrap_or("Admin").to_string());
             let (tenant_id, admin_id) =
-                create_tenant_with_admin(&st.db, &email, &display_name).await?;
+                create_tenant_with_admin(&st.db, &email, &display_name, true).await?;
             (admin_id, tenant_id)
         }
     };

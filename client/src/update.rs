@@ -138,9 +138,25 @@ pub async fn check_and_update(
         return Ok(false);
     };
 
+    // The binary download must come from the ENROLLED server over the same
+    // origin as the API. A manifest must not be able to point this root-installed
+    // fetch at an arbitrary host or downgrade it to plaintext http — that would
+    // widen a fleet-wide root-RCE surface well beyond the server we already trust.
     let url = if art.url.starts_with('/') {
         format!("{base}{}", art.url)
     } else {
+        let (Ok(want), Ok(got)) = (reqwest::Url::parse(base), reqwest::Url::parse(&art.url)) else {
+            anyhow::bail!("self-update: unparseable artifact URL — refusing");
+        };
+        let same_origin = want.scheme() == got.scheme()
+            && want.host_str() == got.host_str()
+            && want.port_or_known_default() == got.port_or_known_default();
+        if !same_origin {
+            anyhow::bail!(
+                "self-update: artifact URL {} is not on the enrolled server origin — refusing",
+                art.url
+            );
+        }
         art.url.clone()
     };
     tracing::info!(

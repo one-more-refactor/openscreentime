@@ -121,14 +121,15 @@ async fn main() -> Result<()> {
     }
 
     // Hidden GUI presenter subprocess (spawned detached by the runner so the
-    // blocking egui event loop never stalls the enforcement tick). Decodes a
-    // base64 LockSpec, shows the overlay, and writes an unlock grant on a
-    // verified dismissal.
+    // blocking egui event loop never stalls the enforcement tick). Reads the
+    // root-only staged LockSpec file whose path is the argument (never the spec
+    // itself — it carries the parent-PIN hash, which must not sit on argv), shows
+    // the overlay, and writes an unlock grant on a verified dismissal.
     if raw_args.get(1).map(String::as_str) == Some("__lockout") {
         #[cfg(feature = "gui")]
         {
-            let b64 = raw_args.get(2).map(String::as_str).unwrap_or("");
-            return lockout::gui::run_from_b64(b64);
+            let spec_path = raw_args.get(2).map(String::as_str).unwrap_or("");
+            return lockout::gui::run_from_spec_file(spec_path);
         }
         #[cfg(not(feature = "gui"))]
         {

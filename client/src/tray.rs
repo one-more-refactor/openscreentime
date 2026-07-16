@@ -17,6 +17,8 @@ use serde::Deserialize;
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// Shared, device-wide snapshot (lock/connection/remote-shell). World-readable
+/// but carries NO per-user activity — that lives in the per-user file below.
 const STATUS_PATH: &str = "/run/sentinel/status.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How often parent mode polls the server for pending requests + alerts.
@@ -88,8 +90,14 @@ impl Status {
     }
 }
 
-fn read_status() -> Option<Status> {
-    let raw = std::fs::read_to_string(STATUS_PATH).ok()?;
+/// Read this user's status: the private per-user file if present (managed user),
+/// otherwise the shared device-wide snapshot (non-managed user still sees
+/// lock/connection/remote-shell state).
+fn read_status(username: &str) -> Option<Status> {
+    let per_user = format!("/run/sentinel/status.{username}.json");
+    let raw = std::fs::read_to_string(&per_user)
+        .or_else(|_| std::fs::read_to_string(STATUS_PATH))
+        .ok()?;
     serde_json::from_str(&raw).ok()
 }
 
@@ -304,7 +312,11 @@ fn request_more_time() {
         notify("COULDN'T SEND", "Try again in a moment", false);
         return;
     }
-    notify("REQUEST SENT", "Asked for more time — waiting for a parent", false);
+    notify(
+        "REQUEST SENT",
+        "Asked for more time — waiting for a parent",
+        false,
+    );
 }
 
 fn notify(summary: &str, body: &str, critical: bool) {
@@ -474,7 +486,11 @@ fn spawn_parent_worker(
                         ),
                         Err(e) => {
                             tracing::warn!("parent decide failed: {e}");
-                            notify("COULDN'T UPDATE", "Check the connection and try again", false);
+                            notify(
+                                "COULDN'T UPDATE",
+                                "Check the connection and try again",
+                                false,
+                            );
                         }
                     }
                 }
@@ -535,7 +551,7 @@ pub fn run() -> Result<()> {
         })?;
     tracing::info!("tray starting for user {username} (reading {STATUS_PATH})");
 
-    let mut prev = read_status();
+    let mut prev = read_status(&username);
     if prev.is_none() {
         tracing::warn!("{STATUS_PATH} not readable yet — is sentinel-agent running?");
     }
@@ -578,7 +594,7 @@ pub fn run() -> Result<()> {
 
     loop {
         std::thread::sleep(POLL_INTERVAL);
-        let next = read_status();
+        let next = read_status(&username);
         if let (Some(p), Some(n)) = (&prev, &next) {
             if p != n {
                 notify_transitions(&username, p, n);
