@@ -244,11 +244,13 @@ pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) 
 }
 
 /// Users currently active on a local seat (loginctl). Empty on headless/no-logind.
-/// Sessions logind reports as idle (`IdleHint=yes`) are excluded so time spent
-/// away from the keyboard (dinner, an open lid) doesn't burn the daily budget —
-/// enforcement should be predictable, and "I wasn't even using it" is a
-/// legitimate complaint. DEs that never set the hint report `IdleHint=no`, so
-/// the fallback is the old behavior (count it).
+///
+/// Accounting deliberately does NOT consult the session's `IdleHint`: logind lets
+/// a session's own owner set that hint (`SetIdleHint` on the session object), so
+/// a managed user could mark themselves "idle" while actively using the machine
+/// and never burn their daily budget. Screen time must not be gameable, so an
+/// active, local (non-remote) session counts regardless of the self-reported
+/// idle state.
 pub fn active_seat_users(exec: &Exec) -> Vec<String> {
     let listing = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
     let mut users = Vec::new();
@@ -262,21 +264,11 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
         let user = cols[2];
         let state = exec.probe(
             "loginctl",
-            &[
-                "show-session",
-                session,
-                "-p",
-                "Active",
-                "-p",
-                "Remote",
-                "-p",
-                "IdleHint",
-            ],
+            &["show-session", session, "-p", "Active", "-p", "Remote"],
         );
         let active = state.contains("Active=yes");
         let remote = state.contains("Remote=yes");
-        let idle = state.contains("IdleHint=yes");
-        if active && !remote && !idle && !users.contains(&user.to_string()) {
+        if active && !remote && !users.contains(&user.to_string()) {
             users.push(user.to_string());
         }
     }
@@ -432,7 +424,7 @@ mod tests {
         // future relative to "today".
         t.day = Some(Local::now().date_naive() + chrono::Duration::days(1));
         t.add_active("kid", 60, 1); // a tick after the set-back
-        // Still counted against the same budget, never wiped.
+                                    // Still counted against the same budget, never wiped.
         assert!(t.used_minutes("kid") >= 55);
     }
 

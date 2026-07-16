@@ -118,14 +118,55 @@ pub async fn open_session(
     })))
 }
 
-/// Load an SSH session scoped to the tenant, or 404.
+/// How long a session may sit in `opening` (agent never confirmed) before the
+/// reaper tears it down. Generous enough that a briefly-offline device can still
+/// confirm, tight enough to bound accumulation.
+const OPENING_TTL_MINUTES: i64 = 15;
+
+/// Background reaper: close sessions stuck in `opening`. Without it, an agent
+/// that never confirms (offline at click time, or a spammed open) leaks a DB
+/// row, an in-memory bridge, and possibly a lingering agent-side root shell,
+/// indefinitely. Reuses `finalize_close`, so the agent is told to tear down too.
+pub fn spawn_reaper(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let stale: Vec<(Uuid, Uuid, Uuid)> = match sqlx::query_as(
+                "SELECT s.id, s.device_id, d.tenant_id FROM ssh_sessions s
+                 JOIN devices d ON d.id = s.device_id
+                 WHERE s.status = 'opening'
+                   AND s.created_at < now() - make_interval(mins => $1)",
+            )
+            .bind(OPENING_TTL_MINUTES)
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("ssh reaper query failed: {e}");
+                    continue;
+                }
+            };
+            for (session_id, device_id, tenant_id) in stale {
+                if let Err(e) = finalize_close(&state, tenant_id, None, session_id, device_id).await
+                {
+                    tracing::warn!(%session_id, "ssh reaper close failed: {e}");
+                }
+            }
+        }
+    });
+}
+
+/// Load an SSH session scoped to the tenant, or 404. Returns
+/// `(device_id, status, opener_admin_id)`.
 async fn get_session(
     db: &sqlx::PgPool,
     session_id: Uuid,
     tenant_id: Uuid,
-) -> AppResult<(Uuid, String)> {
-    let row: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT s.device_id, s.status FROM ssh_sessions s
+) -> AppResult<(Uuid, String, Uuid)> {
+    let row: Option<(Uuid, String, Uuid)> = sqlx::query_as(
+        "SELECT s.device_id, s.status, s.admin_id FROM ssh_sessions s
          JOIN devices d ON d.id = s.device_id
          WHERE s.id = $1 AND d.tenant_id = $2",
     )
@@ -187,7 +228,7 @@ pub async fn close_session(
     admin: AuthAdmin,
     Path(session_id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    let (device_id, _status) = get_session(&st.db, session_id, admin.tenant_id).await?;
+    let (device_id, _status, _opener) = get_session(&st.db, session_id, admin.tenant_id).await?;
     finalize_close(
         &st,
         admin.tenant_id,
@@ -206,7 +247,14 @@ pub async fn ws(
     Path(session_id): Path<Uuid>,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    let (device_id, status) = get_session(&st.db, session_id, admin.tenant_id).await?;
+    let (device_id, status, opener) = get_session(&st.db, session_id, admin.tenant_id).await?;
+    // Bind the terminal to the admin who OPENED the session. Same-tenant co-admins
+    // must not attach — that would silently displace the opener's live root shell
+    // (attach_ssh_admin replaces the sink). Indistinguishable-from-missing on
+    // purpose (404, not 403).
+    if opener != admin.admin_id {
+        return Err(AppError::NotFound("ssh session not found".into()));
+    }
     if status != "opening" && status != "open" {
         return Err(AppError::Conflict("ssh session is not open".into()));
     }

@@ -125,6 +125,10 @@ async fn main() -> anyhow::Result<()> {
     // requests. No-op unless a channel is configured in the environment.
     alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
 
+    // Reap SSH sessions stuck in `opening` (agent never confirmed) so they can't
+    // leak DB rows + in-memory bridges + agent-side shells.
+    ssh::spawn_reaper(state.clone());
+
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
         .allow_origin(

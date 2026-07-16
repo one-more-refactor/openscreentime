@@ -30,6 +30,9 @@ const FREEZE_GRACE: Duration = Duration::from_secs(60);
 /// Minutes granted when a parent PIN arrives via the headless file-drop
 /// override (`/run/sentinel/unlock_pin.<user>`), matching the GUI's PIN grant.
 const PIN_OVERRIDE_GRANT_MIN: u32 = 30;
+/// Max self-serve challenge (math) unlock grants honored per user per day, so
+/// the trivial challenge can't be re-solved indefinitely to defeat screen time.
+const CHALLENGE_GRANTS_PER_DAY: u32 = 3;
 
 /// Default fail-closed offline grace period: how long the agent tolerates no
 /// server contact (WS message or successful poll/heartbeat) before treating
@@ -107,6 +110,9 @@ pub struct Agent {
     /// so the headless auto-request doesn't spam the server more than once a day
     /// (CONTRACT-PROD.md §4 — the server also dedupes, this just avoids the noise).
     requested_earn: HashMap<(String, String), chrono::NaiveDate>,
+    /// (os_username) → (date, count) of self-serve challenge unlock grants
+    /// honored today, capped at [`CHALLENGE_GRANTS_PER_DAY`].
+    challenge_grants: HashMap<String, (chrono::NaiveDate, u32)>,
     /// Last time the agent successfully reached the server (WS message received
     /// or a successful poll/heartbeat) — the fail-closed offline grace clock.
     last_contact: Instant,
@@ -168,6 +174,56 @@ fn ondemand_earn_marker(user: &str) -> Option<std::path::PathBuf> {
     )))
 }
 
+/// Increment a per-user daily counter (resetting it on a new day) and report
+/// whether this use is within `cap`. Pure, so the challenge-grant cap is
+/// unit-testable without constructing an `Agent`.
+fn allow_daily(
+    map: &mut HashMap<String, (chrono::NaiveDate, u32)>,
+    user: &str,
+    today: chrono::NaiveDate,
+    cap: u32,
+) -> bool {
+    let entry = map.entry(user.to_string()).or_insert((today, 0));
+    if entry.0 != today {
+        *entry = (today, 0);
+    }
+    if entry.1 >= cap {
+        return false;
+    }
+    entry.1 += 1;
+    true
+}
+
+/// Atomically write a managed user's private status snapshot: `0600`, chowned to
+/// the user so their (unprivileged) tray can read it while no other local user
+/// can. Created via `create_new` so the restrictive mode always applies to a
+/// fresh file rather than an inherited-perms one.
+fn write_private_status(dir: &std::path::Path, user: &str, uid: u32, contents: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = dir.join(format!("status.{user}.json.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("could not stage status for {user}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = f.write_all(contents.as_bytes()) {
+        tracing::warn!("could not write status for {user}: {e}");
+        return;
+    }
+    drop(f);
+    let _ = std::os::unix::fs::chown(&tmp, Some(uid), None);
+    let _ = std::fs::rename(&tmp, dir.join(format!("status.{user}.json")));
+}
+
 /// A normal (non-blocking) user-facing message the per-user tray should show as
 /// a desktop notification. Full-screen takeovers are reserved for the moments
 /// that actually block the screen (a lock, or the freeze countdown); everything
@@ -209,6 +265,7 @@ impl Agent {
             policy_version: String::new(),
             expected_wall: None,
             requested_earn: HashMap::new(),
+            challenge_grants: HashMap::new(),
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
             offline_grace: offline_grace_from_env(),
@@ -561,20 +618,35 @@ impl Agent {
             // standing at the machine could never get them out.) Two sources:
             //   * an overlay grant (GUI already verified PIN/challenge), and
             //   * the headless parent-PIN file drop (verified here).
-            let granted: Option<(u32, &str)> = if let Some(mins) = lockout::take_unlock_grant(&user)
-            {
-                Some((mins, "lockout-screen unlock"))
-            } else {
-                let spec = LockSpec::from_lockout(
-                    &Default::default(),
-                    "",
-                    "",
-                    &user,
-                    policy.parent_pin_hash.clone(),
-                );
-                lockout::check_and_consume_pin_override(&self.exec, &spec)
-                    .then_some((PIN_OVERRIDE_GRANT_MIN, "parent PIN"))
-            };
+            let granted: Option<(u32, &str)> =
+                if let Some((mins, kind)) = lockout::take_unlock_grant(&user) {
+                    // A self-serve challenge (math) grant is capped per day so it
+                    // can't be re-solved indefinitely to defeat screen time; a
+                    // parent-PIN grant is never capped.
+                    if kind == "challenge"
+                        && !allow_daily(
+                            &mut self.challenge_grants,
+                            &user,
+                            chrono::Local::now().date_naive(),
+                            CHALLENGE_GRANTS_PER_DAY,
+                        )
+                    {
+                        tracing::info!("challenge unlock for {user} ignored — daily cap reached");
+                        None
+                    } else {
+                        Some((mins, "lockout-screen unlock"))
+                    }
+                } else {
+                    let spec = LockSpec::from_lockout(
+                        &Default::default(),
+                        "",
+                        "",
+                        &user,
+                        policy.parent_pin_hash.clone(),
+                    );
+                    lockout::check_and_consume_pin_override(&self.exec, &spec)
+                        .then_some((PIN_OVERRIDE_GRANT_MIN, "parent PIN"))
+                };
             if let Some((mins, source)) = granted {
                 self.unlock_until.insert(
                     user.clone(),
@@ -630,10 +702,9 @@ impl Agent {
                 self.maybe_warn(&user, &policy, &mut events);
             }
 
-            let effective_device_locked = (self.device_locked
-                || self.offline_hard_lockdown
-                || self.tamper_lockdown)
-                && !in_grace;
+            let effective_device_locked =
+                (self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown)
+                    && !in_grace;
             match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
                 FreezeAction::Freeze => {
                     if effective_device_locked {
@@ -831,29 +902,24 @@ impl Agent {
         }
     }
 
-    /// Transparency surface: an atomically-replaced world-readable snapshot at
-    /// `/run/sentinel/status.json` for the per-user tray/companion — time
-    /// remaining, freeze state, server connection, and whether a remote shell
-    /// is open (the teen deserves to know).
+    /// Transparency surface for the per-user tray/companion — time remaining,
+    /// freeze state, server connection, and whether a remote shell is open (the
+    /// teen deserves to know).
+    ///
+    /// Split so one managed user can't read another's activity: the shared
+    /// `/run/sentinel/status.json` is world-readable but carries ONLY device-wide
+    /// state (lock/connection/remote-shell + device-wide notifications). Each
+    /// managed user's usage and their own notifications go in a private
+    /// `/run/sentinel/status.<user>.json`, chowned to that user and `0600`.
     fn write_status_file(&self) {
         if self.exec.dry_run() {
             return;
         }
-        let users: Vec<serde_json::Value> = self
-            .policies
-            .iter()
-            .map(|(u, p)| {
-                json!({
-                    "name": u,
-                    "used_minutes": self.tracker.used_minutes(u),
-                    "remaining_minutes": self.tracker.remaining_minutes(u, p),
-                    "frozen": self.frozen.contains(u),
-                    "freeze_in_secs": self.pending_freeze.get(u).map(|d|
-                        d.saturating_duration_since(Instant::now()).as_secs()),
-                })
-            })
-            .collect();
-        let status = json!({
+        let dir = std::path::Path::new("/run/sentinel");
+        let _ = std::fs::create_dir_all(dir);
+
+        // Global, non-sensitive fields shared by every view.
+        let base = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "connection": match self.contact_state {
                 ContactState::Online => "online",
@@ -864,20 +930,56 @@ impl Agent {
             "offline_hard_lockdown": self.offline_hard_lockdown,
             "tamper_lockdown": self.tamper_lockdown,
             "remote_shell_open": !self.sessions.is_empty(),
-            "users": users,
-            "notifications": self.notifications.iter().map(|n| json!({
+        });
+        let notif_json = |n: &UserNotification| {
+            json!({
                 "id": n.id,
                 "title": n.title,
                 "body": n.body,
                 "urgency": if n.critical { "critical" } else { "normal" },
                 "user": n.user,
-            })).collect::<Vec<_>>(),
-        });
-        let dir = std::path::Path::new("/run/sentinel");
-        let _ = std::fs::create_dir_all(dir);
+            })
+        };
+        // Device-wide notifications (no target user) are safe for everyone.
+        let device_notifs: Vec<serde_json::Value> = self
+            .notifications
+            .iter()
+            .filter(|n| n.user.is_none())
+            .map(&notif_json)
+            .collect();
+
+        // Shared world-readable file: device-wide state only, no per-user data.
+        let mut global = base.clone();
+        global["users"] = json!([]);
+        global["notifications"] = json!(device_notifs);
         let tmp = dir.join("status.json.tmp");
-        if std::fs::write(&tmp, status.to_string()).is_ok() {
+        if std::fs::write(&tmp, global.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, dir.join("status.json"));
+        }
+
+        // Per-user private files.
+        for (u, p) in &self.policies {
+            let Some(uid) = crate::sysusers::uid_of(u) else {
+                continue;
+            };
+            let mut notifs = device_notifs.clone();
+            notifs.extend(
+                self.notifications
+                    .iter()
+                    .filter(|n| n.user.as_deref() == Some(u.as_str()))
+                    .map(&notif_json),
+            );
+            let mut view = base.clone();
+            view["users"] = json!([{
+                "name": u,
+                "used_minutes": self.tracker.used_minutes(u),
+                "remaining_minutes": self.tracker.remaining_minutes(u, p),
+                "frozen": self.frozen.contains(u),
+                "freeze_in_secs": self.pending_freeze.get(u).map(|d|
+                    d.saturating_duration_since(Instant::now()).as_secs()),
+            }]);
+            view["notifications"] = json!(notifs);
+            write_private_status(dir, u, uid, &view.to_string());
         }
     }
 
@@ -1395,6 +1497,42 @@ mod tests {
             used_min: 60,
             limit_min: 60,
         }
+    }
+
+    #[test]
+    fn challenge_grants_are_capped_per_day_then_reset() {
+        let mut map = HashMap::new();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        // First CHALLENGE_GRANTS_PER_DAY are honored, the next is not.
+        for _ in 0..CHALLENGE_GRANTS_PER_DAY {
+            assert!(allow_daily(
+                &mut map,
+                "kid",
+                today,
+                CHALLENGE_GRANTS_PER_DAY
+            ));
+        }
+        assert!(!allow_daily(
+            &mut map,
+            "kid",
+            today,
+            CHALLENGE_GRANTS_PER_DAY
+        ));
+        // A different user has an independent budget.
+        assert!(allow_daily(
+            &mut map,
+            "sib",
+            today,
+            CHALLENGE_GRANTS_PER_DAY
+        ));
+        // A new day resets the counter.
+        let tomorrow = today.succ_opt().unwrap();
+        assert!(allow_daily(
+            &mut map,
+            "kid",
+            tomorrow,
+            CHALLENGE_GRANTS_PER_DAY
+        ));
     }
 
     #[test]

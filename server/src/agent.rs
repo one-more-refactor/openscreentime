@@ -432,7 +432,30 @@ pub async fn push_events(
     agent: AgentAuth,
     Json(req): Json<PushEventsReq>,
 ) -> AppResult<axum::http::StatusCode> {
+    // An enrolled device is a semi-trusted origin (a rooted managed device holds
+    // a valid token and could forge events — e.g. a `critical` one whose message
+    // is relayed to the parent's phone). The DB CHECK constrains `type`; here we
+    // reject an out-of-range severity with a clean 400 and bound the batch +
+    // payload size so a device can't blast oversized/unbounded events.
+    const MAX_EVENTS: usize = 100;
+    const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
+    if req.events.len() > MAX_EVENTS {
+        return Err(AppError::BadRequest("too many events in one push".into()));
+    }
     for ev in req.events {
+        if !matches!(ev.severity.as_str(), "info" | "warn" | "critical") {
+            return Err(AppError::BadRequest("invalid event severity".into()));
+        }
+        if ev.r#type.trim().is_empty() {
+            return Err(AppError::BadRequest("event type required".into()));
+        }
+        if serde_json::to_string(&ev.payload)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX)
+            > MAX_PAYLOAD_BYTES
+        {
+            return Err(AppError::BadRequest("event payload too large".into()));
+        }
         let device_user_id = resolve_device_user(&st.db, agent.device_id, ev.device_user).await?;
         events::insert(
             &st.db,
