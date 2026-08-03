@@ -151,9 +151,14 @@ export interface Device {
   public_ip: string | null;
   last_seen: string | null;
   created_at: string;
+  /** device VPN profile — presence only; the config body (private keys!)
+   * is never returned to the admin UI */
+  vpn?: { kind: VpnKind; updated_at: string | null } | null;
   /** present on list + detail responses */
   users?: DeviceUser[];
 }
+
+export type VpnKind = "wireguard" | "openvpn";
 
 export interface DeviceDetail extends Device {
   users: DeviceUser[];

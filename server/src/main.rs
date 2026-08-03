@@ -30,7 +30,7 @@ use std::sync::Arc;
 use axum::{
     http::{header, HeaderValue, Method},
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -219,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
         .route("/api/devices/{id}/ssh", post(ssh::open_session))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
+        .route(
+            "/api/devices/{id}/vpn",
+            put(devices::set_vpn).delete(devices::remove_vpn),
+        )
         .route(
             "/api/devices/{id}/enroll-token",
             post(devices::regen_enroll_token),
