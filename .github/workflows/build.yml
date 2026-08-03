@@ -40,7 +40,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -98,7 +98,7 @@ jobs:
       - name: Install Rust toolchain + musl target
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
           targets: x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
