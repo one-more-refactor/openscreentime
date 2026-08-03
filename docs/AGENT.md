@@ -354,6 +354,18 @@ handling never black out all traffic):
   service is down, nothing is enforced (fail-open is possible only while
   the process itself is dead — this is what the watchdog timer exists to
   prevent).
+- **`enforcement_degraded` events (critical)**: the policy was written but the
+  host can't enforce all of it. The payload `kind` says which:
+  | `kind` | Meaning | Fix |
+  |---|---|---|
+  | `dns_no_local_resolver` | dnsmasq isn't installed or won't start, so the allowlist filters nothing | `apt install dnsmasq` (or the distro equivalent) and check `systemctl status dnsmasq` |
+  | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` was a symlink owned by `systemd-resolved`/`resolvconf`; the agent replaced it with a real file | `systemctl disable --now systemd-resolved`, or it fights the pin on every network change |
+  | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
+
+  These are the reason a distro whose `/etc/resolv.conf` is a
+  systemd-resolved symlink (Ubuntu, Mint, Fedora) needs resolved disabled
+  and dnsmasq installed *before* enrollment. On Debian and Arch, where
+  NetworkManager writes a real file, none of them fire.
 - **Locked out and no server reachable**: `sudo sentinel-agent unlock --pin
   <PARENT_PIN> --minutes 60` works fully offline (verifies against the
   cached policy at `/etc/sentinel/policy_cache.json`) as long as the agent

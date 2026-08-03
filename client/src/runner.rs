@@ -48,6 +48,22 @@ fn offline_grace_from_env() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Turn enforcement gaps into `critical` events for the console.
+///
+/// A device that accepted a policy it cannot enforce is the one case where
+/// staying quiet is worse than being noisy: the parent believes filtering is on.
+fn degraded_events(gaps: &[enforce::dns::DnsGap]) -> Vec<Event> {
+    gaps.iter()
+        .map(|gap| {
+            Event::new(
+                EV_ENFORCEMENT_DEGRADED,
+                SEV_CRITICAL,
+                json!({ "kind": gap.kind(), "detail": gap.explain() }),
+            )
+        })
+        .collect()
+}
+
 /// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
 /// tampering with it requires root, at which point the game is over anyway).
 const LAST_CONTACT_PATH: &str = "/var/lib/sentinel/last_contact";
@@ -410,13 +426,14 @@ impl Agent {
             // resolv pin) so nothing drifts open while unreachable.
             let effective = self.effective_network_policy();
             let server_host = crate::client::server_host(&self.cfg.server_url);
-            if let Err(e) = enforce::apply_network_policy(
+            match enforce::apply_network_policy(
                 self.ctx.clone(),
                 &self.exec,
                 server_host.as_deref(),
                 &effective,
             ) {
-                tracing::warn!("offline fail-closed policy re-assert failed: {e}");
+                Ok(gaps) => events.extend(degraded_events(&gaps)),
+                Err(e) => tracing::warn!("offline fail-closed policy re-assert failed: {e}"),
             }
         } else {
             if self.contact_state == ContactState::OfflineFailClosed {
@@ -471,7 +488,7 @@ impl Agent {
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
-        enforce::apply_network_policy(
+        let gaps = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
@@ -485,11 +502,19 @@ impl Agent {
             self.policy_version,
             self.policies.len()
         );
-        Ok(vec![Event::new(
+        // "Applied" is reported alongside, not instead of, the gaps: the policy
+        // really was written, it just isn't all being enforced.
+        let mut events = vec![Event::new(
             EV_POLICY_APPLIED,
             SEV_INFO,
-            json!({ "policy_version": self.policy_version, "users": self.policies.len() }),
-        )])
+            json!({
+                "policy_version": self.policy_version,
+                "users": self.policies.len(),
+                "dns_gaps": gaps.len(),
+            }),
+        )];
+        events.extend(degraded_events(&gaps));
+        Ok(events)
     }
 
     /// Merge all users' network policies into the tightest host-global ruleset:
@@ -557,7 +582,10 @@ impl Agent {
                 server_host.as_deref(),
                 &effective,
             ) {
-                Ok(()) => tracing::info!("nft table was missing — re-applied firewall"),
+                Ok(gaps) => {
+                    tracing::info!("nft table was missing — re-applied firewall");
+                    events.extend(degraded_events(&gaps));
+                }
                 Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
             }
         }
