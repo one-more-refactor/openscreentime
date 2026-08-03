@@ -177,6 +177,24 @@ rebuilds/updates. Already-enrolled agents self-update from the new image
 automatically (within a day) — updating the server is enough, no separate
 device rollout step.
 
+If the updated server fails its `/health` check within 90 s, `update.sh`
+automatically rolls back: `git reset --hard` to the previously running
+revision, rebuild, `up -d`. The script exits non-zero either way so you (or
+the timer's journal) can see the update didn't stick.
+
+### Automatic updates (optional)
+
+```sh
+sudo deploy/install-auto-update.sh
+```
+
+Installs `sentinel-update.timer`: runs `deploy/update.sh` daily (randomized
+by up to an hour, catch-up after downtime) as the deploy user. Combined with
+the rollback above, a bad release self-heals instead of leaving the server
+down overnight. Check what it did with `journalctl -u
+sentinel-update.service`; disable with `sudo systemctl disable --now
+sentinel-update.timer`.
+
 ## Rootless port note
 
 The compose file publishes the app on `127.0.0.1:${SENTINEL_PORT:-8080}`

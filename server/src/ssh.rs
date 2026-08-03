@@ -136,7 +136,7 @@ pub fn spawn_reaper(state: AppState) {
                 "SELECT s.id, s.device_id, d.tenant_id FROM ssh_sessions s
                  JOIN devices d ON d.id = s.device_id
                  WHERE s.status = 'opening'
-                   AND s.created_at < now() - make_interval(mins => $1)",
+                   AND s.created_at < now() - ($1 * interval '1 minute')",
             )
             .bind(OPENING_TTL_MINUTES)
             .fetch_all(&state.db)

@@ -13,6 +13,45 @@ patch bump means fixes only. The agent self-updates by comparing this version
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-04
+
+Headline: **VPN profiles**. Drop a WireGuard `.conf` or OpenVPN `.ovpn`
+client config on a device's page and that machine routes through your VPN —
+the agent keeps the tunnel up, across reboots and config changes, and the
+device firewall automatically lets your own tunnel through even with
+VPN-blocking lockdown enabled. Plus: server deployments can now update
+themselves daily, rolling back automatically if the new version fails its
+health check.
+
+### Added
+
+- Per-device VPN profiles: upload in the console (drag & drop), enforced on
+  the device as `wg-quick@sentinel` / `openvpn-client@sentinel`. The config
+  (it contains private keys) is stored write-only — the console only ever
+  shows kind + upload time — and is written on the device root-only. A
+  tunnel that isn't actually running (e.g. WireGuard tools not installed)
+  raises a critical `enforcement_degraded` alert instead of pretending.
+- Removing a profile propagates like setting one: the agent tears the
+  tunnel down on its next sync, even in polling mode.
+- Optional automatic server updates: `sudo deploy/install-auto-update.sh`
+  installs a daily systemd timer around `deploy/update.sh`, which now rolls
+  back to the previously running revision if the updated server fails its
+  health check — an unattended bad update self-heals.
+
+### Fixed
+
+- The `enforcement_degraded` alerts introduced in 0.2.0 were rejected by the
+  database (missing from the events type constraint) — agents buffered and
+  retried them forever and the console never saw them. They now land.
+- The SSH session reaper's cleanup query was rejected by PostgreSQL on every
+  sweep (`make_interval` type mismatch), so sessions stuck in `opening`
+  were never cleaned up. Stale sessions now reap after 15 minutes as
+  intended.
+- Release builds: the Build workflow pinned a Rust older than the project's
+  minimum supported version and failed on every run since the MSRV bump;
+  release notes extraction produced empty notes on every tag. Both fixed —
+  v0.2.0 was the first release to actually ship because of it.
+
 ## [0.2.0] - 2026-08-04
 
 The first tagged Sentinel release, and the first one devices can auto-update
