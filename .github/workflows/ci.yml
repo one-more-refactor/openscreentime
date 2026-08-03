@@ -35,7 +35,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -95,7 +95,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -103,7 +103,7 @@ jobs:
           workspaces: server
 
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features postgres --locked
+        run: cargo install sqlx-cli --version "^0.8" --no-default-features --features postgres --locked
 
       - name: Run migrations
         run: sqlx migrate run
@@ -151,7 +151,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
           components: rustfmt, clippy
 
       # eframe (gui feature) needs these at link time
