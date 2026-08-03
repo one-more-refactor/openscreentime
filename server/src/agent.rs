@@ -88,11 +88,14 @@ async fn default_profile_id(db: &sqlx::PgPool, tenant_id: Uuid) -> AppResult<Uui
 }
 
 /// Derive a stable policy version string from the max `updated_at` across the
-/// profiles assigned to a device's users.
+/// profiles assigned to a device's users — and the device's VPN profile, so a
+/// set/removed VPN config also bumps the version and poll-mode agents re-pull.
 async fn policy_version(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<String> {
     let ts: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT max(p.updated_at) FROM device_users du
-         JOIN profiles p ON p.id = du.profile_id WHERE du.device_id = $1",
+        "SELECT GREATEST(
+            (SELECT max(p.updated_at) FROM device_users du
+             JOIN profiles p ON p.id = du.profile_id WHERE du.device_id = $1),
+            (SELECT vpn_updated_at FROM devices WHERE id = $1))",
     )
     .bind(device_id)
     .fetch_one(db)
@@ -368,10 +371,11 @@ async fn pull_pending_commands(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
 // ---------------------------------------------------------------------------
 
 pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<Json<Value>> {
-    let tamper_level: i32 = sqlx::query_scalar("SELECT tamper_level FROM devices WHERE id = $1")
-        .bind(agent.device_id)
-        .fetch_one(&st.db)
-        .await?;
+    let (tamper_level, vpn_kind, vpn_config): (i32, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT tamper_level, vpn_kind, vpn_config FROM devices WHERE id = $1")
+            .bind(agent.device_id)
+            .fetch_one(&st.db)
+            .await?;
 
     let rows: Vec<(String, String, Value)> = sqlx::query_as(
         "SELECT du.os_username, p.kind, p.policy FROM device_users du
@@ -400,6 +404,13 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
         "policy_version": version,
         "device_tamper_level": tamper_level,
         "users": users,
+        // Device-level VPN profile (admin-uploaded wg/ovpn client config).
+        // Only served here — the agent's authenticated pull — because the
+        // config body carries private keys.
+        "vpn": vpn_kind.map(|kind| json!({
+            "kind": kind,
+            "config": vpn_config.unwrap_or_default(),
+        })),
     })))
 }
 

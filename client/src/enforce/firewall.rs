@@ -2,6 +2,7 @@
 //! allowing only policy ports + established/related + loopback + the server + the
 //! DNS upstream (TAMPER.md). Re-applied on any drift by the tamper loop.
 
+use super::vpn::VpnPlan;
 use crate::policy::{FirewallPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
@@ -37,6 +38,7 @@ pub fn render_ruleset(
     lockdown: &NetworkLockdown,
     dns_upstream: &str,
     server: Option<&str>,
+    vpn: &VpnPlan,
 ) -> String {
     let mut s = String::new();
     s.push_str("# Managed by sentinel-agent — do not edit.\n");
@@ -72,6 +74,27 @@ pub fn render_ruleset(
     ));
     s.push_str("    oif lo accept\n");
     s.push_str("    ct state established,related accept\n");
+
+    // ---- the device's OWN managed VPN (admin-uploaded profile) — these accepts
+    // must come BEFORE the lockdown drops: `block_vpn` drops udp 51820/1194,
+    // which would kill the parent's own tunnel handshake. ----
+    if let Some(iface) = vpn.iface {
+        s.push_str("    # sentinel VPN profile: tunnel traffic + endpoint handshake\n");
+        s.push_str(&format!("    oifname \"{iface}\" accept\n"));
+    }
+    for ep in &vpn.endpoints {
+        if ep.host.parse::<std::net::IpAddr>().is_ok() {
+            // Literal IP: pin the accept to the endpoint address.
+            s.push_str(&format!(
+                "    ip daddr {} {} dport {} accept\n",
+                ep.host, ep.proto, ep.port
+            ));
+        } else {
+            // Hostname endpoints can't be matched in nft; accept the port. The
+            // widened hole is parent-configured and bounded to one port/proto.
+            s.push_str(&format!("    {} dport {} accept\n", ep.proto, ep.port));
+        }
+    }
 
     // ---- network anti-bypass (NetworkLockdown) — DROP rules FIRST, before the
     // generic accepts below, since nft chains are first-match-wins/terminal. ----
@@ -150,8 +173,9 @@ pub fn apply(
     lockdown: &NetworkLockdown,
     dns_upstream: &str,
     server: Option<&str>,
+    vpn: &VpnPlan,
 ) -> Result<()> {
-    let body = render_ruleset(fw, lockdown, dns_upstream, server);
+    let body = render_ruleset(fw, lockdown, dns_upstream, server, vpn);
     // Atomic replace: `add table` (idempotent — creates if absent) then
     // `delete table` then the fresh definition, all in ONE `nft -f` transaction.
     // nft applies the file all-or-nothing, so a malformed rule (e.g. a bad
@@ -189,6 +213,7 @@ mod tests {
             &NetworkLockdown::default(),
             "1.1.1.2",
             Some("203.0.113.10"),
+            &VpnPlan::default(),
         );
         assert!(r.contains("hook input priority 0; policy drop"));
         assert!(r.contains("hook output priority 0; policy drop"));
@@ -212,7 +237,7 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("tcp dport 853 drop"));
         assert!(r.contains("udp dport 853 drop"));
     }
@@ -223,7 +248,7 @@ mod tests {
             force_dns: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("ip daddr != 1.1.1.2 udp dport 53 drop"));
         assert!(r.contains("ip daddr != 1.1.1.2 tcp dport 53 drop"));
     }
@@ -234,7 +259,7 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("ip daddr 8.8.8.8 tcp dport 443 drop"));
         assert!(r.contains("ip daddr 9.9.9.9 udp dport 443 drop"));
         // Never block our own configured upstream, even though it's in the list.
@@ -248,7 +273,7 @@ mod tests {
             block_vpn: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("udp dport 51820 drop"));
         assert!(r.contains("udp dport 1194 drop"));
         assert!(r.contains("tcp dport 1194 drop"));
@@ -262,8 +287,59 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("tcp dport { 9001, 9030, 9050, 9051, 9150 } drop"));
+    }
+
+    #[test]
+    fn vpn_exemptions_precede_block_vpn_drops() {
+        use super::super::vpn::Endpoint;
+        let lockdown = NetworkLockdown {
+            block_vpn: true,
+            ..Default::default()
+        };
+        let vpn = VpnPlan {
+            iface: Some("sentinel"),
+            endpoints: vec![Endpoint {
+                host: "203.0.113.7".into(),
+                port: 51820,
+                proto: "udp",
+            }],
+        };
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &vpn);
+        let iface_pos = r.find("oifname \"sentinel\" accept").unwrap();
+        let ep_pos = r
+            .find("ip daddr 203.0.113.7 udp dport 51820 accept")
+            .unwrap();
+        let drop_pos = r.find("udp dport 51820 drop").unwrap();
+        assert!(
+            iface_pos < drop_pos && ep_pos < drop_pos,
+            "the managed VPN's accepts must precede block_vpn's drops"
+        );
+    }
+
+    #[test]
+    fn vpn_hostname_endpoint_gets_port_accept() {
+        use super::super::vpn::Endpoint;
+        let vpn = VpnPlan {
+            iface: Some("tun*"),
+            endpoints: vec![Endpoint {
+                host: "vpn.example.org".into(),
+                port: 1194,
+                proto: "udp",
+            }],
+        };
+        let r = render_ruleset(
+            &fw_basic(),
+            &NetworkLockdown::default(),
+            "1.1.1.2",
+            None,
+            &vpn,
+        );
+        // Hostnames can't be nft-matched — the port itself is accepted.
+        assert!(r.contains("udp dport 1194 accept"));
+        assert!(!r.contains("vpn.example.org"));
+        assert!(r.contains("oifname \"tun*\" accept"));
     }
 
     #[test]
@@ -272,7 +348,7 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         let drop_pos = r.find("tcp dport 853 drop").unwrap();
         let accept_pos = r.find("ip daddr 1.1.1.2 accept").unwrap();
         assert!(
