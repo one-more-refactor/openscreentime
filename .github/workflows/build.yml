@@ -390,14 +390,19 @@ jobs:
         id: changelog
         run: |
           TAG="${{ github.ref_name }}"
-          # Try to pull the relevant section from CHANGELOG.md if it exists
+          # Pull this version's section from CHANGELOG.md (heading format:
+          # `## [x.y.z] - date`). A naive awk /start/,/end/ range can't work
+          # here — the start line also matches `^## `, collapsing the range —
+          # so walk headings explicitly: print between our heading and the next.
           if [ -f CHANGELOG.md ]; then
-            NOTES=$(awk "/^## \[?${TAG#v}\]?/,/^## /" CHANGELOG.md | head -50 | tail -n +2 | head -48)
-          else
-            NOTES="See commit history for changes."
+            awk -v ver="${TAG#v}" '
+              /^## / { if (on) exit; if (index($0, "[" ver "]") > 0) { on=1; next } }
+              on { print }
+            ' CHANGELOG.md > /tmp/release-notes.txt
           fi
-          # Store in a file to avoid quoting issues
-          echo "$NOTES" > /tmp/release-notes.txt
+          if [ ! -s /tmp/release-notes.txt ]; then
+            echo "See commit history for changes." > /tmp/release-notes.txt
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
