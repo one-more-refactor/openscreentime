@@ -110,6 +110,8 @@ Two subcommands are intentionally hidden — not in `--help`, not real
 | `/etc/sentinel/policy_cache.json` | root : **0600** | `run` (after every applied policy bundle) | Last-applied effective `Policy`, JSON. Not read by enforcement itself (that's in-memory); exists only so `unlock` can verify the parent PIN and know what to tear down without a live agent process. |
 | `/etc/sentinel/dnsmasq.d/sentinel.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
 | `/etc/resolv.conf` | root : default, **immutable (`chattr +i`)** | `run` (DNS enforcement) | Pinned to `nameserver 127.0.0.1`; the immutable bit stops a managed user from repointing it. Re-asserted every tick if it drifts. |
+| `/etc/wireguard/sentinel.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@sentinel`. |
+| `/etc/openvpn/client/sentinel.conf` | root : **0600** | `run` (VPN enforcement) | Same for an OpenVPN profile; runs as `openvpn-client@sentinel`. |
 | `/etc/polkit-1/rules.d/49-sentinel.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `sentinel-admin` and `root` always retain access. |
 | `/etc/systemd/logind.conf.d/50-sentinel.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/sentinel/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `sentinel-watchdog.timer`. |
@@ -217,6 +219,25 @@ upstream), `block_vpn` (WireGuard/OpenVPN/IPsec ports), `block_tor`
 (OR/directory/SOCKS ports). A missing table is detected every tick
 (`table_missing`) and immediately re-applied with the last effective
 policy.
+
+### VPN profile
+
+`client/src/enforce/vpn.rs`. The policy bundle can carry a device-level
+`vpn` profile — a WireGuard or OpenVPN client config uploaded in the
+console (device → VPN PROFILE). The agent reconciles declaratively on
+every policy apply: profile present → write the config (root-only `0600`;
+dry-run logs withhold the body — it contains the private key), `systemctl
+enable` + `restart` the matching unit (`wg-quick@sentinel` /
+`openvpn-client@sentinel`, switching kinds tears the other down); profile
+absent → stop/disable the unit and delete the config. The firewall
+cooperates: the tunnel interface (`sentinel` / `tun*`) and the parsed
+endpoint(s) (`Endpoint =` / `remote` lines) are accepted **ahead of** the
+lockdown drop rules, so the parent's own tunnel survives `block_vpn` and
+default-deny. A profile whose unit isn't active after apply (wg-quick /
+openvpn not installed, bad config) is reported as an
+`enforcement_degraded` critical event (`vpn_not_running`) — never a silent
+green. CLI paths without server state (`sentinel-agent unlock`) never
+touch the tunnel.
 
 ### Screen time
 

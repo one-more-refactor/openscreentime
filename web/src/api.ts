@@ -36,6 +36,7 @@ import type {
   Severity,
   SshSessionResponse,
   TamperLevel,
+  VpnKind,
 } from "./types";
 
 import {
@@ -237,6 +238,27 @@ export async function regenEnrollToken(id: string): Promise<EnrollTokenResponse>
 
 export async function deleteDevice(id: string): Promise<void> {
   return request<void>(`/api/devices/${id}`, { method: "DELETE" });
+}
+
+/** Upload a WireGuard/OpenVPN client config as this device's VPN profile.
+ * The config body is write-only: responses only ever carry kind + timestamp. */
+export async function setDeviceVpn(
+  id: string,
+  kind: VpnKind,
+  config: string,
+): Promise<Device> {
+  const res = await request<{ device: Device }>(`/api/devices/${id}/vpn`, {
+    method: "PUT",
+    body: JSON.stringify({ kind, config }),
+  });
+  return res.device;
+}
+
+export async function removeDeviceVpn(id: string): Promise<Device> {
+  const res = await request<{ device: Device }>(`/api/devices/${id}/vpn`, {
+    method: "DELETE",
+  });
+  return res.device;
 }
 
 // ---- SSH (contract §3) -------------------------------------------------------
