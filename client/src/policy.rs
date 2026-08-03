@@ -50,6 +50,23 @@ pub struct PolicyBundle {
     pub device_tamper_level: u8,
     #[serde(default)]
     pub users: Vec<UserPolicy>,
+    /// Device-level VPN profile (admin-uploaded wg/ovpn client config), or
+    /// `None` when no profile is set — which means "tear the tunnel down",
+    /// not "leave it alone" (the bundle is declarative).
+    #[serde(default)]
+    pub vpn: Option<VpnProfile>,
+}
+
+/// An admin-uploaded VPN client config for this device. The `config` body
+/// carries private keys: it is only ever transported over the authenticated
+/// agent channel and written to disk `0600` root-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpnProfile {
+    /// `"wireguard"` or `"openvpn"`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub config: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
