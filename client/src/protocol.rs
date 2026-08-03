@@ -34,6 +34,8 @@ pub const EV_SCREEN_TIME_EXCEEDED: &str = "screen_time_exceeded";
 pub const EV_SCREEN_TIME_EARNED: &str = "screen_time_earned";
 pub const EV_STREAK: &str = "streak";
 pub const EV_DISCOVERY_RESULT: &str = "discovery_result";
+/// Policy was accepted but the host cannot actually enforce part of it.
+pub const EV_ENFORCEMENT_DEGRADED: &str = "enforcement_degraded";
 
 /// Severities (DATA_MODEL.md → `events.severity`).
 pub const SEV_INFO: &str = "info";
