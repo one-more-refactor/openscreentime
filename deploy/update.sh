@@ -19,8 +19,16 @@ if [[ ! -f .env ]]; then
     exit 1
 fi
 
+# Remember where we are so a failed update can roll back (used below when the
+# health poll fails — important once this runs unattended from the timer).
+prev_rev="$(git rev-parse HEAD)"
+
 echo "==> git pull --ff-only"
 git pull --ff-only
+
+if [[ "$(git rev-parse HEAD)" == "$prev_rev" ]]; then
+    echo "==> already up to date ($(git rev-parse --short HEAD)) — rebuilding anyway (idempotent)"
+fi
 
 compose_bin=""
 compose_args=()
@@ -78,6 +86,13 @@ echo
 if [[ -z "$healthy" ]]; then
     echo "error: server did not become healthy within 90s after update." >&2
     echo "       check logs: ${compose_bin} ${compose_args[*]} -f compose.yaml logs server" >&2
+    if [[ "$(git rev-parse HEAD)" != "$prev_rev" ]]; then
+        echo "==> ROLLING BACK to ${prev_rev} (the previously running revision)" >&2
+        git reset --hard "$prev_rev"
+        "${compose_bin}" "${compose_args[@]}" -f compose.yaml build
+        "${compose_bin}" "${compose_args[@]}" -f compose.yaml up -d
+        echo "==> rollback deployed — verify with: curl ${health_url}" >&2
+    fi
     exit 1
 fi
 
