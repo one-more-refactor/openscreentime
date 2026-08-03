@@ -23,13 +23,17 @@ use std::sync::Arc;
 /// `server_host` is passed in by the caller (rather than derived here from a
 /// server URL) so this module doesn't need to reach into the transport layer
 /// (`client::server_host`) to do its job — the caller already knows it.
+///
+/// Returns the [`dns::DnsGap`]s that prevent this host from actually enforcing
+/// the policy — an empty vec means enforcement is genuinely in force. Callers
+/// must surface a non-empty result rather than treating `Ok` as "applied".
 pub fn apply_network_policy(
     ctx: Arc<AgentCtx>,
     exec: &Exec,
     server_host: Option<&str>,
     policy: &Policy,
-) -> Result<()> {
-    dns::apply(exec, &policy.dns, &policy.lockdown)?;
+) -> Result<Vec<dns::DnsGap>> {
+    let gaps = dns::apply(exec, &policy.dns, &policy.lockdown)?;
     firewall::apply(
         exec,
         &policy.firewall,
@@ -39,9 +43,10 @@ pub fn apply_network_policy(
     )?;
     tracing::info!(
         dry_run = ctx.dry_run,
-        "network policy applied (dns.mode={}, fw.mode={})",
+        "network policy applied (dns.mode={}, fw.mode={}, dns_gaps={})",
         policy.dns.mode,
-        policy.firewall.mode
+        policy.firewall.mode,
+        gaps.len()
     );
-    Ok(())
+    Ok(gaps)
 }
