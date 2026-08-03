@@ -85,13 +85,28 @@ pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
 pub fn reassert_all(exec: &Exec) -> Vec<Event> {
     let mut events = Vec::new();
     match dns::reassert(exec) {
-        Ok(true) => events.push(tamper_event(
-            "resolv_conf_drift",
-            SEV_WARN,
-            "resolv.conf was changed; re-pinned to local resolver",
-        )),
-        Ok(false) => {}
-        Err(e) => tracing::debug!("resolv reassert error: {e}"),
+        Ok((drifted, gaps)) => {
+            if drifted {
+                events.push(tamper_event(
+                    "resolv_conf_drift",
+                    SEV_WARN,
+                    "resolv.conf was changed; re-pinned to local resolver",
+                ));
+            }
+            // A re-pin that could not be locked down is not a recovery — the
+            // next edit sticks just as easily. Say so, every time.
+            for gap in gaps {
+                events.push(tamper_event(gap.kind(), SEV_CRITICAL, gap.explain()));
+            }
+        }
+        Err(e) => {
+            tracing::error!("resolv reassert failed: {e}");
+            events.push(tamper_event(
+                "resolv_conf_reassert_failed",
+                SEV_CRITICAL,
+                "could not re-pin resolv.conf; DNS enforcement may be off",
+            ));
+        }
     }
     if firewall::table_missing(exec) && !exec.dry_run() {
         events.push(tamper_event(
