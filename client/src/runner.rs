@@ -52,7 +52,7 @@ fn offline_grace_from_env() -> Duration {
 ///
 /// A device that accepted a policy it cannot enforce is the one case where
 /// staying quiet is worse than being noisy: the parent believes filtering is on.
-fn degraded_events(gaps: &[enforce::dns::DnsGap]) -> Vec<Event> {
+fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
     gaps.iter()
         .map(|gap| {
             Event::new(
@@ -110,6 +110,8 @@ pub struct Agent {
     exec: Exec,
     /// Effective per-user policies (os_username → Policy).
     policies: HashMap<String, Policy>,
+    /// Device-level VPN profile from the last policy bundle (None = no tunnel).
+    vpn: Option<crate::policy::VpnProfile>,
     tracker: screentime::UsageTracker,
     /// Users currently frozen by screen-time enforcement.
     frozen: HashSet<String>,
@@ -273,6 +275,7 @@ impl Agent {
             client,
             exec,
             policies: HashMap::new(),
+            vpn: None,
             // Reboot-surviving: reload the day's usage so a restart can't reset it.
             tracker: screentime::UsageTracker::load(),
             frozen: HashSet::new(),
@@ -431,6 +434,7 @@ impl Agent {
                 &self.exec,
                 server_host.as_deref(),
                 &effective,
+                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
             ) {
                 Ok(gaps) => events.extend(degraded_events(&gaps)),
                 Err(e) => tracing::warn!("offline fail-closed policy re-assert failed: {e}"),
@@ -485,6 +489,7 @@ impl Agent {
         for up in bundle.users {
             self.policies.insert(up.os_username, up.policy);
         }
+        self.vpn = bundle.vpn;
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
@@ -493,6 +498,7 @@ impl Agent {
             &self.exec,
             server_host.as_deref(),
             &effective,
+            &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
         )?;
         // Best-effort cache so `sentinel-agent unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
@@ -581,6 +587,7 @@ impl Agent {
                 &self.exec,
                 server_host.as_deref(),
                 &effective,
+                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
             ) {
                 Ok(gaps) => {
                     tracing::info!("nft table was missing — re-applied firewall");
