@@ -4,6 +4,7 @@ import { ToastProvider } from "./lib/toast";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
 import { Devices } from "./pages/Devices";
+import { Family } from "./pages/Family";
 import { DeviceDetail } from "./pages/DeviceDetail";
 import { Profiles } from "./pages/Profiles";
 import { Approvals } from "./pages/Approvals";
@@ -38,7 +39,9 @@ export function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<Navigate to="/devices" replace />} />
+          {/* Home is the family, not the fleet. */}
+          <Route index element={<Family />} />
+          <Route path="/family" element={<Family />} />
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/:id" element={<DeviceDetail />} />
           <Route path="/profiles" element={<Profiles />} />
@@ -46,7 +49,7 @@ export function App() {
           <Route path="/events" element={<Events />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
-        <Route path="*" element={<Navigate to="/devices" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ToastProvider>
     </SessionProvider>
