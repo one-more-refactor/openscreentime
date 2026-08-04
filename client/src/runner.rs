@@ -52,6 +52,22 @@ fn offline_grace_from_env() -> Duration {
 ///
 /// A device that accepted a policy it cannot enforce is the one case where
 /// staying quiet is worse than being noisy: the parent believes filtering is on.
+/// The agent's test verdict on a VPN profile, as the event the server's
+/// profile row is updated from.
+fn vpn_report_event(report: Option<enforce::vpn::VpnReport>) -> Option<Event> {
+    report.map(|r| {
+        Event::new(
+            "vpn_profile",
+            if r.ok { SEV_INFO } else { SEV_CRITICAL },
+            json!({
+                "profile_id": r.profile_id,
+                "result": if r.ok { "active" } else { "failed" },
+                "error": r.error,
+            }),
+        )
+    })
+}
+
 fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
     gaps.iter()
         .map(|gap| {
@@ -433,7 +449,10 @@ impl Agent {
                 &effective,
                 &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
             ) {
-                Ok(gaps) => events.extend(degraded_events(&gaps)),
+                Ok((gaps, report)) => {
+                    events.extend(degraded_events(&gaps));
+                    events.extend(vpn_report_event(report));
+                }
                 Err(e) => tracing::warn!("offline fail-closed policy re-assert failed: {e}"),
             }
         } else {
@@ -490,7 +509,7 @@ impl Agent {
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
-        let gaps = enforce::apply_network_policy(
+        let (gaps, vpn_report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
@@ -517,6 +536,7 @@ impl Agent {
             }),
         )];
         events.extend(degraded_events(&gaps));
+        events.extend(vpn_report_event(vpn_report));
         Ok(events)
     }
 
@@ -586,9 +606,10 @@ impl Agent {
                 &effective,
                 &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
             ) {
-                Ok(gaps) => {
+                Ok((gaps, report)) => {
                     tracing::info!("nft table was missing — re-applied firewall");
                     events.extend(degraded_events(&gaps));
+                    events.extend(vpn_report_event(report));
                 }
                 Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
             }

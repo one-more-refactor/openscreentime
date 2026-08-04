@@ -22,6 +22,7 @@ mod profiles;
 mod rate_limit;
 mod state;
 mod static_web;
+mod vpn;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -217,10 +218,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
+        .route("/api/devices/{id}/vpn", get(vpn::list).post(vpn::create))
         .route(
-            "/api/devices/{id}/vpn",
-            put(devices::set_vpn).delete(devices::remove_vpn),
+            "/api/vpn-profiles/{id}",
+            put(vpn::update).delete(vpn::remove),
         )
+        .route("/api/vpn-profiles/{id}/activate", post(vpn::activate))
+        .route("/api/vpn-profiles/{id}/deactivate", post(vpn::deactivate))
         .route(
             "/api/devices/{id}/enroll-token",
             post(devices::regen_enroll_token),
