@@ -16,7 +16,7 @@ use crate::events;
 use crate::state::{AppState, AuthAdmin};
 
 const DEVICE_COLS: &str = "id, tenant_id, name, hostname, os, agent_version, status, \
-    tamper_level, public_ip::text, last_seen, created_at, vpn_kind, vpn_updated_at";
+    tamper_level, public_ip::text, last_seen, created_at, vpn_updated_at";
 
 type DeviceRow = (
     Uuid,
@@ -30,7 +30,6 @@ type DeviceRow = (
     Option<String>,
     Option<DateTime<Utc>>,
     DateTime<Utc>,
-    Option<String>,
     Option<DateTime<Utc>>,
 );
 
@@ -47,9 +46,9 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
         "public_ip": r.8,
         "last_seen": r.9,
         "created_at": r.10,
-        // Presence only — the config body holds private keys and is served
-        // exclusively to the enrolled agent via the policy pull.
-        "vpn": r.11.as_ref().map(|kind| json!({ "kind": kind, "updated_at": r.12 })),
+        // Named VPN profiles live in device_vpn_profiles (GET /devices/:id/vpn);
+        // this stamp only says "something VPN-ish changed" for cache-busting.
+        "vpn_updated_at": r.11,
     })
 }
 
@@ -221,116 +220,6 @@ pub async fn patch_device(
 }
 
 // --- VPN profile -------------------------------------------------------------
-
-/// Hard cap on an uploaded VPN config. Real wg/ovpn client configs are a few
-/// KB; anything bigger is a mistake (or an attempt to stuff the DB/policy pull).
-const MAX_VPN_CONFIG_BYTES: usize = 64 * 1024;
-
-#[derive(Deserialize)]
-pub struct SetVpnReq {
-    pub kind: String,
-    pub config: String,
-}
-
-/// PUT /api/devices/:id/vpn — store an admin-uploaded WireGuard/OpenVPN client
-/// config for this device. The agent picks it up on the next policy apply
-/// (an `apply_policy` command is enqueued here; poll agents see the bumped
-/// `policy_version`).
-pub async fn set_vpn(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-    Path(id): Path<Uuid>,
-    Json(req): Json<SetVpnReq>,
-) -> AppResult<Json<Value>> {
-    get_device_row(&st.db, id, admin.tenant_id).await?;
-
-    if req.config.len() > MAX_VPN_CONFIG_BYTES {
-        return Err(AppError::BadRequest(format!(
-            "VPN config too large (max {} KB)",
-            MAX_VPN_CONFIG_BYTES / 1024
-        )));
-    }
-    // Cheap shape check so a wrong-file upload fails here with a clear message
-    // instead of on the device with a dead tunnel.
-    let ok = match req.kind.as_str() {
-        "wireguard" => req.config.contains("[Interface]") && req.config.contains("PrivateKey"),
-        "openvpn" => req.config.lines().any(|l| {
-            let l = l.trim_start();
-            l.starts_with("remote ") || l == "client"
-        }),
-        _ => {
-            return Err(AppError::BadRequest(
-                "kind must be 'wireguard' or 'openvpn'".into(),
-            ))
-        }
-    };
-    if !ok {
-        return Err(AppError::BadRequest(format!(
-            "this does not look like a {} client config",
-            req.kind
-        )));
-    }
-
-    sqlx::query(
-        "UPDATE devices SET vpn_kind = $1, vpn_config = $2, vpn_updated_at = now()
-         WHERE id = $3 AND tenant_id = $4",
-    )
-    .bind(&req.kind)
-    .bind(&req.config)
-    .bind(id)
-    .bind(admin.tenant_id)
-    .execute(&st.db)
-    .await?;
-
-    enqueue_command(&st, id, "apply_policy", json!({})).await?;
-    events::insert(
-        &st.db,
-        admin.tenant_id,
-        Some(id),
-        None,
-        "vpn_profile",
-        "info",
-        json!({ "action": "set", "kind": req.kind, "by": admin.admin_id }),
-    )
-    .await?;
-
-    let row = get_device_row(&st.db, id, admin.tenant_id).await?;
-    Ok(Json(json!({ "device": device_to_json(&row) })))
-}
-
-/// DELETE /api/devices/:id/vpn — remove the profile; the agent tears the
-/// tunnel down on its next policy apply. `vpn_updated_at` is bumped (not
-/// nulled) so the removal propagates to poll-mode agents too.
-pub async fn remove_vpn(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-    Path(id): Path<Uuid>,
-) -> AppResult<Json<Value>> {
-    get_device_row(&st.db, id, admin.tenant_id).await?;
-    sqlx::query(
-        "UPDATE devices SET vpn_kind = NULL, vpn_config = NULL, vpn_updated_at = now()
-         WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(admin.tenant_id)
-    .execute(&st.db)
-    .await?;
-
-    enqueue_command(&st, id, "apply_policy", json!({})).await?;
-    events::insert(
-        &st.db,
-        admin.tenant_id,
-        Some(id),
-        None,
-        "vpn_profile",
-        "info",
-        json!({ "action": "removed", "by": admin.admin_id }),
-    )
-    .await?;
-
-    let row = get_device_row(&st.db, id, admin.tenant_id).await?;
-    Ok(Json(json!({ "device": device_to_json(&row) })))
-}
 
 pub async fn delete_device(
     State(st): State<AppState>,

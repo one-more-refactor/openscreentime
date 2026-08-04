@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   assignProfile,
@@ -11,8 +11,6 @@ import {
   listProfiles,
   lockDevice,
   regenEnrollToken,
-  removeDeviceVpn,
-  setDeviceVpn,
   unlockDevice,
   updateDevice,
 } from "../api";
@@ -22,7 +20,6 @@ import type {
   EnrollTokenResponse,
   Profile,
   TamperLevel,
-  VpnKind,
 } from "../types";
 import { useAsync } from "../lib/useAsync";
 import type { CommandRow } from "../types";
@@ -34,6 +31,7 @@ import {
   ErrorPanel,
   EventFeed,
   UsageHistory,
+  VpnProfiles,
   Modal,
   Panel,
   Select,
@@ -342,17 +340,7 @@ export function DeviceDetail() {
             </p>
           </Panel>
 
-          <VpnPanel
-            vpn={d.vpn ?? null}
-            onUpload={async (kind, config) => {
-              const dev = await setDeviceVpn(d.id, kind, config);
-              device.setData((p) => (p ? { ...p, vpn: dev.vpn } : p));
-            }}
-            onRemove={async () => {
-              const dev = await removeDeviceVpn(d.id);
-              device.setData((p) => (p ? { ...p, vpn: dev.vpn } : p));
-            }}
-          />
+          <VpnProfiles deviceId={d.id} />
 
           <Panel title="TAMPER RESISTANCE" refCode="TR-01">
             <div className="flex flex-col gap-4">
@@ -501,136 +489,6 @@ export function DeviceDetail() {
       </Modal>
 
     </>
-  );
-}
-
-/** Sniff whether an uploaded file is a WireGuard or OpenVPN client config.
- * Filename is only a hint; the content decides. */
-function sniffVpnKind(name: string, text: string): VpnKind | null {
-  if (text.includes("[Interface]")) return "wireguard";
-  if (/^\s*(remote\s+\S+|client\s*$)/m.test(text)) return "openvpn";
-  if (name.endsWith(".ovpn")) return "openvpn";
-  return null;
-}
-
-/** VPN profile: a drop/browse upload field for a wg/ovpn client config. The
- * server never echoes the config back — the panel shows presence only. */
-function VpnPanel({
-  vpn,
-  onUpload,
-  onRemove,
-}: {
-  vpn: { kind: VpnKind; updated_at: string | null } | null;
-  onUpload: (kind: VpnKind, config: string) => Promise<void>;
-  onRemove: () => Promise<void>;
-}) {
-  const { toast } = useToast();
-  const [busy, setBusy] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
-
-  async function handleFile(file: File | undefined) {
-    if (!file || busy) return;
-    setBusy(true);
-    try {
-      const text = await file.text();
-      const kind = sniffVpnKind(file.name, text);
-      if (!kind) {
-        toast(
-          "That doesn't look like a WireGuard (.conf) or OpenVPN (.ovpn) client config.",
-          "warn",
-        );
-        return;
-      }
-      await onUpload(kind, text);
-      toast(`${kind.toUpperCase()} PROFILE SET — APPLIES ON NEXT AGENT SYNC`, "ok");
-    } catch (e) {
-      toast(errMsg(e, "Couldn't upload the VPN config — try again."));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleRemove() {
-    setBusy(true);
-    try {
-      await onRemove();
-      toast("VPN PROFILE REMOVED — TUNNEL STOPS ON NEXT AGENT SYNC", "ok");
-    } catch (e) {
-      toast(errMsg(e, "Couldn't remove the VPN profile — try again."));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Panel title="VPN PROFILE" refCode="VP-01">
-      <div className="flex flex-col gap-3">
-        {vpn ? (
-          <div className="flex items-center gap-4 flex-wrap">
-            <StatusLed tone="ok" label={vpn.kind.toUpperCase()} />
-            <span className="label" style={{ color: "var(--fg-faint)" }}>
-              UPLOADED {vpn.updated_at ? relTime(vpn.updated_at) : "—"}
-            </span>
-            <span className="flex-1" />
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void handleRemove()}>
-              {busy ? "…" : "REMOVE"}
-            </Button>
-          </div>
-        ) : (
-          <p className="label" style={{ color: "var(--fg-faint)" }}>
-            NO VPN PROFILE
-          </p>
-        )}
-        <div
-          role="button"
-          tabIndex={0}
-          aria-label="Upload a WireGuard or OpenVPN client config"
-          className="border border-dashed rounded px-4 py-6 text-center cursor-pointer outline-none"
-          style={{
-            borderColor: dragOver ? "var(--fg)" : "var(--line)",
-            background: dragOver ? "var(--panel-2, transparent)" : "transparent",
-          }}
-          onClick={() => fileInput.current?.click()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") fileInput.current?.click();
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragOver(false);
-            void handleFile(e.dataTransfer.files?.[0]);
-          }}
-        >
-          <p className="dot text-xs text-fg">
-            {busy ? "UPLOADING…" : vpn ? "DROP A NEW CONFIG TO REPLACE" : "DROP CONFIG HERE"}
-          </p>
-          <p className="text-[0.625rem] mt-1" style={{ color: "var(--fg-faint)" }}>
-            .conf (WireGuard) or .ovpn (OpenVPN) — or click to browse
-          </p>
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".conf,.ovpn,.txt"
-            className="hidden"
-            onChange={(e) => {
-              void handleFile(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-        </div>
-        <p className="text-[0.6875rem] leading-relaxed" style={{ color: "var(--fg-faint)" }}>
-          The device routes its traffic through this tunnel (wg-quick / openvpn-client must be
-          installed there). The config — including its private key — is sent once to the device
-          and never shown here again. The firewall automatically lets the tunnel through, even
-          with VPN-blocking lockdown on.
-        </p>
-      </div>
-    </Panel>
   );
 }
 

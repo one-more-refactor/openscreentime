@@ -188,13 +188,29 @@ fn parse_ovpn_endpoints(config: &str) -> Vec<Endpoint> {
         .collect()
 }
 
+/// The agent's verdict on a profile it was asked to test — reported back to
+/// the server as a `vpn_profile` event so the admin sees ACTIVE or FAILED
+/// (with the reason) instead of guessing.
+#[derive(Debug, Clone)]
+pub struct VpnReport {
+    pub profile_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
 /// Reconcile the on-host tunnel to `state`. Called from
 /// `apply_network_policy` AFTER the firewall (so the endpoint accepts are in
 /// place before the handshake). Returns the gaps preventing the tunnel from
-/// actually being in force; empty vec = in force (or nothing to enforce).
-pub fn reconcile(exec: &Exec, state: &VpnState) -> Result<Vec<VpnGap>> {
+/// actually being in force, plus — when the server asked for a test cycle or
+/// the config changed — the verdict to report back.
+///
+/// Test-before-enforce: a new/changed config is brought up and VERIFIED
+/// (service active + tunnel interface carrying traffic). If verification
+/// fails, the previous on-disk config is restored and restarted, so a broken
+/// upload can never silently strand the device behind a dead tunnel.
+pub fn reconcile(exec: &Exec, state: &VpnState) -> Result<(Vec<VpnGap>, Option<VpnReport>)> {
     let profile = match state {
-        VpnState::Keep => return Ok(Vec::new()),
+        VpnState::Keep => return Ok((Vec::new(), None)),
         VpnState::Sync(p) => *p,
     };
 
@@ -202,7 +218,7 @@ pub fn reconcile(exec: &Exec, state: &VpnState) -> Result<Vec<VpnGap>> {
         None => {
             teardown(exec, WG_CONF, WG_UNIT);
             teardown(exec, OVPN_CONF, OVPN_UNIT);
-            Ok(Vec::new())
+            Ok((Vec::new(), None))
         }
         Some(p) => {
             let (conf, unit, other) = match p.kind.as_str() {
@@ -214,34 +230,123 @@ pub fn reconcile(exec: &Exec, state: &VpnState) -> Result<Vec<VpnGap>> {
                         VpnGap::UnsupportedKind.kind(),
                         VpnGap::UnsupportedKind.explain()
                     );
-                    return Ok(vec![VpnGap::UnsupportedKind]);
+                    let report = p.id.clone().map(|profile_id| VpnReport {
+                        profile_id,
+                        ok: false,
+                        error: Some("unsupported profile kind".into()),
+                    });
+                    return Ok((vec![VpnGap::UnsupportedKind], report));
                 }
             };
+
+            // Does anything need doing? Unchanged config + running unit + no
+            // pending test request = leave it alone.
+            let on_disk = std::fs::read_to_string(conf).ok();
+            let unchanged = on_disk.as_deref() == Some(p.config.as_str());
+            let running =
+                exec.dry_run() || exec.probe("systemctl", &["is-active", unit]).trim() == "active";
+            let testing = p.status.as_deref() == Some("testing");
+            if unchanged && running && !testing {
+                return Ok((Vec::new(), None));
+            }
+
+            // Snapshot the previous world for rollback: whichever managed conf
+            // exists right now (same kind or the other one).
+            let backup: Option<(&str, &str, String)> = [(conf, unit), (other.0, other.1)]
+                .into_iter()
+                .find_map(|(c, u)| std::fs::read_to_string(c).ok().map(|body| (c, u, body)));
+
             // Only one managed tunnel at a time: a kind switch removes the other.
             teardown(exec, other.0, other.1);
 
             write_secret(exec, conf, &p.config)?;
             // enable = survive reboot; restart (not `start`) = pick up a changed
-            // config on an already-running tunnel. Errors surface via the
-            // is-active probe below, as a gap rather than an aborted apply.
+            // config on an already-running tunnel.
             let _ = exec.run("systemctl", &["enable", unit]);
             if let Err(e) = exec.run("systemctl", &["restart", unit]) {
                 tracing::error!("{unit} restart failed: {e}");
             }
 
-            let mut gaps = Vec::new();
-            if !exec.dry_run() && exec.probe("systemctl", &["is-active", unit]).trim() != "active" {
-                gaps.push(VpnGap::NotRunning);
+            if exec.dry_run() {
+                return Ok((Vec::new(), None));
             }
-            for gap in &gaps {
-                tracing::error!("VPN gap [{}]: {}", gap.kind(), gap.explain());
+
+            match verify_tunnel(exec, p.kind.as_str(), unit) {
+                Ok(()) => {
+                    tracing::info!("VPN profile verified ({} via {unit})", p.kind);
+                    let report = p.id.clone().map(|profile_id| VpnReport {
+                        profile_id,
+                        ok: true,
+                        error: None,
+                    });
+                    Ok((Vec::new(), report))
+                }
+                Err(why) => {
+                    tracing::error!("VPN profile FAILED verification: {why} — rolling back");
+                    // Roll back to the previous world so the device isn't
+                    // stranded behind a dead tunnel.
+                    teardown(exec, conf, unit);
+                    if let Some((prev_conf, prev_unit, body)) = backup {
+                        if write_secret(exec, prev_conf, &body).is_ok() {
+                            let _ = exec.run("systemctl", &["enable", prev_unit]);
+                            let _ = exec.run("systemctl", &["restart", prev_unit]);
+                            tracing::info!("previous VPN profile restored ({prev_unit})");
+                        }
+                    }
+                    let report = p.id.clone().map(|profile_id| VpnReport {
+                        profile_id,
+                        ok: false,
+                        error: Some(why.clone()),
+                    });
+                    Ok((vec![VpnGap::NotRunning], report))
+                }
             }
-            if gaps.is_empty() {
-                tracing::info!("VPN profile applied ({} via {unit})", p.kind);
-            }
-            Ok(gaps)
         }
     }
+}
+
+/// Budget for a tunnel to come up and prove itself.
+const VERIFY_TIMEOUT_SECS: u64 = 12;
+
+/// Prove the tunnel is genuinely in force: the unit is active AND the tunnel
+/// interface exists AND (for WireGuard) a peer handshake completed — induced
+/// by pinging through the interface, since wg handshakes only on traffic.
+fn verify_tunnel(exec: &Exec, kind: &str, unit: &str) -> std::result::Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(VERIFY_TIMEOUT_SECS);
+    let mut last = String::from("verification never ran");
+    while std::time::Instant::now() < deadline {
+        if exec.probe("systemctl", &["is-active", unit]).trim() != "active" {
+            last = format!("{unit} is not active");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+        match kind {
+            "wireguard" => {
+                // Induce traffic, then check for any nonzero peer handshake.
+                let _ = exec.probe("ping", &["-c", "1", "-W", "2", "-I", WG_IFACE, "1.1.1.1"]);
+                let hs = exec.probe("wg", &["show", WG_IFACE, "latest-handshakes"]);
+                let ok = hs
+                    .split_whitespace()
+                    .filter_map(|t| t.parse::<u64>().ok())
+                    .any(|ts| ts > 0);
+                if ok {
+                    return Ok(());
+                }
+                last = "wireguard peer never completed a handshake".into();
+            }
+            "openvpn" => {
+                // OpenVPN allocates its tun device only once connected.
+                let links = exec.probe("ip", &["-o", "link"]);
+                if links.lines().any(|l| l.contains(": tun")) {
+                    return Ok(());
+                }
+                last = "openvpn never brought a tun interface up".into();
+            }
+            _ => return Err("unsupported kind".into()),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(last)
 }
 
 /// Stop/disable a managed tunnel unit and remove its config — but only if our

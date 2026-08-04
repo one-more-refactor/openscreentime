@@ -426,11 +426,11 @@ async fn pull_pending_commands(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
 // ---------------------------------------------------------------------------
 
 pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<Json<Value>> {
-    let (tamper_level, vpn_kind, vpn_config): (i32, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT tamper_level, vpn_kind, vpn_config FROM devices WHERE id = $1")
-            .bind(agent.device_id)
-            .fetch_one(&st.db)
-            .await?;
+    let tamper_level: i32 = sqlx::query_scalar("SELECT tamper_level FROM devices WHERE id = $1")
+        .bind(agent.device_id)
+        .fetch_one(&st.db)
+        .await?;
+    let vpn = crate::vpn::active_for_agent(&st.db, agent.device_id).await?;
 
     let rows: Vec<(String, String, Value)> = sqlx::query_as(
         "SELECT du.os_username, p.kind, p.policy FROM device_users du
@@ -459,13 +459,10 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
         "policy_version": version,
         "device_tamper_level": tamper_level,
         "users": users,
-        // Device-level VPN profile (admin-uploaded wg/ovpn client config).
-        // Only served here — the agent's authenticated pull — because the
-        // config body carries private keys.
-        "vpn": vpn_kind.map(|kind| json!({
-            "kind": kind,
-            "config": vpn_config.unwrap_or_default(),
-        })),
+        // The device's ACTIVE named VPN profile (raw config, private keys and
+        // all) — only served here, on the authenticated agent pull. A
+        // status of "testing" asks the agent to verify-then-report.
+        "vpn": vpn,
     })))
 }
 
@@ -523,6 +520,10 @@ pub async fn push_events(
             return Err(AppError::BadRequest("event payload too large".into()));
         }
         let device_user_id = resolve_device_user(&st.db, agent.device_id, ev.device_user).await?;
+        if ev.r#type == "vpn_profile" {
+            // The agent's verdict on a tested profile lands in the profile row.
+            crate::vpn::apply_agent_report(&st.db, agent.device_id, &ev.payload).await;
+        }
         events::insert(
             &st.db,
             agent.tenant_id,
@@ -751,6 +752,9 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             if let Ok(device_user_id) =
                 resolve_device_user(&st.db, agent.device_id, device_user).await
             {
+                if etype == "vpn_profile" {
+                    crate::vpn::apply_agent_report(&st.db, agent.device_id, &payload).await;
+                }
                 let _ = events::insert(
                     &st.db,
                     agent.tenant_id,

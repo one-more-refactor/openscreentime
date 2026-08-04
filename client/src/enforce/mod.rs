@@ -67,7 +67,7 @@ pub fn apply_network_policy(
     server_host: Option<&str>,
     policy: &Policy,
     vpn_state: &vpn::VpnState,
-) -> Result<Vec<Gap>> {
+) -> Result<(Vec<Gap>, Option<vpn::VpnReport>)> {
     let mut gaps: Vec<Gap> = dns::apply(exec, &policy.dns, &policy.lockdown)?
         .into_iter()
         .map(Gap::Dns)
@@ -84,7 +84,8 @@ pub fn apply_network_policy(
         server_host,
         &plan,
     )?;
-    gaps.extend(vpn::reconcile(exec, vpn_state)?.into_iter().map(Gap::Vpn));
+    let (vpn_gaps, vpn_report) = vpn::reconcile(exec, vpn_state)?;
+    gaps.extend(vpn_gaps.into_iter().map(Gap::Vpn));
     tracing::info!(
         dry_run = ctx.dry_run,
         "network policy applied (dns.mode={}, fw.mode={}, vpn={}, gaps={})",
@@ -93,5 +94,5 @@ pub fn apply_network_policy(
         plan.iface.unwrap_or("none"),
         gaps.len()
     );
-    Ok(gaps)
+    Ok((gaps, vpn_report))
 }
