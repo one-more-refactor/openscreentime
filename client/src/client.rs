@@ -31,6 +31,12 @@ pub struct EnrollResponse {
     pub device_token: String,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
+    /// The device's recovery PIN, plaintext, returned exactly once. The server
+    /// keeps only an argon2 hash, so if this is not written down here it cannot
+    /// be recovered — only rotated. It is what `sentinel-agent unlock --pin`
+    /// verifies offline when a device has locked itself out.
+    #[serde(default)]
+    pub recovery_pin: Option<String>,
 }
 
 fn default_poll() -> u64 {
