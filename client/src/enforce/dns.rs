@@ -17,8 +17,19 @@ use crate::util::Exec;
 use anyhow::Result;
 
 const DNSMASQ_CONF: &str = "/etc/sentinel/dnsmasq.d/sentinel.conf";
+const SENTINEL_CONF_DIR: &str = "/etc/sentinel/dnsmasq.d";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const LOCAL_RESOLVER: &str = "127.0.0.1";
+
+/// Distro directories dnsmasq already reads on startup. We drop a one-line
+/// `conf-dir=` stub into the first one that exists, because nothing makes
+/// dnsmasq read [`SENTINEL_CONF_DIR`] on its own — a stock Debian
+/// `/etc/dnsmasq.conf` has no active directives at all.
+const DISTRO_CONF_DIRS: &[&str] = &["/etc/dnsmasq.d", "/usr/local/etc/dnsmasq.d"];
+
+/// Filename for that stub. `00-` so it is parsed before anything else in the
+/// directory, since ordering decides who wins on conflicting options.
+const INCLUDE_STUB: &str = "00-sentinel.conf";
 
 /// A reason DNS enforcement is not actually in force on this host.
 ///
@@ -34,6 +45,10 @@ pub enum DnsGap {
     ResolvConfNotAFile,
     /// The immutable bit could not be set: a managed user can repoint DNS.
     ResolvConfNotLocked,
+    /// The rendered ruleset was written, but no directory dnsmasq actually
+    /// reads could be found to include it from — so dnsmasq is running with
+    /// its stock config and the policy is a file nobody parses.
+    PolicyNotLoaded,
 }
 
 impl DnsGap {
@@ -43,6 +58,7 @@ impl DnsGap {
             DnsGap::NoLocalResolver => "dns_no_local_resolver",
             DnsGap::ResolvConfNotAFile => "dns_resolv_conf_not_a_file",
             DnsGap::ResolvConfNotLocked => "dns_resolv_conf_not_locked",
+            DnsGap::PolicyNotLoaded => "dns_policy_not_loaded",
         }
     }
 
@@ -65,8 +81,46 @@ impl DnsGap {
                  filesystem does not support it. A managed user can repoint DNS \
                  and only the 10-second drift check will pull it back."
             }
+            DnsGap::PolicyNotLoaded => {
+                "the DNS ruleset was written but dnsmasq never reads it: no \
+                 dnsmasq config directory was found to include it from, so \
+                 dnsmasq is serving its stock config and NOTHING is filtered. \
+                 Add `conf-dir=/etc/sentinel/dnsmasq.d` to this host's \
+                 dnsmasq.conf."
+            }
         }
     }
+}
+
+/// Make dnsmasq actually read [`SENTINEL_CONF_DIR`].
+///
+/// Writing the ruleset is not enough: dnsmasq only parses `/etc/dnsmasq.conf`
+/// plus whatever `conf-dir` it was given, and a stock Debian install has no
+/// active directives whatsoever. Without this stub the agent writes a policy,
+/// restarts dnsmasq successfully, sees it `active`, and reports a fully
+/// enforcing device while dnsmasq serves its default forward-everything
+/// config — the exact silent-green failure this module exists to prevent.
+fn ensure_include(exec: &Exec) -> Option<DnsGap> {
+    let dir = DISTRO_CONF_DIRS
+        .iter()
+        .find(|d| std::path::Path::new(d).is_dir());
+
+    // Under --dry-run nothing exists to probe; log the intent, claim no gap.
+    let Some(dir) = dir else {
+        if exec.dry_run() {
+            return None;
+        }
+        return Some(DnsGap::PolicyNotLoaded);
+    };
+
+    let stub = format!("{dir}/{INCLUDE_STUB}");
+    let body =
+        format!("# Managed by sentinel-agent — do not edit.\nconf-dir={SENTINEL_CONF_DIR}\n");
+    if let Err(e) = exec.write_file(&stub, &body) {
+        tracing::error!("could not write dnsmasq include stub {stub}: {e}");
+        return Some(DnsGap::PolicyNotLoaded);
+    }
+    None
 }
 
 /// Is a local resolver actually answering? A rendered allowlist that nothing
@@ -157,6 +211,12 @@ pub fn apply(exec: &Exec, dns: &DnsPolicy, lockdown: &NetworkLockdown) -> Result
     let mut gaps = Vec::new();
     let conf = render_dnsmasq(dns, lockdown);
     exec.write_file(DNSMASQ_CONF, &conf)?;
+
+    // Writing the ruleset does not make dnsmasq read it. Drop the include stub
+    // BEFORE the restart so the policy goes live on this cycle, not the next.
+    if let Some(gap) = ensure_include(exec) {
+        gaps.push(gap);
+    }
 
     // dnsmasq is what actually serves the allowlist. There is no equivalent
     // systemd-resolved path implemented, so a failure here is not something a
@@ -288,6 +348,20 @@ mod tests {
             DnsGap::ResolvConfNotLocked.kind(),
             "dns_resolv_conf_not_locked"
         );
+        assert_eq!(DnsGap::PolicyNotLoaded.kind(), "dns_policy_not_loaded");
+    }
+
+    /// The include stub is what makes dnsmasq read our ruleset at all, so its
+    /// contents are load-bearing: a typo here is a silently unfiltered device.
+    #[test]
+    fn include_stub_points_at_the_sentinel_conf_dir() {
+        let body = format!("conf-dir={SENTINEL_CONF_DIR}\n");
+        assert!(body.contains("conf-dir=/etc/sentinel/dnsmasq.d"));
+        // The rendered ruleset must live inside the directory we include.
+        assert!(DNSMASQ_CONF.starts_with(SENTINEL_CONF_DIR));
+        // Sorts first, so a conflicting option later in the dir still wins
+        // deliberately rather than by filename accident.
+        assert!(INCLUDE_STUB.starts_with("00-"));
     }
 
     /// Every gap has to tell an operator what to actually do about it — an
@@ -299,6 +373,7 @@ mod tests {
             DnsGap::NoLocalResolver,
             DnsGap::ResolvConfNotAFile,
             DnsGap::ResolvConfNotLocked,
+            DnsGap::PolicyNotLoaded,
         ] {
             assert!(gap.explain().len() > 40, "{} has no guidance", gap.kind());
         }
