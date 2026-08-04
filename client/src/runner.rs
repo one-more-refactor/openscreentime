@@ -583,13 +583,21 @@ impl Agent {
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
-        let (gaps, vpn_report) = enforce::apply_network_policy(
+        let (mut gaps, vpn_report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
             &effective,
             &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
         )?;
+        // Report policy fields this agent accepts but does not enforce. Checked
+        // across every user's policy, not just the merged network one, since
+        // app limits are per-person and the merge only picks a network winner.
+        if self.policies.values().any(|p| !p.app_limits.is_empty()) {
+            gaps.push(enforce::Gap::Policy(
+                enforce::PolicyGap::AppLimitsUnsupported,
+            ));
+        }
         // Best-effort cache so `sentinel-agent unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
         crate::policy::save_cache(&effective);
