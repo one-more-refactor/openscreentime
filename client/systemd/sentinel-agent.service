@@ -29,8 +29,15 @@ OOMScoreAdjust=-1000
 #   /etc/dnsmasq.d              — absent until dnsmasq is; the agent writes its
 #                                 conf-dir include stub here, and under
 #                                 ProtectSystem=strict it cannot without this
+#   /etc/wireguard              — managed VPN profile lands in sentinel.conf
+#   /etc/openvpn/client         — same, for the openvpn transport
+#
+# The two VPN dirs matter more than they look: enforce/vpn.rs propagates a
+# write failure as Err all the way out of apply_network_policy, which skips
+# gap reporting AND save_cache — so a VPN profile pushed to a hardened host
+# strands in "testing" in the console with no verdict and no event.
 ProtectSystem=strict
-ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d
+ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client
 RuntimeDirectory=sentinel
 StateDirectory=sentinel
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.
