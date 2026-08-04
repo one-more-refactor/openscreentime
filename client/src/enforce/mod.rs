@@ -20,6 +20,38 @@ use std::sync::Arc;
 pub enum Gap {
     Dns(dns::DnsGap),
     Vpn(vpn::VpnGap),
+    Policy(PolicyGap),
+}
+
+/// A policy field this agent accepts over the wire but does not enforce.
+///
+/// Silently ignoring a setting an admin deliberately configured is the same
+/// class of failure as a firewall that does not load: the console shows the
+/// rule, the device does not apply it, and nothing says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyGap {
+    /// `policy.app_limits` has entries. Nothing in the agent reads this field —
+    /// there is no per-application enforcement of any kind.
+    AppLimitsUnsupported,
+}
+
+impl PolicyGap {
+    pub fn kind(self) -> &'static str {
+        match self {
+            PolicyGap::AppLimitsUnsupported => "policy_app_limits_unsupported",
+        }
+    }
+
+    pub fn explain(self) -> &'static str {
+        match self {
+            PolicyGap::AppLimitsUnsupported => {
+                "this profile sets per-app limits, but the Linux agent does not \
+                 implement them — no application is being limited or blocked. \
+                 Use screen time and the DNS allowlist instead, or remove the \
+                 app limits so the console stops implying they are in force."
+            }
+        }
+    }
 }
 
 impl Gap {
@@ -28,6 +60,7 @@ impl Gap {
         match self {
             Gap::Dns(g) => g.kind(),
             Gap::Vpn(g) => g.kind(),
+            Gap::Policy(g) => g.kind(),
         }
     }
 
@@ -36,6 +69,7 @@ impl Gap {
         match self {
             Gap::Dns(g) => g.explain(),
             Gap::Vpn(g) => g.explain(),
+            Gap::Policy(g) => g.explain(),
         }
     }
 }
@@ -95,4 +129,20 @@ pub fn apply_network_policy(
         gaps.len()
     );
     Ok((gaps, vpn_report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `kind` lands in stored event payloads and whatever the console filters
+    /// on, so it is API. And every gap must tell an operator what to do — an
+    /// alert nobody can act on is the failure this reporting exists to remove.
+    #[test]
+    fn policy_gap_is_identified_and_actionable() {
+        let g = Gap::Policy(PolicyGap::AppLimitsUnsupported);
+        assert_eq!(g.kind(), "policy_app_limits_unsupported");
+        assert!(g.explain().contains("does not implement"));
+        assert!(g.explain().len() > 60);
+    }
 }
