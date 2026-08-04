@@ -185,7 +185,7 @@ export function Shell() {
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
         </button>
-        <NavLink to="/devices" className="focusable flex items-center" aria-label="Sentinel home">
+        <NavLink to="/" className="focusable flex items-center" aria-label="Sentinel home">
           <DotMatrix text="SENTINEL" dot={3} color="var(--fg)" />
         </NavLink>
         <span className="flex-1" />
