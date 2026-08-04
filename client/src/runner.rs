@@ -855,7 +855,22 @@ impl Agent {
                 self.unlock_until.remove(&user);
             }
 
-            let lock = if is_active && !in_grace {
+            // Evaluate when the user is at the machine — and also when they are
+            // already frozen, even if their session has gone inactive.
+            //
+            // Treating "inactive" as "no verdict" made a frozen user unfreeze
+            // the moment their session stopped being the active one, and every
+            // re-lock re-armed the full FREEZE_GRACE. On a machine with a
+            // second session (a sibling, or just the greeter on another VT),
+            // flipping away and back yielded a fresh ~60 seconds of usable time
+            // per flip, repeatable all night, each cycle logging an ordinary
+            // looking lockout event. Bedtime and the daily limit are properties
+            // of the clock and the ledger, not of who currently holds the seat.
+            //
+            // Still gated on `is_active` for users who are NOT frozen, so an
+            // absent user is never newly frozen (and never shown an overlay)
+            // just for existing in the policy.
+            let lock = if should_evaluate_screen_time(in_grace, is_active, currently_frozen) {
                 screentime::evaluate(&policy, &self.tracker, &user)
             } else {
                 None
@@ -1398,6 +1413,19 @@ enum FreezeAction {
 /// screen-time verdict alone that decides to unfreeze someone while
 /// `device_locked` is true). Extracted so it's testable without the rest of the
 /// `Agent` machinery.
+/// Whether screen time should be evaluated for a user on this tick.
+///
+/// Active users are evaluated, obviously. Frozen users are evaluated *even when
+/// inactive*: skipping them yielded `None`, which `decide_freeze` reads as
+/// "within policy" and unfreezes. Flipping to another session and back then
+/// re-armed the full [`FREEZE_GRACE`], handing out ~60 usable seconds per flip.
+///
+/// A user who is neither active nor frozen is skipped, so nobody is newly
+/// frozen — or shown an overlay — merely for appearing in the policy.
+fn should_evaluate_screen_time(in_grace: bool, is_active: bool, currently_frozen: bool) -> bool {
+    !in_grace && (is_active || currently_frozen)
+}
+
 fn decide_freeze(
     device_locked: bool,
     screen_time_lock: Option<&screentime::LockReason>,
@@ -1597,6 +1625,21 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A frozen user must stay frozen when their session goes inactive.
+    /// Regression: VT-flipping unfroze them and re-granted the save-your-work
+    /// countdown, which is ~60 seconds of screen time per flip, all night.
+    #[test]
+    fn frozen_users_are_still_evaluated_when_inactive() {
+        // frozen + inactive -> still evaluated, so the freeze holds
+        assert!(should_evaluate_screen_time(false, false, true));
+        // active -> evaluated as always
+        assert!(should_evaluate_screen_time(false, true, false));
+        // neither active nor frozen -> skipped, never newly frozen while away
+        assert!(!should_evaluate_screen_time(false, false, false));
+        // a parent-granted grace window suspends enforcement outright
+        assert!(!should_evaluate_screen_time(true, true, true));
+    }
+
     /// A full retry buffer must drain in a bounded number of round-trips.
     /// (The batch-vs-server-cap invariant itself is a `const` assertion up top,
     /// so it fails the build rather than waiting for anyone to run tests.)
