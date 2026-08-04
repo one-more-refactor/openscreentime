@@ -16,6 +16,7 @@
 //   - offline_lockdown_days stays 0, so a device that loses the server does
 //     not lock a child out of a machine they need for school
 // ============================================================================
+import { useEffect, useState } from "react";
 import type { Policy } from "../types";
 
 export interface SecurityLevel {
@@ -30,53 +31,49 @@ export interface SecurityLevel {
 export const LEVELS: SecurityLevel[] = [
   {
     id: 0,
-    name: "Open",
-    summary: "No filtering or time limits. You can still see what's going on.",
-    detail: [
-      "Every site allowed",
-      "No screen-time limit",
-      "Usage still reported, so the history keeps building",
-    ],
+    name: "Off",
+    summary: "Nothing is blocked and there is no time limit.",
+    detail: ["Every website works", "No daily limit, no bedtime"],
   },
   {
     id: 1,
-    name: "Guided",
-    summary: "Blocks malware and forces SafeSearch. No time limit.",
+    name: "Safe search",
+    summary: "Blocks dangerous sites and forces safe search. No time limit.",
     detail: [
-      "Malware and phishing blocked at the resolver",
-      "SafeSearch forced on Google, YouTube and Bing",
-      "No screen-time limit",
+      "Sites known for viruses and scams are blocked",
+      "Google, YouTube and Bing are forced into their safe modes",
+      "No daily limit, no bedtime",
     ],
   },
   {
     id: 2,
     name: "Protected",
-    summary: "Adult content blocked, screen time on. The sensible default.",
+    summary: "Adult sites blocked, 60 minutes a day, bedtime at 20:00.",
     detail: [
-      "Adult content and malware blocked (Cloudflare for Families)",
-      "Proxies, torrent sites, gambling and stranger-chat blocked by name",
-      "Screen time with a daily limit and a bedtime",
-      "Encrypted-DNS bypasses (DoH/DoT) and Tor blocked",
+      "Adult sites, plus viruses and scams, are blocked",
+      "Gambling, torrent and stranger-chat sites are blocked by name",
+      "60 minutes a day · allowed 07:00–20:00 · bedtime 20:00–07:00",
+      "The usual tricks for getting around a filter stop working",
     ],
   },
   {
     id: 3,
     name: "Strict",
-    summary: "Everything in Protected, plus a tighter day and no workarounds.",
+    summary: "Same blocking, but 45 minutes a day and only 15:00–19:00.",
     detail: [
-      "Everything in Protected",
-      "Shorter daily limit and a narrower window",
-      "Anonymising tools and VPN ports blocked",
+      "Everything Protected blocks",
+      "45 minutes a day · allowed 15:00–19:00 on school days",
+      "Apps that hide what a computer is doing are blocked too",
     ],
   },
   {
     id: 4,
-    name: "Allowlist",
-    summary: "Only sites you approve. Expect to maintain the list.",
+    name: "Approved sites only",
+    summary: "Everything is blocked except sites you add by hand.",
     detail: [
-      "Nothing resolves unless it is on the list",
-      "Breaks app stores, game launchers and system updates until added",
-      "Best for short periods, not as a permanent setting",
+      "Only sites on your list will open — everything else stops",
+      "App stores, game launchers and updates will break until you add them",
+      "Meant for short periods, not for every day",
     ],
   },
 ];
@@ -167,7 +164,14 @@ export function SecuritySlider({
   onChange: (level: number) => void;
   busy?: boolean;
 }) {
-  const level = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, value))];
+  // Dragging previews; nothing is written until "Apply". The old version fired
+  // a policy write for every notch the thumb crossed, so sliding from Off to
+  // Strict briefly applied two settings nobody chose — and a parent had no way
+  // to see what they were about to do before it happened.
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const level = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, draft))];
+  const dirty = draft !== value;
   return (
     <div className="sec">
       <div className="sec-head">
@@ -181,16 +185,16 @@ export function SecuritySlider({
         min={0}
         max={LEVELS.length - 1}
         step={1}
-        value={value}
+        value={draft}
         disabled={busy}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e) => setDraft(Number(e.target.value))}
         aria-label="Protection level"
         aria-valuetext={level.name}
       />
 
       <div className="sec-ticks" aria-hidden="true">
         {LEVELS.map((l) => (
-          <span key={l.id} className="sec-tick" data-on={l.id <= value}>
+          <span key={l.id} className="sec-tick" data-on={l.id <= draft}>
             {l.name}
           </span>
         ))}
@@ -206,10 +210,29 @@ export function SecuritySlider({
           ))}
         </ul>
         <p className="sec-invariant">
-          At every level, remote access stays open and a device never locks
-          itself out when it can't reach the server.
+          Whatever you choose, this computer can never lock you out of it — you
+          can always get back in with the recovery PIN, even with no internet.
         </p>
       </details>
+
+      {dirty && (
+        <div className="sec-apply">
+          <p className="sec-apply-note">
+            Change from <strong>{LEVELS[value].name}</strong> to{" "}
+            <strong>{level.name}</strong>?
+          </p>
+          <button className="ch-btn" onClick={() => setDraft(value)} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="ch-btn ch-btn-yes"
+            onClick={() => onChange(draft)}
+            disabled={busy}
+          >
+            {busy ? "Applying…" : "Apply"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

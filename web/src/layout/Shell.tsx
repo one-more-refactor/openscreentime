@@ -112,7 +112,7 @@ export function Shell() {
   const { me, mock, logout } = useSession();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
-  const { devices, pending } = useFleet();
+  const { devices } = useFleet();
   const [menuOpen, setMenuOpen] = useState(false);
 
   async function handleLogout() {
@@ -120,11 +120,11 @@ export function Shell() {
     navigate("/login", { replace: true });
   }
 
+  // Two destinations. Everything else — devices, tokens, events, profiles —
+  // is machinery that now lives inside a child's page or runs unattended.
+  // A console about your children should not have a fleet menu.
   const entries: NavEntry[] = [
-    { to: "/devices", label: "DEVICES", count: devices?.length ?? null },
-    { to: "/profiles", label: "PROFILES" },
-    { to: "/approvals", label: "APPROVALS", count: pending, warn: true },
-    { to: "/events", label: "EVENTS" },
+    { to: "/", label: "FAMILY" },
     { to: "/settings", label: "SETTINGS" },
   ];
 
