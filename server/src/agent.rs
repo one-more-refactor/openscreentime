@@ -1,5 +1,5 @@
 //! Agent API (`/agent/*`): enrollment, heartbeat poll, policy pull, event push,
-//! command ack, and the WebSocket bus (command push + event/ack + reverse-SSH
+//! command ack, and the WebSocket bus (command push + event/ack
 //! data frames). Auth via `Authorization: Bearer <device_token>` (except
 //! enrollment, which consumes a one-time `enroll_token`).
 
@@ -11,8 +11,6 @@ use axum::{
     response::Response,
     Json,
 };
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -22,7 +20,7 @@ use uuid::Uuid;
 use crate::auth::{gen_token, hash_token};
 use crate::error::{AppError, AppResult};
 use crate::events;
-use crate::state::{AgentAuth, AppState, SshToAdmin};
+use crate::state::{AgentAuth, AppState};
 use sentinel_policy::Policy;
 
 /// Default poll interval handed to agents that fall back to heartbeat polling.
@@ -32,24 +30,73 @@ const POLL_INTERVAL_SECS: u64 = 15;
 // Command queue
 // ---------------------------------------------------------------------------
 
+/// Command types where at most one pending (queued|sent) instance per device
+/// makes sense; enqueueing again coalesces into the pending row (payload
+/// refreshed) instead of stacking duplicates. `credit_time`/`deny_earn` are
+/// deliberately absent — every grant is a distinct command.
+/// Mirrors the partial unique index in migration 0009.
+const COALESCE_TYPES: &[&str] = &[
+    "lock",
+    "unlock",
+    "apply_policy",
+    "discover",
+    "set_tamper_level",
+];
+
+/// The id of a pending (queued|sent) command of this type, if one exists.
+pub async fn pending_command(
+    db: &sqlx::PgPool,
+    device_id: Uuid,
+    ctype: &str,
+) -> AppResult<Option<Uuid>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM commands
+         WHERE device_id = $1 AND type = $2 AND status IN ('queued','sent')",
+    )
+    .bind(device_id)
+    .bind(ctype)
+    .fetch_optional(db)
+    .await?)
+}
+
 /// Enqueue a command for a device and, if the agent has a live WS, push it
 /// immediately and mark it `sent`. Returns the command id plus whether the
 /// frame was actually delivered to a live agent (false = stays `queued` until
 /// the agent's next heartbeat/WS connect).
+///
+/// For `COALESCE_TYPES` this is an upsert against the one-pending-per-type
+/// guard: a duplicate enqueue refreshes the pending row's payload and re-pushes
+/// it, it never stacks a second copy.
 pub async fn enqueue_command_delivered(
     st: &AppState,
     device_id: Uuid,
     ctype: &str,
     payload: Value,
 ) -> AppResult<(Uuid, bool)> {
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(device_id)
-    .bind(ctype)
-    .bind(&payload)
-    .fetch_one(&st.db)
-    .await?;
+    let id: Uuid = if COALESCE_TYPES.contains(&ctype) {
+        sqlx::query_scalar(
+            "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, $3)
+             ON CONFLICT (device_id, type)
+               WHERE status IN ('queued','sent')
+                 AND type IN ('lock','unlock','apply_policy','discover','set_tamper_level')
+             DO UPDATE SET payload = EXCLUDED.payload
+             RETURNING id",
+        )
+        .bind(device_id)
+        .bind(ctype)
+        .bind(&payload)
+        .fetch_one(&st.db)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(device_id)
+        .bind(ctype)
+        .bind(&payload)
+        .fetch_one(&st.db)
+        .await?
+    };
 
     let frame = json!({
         "type": "command",
@@ -57,7 +104,7 @@ pub async fn enqueue_command_delivered(
     });
     let delivered = st.hub.push(device_id, frame).await;
     if delivered {
-        sqlx::query("UPDATE commands SET status = 'sent' WHERE id = $1")
+        sqlx::query("UPDATE commands SET status = 'sent', sent_at = now() WHERE id = $1")
             .bind(id)
             .execute(&st.db)
             .await?;
@@ -344,19 +391,27 @@ pub async fn heartbeat(
     })))
 }
 
+/// A `sent` command whose ack hasn't arrived is redelivered only after this
+/// grace window — NOT on every heartbeat, which used to re-execute unacked
+/// commands over and over.
+const REDELIVERY_GRACE_SECS: i64 = 90;
+
 async fn pull_pending_commands(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<Value>> {
-    let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(&format!(
         "SELECT id, type, payload FROM commands
-         WHERE device_id = $1 AND status IN ('queued','sent')
+         WHERE device_id = $1
+           AND (status = 'queued'
+                OR (status = 'sent'
+                    AND sent_at < now() - interval '{REDELIVERY_GRACE_SECS} seconds'))
          ORDER BY created_at",
-    )
+    ))
     .bind(device_id)
     .fetch_all(db)
     .await?;
 
-    // Mark queued ones sent.
-    sqlx::query("UPDATE commands SET status = 'sent' WHERE device_id = $1 AND status = 'queued'")
-        .bind(device_id)
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    sqlx::query("UPDATE commands SET status = 'sent', sent_at = now() WHERE id = ANY($1)")
+        .bind(&ids)
         .execute(db)
         .await?;
 
@@ -670,8 +725,6 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
 ///   - `{ type:"event", event:{ type, severity?, device_user?, payload } }`
 ///     (fields at the top level also accepted)
 ///   - `{ type:"ack", ack:{ command_id, status, result? } }` (idem)
-///   - `{ type:"ssh_data", session_id, data_b64 }` — base64 raw PTY output
-///   - `{ type:"ssh_closed", session_id, exit_code? }` (`ssh_close` accepted)
 ///   - `{ type:"heartbeat" }` / `{ type:"pong" }`
 async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
     let kind = v
@@ -726,54 +779,6 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
                     .await;
             }
         }
-        Some("ssh_data") => {
-            let Some(session_id) = frame_session_id(&v) else {
-                return;
-            };
-            let Some(data) = v
-                .get("data_b64")
-                .and_then(|d| d.as_str())
-                .and_then(|s| B64.decode(s).ok())
-            else {
-                return;
-            };
-            ssh_frame_from_agent(st, agent, session_id, SshToAdmin::Data(data)).await;
-        }
-        Some("ssh_closed") | Some("ssh_close") => {
-            let Some(session_id) = frame_session_id(&v) else {
-                return;
-            };
-            let exit_code = v.get("exit_code").and_then(|e| e.as_i64());
-            ssh_frame_from_agent(st, agent, session_id, SshToAdmin::Closed(exit_code)).await;
-            // The agent side is gone: mark the row closed and drop the bridge.
-            let _ = sqlx::query(
-                "UPDATE ssh_sessions SET status = 'closed', closed_at = now()
-                 WHERE id = $1 AND device_id = $2 AND status IN ('opening','open')",
-            )
-            .bind(session_id)
-            .bind(agent.device_id)
-            .execute(&st.db)
-            .await;
-            st.hub.close_ssh(session_id, Some(agent.device_id)).await;
-            // Tell the agent to drop its session handle (PTY fd + writer thread);
-            // a self-exited shell would otherwise leak them until an explicit close.
-            st.hub
-                .push(
-                    agent.device_id,
-                    json!({ "type": "ssh_close", "session_id": session_id }),
-                )
-                .await;
-            let _ = events::insert(
-                &st.db,
-                agent.tenant_id,
-                Some(agent.device_id),
-                None,
-                "ssh",
-                "info",
-                json!({ "action": "ssh_closed", "session_id": session_id, "exit_code": exit_code }),
-            )
-            .await;
-        }
         Some("heartbeat") => {
             let _ = sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
                 .bind(agent.device_id)
@@ -788,36 +793,5 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             }
         }
         _ => {}
-    }
-}
-
-fn frame_session_id(v: &Value) -> Option<Uuid> {
-    v.get("session_id")
-        .and_then(|s| s.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-}
-
-/// Route an agent-side SSH frame into the bridge; the agent's first frame for
-/// a session confirms it (`opening` -> `open`).
-async fn ssh_frame_from_agent(st: &AppState, agent: AgentAuth, session_id: Uuid, msg: SshToAdmin) {
-    match st
-        .hub
-        .ssh_from_agent(session_id, agent.device_id, msg)
-        .await
-    {
-        Some(true) => {
-            let _ = sqlx::query(
-                "UPDATE ssh_sessions SET status = 'open'
-                 WHERE id = $1 AND device_id = $2 AND status = 'opening'",
-            )
-            .bind(session_id)
-            .bind(agent.device_id)
-            .execute(&st.db)
-            .await;
-        }
-        Some(false) => {}
-        None => {
-            tracing::debug!(%session_id, "ssh frame for unknown session");
-        }
     }
 }

@@ -58,10 +58,10 @@ Your proxy MUST:
 
 1. Forward all traffic for the domain to `127.0.0.1:${SENTINEL_PORT:-8080}`
    (plain HTTP — TLS is terminated at the proxy).
-2. **Upgrade WebSocket connections** for `/agent/ws` and `/api/ssh/*/ws`.
-   These are long-lived bidirectional connections (agent command channel and
-   the browser SSH terminal) — if your proxy doesn't forward the `Upgrade`
-   and `Connection` headers, both features silently break.
+2. **Upgrade WebSocket connections** for `/agent/ws`. This is a long-lived
+   bidirectional connection (the agent command channel) — if your proxy
+   doesn't forward the `Upgrade` and `Connection` headers, it silently
+   breaks.
 3. Set `X-Forwarded-For` with the **real client IP as the last hop**. The
    server's rate limiter (`server/src/rate_limit.rs`) reads the last XFF hop
    to key rate limits per-client; if your proxy doesn't set this (or another
@@ -209,7 +209,7 @@ does not apply to the default setup here.
 - **Passkey registration fails / "invalid origin"**: `RP_ID`/`RP_ORIGIN`
   don't match what the browser actually sees. They must be the public HTTPS
   origin, not `localhost` or an internal address.
-- **SSH terminal or agent connections drop immediately**: your proxy isn't
+- **Agent connections drop immediately**: your proxy isn't
   forwarding WebSocket upgrades — see the reverse-proxy requirements above.
 - **Everything 429s**: `X-Forwarded-For` isn't set correctly by the proxy,
   so the rate limiter may be collapsing all clients onto one key (the

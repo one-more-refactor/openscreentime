@@ -46,8 +46,6 @@ struct Status {
     #[serde(default)]
     tamper_lockdown: bool,
     #[serde(default)]
-    remote_shell_open: bool,
-    #[serde(default)]
     users: Vec<UserStatus>,
     /// Normal (non-blocking) notifications published by the agent for the tray
     /// to deliver. Consumed by monotonic `id` so each shows exactly once.
@@ -200,18 +198,6 @@ impl ksni::Tray for SentinelTray {
             }
             .into(),
         ];
-        if self.status.as_ref().is_some_and(|s| s.remote_shell_open) {
-            // Surveillance transparency: never hide an open remote shell.
-            items.push(
-                StandardItem {
-                    label: "REMOTE SHELL: ACTIVE".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-
         // Parent mode: pending time requests, each with approve/deny.
         if self.action_tx.is_some() && !self.pending.is_empty() {
             items.push(MenuItem::Separator);
@@ -375,16 +361,6 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
         } else if next.connection == "online" {
             notify("BACK ONLINE", "CONNECTION TO THE SERVER RESTORED", false);
         }
-    }
-    // Transparency is a core promise: always announce remote shells.
-    match (prev.remote_shell_open, next.remote_shell_open) {
-        (false, true) => notify(
-            "REMOTE SHELL OPENED",
-            "A PARENT OPENED A REMOTE SHELL ON THIS DEVICE",
-            true,
-        ),
-        (true, false) => notify("REMOTE SHELL CLOSED", "THE REMOTE SESSION HAS ENDED", false),
-        _ => {}
     }
     match (prev.device_locked, next.device_locked) {
         (false, true) => notify("DEVICE LOCKED", "A PARENT LOCKED THIS DEVICE", true),

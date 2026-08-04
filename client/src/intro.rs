@@ -56,7 +56,7 @@ const SLIDES: &[(&str, &str)] = &[
     ),
     (
         "ONE MORE THING",
-        "If a parent ever opens a remote shell on this machine, the tray shows it — you'll always know. That's the deal.",
+        "There is no remote shell, no camera, no message reading. Sentinel only enforces time and network rules — and everything it does shows up right here. That's the deal.",
     ),
 ];
 

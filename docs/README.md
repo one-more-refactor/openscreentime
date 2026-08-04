@@ -7,7 +7,7 @@ where a limitation exists, the doc says so instead of rounding up.
 
 | Doc | What it answers |
 |---|---|
-| [`PARENT-GUIDE.md`](PARENT-GUIDE.md) | The day-to-day console: enrolling devices, profiles, screen time, granting time, the parent PIN, locking, SSH, gone-dark devices. |
+| [`PARENT-GUIDE.md`](PARENT-GUIDE.md) | The day-to-day console: enrolling devices, profiles, screen time, granting time, the parent PIN, locking, gone-dark devices. |
 | [`TRANSPARENCY.md`](TRANSPARENCY.md) | **For the person being managed**: exactly what your parents can and cannot see and do on your machine. The honest contract. The kid also sees a short, skippable version of this as a first-run intro in the device companion itself (`gui`+`tray` build) — this doc is the fuller reference. |
 | [`PROFILES.md`](PROFILES.md) | The policy document and the kids / teen / default presets, field by field. |
 

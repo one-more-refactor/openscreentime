@@ -139,6 +139,18 @@ export interface DeviceUser {
   created_at?: string;
 }
 
+/** One row of a device's command queue (GET /api/devices/:id/commands). */
+export interface CommandRow {
+  id: string;
+  type: string;
+  payload: Record<string, unknown>;
+  status: "queued" | "sent" | "acked" | "failed" | "cancelled";
+  result: Record<string, unknown> | null;
+  created_at: string;
+  sent_at: string | null;
+  acked_at: string | null;
+}
+
 export interface Device {
   id: string;
   tenant_id: string;
@@ -156,6 +168,8 @@ export interface Device {
   vpn?: { kind: VpnKind; updated_at: string | null } | null;
   /** present on list + detail responses */
   users?: DeviceUser[];
+  /** command types still queued/sent — server-backed PENDING chips */
+  pending_commands?: string[];
 }
 
 export type VpnKind = "wireguard" | "openvpn";
@@ -249,19 +263,6 @@ export interface LockResponse {
   delivered: boolean;
 }
 
-export interface SshSession {
-  id: string;
-  device_id: string;
-  admin_id: string;
-  status: "opening" | "open" | "closed" | "failed";
-  created_at: string;
-  closed_at: string | null;
-}
-
-export interface SshSessionResponse {
-  session: SshSession;
-}
-
 // ---- Earn-time approval (contract §4) ---------------------------------------
 
 export type EarnRequestStatus = "pending" | "approved" | "denied";
@@ -311,4 +312,18 @@ export interface DiscoveryResult {
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
+}
+
+// ---- Screen-time history ----------------------------------------------------
+
+export interface UsageDay {
+  day: string; // YYYY-MM-DD
+  used_minutes: number;
+  earned_minutes: number;
+}
+
+export interface UsageHistoryResponse {
+  days: UsageDay[];
+  /** consecutive days with any usage, counted back from today (server-computed) */
+  streak_days: number;
 }

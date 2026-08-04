@@ -7,6 +7,7 @@ import {
   lockDevice,
   scanDiscovery,
   unlockDevice,
+  ApiError,
 } from "../api";
 import type { Device, EnrollTokenResponse } from "../types";
 import { useAsync } from "../lib/useAsync";
@@ -19,7 +20,6 @@ import {
   Modal,
   Panel,
   EnrollCommand,
-  SshTerminal,
   Stat,
   StatusLed,
   TextInput,
@@ -38,7 +38,6 @@ export function Devices() {
   const [newName, setNewName] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
-  const [ssh, setSsh] = useState<{ id: string; name: string } | null>(null);
   const [creating, setCreating] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   // Devices with a queued-but-undelivered lock command (agent offline at click
@@ -129,7 +128,13 @@ export function Devices() {
       devices.setData((prev) =>
         (prev ?? []).map((x) => (x.id === d.id ? { ...x, status: prevStatus } : x)),
       );
-      toast(errMsg(e, `Couldn't ${lock ? "lock" : "unlock"} ${d.name} — try again.`));
+      if (e instanceof ApiError && e.status === 409) {
+        // Already pending server-side — reflect it instead of erroring.
+        toast(`${lock ? "LOCK" : "UNLOCK"} ALREADY PENDING FOR ${d.name.toUpperCase()}`, "warn");
+        devices.reload();
+      } else {
+        toast(errMsg(e, `Couldn't ${lock ? "lock" : "unlock"} ${d.name} — try again.`));
+      }
     } finally {
       setBusy(d.id, false);
     }
@@ -242,10 +247,14 @@ export function Devices() {
               device={d}
               refCode={`DV-${pad2(i + 1)}`}
               busy={busyIds.has(d.id)}
-              lockPending={pendingLocks.has(d.id) && d.status !== "locked"}
+              lockPending={
+                (pendingLocks.has(d.id) ||
+                  (d.pending_commands ?? []).includes("lock")) &&
+                d.status !== "locked"
+              }
+              unlockPending={(d.pending_commands ?? []).includes("unlock")}
               onLock={(x) => void setLockState(x, true)}
               onUnlock={(x) => void setLockState(x, false)}
-              onSsh={(x) => setSsh({ id: x.id, name: x.name })}
               onDelete={(x) => setConfirmDelete(x)}
             />
           ))}
@@ -426,7 +435,6 @@ export function Devices() {
         </p>
       </Modal>
 
-      <SshTerminal target={ssh} onClose={() => setSsh(null)} />
     </>
   );
 }

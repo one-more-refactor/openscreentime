@@ -110,7 +110,6 @@ self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by 
 | POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
 | POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
 | POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command → same response shape as lock       |
-| POST   | `/api/devices/:id/ssh`        | open remote shell session → `{ session: { id, device_id, broker_port, status:"opening", created_at } }` |
 | DELETE | `/api/devices/:id`            | de-enroll                                                    |
 
 ### Truthful lock state
@@ -127,20 +126,11 @@ A background task (every 60 s) marks devices `offline` whose `status = 'online'`
 disconnect. `locked` and `pending` are never touched. The web UI escalates devices offline
 for 7+ days to a red "GONE DARK Nd" badge (tamper signal).
 
-## Remote SSH (browser terminal)
+## Remote SSH — removed
 
-A session stays `opening` until the agent's first `ssh_data` frame confirms the shell, then
-becomes `open`. All SSH activity is audited with events of `type = 'ssh'`.
-
-| Method | Path                        | Notes                                                    |
-|--------|-----------------------------|----------------------------------------------------------|
-| GET    | `/api/ssh/:session_id/ws`   | cookie-authenticated WebSocket upgrade for the terminal  |
-| POST   | `/api/ssh/:session_id/close`| → `{ ok: true, session_id }`; sends `ssh_close` to agent |
-
-Browser WS protocol: browser → server **binary frames** are raw keystroke bytes, **text
-frames** are JSON `{"type":"resize","cols":N,"rows":N}`. Server → browser binary frames are
-raw terminal output; a final text frame `{"type":"closed","exit_code":N|null}` precedes the
-close. Closing the browser WS also closes the session.
+The remote-shell feature (browser terminal, `/api/devices/:id/ssh`, `/api/ssh/*` routes)
+was removed in v0.4 — everything a parent can do is UI-only now. Historical events of
+`type = 'ssh'` remain readable in the event log as the record of past sessions.
 
 ## Device users & profile assignment
 
@@ -249,16 +239,12 @@ GET /agent/ws   (Upgrade)
 ```
 Bidirectional JSON frames, tagged with `"type"`:
 
-- server → agent: `command { command }`, `ssh_data { session_id, data_b64 }`,
-  `ssh_resize { session_id, cols, rows }`, `ssh_close { session_id }`,
+- server → agent: `command { command }`,
   `ping` (reserved — accepted by the agent, not currently sent by the server)
 - agent → server: `event { event }` (accepted for compatibility; the agent now sends events over
-  HTTP, see below), `ack { ack }`,
-  `ssh_data { session_id, data_b64 }`, `ssh_closed { session_id, exit_code? }`, `pong`
+  HTTP, see below), `ack { ack }`, `pong`
 
-`data_b64` carries base64-encoded raw terminal bytes in both directions. The agent's first
-frame for a session flips it `opening` → `open`. Falls back to heartbeat polling if WS is
-unavailable.
+Falls back to heartbeat polling if WS is unavailable.
 
 ---
 

@@ -39,36 +39,11 @@ pub struct AuthChallenge {
     pub created: std::time::Instant,
 }
 
-/// A frame the SSH bridge delivers to the attached admin terminal.
-pub enum SshToAdmin {
-    /// Raw terminal output bytes (already base64-decoded).
-    Data(Vec<u8>),
-    /// The agent-side shell exited (or the session was closed server-side).
-    Closed(Option<i64>),
-}
-
-/// Cap on bytes buffered per SSH session while no admin terminal is attached.
-const SSH_BACKLOG_MAX_BYTES: usize = 256 * 1024;
-
-/// In-memory bridge for one reverse-SSH session: agent WS frames on one side,
-/// the admin's browser-terminal WS on the other. Output that arrives before
-/// the admin attaches is buffered (bounded).
-struct SshBridge {
-    device_id: Uuid,
-    /// Set once the agent has confirmed the session with its first frame.
-    confirmed: bool,
-    to_admin: Option<mpsc::UnboundedSender<SshToAdmin>>,
-    backlog: Vec<SshToAdmin>,
-    backlog_bytes: usize,
-}
-
-/// Hub of live agent WebSocket connections + active SSH bridges.
+/// Hub of live agent WebSocket connections.
 #[derive(Default)]
 pub struct Hub {
     /// device_id -> sender that writes JSON frames to that agent's socket.
     agents: RwLock<HashMap<Uuid, mpsc::UnboundedSender<serde_json::Value>>>,
-    /// ssh_session_id -> bridge.
-    ssh: RwLock<HashMap<Uuid, SshBridge>>,
 }
 
 impl Hub {
@@ -94,97 +69,6 @@ impl Hub {
             tx.send(frame).is_ok()
         } else {
             false
-        }
-    }
-
-    /// Register a bridge for a freshly-created (still `opening`) SSH session.
-    pub async fn open_ssh(&self, session_id: Uuid, device_id: Uuid) {
-        self.ssh.write().await.insert(
-            session_id,
-            SshBridge {
-                device_id,
-                confirmed: false,
-                to_admin: None,
-                backlog: Vec::new(),
-                backlog_bytes: 0,
-            },
-        );
-    }
-
-    /// Attach the admin terminal to a session; drains buffered agent output
-    /// into `tx`. Returns the session's device_id, or None if unknown.
-    pub async fn attach_ssh_admin(
-        &self,
-        session_id: Uuid,
-        tx: mpsc::UnboundedSender<SshToAdmin>,
-    ) -> Option<Uuid> {
-        let mut ssh = self.ssh.write().await;
-        let bridge = ssh.get_mut(&session_id)?;
-        for msg in bridge.backlog.drain(..) {
-            let _ = tx.send(msg);
-        }
-        bridge.backlog_bytes = 0;
-        bridge.to_admin = Some(tx);
-        Some(bridge.device_id)
-    }
-
-    /// Deliver an agent-side frame to the attached admin (or buffer it).
-    /// Returns `Some(newly_confirmed)` if the session is known AND owned by
-    /// `from_device` — the first agent frame confirms the session
-    /// (`opening` -> `open`). A frame whose `session_id` belongs to a different
-    /// device is rejected (`None`), so one agent can't inject into or confirm
-    /// another device's terminal by guessing its session id.
-    pub async fn ssh_from_agent(
-        &self,
-        session_id: Uuid,
-        from_device: Uuid,
-        msg: SshToAdmin,
-    ) -> Option<bool> {
-        let mut ssh = self.ssh.write().await;
-        let bridge = ssh.get_mut(&session_id)?;
-        if bridge.device_id != from_device {
-            tracing::warn!(%session_id, "ssh frame from wrong device, dropping");
-            return None;
-        }
-        let newly_confirmed = !bridge.confirmed;
-        bridge.confirmed = true;
-        match &bridge.to_admin {
-            Some(tx) => {
-                let _ = tx.send(msg);
-            }
-            None => {
-                let size = match &msg {
-                    SshToAdmin::Data(d) => d.len(),
-                    SshToAdmin::Closed(_) => 0,
-                };
-                if bridge.backlog_bytes + size <= SSH_BACKLOG_MAX_BYTES {
-                    bridge.backlog_bytes += size;
-                    bridge.backlog.push(msg);
-                } else {
-                    tracing::warn!(%session_id, "ssh backlog full, dropping agent frame");
-                }
-            }
-        }
-        Some(newly_confirmed)
-    }
-
-    /// Tear down a bridge; notifies an attached admin terminal, if any. When
-    /// `from_device` is set, only tears down the session if that device owns it
-    /// (agent-initiated close); admin/server-initiated closes pass `None`.
-    pub async fn close_ssh(&self, session_id: Uuid, from_device: Option<Uuid>) {
-        let mut ssh = self.ssh.write().await;
-        if let Some(bridge) = ssh.get(&session_id) {
-            if let Some(dev) = from_device {
-                if bridge.device_id != dev {
-                    tracing::warn!(%session_id, "ssh close from wrong device, ignoring");
-                    return;
-                }
-            }
-        }
-        if let Some(bridge) = ssh.remove(&session_id) {
-            if let Some(tx) = bridge.to_admin {
-                let _ = tx.send(SshToAdmin::Closed(None));
-            }
         }
     }
 }

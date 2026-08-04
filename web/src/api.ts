@@ -15,6 +15,8 @@ import {
 } from "@simplewebauthn/browser";
 
 import type {
+  CommandRow,
+  UsageHistoryResponse,
   ApiErrorBody,
   AuthConfig,
   Device,
@@ -34,7 +36,6 @@ import type {
   Policy,
   Profile,
   Severity,
-  SshSessionResponse,
   TamperLevel,
   VpnKind,
 } from "./types";
@@ -263,25 +264,6 @@ export async function removeDeviceVpn(id: string): Promise<Device> {
 
 // ---- SSH (contract §3) -------------------------------------------------------
 
-export async function openSsh(id: string): Promise<SshSessionResponse> {
-  return request<SshSessionResponse>(`/api/devices/${id}/ssh`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-export async function closeSsh(sessionId: string): Promise<void> {
-  return request<void>(`/api/ssh/${sessionId}/close`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-/** Cookie-authenticated browser terminal WebSocket URL for a session. */
-export function sshWsUrl(sessionId: string): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/api/ssh/${sessionId}/ws`;
-}
 
 // ---- Device users & profile assignment -------------------------------------
 
@@ -506,4 +488,22 @@ export async function revokeParentToken(id: string): Promise<void> {
   await request<{ revoked: boolean }>(`/api/parent-tokens/${id}`, {
     method: "DELETE",
   });
+}
+
+// ---- Command queue ----------------------------------------------------------
+
+export async function listCommands(deviceId: string): Promise<CommandRow[]> {
+  const r = await request<{ commands: CommandRow[] }>(`/api/devices/${deviceId}/commands`);
+  return r.commands;
+}
+
+export async function cancelCommand(id: string): Promise<void> {
+  await request<unknown>(`/api/commands/${id}/cancel`, { method: "POST" });
+}
+
+export async function getUsageHistory(
+  deviceUserId: string,
+  days: number,
+): Promise<UsageHistoryResponse> {
+  return request<UsageHistoryResponse>(`/api/device-users/${deviceUserId}/usage?days=${days}`);
 }
