@@ -163,9 +163,8 @@ export interface Device {
   public_ip: string | null;
   last_seen: string | null;
   created_at: string;
-  /** device VPN profile — presence only; the config body (private keys!)
-   * is never returned to the admin UI */
-  vpn?: { kind: VpnKind; updated_at: string | null } | null;
+  /** bumped when the device's VPN profiles change (cache-busting stamp) */
+  vpn_updated_at?: string | null;
   /** present on list + detail responses */
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
@@ -173,6 +172,20 @@ export interface Device {
 }
 
 export type VpnKind = "wireguard" | "openvpn";
+
+/** A named VPN profile (GET /api/devices/:id/vpn). Configs render MASKED —
+ * secrets appear as ••• and survive edit round-trips server-side. */
+export interface VpnProfile {
+  id: string;
+  name: string;
+  kind: VpnKind;
+  config_masked: string;
+  status: "untested" | "testing" | "active" | "failed";
+  last_error: string | null;
+  last_tested_at: string | null;
+  is_active: boolean;
+  updated_at: string;
+}
 
 export interface DeviceDetail extends Device {
   users: DeviceUser[];

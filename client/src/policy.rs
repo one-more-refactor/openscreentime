@@ -62,11 +62,17 @@ pub struct PolicyBundle {
 /// agent channel and written to disk `0600` root-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnProfile {
+    /// Server-side profile id — test verdicts report back against it.
+    #[serde(default)]
+    pub id: Option<String>,
     /// `"wireguard"` or `"openvpn"`.
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub config: String,
+    /// `"testing"` asks this agent to verify-then-report before enforcing.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

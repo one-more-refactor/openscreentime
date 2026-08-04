@@ -18,3 +18,4 @@ export { Modal } from "./Modal";
 export { TokenBlock } from "./TokenBlock";
 export { EnrollCommand } from "./EnrollCommand";
 export { UsageHistory } from "./UsageHistory";
+export { VpnProfiles } from "./VpnProfiles";

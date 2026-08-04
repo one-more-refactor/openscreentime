@@ -16,6 +16,7 @@ import {
 
 import type {
   CommandRow,
+  VpnProfile,
   UsageHistoryResponse,
   ApiErrorBody,
   AuthConfig,
@@ -241,29 +242,43 @@ export async function deleteDevice(id: string): Promise<void> {
   return request<void>(`/api/devices/${id}`, { method: "DELETE" });
 }
 
-/** Upload a WireGuard/OpenVPN client config as this device's VPN profile.
- * The config body is write-only: responses only ever carry kind + timestamp. */
-export async function setDeviceVpn(
-  id: string,
-  kind: VpnKind,
+// ---- VPN profiles -----------------------------------------------------------
+
+export async function listVpnProfiles(deviceId: string): Promise<VpnProfile[]> {
+  const r = await request<{ profiles: VpnProfile[] }>(`/api/devices/${deviceId}/vpn`);
+  return r.profiles;
+}
+
+export async function createVpnProfile(
+  deviceId: string,
+  name: string,
   config: string,
-): Promise<Device> {
-  const res = await request<{ device: Device }>(`/api/devices/${id}/vpn`, {
+  kind?: VpnKind,
+): Promise<void> {
+  await request<unknown>(`/api/devices/${deviceId}/vpn`, {
+    method: "POST",
+    body: JSON.stringify({ name, config, kind }),
+  });
+}
+
+export async function updateVpnProfile(id: string, name: string, config: string): Promise<void> {
+  await request<unknown>(`/api/vpn-profiles/${id}`, {
     method: "PUT",
-    body: JSON.stringify({ kind, config }),
+    body: JSON.stringify({ name, config }),
   });
-  return res.device;
 }
 
-export async function removeDeviceVpn(id: string): Promise<Device> {
-  const res = await request<{ device: Device }>(`/api/devices/${id}/vpn`, {
-    method: "DELETE",
-  });
-  return res.device;
+export async function activateVpnProfile(id: string): Promise<void> {
+  await request<unknown>(`/api/vpn-profiles/${id}/activate`, { method: "POST" });
 }
 
-// ---- SSH (contract §3) -------------------------------------------------------
+export async function deactivateVpnProfile(id: string): Promise<void> {
+  await request<unknown>(`/api/vpn-profiles/${id}/deactivate`, { method: "POST" });
+}
 
+export async function deleteVpnProfile(id: string): Promise<void> {
+  await request<unknown>(`/api/vpn-profiles/${id}`, { method: "DELETE" });
+}
 
 // ---- Device users & profile assignment -------------------------------------
 
