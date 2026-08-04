@@ -385,6 +385,57 @@ pub mod gui {
     /// low-entropy PIN. Instead the spec is staged in a root-only (0600) file
     /// under root-owned `/run/sentinel` and only its *path* — not a secret — is
     /// passed on argv; the child reads it once and unlinks it.
+    /// The display environment a root-owned process needs in order to draw on a
+    /// logged-in user's session.
+    ///
+    /// The agent runs from a systemd unit with no `DISPLAY`, no
+    /// `WAYLAND_DISPLAY` and no `XDG_RUNTIME_DIR`, so a subprocess inheriting
+    /// that environment has nowhere to render — `eframe` fails at
+    /// `run_native` and the process dies immediately. Root can open the user's
+    /// compositor socket (it bypasses the 0700 on `/run/user/<uid>`), but only
+    /// if it is told where the socket is.
+    ///
+    /// Returns `None` when the user has no graphical session at all, which is
+    /// the honest signal to skip the GUI and use the TTY fallback instead of
+    /// spawning something that cannot possibly draw.
+    fn session_env(user: &str) -> Option<Vec<(String, String)>> {
+        let uid = crate::sysusers::uid_of(user)?;
+        let runtime_dir = format!("/run/user/{uid}");
+        if !std::path::Path::new(&runtime_dir).is_dir() {
+            return None;
+        }
+        let mut env = vec![
+            ("XDG_RUNTIME_DIR".to_string(), runtime_dir.clone()),
+            ("HOME".to_string(), format!("/home/{user}")),
+        ];
+
+        // Wayland first — the default on GNOME, which is what this ships against.
+        let wayland = std::fs::read_dir(&runtime_dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
+                .min()
+        });
+        if let Some(disp) = wayland {
+            env.push(("WAYLAND_DISPLAY".to_string(), disp));
+            return Some(env);
+        }
+
+        // X11 fallback: the display number is not discoverable from the runtime
+        // dir, so take the conventional :0 and point at the user's Xauthority.
+        if std::path::Path::new("/tmp/.X11-unix/X0").exists() {
+            env.push(("DISPLAY".to_string(), ":0".to_string()));
+            env.push((
+                "XAUTHORITY".to_string(),
+                format!("{runtime_dir}/gdm/Xauthority"),
+            ));
+            return Some(env);
+        }
+
+        None
+    }
+
     pub fn spawn_detached(spec: &LockSpec) -> bool {
         let Ok(json) = serde_json::to_string(spec) else {
             return false;
@@ -393,18 +444,50 @@ pub mod gui {
         let Ok(exe) = std::env::current_exe() else {
             return false;
         };
+        // Preflight: if the user has no graphical session, spawning is pointless
+        // and — worse — used to be reported as success, suppressing the fallback.
+        let Some(env) = session_env(&spec.for_user) else {
+            tracing::warn!(
+                "no graphical session found for {}; using the TTY fallback instead of \
+                 a GUI overlay that could not draw",
+                spec.for_user
+            );
+            return false;
+        };
         let Some(spec_path) = stage_spec_file(&spec.for_user, b64.as_bytes()) else {
             return false;
         };
-        match std::process::Command::new(exe)
-            .arg("__lockout")
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("__lockout")
             .arg(&spec_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => true,
+            // stderr is NOT nulled: eframe's failure to open a window is the
+            // single most useful line when an overlay does not appear, and
+            // discarding it is why this failed silently for so long.
+            .stderr(std::process::Stdio::inherit());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                // Spawning is not displaying. Give the child a moment to fail —
+                // a GUI that cannot open its window dies almost immediately —
+                // and fall back to the TTY broadcast if it did.
+                std::thread::sleep(std::time::Duration::from_millis(700));
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let _ = std::fs::remove_file(&spec_path);
+                        tracing::warn!(
+                            "lockout GUI exited immediately ({status}); falling back to the \
+                             TTY broadcast so the user is not frozen without warning"
+                        );
+                        false
+                    }
+                    // Still running: it opened a window (or is about to).
+                    _ => true,
+                }
+            }
             Err(e) => {
                 let _ = std::fs::remove_file(&spec_path);
                 tracing::warn!("could not spawn lockout GUI subprocess: {e}");
