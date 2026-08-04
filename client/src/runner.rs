@@ -488,13 +488,47 @@ impl Agent {
                 self.record_contact();
                 events.extend(self.apply_bundle(bundle)?)
             }
-            Err(e) => tracing::warn!("initial policy pull failed ({e}); will retry on tick"),
+            Err(e) => {
+                // Fail closed, not open. Booting with an empty policy map means
+                // enforcing nothing — and it also zeroes offline_lockdown_days,
+                // which is read from that map, so the "cut off from the server"
+                // countermeasure is disabled by exactly the condition it exists
+                // to catch. Re-apply the last known bundle instead and let the
+                // next successful pull replace it.
+                tracing::warn!("initial policy pull failed ({e}); falling back to cached bundle");
+                match crate::policy::load_bundle_cache() {
+                    Ok(cached) => {
+                        let version = cached.policy_version.clone();
+                        events.extend(self.apply_bundle(cached)?);
+                        tracing::warn!(
+                            "enforcing cached policy v{version} until the server answers"
+                        );
+                        events.push(Event::new(
+                            EV_POLICY_APPLIED,
+                            SEV_WARN,
+                            json!({
+                                "policy_version": version,
+                                "source": "cache",
+                                "detail": "server unreachable at boot; re-applied the last known \
+                                           policy from disk rather than starting unenforced",
+                            }),
+                        ));
+                    }
+                    // Genuinely nothing to enforce: never enrolled, or the
+                    // cache was removed. Say so loudly — this device is open.
+                    Err(ce) => tracing::error!(
+                        "no cached policy to fall back on ({ce}); device is UNENFORCED until \
+                         the server is reachable"
+                    ),
+                }
+            }
         }
         Ok(events)
     }
 
     /// Store a policy bundle and (re)apply the network-level enforcement.
     fn apply_bundle(&mut self, bundle: crate::policy::PolicyBundle) -> Result<Vec<Event>> {
+        let cacheable = bundle.clone();
         self.policy_version = bundle.policy_version.clone();
         if bundle.device_tamper_level > self.tamper_level && self.ctx.tamper_max >= 3 {
             self.tamper_level = bundle.device_tamper_level;
@@ -519,6 +553,11 @@ impl Agent {
         // Best-effort cache so `sentinel-agent unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
         crate::policy::save_cache(&effective);
+        // …and the whole bundle, so a reboot while the server is unreachable
+        // re-enforces the last known policy instead of coming up wide open.
+        // Cached only after a successful apply, and cached verbatim — rebuilding
+        // it from `self.policies` would silently drop `profile_kind`.
+        crate::policy::save_bundle_cache(&cacheable);
         tracing::info!(
             "policy v{} applied for {} user(s)",
             self.policy_version,
