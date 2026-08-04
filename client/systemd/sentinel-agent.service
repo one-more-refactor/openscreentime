@@ -19,8 +19,25 @@ OOMScoreAdjust=-1000
 # --- Hardening (TAMPER.md level 1) ---
 # ProtectSystem=strict makes most of the fs read-only; we carve out the paths the
 # agent legitimately writes (config, state, runtime heartbeat, resolver + nft + polkit).
+#
+# A leading "-" marks a path OPTIONAL. Without it, systemd refuses to set up the
+# mount namespace when the path does not exist and the unit dies at step
+# NAMESPACE (status=226) before ExecStart ever runs. Three of these are not
+# present on a stock install:
+#   /etc/systemd/logind.conf.d  — only created at tamper level 3
+#   /etc/polkit-1/rules.d       — absent unless polkit is installed
+#   /etc/dnsmasq.d              — absent until dnsmasq is; the agent writes its
+#                                 conf-dir include stub here, and under
+#                                 ProtectSystem=strict it cannot without this
+#   /etc/wireguard              — managed VPN profile lands in sentinel.conf
+#   /etc/openvpn/client         — same, for the openvpn transport
+#
+# The two VPN dirs matter more than they look: enforce/vpn.rs propagates a
+# write failure as Err all the way out of apply_network_policy, which skips
+# gap reporting AND save_cache — so a VPN profile pushed to a hardened host
+# strands in "testing" in the console with no verdict and no event.
 ProtectSystem=strict
-ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf /etc/polkit-1/rules.d /etc/systemd/logind.conf.d
+ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client
 RuntimeDirectory=sentinel
 StateDirectory=sentinel
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.
