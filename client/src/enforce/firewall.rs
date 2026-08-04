@@ -9,14 +9,18 @@ use anyhow::Result;
 
 const NFT_TABLE: &str = "sentinel";
 
-/// Well-known public DoH resolver IPs (Cloudflare/Google/Quad9/OpenDNS/AdGuard/
-/// NextDNS). `block_doh` drops tcp/udp 443 to these, except the configured
-/// `dns_upstream` (never block our own upstream).
+/// Well-known public DoH resolver addresses (Cloudflare/Google/Quad9/OpenDNS/
+/// AdGuard/NextDNS). `block_doh` drops tcp/udp 443 to all of them — including
+/// the configured `dns_upstream`, see below.
+///
+/// Entries may be CIDRs; they are interpolated straight into `ip daddr`.
 const DOH_RESOLVERS: &[&str] = &[
     "1.1.1.1",
     "1.0.0.1",
     "1.1.1.2",
+    "1.0.0.2", // Cloudflare family — the secondary was missing entirely
     "1.1.1.3",
+    "1.0.0.3", // ditto
     "8.8.8.8",
     "8.8.4.4",
     "9.9.9.9",
@@ -25,8 +29,11 @@ const DOH_RESOLVERS: &[&str] = &[
     "208.67.220.220",
     "94.140.14.14",
     "94.140.15.15",
-    "45.90.28.0",
-    "45.90.30.0",
+    // NextDNS hands each profile its own address inside these ranges, so the
+    // bare network addresses that used to be listed here (45.90.28.0 /
+    // 45.90.30.0) matched no real resolver at all.
+    "45.90.28.0/24",
+    "45.90.30.0/24",
 ];
 
 /// Tor OR/directory/SOCKS ports blocked by `block_tor`.
@@ -113,13 +120,20 @@ pub fn render_ruleset(
         ));
     }
     if lockdown.block_doh {
-        s.push_str(
-            "    # block_doh: known public DNS-over-HTTPS resolvers (except our upstream)\n",
-        );
+        // The upstream is NOT exempt. It used to be — "never block our own
+        // upstream" — but the agent only ever needs port 53 there (dnsmasq
+        // forwards plaintext DNS), and force_dns already opens 53 to it alone.
+        // Exempting 443 instead handed out a working DoH endpoint: the kids
+        // preset ships upstream 1.1.1.2, which IS Cloudflare's public
+        // family-filter DoH resolver. A browser pointed at
+        // https://1.1.1.2/dns-query then resolved everything, so the
+        // default-deny allowlist became decorative while the console showed
+        // both "default_deny" and "block_doh: true" in green.
+        //
+        // These drops precede the generic accepts (including the upstream
+        // accept), and nft chains are first-match-wins, so they take effect.
+        s.push_str("    # block_doh: known public DNS-over-HTTPS resolvers (upstream included)\n");
         for ip in DOH_RESOLVERS {
-            if *ip == dns_upstream {
-                continue;
-            }
             s.push_str(&format!("    ip daddr {ip} tcp dport 443 drop\n"));
             s.push_str(&format!("    ip daddr {ip} udp dport 443 drop\n"));
         }
@@ -254,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn block_doh_drops_known_resolvers_but_not_upstream() {
+    fn block_doh_drops_known_resolvers_including_the_upstream() {
         let lockdown = NetworkLockdown {
             block_doh: true,
             ..Default::default()
@@ -262,9 +276,46 @@ mod tests {
         let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
         assert!(r.contains("ip daddr 8.8.8.8 tcp dport 443 drop"));
         assert!(r.contains("ip daddr 9.9.9.9 udp dport 443 drop"));
-        // Never block our own configured upstream, even though it's in the list.
-        assert!(!r.contains("ip daddr 1.1.1.2 tcp dport 443 drop"));
-        assert!(!r.contains("ip daddr 1.1.1.2 udp dport 443 drop"));
+
+        // The upstream gets blocked on 443 like everything else. This assertion
+        // used to be inverted: 1.1.1.2 is Cloudflare's family DoH resolver, so
+        // exempting it from the 443 drop left a fully working DoH endpoint open
+        // and the DNS allowlist bypassable. The agent needs 53 there, not 443.
+        assert!(r.contains("ip daddr 1.1.1.2 tcp dport 443 drop"));
+        assert!(r.contains("ip daddr 1.1.1.2 udp dport 443 drop"));
+
+        // …and 53 to the upstream must still be the one plaintext path allowed.
+        let fd = NetworkLockdown {
+            block_doh: true,
+            force_dns: true,
+            ..Default::default()
+        };
+        let r2 = render_ruleset(&fw_basic(), &fd, "1.1.1.2", None, &VpnPlan::default());
+        assert!(r2.contains("ip daddr != 1.1.1.2 udp dport 53 drop"));
+        assert!(!r2.contains("ip daddr 1.1.1.2 udp dport 53 drop\n"));
+    }
+
+    /// Both halves of each provider pair must be listed — a kid who finds the
+    /// secondary has the same bypass as one who finds the primary.
+    #[test]
+    fn doh_list_covers_secondaries_and_nextdns_ranges() {
+        let lockdown = NetworkLockdown {
+            block_doh: true,
+            ..Default::default()
+        };
+        let r = render_ruleset(&fw_basic(), &lockdown, "9.9.9.9", None, &VpnPlan::default());
+        for ip in [
+            "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
+        ] {
+            assert!(
+                r.contains(&format!("ip daddr {ip} tcp dport 443 drop")),
+                "{ip} missing from the DoH block list"
+            );
+        }
+        // NextDNS assigns a per-profile address in these ranges; the bare
+        // network addresses previously listed matched no real resolver.
+        assert!(r.contains("ip daddr 45.90.28.0/24 tcp dport 443 drop"));
+        assert!(r.contains("ip daddr 45.90.30.0/24 udp dport 443 drop"));
     }
 
     #[test]
