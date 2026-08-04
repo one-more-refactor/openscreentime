@@ -222,26 +222,26 @@ mostly off in Teen, reflecting the different trust levels those two presets are 
 ## The events feed
 
 **Events** is the audit log: every lock/unlock, policy application, screen-time exceed,
-earn-time request/grant/decision, tamper signal, enrollment, discovery scan, and SSH session,
+earn-time request/grant/decision, tamper signal, enrollment, and discovery scan (plus
+historical `ssh` entries from the removed remote-shell feature — see below),
 filterable by device, type, and severity (info / warn / critical), with a free-text search over
 event payloads. It's also linked from each device's detail page, scoped to that device. If
 something surprising happened — a device suddenly locked itself, a lockdown engaged, a PIN was
 used — this is where to see exactly when and why.
 
-## Remote SSH
+## Remote SSH — removed
 
-The **SHELL** button (device card or device detail page) opens a real terminal to the device,
-brokered through the server over a reverse tunnel — the agent only ever dials *out*, so this
-works even behind NAT and never requires opening an inbound port on the child's network. It's
-disabled while the device is offline, for the obvious reason.
+Earlier versions had a **SHELL** button that opened a real root terminal to the device,
+always disclosed to the child while it was live. That feature has been **removed
+entirely** — there is no remote shell at all anymore, and nothing in Sentinel can reach a
+terminal or the files on a managed device. Everything you can do as a parent goes through
+this console. The promise to the child got simpler and stronger in the process: instead of
+"a shell is never open without you knowing," it's now "there is no shell."
 
-**This is deliberately not covert.** The moment a shell opens, the device's tray companion —
-the little status icon the child can see — shows "REMOTE SHELL: ACTIVE" in its menu and fires a
-desktop notification: "A PARENT OPENED A REMOTE SHELL ON THIS DEVICE." When you close the
-session, it notifies again that the session ended. Every SSH open/close is also written to the
-events feed. This is a product decision, not an oversight: transparency about surveillance is
-treated as a feature here, not a workaround to route around. If you need to look at something
-on the device, the child will know you did.
+If shell sessions were ever opened on a device in the past, they're still visible as `ssh`
+entries in the events feed — the audit record survives the feature's removal. A possible
+future replacement (a secure reverse tunnel for native SSH and remote desktop) was
+considered and deferred; if it ever ships, it will be just as loudly disclosed.
 
 ## What to do when a device goes dark
 

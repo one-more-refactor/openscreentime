@@ -35,41 +35,18 @@ Simple in-memory fixed-window limiter (no new deps), keyed by client IP
 
 429 body uses the standard error envelope.
 
-## 3. Remote SSH — working end-to-end
+## 3. Remote SSH — REMOVED in v0.4
 
-### Wire format, agent ↔ server (existing agent WS, `/agent/ws`)
-
-The agent already sends `{"type":"ssh_data","session_id":"<uuid>","data_b64":"<base64>"}`.
-**Server adopts `data_b64`** (base64-encoded raw terminal bytes) in BOTH directions. Frames:
-
-- server → agent: `ssh_open {session_id}`, `ssh_data {session_id, data_b64}`,
-  `ssh_resize {session_id, cols, rows}`, `ssh_close {session_id}`
-- agent → server: `ssh_data {session_id, data_b64}`, `ssh_closed {session_id, exit_code?}`
-
-### Agent PTY
-
-Agent allocates a real PTY (`nix` openpty or `rustix-openpty`; pick the lightest dep already
-in-tree if possible), spawns `/bin/bash -l` on the slave, bridges master ↔ WS. Handles
-`ssh_resize` via `TIOCSWINSZ`. On child exit sends `ssh_closed`.
-
-### Admin side (new)
-
-- `POST /api/devices/:id/ssh` (exists) → `{ session: { id, status, ... } }`. Status stays
-  `opening` until the agent's first `ssh_data`/ack; server marks `open` when the agent WS
-  confirms (`ssh_open` is acked by first agent frame or explicit ack — implementer's choice,
-  but do NOT mark open unconditionally at creation).
-- **New:** `GET /api/ssh/:session_id/ws` — cookie-authenticated WebSocket upgrade for the
-  browser terminal.
-  - browser → server: **binary frames** = raw keystroke bytes; **text frames** = JSON
-    `{"type":"resize","cols":N,"rows":N}`.
-  - server → browser: **binary frames** = raw terminal output bytes; text frame
-    `{"type":"closed","exit_code":N|null}` before server closes.
-  - Server bridges: browser binary → base64 → `ssh_data` to agent; agent `ssh_data` → decode →
-    binary to browser. Tenant + admin checked on upgrade; session must belong to tenant.
-- `POST /api/ssh/:session_id/close` (replaces unused `closeSsh` shape if different) → closes
-  agent side (`ssh_close`), marks row `closed`. Browser WS close also triggers this.
-- SSH audit events use **`type = 'ssh'`** (new event type; migration extends the CHECK
-  constraint), severity `info`. Stop logging them as `tamper`.
+This section specified the remote-shell feature end-to-end: the agent PTY, the
+`ssh_open`/`ssh_data`/`ssh_resize`/`ssh_close`/`ssh_closed` WS frames,
+`POST /api/devices/:id/ssh`, `GET /api/ssh/:session_id/ws`,
+`POST /api/ssh/:session_id/close`, and the `ssh_sessions` table. The whole
+capability was removed in v0.4 (`0008_remove_ssh.sql`) — there is no remote
+shell anymore; everything is UI-only. Historical events of `type = 'ssh'`
+remain readable in the event log as the record of past sessions. A possible
+replacement (secure reverse tunnel, native SSH+RDP) was considered and
+deferred. The section number is kept so existing cross-references ("contract
+§3") stay resolvable.
 
 ## 4. Earn-time approval — working end-to-end
 
@@ -175,7 +152,8 @@ Env config (all optional; feature off unless all three set):
 
 All schema changes above land in `server/migrations/0002_prod.sql`: admin_sessions,
 earn_requests, commands CHECK += 'credit_time', events CHECK += 'ssh' and += 'earn_request'
-(used for audit trail of requests/decisions).
+(used for audit trail of requests/decisions). Since v0.4, `'ssh'` is a historical-only
+event type — the capability behind it is gone (see §3), but the rows and the CHECK entry stay.
 
 ## 11. Network lockdown + parent PIN (v1 prod)
 
@@ -223,19 +201,20 @@ black out all traffic — the device stays usable under its existing strict allo
 
 The root agent publishes an atomically-replaced, world-readable snapshot at
 `/run/sentinel/status.json` every tick (connection state, device/user lock+freeze state,
-`remote_shell_open`, per-user used/remaining minutes). A feature-gated subcommand
+per-user used/remaining minutes; `remote_shell_open` was dropped with the shell in v0.4,
+see §3). A feature-gated subcommand
 (`cargo build --features tray`, `ksni` + `notify-rust`, session bus only, **no root**) polls it
 every 5s and renders:
 
 - a StatusNotifierItem using themed freedesktop icons (`security-high` online/unlocked,
   `security-medium` offline-within-grace, `security-low` fail-closed/locked/frozen/lockdown),
   tooltip `TIME LEFT: NN MIN · ONLINE` (or `NO LIMIT` / `PAUSED`);
-- a read-only menu (time left, connection, `REMOTE SHELL: ACTIVE` when open) plus
+- a read-only menu (time left, connection) plus
   `ABOUT SENTINEL` → notification "This device is managed. Screen time and network filtering
   are active.";
 - desktop notifications on state **transitions only**: remaining time crossing ≤10/≤2 min,
   pending freeze countdown, frozen on/off, fail-closed/back-online, device lock/lockdown
-  on/off, and — transparency promise — remote shell opened/closed.
+  on/off.
 
 `install-service` best-effort drops `client/systemd/sentinel-tray.service` into
 `/etc/systemd/user/`; each desktop user opts in with `systemctl --user enable --now sentinel-tray`

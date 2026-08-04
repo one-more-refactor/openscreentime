@@ -178,8 +178,7 @@ Next steps:
 
 1. Point a reverse proxy at 127.0.0.1:${port} for https://${domain}.
    The app itself does not terminate TLS — your proxy must. It also must
-   forward WebSocket upgrades (used by the agent channel and the SSH
-   terminal).
+   forward WebSocket upgrades (used by the agent channel).
 
    Minimal Caddy example:
 

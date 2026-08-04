@@ -9,6 +9,7 @@ mod agent_dist;
 mod alerts;
 mod auth;
 mod auth_oidc;
+mod commands;
 mod db;
 mod devices;
 mod discovery;
@@ -19,7 +20,6 @@ mod parent;
 mod presets;
 mod profiles;
 mod rate_limit;
-mod ssh;
 mod state;
 mod static_web;
 
@@ -125,9 +125,8 @@ async fn main() -> anyhow::Result<()> {
     // requests. No-op unless a channel is configured in the environment.
     alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
 
-    // Reap SSH sessions stuck in `opening` (agent never confirmed) so they can't
-    // leak DB rows + in-memory bridges + agent-side shells.
-    ssh::spawn_reaper(state.clone());
+    // Settled commands age out after 30 days; the event log is the audit trail.
+    commands::spawn_janitor(state.clone());
 
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
@@ -217,7 +216,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
-        .route("/api/devices/{id}/ssh", post(ssh::open_session))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
         .route(
             "/api/devices/{id}/vpn",
@@ -235,9 +233,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/device-users/{id}/credit-time",
             post(earn::credit_time),
         )
-        // --- SSH (browser terminal) ----------------------------------------
-        .route("/api/ssh/{session_id}/ws", get(ssh::ws))
-        .route("/api/ssh/{session_id}/close", post(ssh::close_session))
+        .route("/api/device-users/{id}/usage", get(devices::usage_history))
+        // --- Command queue ---------------------------------------------------
+        .route("/api/devices/{id}/commands", get(commands::list_for_device))
+        .route("/api/commands/{id}/cancel", post(commands::cancel))
         // --- Earn-time requests ---------------------------------------------
         .route("/api/earn-requests", get(earn::list_requests))
         .route(

@@ -13,8 +13,6 @@ use serde_json::Value;
 pub const CMD_LOCK: &str = "lock";
 pub const CMD_UNLOCK: &str = "unlock";
 pub const CMD_APPLY_POLICY: &str = "apply_policy";
-pub const CMD_SSH_OPEN: &str = "ssh_open";
-pub const CMD_SSH_CLOSE: &str = "ssh_close";
 pub const CMD_DISCOVER: &str = "discover";
 pub const CMD_SET_TAMPER_LEVEL: &str = "set_tamper_level";
 /// Earn-time approval credit (CONTRACT-PROD.md §4): `{os_username, minutes, request_id}`.
@@ -100,7 +98,7 @@ pub struct CommandAck {
 
 /// Server → agent frames on the WS bus.
 ///
-/// CONTRACT-PROD.md §3 pins the tag field to `"type"` (e.g. `{"type":"ssh_data",...}`);
+/// CONTRACT-PROD.md §3 pins the tag field to `"type"`;
 /// the frames used to be tagged `"kind"`, which silently disagreed with the documented
 /// wire shape (never noticed because both ends only ever spoke to each other's own
 /// impl). Renamed here to match the contract exactly.
@@ -109,21 +107,6 @@ pub struct CommandAck {
 pub enum ServerFrame {
     Command {
         command: Command,
-    },
-    /// A frame of an open reverse-SSH session (base64-encoded bytes toward the shell).
-    SshData {
-        session_id: String,
-        data_b64: String,
-    },
-    /// Server resizes the PTY (browser terminal resize → `TIOCSWINSZ`).
-    SshResize {
-        session_id: String,
-        cols: u16,
-        rows: u16,
-    },
-    /// Server closes an SSH session.
-    SshClose {
-        session_id: String,
     },
     /// Keepalive.
     Ping,
@@ -138,17 +121,6 @@ pub enum AgentFrame {
     },
     Ack {
         ack: CommandAck,
-    },
-    /// A frame of shell output (base64-encoded bytes from the PTY).
-    SshData {
-        session_id: String,
-        data_b64: String,
-    },
-    /// The child shell exited; `exit_code` is `None` if it died by signal.
-    SshClosed {
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
     },
     /// Periodic per-user usage push. The WS bus has no HTTP heartbeat, so this is
     /// how a WS-connected agent keeps `screen_time_ledger` current (CONTRACT-PROD.md §5).

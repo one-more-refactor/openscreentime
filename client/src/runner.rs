@@ -9,7 +9,7 @@ use crate::lockout::{self, LockSpec};
 use crate::policy::Policy;
 use crate::protocol::*;
 use crate::util::Exec;
-use crate::{discovery, gamify, ssh, tamper};
+use crate::{discovery, gamify, tamper};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -119,8 +119,6 @@ pub struct Agent {
     device_locked: bool,
     /// Effective tamper level (max of device policy and --tamper-max).
     tamper_level: u8,
-    /// Live SSH sessions.
-    sessions: HashMap<String, ssh::SshSession>,
     policy_version: String,
     /// Expected wall-clock at the next tick (clock-skew / time-tamper detection).
     expected_wall: Option<chrono::DateTime<chrono::Utc>>,
@@ -280,7 +278,6 @@ impl Agent {
             tracker: screentime::UsageTracker::load(),
             frozen: HashSet::new(),
             device_locked: false,
-            sessions: HashMap::new(),
             policy_version: String::new(),
             expected_wall: None,
             requested_earn: HashMap::new(),
@@ -964,7 +961,6 @@ impl Agent {
             "device_locked": self.device_locked,
             "offline_hard_lockdown": self.offline_hard_lockdown,
             "tamper_lockdown": self.tamper_lockdown,
-            "remote_shell_open": !self.sessions.is_empty(),
         });
         let notif_json = |n: &UserNotification| {
             json!({
@@ -1082,12 +1078,8 @@ impl Agent {
         }
     }
 
-    /// Dispatch one server command. `out_tx` lets SSH sessions stream frames back.
-    async fn handle_command(
-        &mut self,
-        cmd: Command,
-        out_tx: &mpsc::Sender<AgentFrame>,
-    ) -> (CommandAck, Vec<Event>) {
+    /// Dispatch one server command.
+    async fn handle_command(&mut self, cmd: Command) -> (CommandAck, Vec<Event>) {
         let mut events = Vec::new();
         let result = match cmd.cmd_type.as_str() {
             CMD_LOCK => {
@@ -1165,27 +1157,6 @@ impl Agent {
                 events.push(ev);
                 json!({ "scanned": true })
             }
-            CMD_SSH_OPEN => {
-                let session_id = cmd
-                    .payload
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&cmd.id)
-                    .to_string();
-                let broker_port = cmd
-                    .payload
-                    .get("broker_port")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u16;
-                tracing::info!("{}", ssh::production_reverse_tunnel_hint(broker_port));
-                match ssh::SshSession::open(session_id.clone(), out_tx.clone()) {
-                    Ok(sess) => {
-                        self.sessions.insert(session_id.clone(), sess);
-                        json!({ "session_id": session_id, "status": "open" })
-                    }
-                    Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
-                }
-            }
             CMD_CREDIT_TIME => {
                 let os_username = cmd
                     .payload
@@ -1253,18 +1224,6 @@ impl Agent {
                     false,
                 );
                 json!({ "denied": true, "os_username": os_username, "task_id": task_id })
-            }
-            CMD_SSH_CLOSE => {
-                let session_id = cmd
-                    .payload
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(sess) = self.sessions.remove(&session_id) {
-                    sess.close().await;
-                }
-                json!({ "session_id": session_id, "status": "closed" })
             }
             other => {
                 return (
@@ -1371,7 +1330,7 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
 }
 
 /// WS-connected event loop: read server frames, run the enforcement tick, and
-/// drain agent→server frames (events, acks, ssh data) through a writer task.
+/// drain agent→server frames (events, acks) through a writer task.
 async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()> {
     let (mut write, mut read) = stream.split();
     let (out_tx, mut out_rx) = mpsc::channel::<AgentFrame>(256);
@@ -1437,31 +1396,9 @@ async fn handle_server_text(
     let frame: ServerFrame = serde_json::from_str(txt)?;
     match frame {
         ServerFrame::Command { command } => {
-            let (ack, events) = agent.handle_command(command, out_tx).await;
+            let (ack, events) = agent.handle_command(command).await;
             agent.flush_events(events).await;
             let _ = out_tx.send(AgentFrame::Ack { ack }).await;
-        }
-        ServerFrame::SshData {
-            session_id,
-            data_b64,
-        } => {
-            if let Some(sess) = agent.sessions.get(&session_id) {
-                sess.feed_b64(&data_b64).await;
-            }
-        }
-        ServerFrame::SshResize {
-            session_id,
-            cols,
-            rows,
-        } => {
-            if let Some(sess) = agent.sessions.get(&session_id) {
-                sess.resize(cols, rows);
-            }
-        }
-        ServerFrame::SshClose { session_id } => {
-            if let Some(sess) = agent.sessions.remove(&session_id) {
-                sess.close().await;
-            }
         }
         ServerFrame::Ping => {
             let _ = out_tx.send(AgentFrame::Pong).await;
@@ -1470,15 +1407,10 @@ async fn handle_server_text(
     Ok(())
 }
 
-/// Heartbeat polling fallback (no WS). SSH/reverse-tunnel is unavailable here;
-/// commands still flow via the heartbeat command queue.
+/// Heartbeat polling fallback (no WS); commands flow via the heartbeat
+/// command queue.
 async fn run_poll(agent: &mut Agent) -> Result<()> {
     let interval = Duration::from_secs(agent.cfg.poll_interval_secs.max(5));
-    // A throwaway channel so handle_command has somewhere to send ssh frames
-    // (dropped — remote shell requires the WS bus).
-    let (out_tx, mut out_rx) = mpsc::channel::<AgentFrame>(16);
-    tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
-
     let mut ticker = tokio::time::interval(TICK);
     let mut hb = tokio::time::interval(interval);
     loop {
@@ -1494,7 +1426,7 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
                     Ok(resp) => {
                         agent.record_contact();
                         for cmd in resp.commands {
-                            let (ack, events) = agent.handle_command(cmd, &out_tx).await;
+                            let (ack, events) = agent.handle_command(cmd).await;
                             agent.flush_events(events).await;
                             let _ = agent.client.ack_command(&ack).await;
                         }

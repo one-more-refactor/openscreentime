@@ -84,7 +84,7 @@ Server → agent command queue. Agent pulls on heartbeat / WS.
 |-------------|-------------|------------------------------------------------------------|
 | id          | uuid pk     |                                                            |
 | device_id   | uuid fk     |                                                            |
-| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `ssh_open` \| `ssh_close` \| `discover` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
+| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `discover` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
 | payload     | jsonb       | command-specific args                                      |
 | status      | text        | `queued` \| `sent` \| `acked` \| `failed`                  |
 | result      | jsonb       | nullable, agent's response                                 |
@@ -99,22 +99,15 @@ Agent → server telemetry & audit log.
 | tenant_id   | uuid fk     |                                                                |
 | device_id   | uuid fk     | nullable                                                       |
 | device_user_id | uuid fk  | nullable                                                       |
-| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `streak` \| `enrolled` \| `discovery_result` \| `ssh` \| `earn_request` |
+| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `streak` \| `enrolled` \| `discovery_result` \| `ssh` (historical only — see below) \| `earn_request` |
 | severity    | text        | `info` \| `warn` \| `critical`                                 |
 | payload     | jsonb       |                                                                |
 | created_at  | timestamptz |                                                                |
 
-### `ssh_sessions`
-Reverse-tunnel bookkeeping for remote shell.
-| column       | type        | notes                                          |
-|--------------|-------------|------------------------------------------------|
-| id           | uuid pk     |                                                |
-| device_id    | uuid fk     |                                                |
-| admin_id     | uuid fk     |                                                |
-| broker_port  | int         | port on server the tunnel is bound to          |
-| status       | text        | `opening` \| `open` \| `closed` \| `failed`    |
-| created_at   | timestamptz |                                                |
-| closed_at    | timestamptz | nullable                                        |
+The `ssh` event type is **historical only**: the remote-shell feature (and its
+`ssh_sessions` table) was removed in v0.4, but existing `ssh` event rows stay readable —
+the record that past sessions happened survives; only the capability is gone. No new
+`ssh` events are written.
 
 ### `admin_sessions`
 DB-backed admin login sessions (cookie `sentinel_session`). Expired rows are deleted lazily.
@@ -167,5 +160,8 @@ the `commands.type` (`credit_time`) and `events.type` (`ssh`, `earn_request`) CH
 of `credit_time` for the denial path (lets the agent clear its once-per-day earn-request dedupe
 and surface an honest denial instead of a stale "WAITING FOR APPROVAL"). `0004_enroll_token_ttl.sql`
 adds `devices.enroll_token_expires_at` (24 h TTL on enrollment tokens; NULL/no-expiry for rows
-predating the migration, additive with no backfill). Seeding the three preset profiles happens in
+predating the migration, additive with no backfill). `0008_remove_ssh.sql` drops the
+`ssh_sessions` table and the `ssh_open`/`ssh_close` command types (the remote shell is gone);
+`events.type = 'ssh'` stays in the CHECK constraint so historical rows remain readable.
+Seeding the three preset profiles happens in
 application code when a tenant is created (see `PROFILES.md`).

@@ -7,7 +7,7 @@ interface Props {
   title: string;
   /** accent-red header for destructive/danger flows */
   danger?: boolean;
-  /** md = dialog, full = full-screen-ish (SSH terminal) */
+  /** md = dialog, full = full-screen-ish (wizards, editors) */
   size?: "md" | "full";
   /** set false when Escape must reach the content (terminal) */
   closeOnEscape?: boolean;
@@ -48,7 +48,6 @@ export function Modal({
 
     const onKey = (e: KeyboardEvent) => {
       // Keys inside the terminal belong to the remote shell.
-      if ((e.target as HTMLElement | null)?.closest?.(".xterm")) return;
       if (e.key === "Escape") {
         if (!closeOnEscape) return;
         e.stopPropagation();

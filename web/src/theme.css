@@ -278,8 +278,3 @@
     animation: none !important;
   }
 }
-
-/* xterm surface inside the SSH terminal modal */
-.ssh-term .xterm {
-  height: 100%;
-}

@@ -66,7 +66,7 @@ Always build from within `client/`. Feature flags (`client/Cargo.toml`):
   agent-dist image ships. Lockout falls back to `wall` broadcasts since there's no display.
 - `--features gui`: adds the egui full-screen lockout overlay in place of the `wall` fallback.
 - `--features tray`: adds the `sentinel-agent tray` subcommand, a per-user tray companion
-  (time left, connection state, remote-shell transparency).
+  (time left, connection state, managed-device disclosure).
 
 ## End-to-end smoke test (the vertical slice)
 1. Start server + db, run migrations (seeds nothing until a tenant exists).
@@ -78,13 +78,13 @@ Always build from within `client/`. Feature flags (`client/Cargo.toml`):
    simulated minute) so the screen-time budget is reachable in a dev session; it pulls policy,
    logs the zero-trust DNS/firewall it would apply, and shows the lockout overlay once the
    accelerated screen-time runs out.
-6. Click **Lock** → agent shows full-screen lock. Click **SSH** → tunnel session opens.
+6. Click **Lock** → agent shows full-screen lock.
 
 ## Testing
-- Client: `cd client && cargo test` — 36 tests (enforcement runner, usage ledger +
+- Client: `cd client && cargo test` (enforcement runner, usage ledger +
   clock-set-back defense, tamper confirmation monitor, lockout challenges, PIN hashing,
-  tamper levels, SSH PTY, self-update ordering, and more). Add `--features tray` for 38
-  (the tray notification selection).
+  tamper levels, self-update ordering, and more). Add `--features tray` for
+  the tray notification selection tests too.
 - Server: `cd server && cargo test` — 11 tests, including
   `presets::tests::presets_round_trip_through_policy_without_loss` — the preset drift canary.
   Any new field added to `Policy` must round-trip through the presets without loss, or this test

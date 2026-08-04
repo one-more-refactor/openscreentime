@@ -130,22 +130,14 @@ Claims you might expect from this category of product that we deliberately do no
   freezer. Screen-time freezes never fall back to killing the session; only an explicit
   admin lock may terminate as a last resort.
 
-## Remote shell (server-brokered, disclosed)
+## Remote shell — removed
 
-Devices sit behind NAT, so the **agent dials out** — it never opens an inbound listener,
-preserving default-deny inbound.
-
-1. Admin clicks **SSH** on a device → `POST /api/devices/:id/ssh` creates an `ssh_session`
-   row and enqueues an `ssh_open` command.
-2. The agent (over its existing WebSocket) spawns a PTY and bridges it to the server; the
-   admin gets an in-browser terminal (xterm.js) over `GET /api/ssh/:id/ws`.
-3. Closing the terminal (or an explicit close) tears the session down.
-
-The shell runs as **root** (the agent's own privilege). Two honesty properties are
-load-bearing: every session is **audited** as events, and the device's tray **discloses an
-open remote shell to the person using the machine** while it's live. Known edge: a browser
-that vanishes mid-session can leak the PTY on the agent until an explicit close — acceptable
-for single-admin family use, revisit for multi-admin.
+Sentinel used to include a server-brokered, disclosed remote shell (a root PTY bridged from
+the agent to a browser terminal). It was removed in v0.4: **there is no remote shell at
+all anymore** — everything an admin can do goes through the UI, and the agent still never
+opens an inbound listener (it only dials out, preserving default-deny inbound). Historical
+`ssh` events remain in the event log as the audit record of past sessions. A possible
+replacement — a secure reverse tunnel carrying native SSH+RDP — was considered and deferred.
 
 ## Device discovery
 

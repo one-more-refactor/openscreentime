@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::agent::{enqueue_command, enqueue_command_delivered};
+use crate::agent::{enqueue_command, enqueue_command_delivered, pending_command};
 use crate::auth::gen_token;
 use crate::error::{AppError, AppResult};
 use crate::events;
@@ -53,6 +53,19 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
     })
 }
 
+/// Types of commands still pending (queued|sent) for a device — drives the
+/// server-backed PENDING chips in the UI (replacing lost-on-reload React state).
+async fn pending_command_types(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT type FROM commands
+         WHERE device_id = $1 AND status IN ('queued','sent')
+         ORDER BY created_at",
+    )
+    .bind(device_id)
+    .fetch_all(db)
+    .await?)
+}
+
 /// Fetch a device scoped to the tenant, or 404.
 async fn get_device_row(db: &sqlx::PgPool, id: Uuid, tenant_id: Uuid) -> AppResult<DeviceRow> {
     let row: Option<DeviceRow> = sqlx::query_as(&format!(
@@ -78,6 +91,7 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
         let mut d = device_to_json(r);
         d["users"] = device_users_json(&st.db, r.0).await?;
         d["online"] = json!(st.hub.is_online(r.0).await);
+        d["pending_commands"] = json!(pending_command_types(&st.db, r.0).await?);
         out.push(d);
     }
     Ok(Json(json!({ "devices": out })))
@@ -94,6 +108,7 @@ pub async fn get_device(
 
     let mut d = device_to_json(&row);
     d["online"] = json!(st.hub.is_online(id).await);
+    d["pending_commands"] = json!(pending_command_types(&st.db, id).await?);
     Ok(Json(json!({
         "device": d,
         "users": users,
@@ -340,6 +355,11 @@ pub async fn lock_device(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     get_device_row(&st.db, id, admin.tenant_id).await?;
+    // One pending lock is enough — a second click is a 409, and the UI shows
+    // the server-backed pending state instead of stacking commands.
+    if pending_command(&st.db, id, "lock").await?.is_some() {
+        return Err(AppError::Conflict("a lock is already pending".into()));
+    }
     // Truthful lock state: only flip status when the command actually reached
     // a live agent. Otherwise it stays queued; the ack path in agent.rs flips
     // the status once the device reconnects and applies the lock.
@@ -371,6 +391,9 @@ pub async fn unlock_device(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     get_device_row(&st.db, id, admin.tenant_id).await?;
+    if pending_command(&st.db, id, "unlock").await?.is_some() {
+        return Err(AppError::Conflict("an unlock is already pending".into()));
+    }
     // Mirror of lock: status flips immediately only on live delivery, else on ack.
     let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "unlock", json!({})).await?;
     if delivered {
@@ -493,4 +516,81 @@ pub async fn assign_profile(
     enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+// --- Screen-time history -----------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct UsageQuery {
+    /// Days of history (default 30, cap 90).
+    pub days: Option<i64>,
+}
+
+/// GET /api/device-users/:id/usage — the per-day ledger for one device user,
+/// newest last, plus the current streak (consecutive days with any usage,
+/// counted back from today; an empty today doesn't break it until midnight).
+/// `streak_days` in the ledger was never written by anything — the streak is
+/// computed here from the rows instead of trusting a dead column.
+pub async fn usage_history(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<UsageQuery>,
+) -> AppResult<Json<Value>> {
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    // Scope: the device user must belong to a device of this tenant.
+    let owned: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM device_users du
+         JOIN devices d ON d.id = du.device_id
+         WHERE du.id = $1 AND d.tenant_id = $2",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .fetch_optional(&st.db)
+    .await?;
+    owned.ok_or_else(|| AppError::NotFound("device user not found".into()))?;
+
+    let rows: Vec<(chrono::NaiveDate, i32, i32)> = sqlx::query_as(
+        "SELECT day, used_seconds, earned_seconds FROM screen_time_ledger
+         WHERE device_user_id = $1 AND day > CURRENT_DATE - $2::int
+         ORDER BY day",
+    )
+    .bind(id)
+    .bind(days)
+    .fetch_all(&st.db)
+    .await?;
+
+    // Streak: walk back from today over the fetched window; a missing or
+    // zero-usage today is forgiven (the day isn't over), any earlier gap ends it.
+    let today = chrono::Utc::now().date_naive();
+    let by_day: std::collections::HashMap<chrono::NaiveDate, i32> =
+        rows.iter().map(|r| (r.0, r.1)).collect();
+    let mut streak: i64 = 0;
+    let mut cursor = today;
+    loop {
+        let used = by_day.get(&cursor).copied().unwrap_or(0);
+        if used > 0 {
+            streak += 1;
+        } else if cursor != today {
+            break;
+        }
+        let Some(prev) = cursor.pred_opt() else { break };
+        // Don't walk past the fetched window — the streak is then "N+ days".
+        if today.signed_duration_since(prev).num_days() >= days {
+            break;
+        }
+        cursor = prev;
+    }
+
+    let out: Vec<Value> = rows
+        .into_iter()
+        .map(|(day, used, earned)| {
+            json!({
+                "day": day,
+                "used_minutes": used / 60,
+                "earned_minutes": earned / 60,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "days": out, "streak_days": streak })))
 }

@@ -12,9 +12,9 @@ interface Props {
   busy?: boolean;
   /** a lock command is queued but not yet applied (device was offline) */
   lockPending?: boolean;
+  unlockPending?: boolean;
   onLock?: (d: Device) => void;
   onUnlock?: (d: Device) => void;
-  onSsh?: (d: Device) => void;
   onDelete?: (d: Device) => void;
 }
 
@@ -25,16 +25,15 @@ export function DeviceCard({
   refCode,
   busy,
   lockPending,
+  unlockPending,
   onLock,
   onUnlock,
-  onSsh,
   onDelete,
 }: Props) {
   const tone = statusTone(device.status);
   const users = device.users ?? [];
   const isLocked = device.status === "locked";
   const isPending = device.status === "pending";
-  const isOffline = device.status === "offline";
   // Tamper signal: offline for 7+ days = the agent has probably been silenced.
   const darkDays = goneDarkDays(device.status, device.last_seen);
 
@@ -83,6 +82,14 @@ export function DeviceCard({
               style={{ color: "var(--warn)", borderColor: "var(--warn)" }}
             >
               LOCK PENDING
+            </span>
+          )}
+          {unlockPending && (
+            <span
+              className="label border rounded px-1.5 py-0.5"
+              style={{ color: "var(--warn)", borderColor: "var(--warn)" }}
+            >
+              UNLOCK PENDING
             </span>
           )}
           {darkDays !== null ? (
@@ -139,15 +146,6 @@ export function DeviceCard({
                 LOCK
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy || isOffline}
-              title={isOffline ? "Device is offline" : undefined}
-              onClick={() => onSsh?.(device)}
-            >
-              SHELL
-            </Button>
             <Link to={`/devices/${device.id}`} className="ml-auto">
               <Button size="sm" variant="ghost">
                 OPEN →

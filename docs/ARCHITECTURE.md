@@ -27,13 +27,13 @@ their data.
         ┌───────────────────────▼────────────────────────┐
         │  Server (server/)                               │  Rust · Axum · SQLx
         │  passkey auth · policy engine · command queue   │  Postgres · multi-tenant
-        │  event log · SSH broker · anti-cheat checks     │  serves the built SPA
+        │  event log · anti-cheat checks · phone alerts   │  serves the built SPA
         └───────────────────────┬────────────────────────┘
                                 │ HTTPS + WebSocket — agent API, device-token bearer
         ┌───────────────────────▼────────────────────────┐
         │  Agent (client/)                                │  Rust · static binary
         │  DNS + firewall · screen-time · tamper resist   │  systemd · per-user
-        │  usage ledger · lockout UI · reverse-SSH end    │  headless by default
+        │  usage ledger · lockout UI · tray companion     │  headless by default
         └─────────────────────────────────────────────────┘
 
         policy/ — the shared Policy document type, a path dependency of BOTH
@@ -42,7 +42,7 @@ their data.
 
 | Path      | What it is                                              | Stack                      |
 |-----------|---------------------------------------------------------|----------------------------|
-| `server/` | Backend API, auth, policy engine, SSH broker, anti-cheat| Rust, Axum, SQLx, Postgres |
+| `server/` | Backend API, auth, policy engine, agent bus, anti-cheat | Rust, Axum, SQLx, Postgres |
 | `web/`    | Admin control center (the "Nothing" UI)                 | Bun, React, Vite, Tailwind |
 | `client/` | Linux device agent                                      | Rust                       |
 | `policy/` | Shared `Policy` document (used by server **and** client)| Rust                       |
@@ -73,15 +73,13 @@ one origin and no production CORS. Responsibilities:
   the WS bus immediately when connected, else pulled on the next heartbeat.
 - **Event log** — the agent's telemetry and the server's own audit trail
   (`events` table); it's the record, and it isn't auto-pruned.
-- **SSH broker** — bridges a browser xterm terminal to a reverse tunnel from
-  the agent (`GET /api/ssh/:id/ws`), so an operator can reach a shell behind NAT.
 - **Anti-cheat checks** — cross-checks each heartbeat against known state and
   records an `evasion` event when they disagree (see [Anti-cheat](#anti-cheat)).
 - **Parent companion surface** — a scoped, revocable bearer token
   (`parent_access_tokens`) an admin mints from Settings, accepted only on the
   narrow `/api/parent/*` routes (list pending time requests, approve/deny, read
   alerts). It is not a session and not tied to a passkey; it cannot reach
-  policy, devices, SSH, or admin settings. This is the auth the tray
+  policy, devices, or admin settings. This is the auth the tray
   parent-mode uses.
 - **Phone alerts** — an optional background worker (`alerts.rs`) that sends
   one-way chat-bot messages (Discord/Slack webhook or Telegram) on confirmed
@@ -174,7 +172,7 @@ every ~15s (poll) or per-tick (WS):
            regression check (see Anti-cheat);  returns queued commands
                                                        │
   agent ◄──────────────────── commands (lock, unlock, apply_policy, credit_time,
-                                        deny_earn, set_tamper_level, discover, ssh)
+                                        deny_earn, set_tamper_level, discover)
   agent ─► ack ─► server updates command + (for lock/unlock) device.status
 ```
 
@@ -186,16 +184,16 @@ A background sweep flips any `online` device whose `last_seen` is older than
 The agent buffers events in memory (cap 512, oldest dropped) and POSTs the whole
 batch every tick; on failure the batch is kept and retried, so an offline tamper
 event survives to reconnect (`Agent::flush_events`). The server also writes its
-own audit events (lock/unlock decisions, earn approvals, SSH open/close,
-anti-cheat findings).
+own audit events (lock/unlock decisions, earn approvals, anti-cheat findings).
 
-### Reverse-SSH
+### No remote shell
 
-The agent opens a PTY and streams it as base64 WS frames to the server, which
-bridges them to a browser xterm terminal. Single-admin family use; the tray
-discloses an open shell to the person at the machine. Known edges (reconnect can
-leak a PTY; a second admin tears down the first) are documented in
-[TAMPER.md](TAMPER.md).
+Sentinel used to broker a reverse-SSH session from the agent to a browser
+terminal. That capability was removed in v0.4 — there is no remote shell at
+all anymore; everything an operator can do goes through the UI. Historical
+`ssh` events remain readable in the event log as the record of past sessions.
+A possible replacement (a secure reverse tunnel carrying native SSH+RDP) was
+considered and deferred.
 
 ---
 

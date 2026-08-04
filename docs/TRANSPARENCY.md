@@ -34,7 +34,6 @@ Everything the agent sends the server is one of these, and nothing else:
 - **LAN discovery results** — but only when a parent explicitly triggers a scan (to onboard
   a new device). It reports IPs, MAC addresses, and open ports of *other devices on your
   network*, not activity on this one.
-- **Whether a remote shell is currently open** on this device (see below).
 
 That's the complete list. There is no hidden channel — `client/src/client.rs` is the only
 code that talks to the server, and every request body it builds is listed above.
@@ -56,13 +55,13 @@ somewhere else, not planned, not collected and just "not shown to you":
   forwarded or answered with NXDOMAIN, on your machine, on the spot. The agent does not
   log which domains you requested and does not ship a query log anywhere.
 
-One honest caveat: the remote shell described below is a **real root shell**, not a
-sandboxed activity viewer. Sentinel itself does not automatically collect any of the things
-above, and there's no background job scraping your files. But if a parent opens a shell and
-manually goes looking through the filesystem, root can read anything on disk — that's true
-of any root shell on any Linux machine, managed or not. Sentinel's actual promise here isn't
-"a shell is technically impossible to misuse" — it's that a shell is **never open without
-you knowing**. That's enforced in the design, not just policy: see the tray section below.
+- **No remote shell.** Earlier versions of Sentinel let a parent open a root shell on this
+  device (always disclosed to you while it was live). That capability has been **removed
+  entirely** — there is no remote shell at all anymore, and no code path that could open
+  one. The promise got stronger: it's no longer "a shell is never open without you
+  knowing", it's "there is no shell". If shells were ever opened on this device in the
+  past, those sessions are still visible as `ssh` entries in the event log — the record
+  wasn't erased along with the feature.
 
 ## What they can do remotely
 
@@ -76,21 +75,12 @@ A parent, from the web dashboard, can push these commands to the agent:
   firewall rules, tamper level.
 - **Grant or deny extra time**, including approving/denying an earn-time request you sent.
 - **Scan the local network** to help onboard another device.
-- **Open a remote shell** on this device. The agent never listens for inbound connections —
-  it dials out to the server, which brokers the session to your parent's browser. The shell
-  runs as root.
 
-The remote shell is the most powerful thing a parent can do, so it's the one thing Sentinel
-goes out of its way to never hide. The moment a shell opens:
-
-- Your tray icon (if the companion app is running) shows **"REMOTE SHELL: ACTIVE"** as a
-  persistent, non-dismissable menu item — not a toast that disappears.
-- A critical desktop notification fires: *"A PARENT OPENED A REMOTE SHELL ON THIS DEVICE."*
-- Another notification fires the moment it closes.
-
-There is no code path that opens a shell silently. If you don't have the tray companion
-running, you lose this visibility — that's a reason to run it, not a loophole the design
-intends.
+That's everything — and everything on that list goes through the same UI and the same
+audited command queue. There is **no remote shell**: a parent cannot reach a terminal,
+your files, or arbitrary commands on this device through Sentinel. Older versions had a
+(always-disclosed) remote shell; it has been removed outright, and any past sessions
+remain visible as `ssh` entries in the event log.
 
 ## What you'll experience
 
@@ -143,7 +133,7 @@ physical access to the machine. What it does instead:
 
 The point of Sentinel isn't to spy on you without your knowledge — it's to enforce agreed
 limits (time, content, bedtime) in a way that's checkable. Every mechanism above either
-reports something structural (time used, lock state, a remote session being open) or an
+reports something structural (time used, lock state, a policy change) or an
 attempt to bypass enforcement. Nothing reports the content of what you do, say, or look at.
 If you don't trust that, you don't have to take it on faith: the agent's source is what this
 document was written from, line by line, and the tray, the events log, and this file are
