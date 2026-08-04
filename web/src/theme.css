@@ -278,3 +278,94 @@
     animation: none !important;
   }
 }
+
+/* ============================================================================
+   FAMILY — the home screen's own layer.
+
+   Deliberately quieter than HARDWARE BAY: no dot-matrix numerals, no LED
+   strip, no silkscreen ref-codes. A parent opening this should see their
+   children, not a rack. Structure follows flick's rules — one accent, hairline
+   borders, elevation by surface step rather than shadow — but the type is a
+   readable sans at human sizes instead of technical mono.
+   ========================================================================== */
+.fam-wrap { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+
+.fam-head { margin-bottom: 2rem; }
+.fam-greet {
+  font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.3rem);
+  font-weight: 600; letter-spacing: -0.02em; margin: 0 0 0.2rem; color: var(--fg);
+}
+.fam-sub { margin: 0; color: var(--fg-dim); font-size: 0.95rem; }
+.fam-quiet, .fam-error { color: var(--fg-dim); }
+.fam-error { color: var(--crit); }
+
+/* The one interruption. Absent on a healthy day, unmissable when not. */
+.fam-trouble {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.7rem 0.9rem; margin-bottom: 1.5rem;
+  border: 1px solid var(--warn); border-radius: var(--radius);
+  color: var(--fg); text-decoration: none; font-size: 0.9rem;
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+}
+.fam-trouble-dot {
+  width: 0.5rem; height: 0.5rem; border-radius: 50%;
+  background: var(--warn); flex: none;
+}
+.fam-trouble-go { margin-left: auto; color: var(--fg-dim); }
+
+.fam-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: 0.9rem;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+}
+
+.fam-card {
+  display: flex; gap: 1rem; align-items: flex-start;
+  padding: 1.1rem; text-decoration: none;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.fam-card:hover { border-color: var(--line-2); background: var(--surface-2); }
+.fam-card:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+
+.fam-avatar {
+  flex: none; border-radius: 50%;
+  display: grid; place-items: center;
+  font-weight: 700; letter-spacing: 0.02em;
+}
+
+.fam-card-body { min-width: 0; flex: 1; }
+.fam-name { margin: 0 0 0.1rem; font-size: 1.05rem; font-weight: 600; }
+.fam-meta {
+  margin: 0 0 0.75rem; font-size: 0.8rem; color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.fam-bar {
+  height: 0.4rem; border-radius: 999px;
+  background: var(--line); overflow: hidden; margin-bottom: 0.4rem;
+}
+.fam-bar-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--ok); transition: width 260ms ease;
+}
+/* Red is reserved for "spent" — the one state a parent needs to spot. */
+.fam-bar-fill[data-spent="true"] { background: var(--accent); }
+
+.fam-time-label { margin: 0; font-size: 0.85rem; color: var(--fg-dim); }
+.fam-time-label strong { color: var(--fg); font-weight: 600; }
+.fam-time-none { margin: 0; font-size: 0.85rem; color: var(--fg-faint); }
+.fam-earned { color: var(--ok); }
+.fam-spent { color: var(--accent); font-weight: 600; }
+
+.fam-empty {
+  border: 1px dashed var(--line-2); border-radius: var(--radius);
+  padding: 2.5rem 1.5rem; text-align: center; color: var(--fg-dim);
+}
+.fam-cta {
+  display: inline-block; margin-top: 0.9rem; padding: 0.55rem 1.1rem;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  color: var(--fg); text-decoration: none; font-size: 0.9rem;
+}
+.fam-cta:hover { background: var(--surface-2); }
