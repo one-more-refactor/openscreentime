@@ -121,13 +121,27 @@ export function policyForLevel(level: number, base: Policy): Policy {
     // 1.1.1.1 no filtering · 1.1.1.2 malware · 1.1.1.3 malware + adult
     upstream: level === 0 ? "1.1.1.1" : level === 1 ? "1.1.1.2" : "1.1.1.3",
     blocklist: level >= 2 ? BLOCKLIST : [],
-    allowlist: level >= 4 ? (base.dns.allowlist ?? []) : ["*"],
+    // Never destroy a curated allowlist. Previously dropping below level 4
+    // replaced it with ["*"], so a parent who explored the control lost the
+    // list permanently — and returning to level 4 then read ["*"] as the base.
+    // The list is kept and simply not consulted while the mode is permissive.
+    allowlist: level >= 4 ? (base.dns.allowlist?.length ? base.dns.allowlist : ["*"]) : ["*"],
   };
 
   next.screen_time = {
     ...next.screen_time,
     enabled: level >= 2,
-    daily_limit_minutes: level >= 3 ? 45 : level >= 2 ? 60 : 0,
+    // Respect a limit the parent set by hand. Overwriting it with 45/60 meant a
+    // deliberate 90 minutes was silently cut by one nudge of the slider, and
+    // dragging back did NOT restore it — the number was simply gone.
+    daily_limit_minutes:
+      level < 2
+        ? (base.screen_time?.daily_limit_minutes ?? 0)
+        : (base.screen_time?.daily_limit_minutes ?? 0) > 0
+          ? (base.screen_time?.daily_limit_minutes as number)
+          : level >= 3
+            ? 45
+            : 60,
     schedule:
       level >= 3
         ? [

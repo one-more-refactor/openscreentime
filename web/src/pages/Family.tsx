@@ -138,7 +138,6 @@ export function Family() {
         if (!alive) return;
         setProfiles(ps);
         if (!alive) return;
-        setDevices(ds);
         // Children live on devices, so the family view has to gather them.
         // A dedicated endpoint would be better; noted rather than faked.
         const entries = await Promise.all(
@@ -152,6 +151,10 @@ export function Family() {
         );
         if (!alive) return;
         setUsersByDevice(Object.fromEntries(entries));
+        // Set devices LAST: setting it before the per-device user fetches
+        // resolved made `children` briefly empty, flashing the
+        // "No children set up yet" empty state on every single load.
+        setDevices(ds);
       } catch (e) {
         if (alive) setError(e instanceof Error ? e.message : "Could not load the family");
       }

@@ -70,6 +70,7 @@ export function ChildDetail() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [requests, setRequests] = useState<EarnRequest[]>([]);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,6 +90,7 @@ export function ChildDetail() {
         }
       }
       setUsers(found);
+      setLoading(false);
       try {
         setRequests((await api.listEarnRequests("pending")).filter((r) => r.os_username === key));
       } catch {
@@ -96,6 +98,7 @@ export function ChildDetail() {
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load this child");
+      setLoading(false);
     }
   }, [key]);
 
@@ -113,6 +116,15 @@ export function ChildDetail() {
   );
   const limit = profile?.policy.screen_time?.daily_limit_minutes ?? 0;
   const level = profile ? levelForPolicy(profile.policy) : 2;
+
+  if (loading)
+    return (
+      <div className="ch-wrap">
+        <Link to="/" className="ch-back">← Family</Link>
+        <p className="fam-quiet">Loading…</p>
+      </div>
+    );
+
 
   async function setLevel(next: number) {
     if (!profile) return;
