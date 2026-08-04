@@ -130,7 +130,11 @@ fn local_resolver_running(exec: &Exec) -> bool {
 }
 
 /// Build the dnsmasq ruleset that realizes the policy.
-pub fn render_dnsmasq(dns: &DnsPolicy, lockdown: &NetworkLockdown) -> String {
+pub fn render_dnsmasq(
+    dns: &DnsPolicy,
+    lockdown: &NetworkLockdown,
+    server_host: Option<&str>,
+) -> String {
     let mut out = String::new();
     out.push_str("# Managed by sentinel-agent — do not edit.\n");
     out.push_str("no-resolv\n"); // never inherit host resolv.conf upstreams
@@ -159,6 +163,15 @@ pub fn render_dnsmasq(dns: &DnsPolicy, lockdown: &NetworkLockdown) -> String {
                 .trim_start_matches('.');
             if !b.is_empty() {
                 out.push_str(&format!("address=/{b}/0.0.0.0\n"));
+            }
+        }
+        // The control server must ALWAYS resolve, or a default-deny policy
+        // permanently severs the only channel that could relax it: the agent
+        // cannot reach the server, so no new policy can ever arrive, and the
+        // console has no way to undo what it just did.
+        if let Some(host) = server_host {
+            if host.parse::<std::net::IpAddr>().is_err() {
+                out.push_str(&format!("server=/{host}/{}\n", dns.upstream));
             }
         }
         // Catch-all: anything not matched above is NXDOMAIN.
@@ -207,9 +220,14 @@ pub fn render_resolv_conf() -> String {
 ///
 /// Returns the [`DnsGap`]s that stop this host from actually enforcing the
 /// policy. An empty vec means DNS is genuinely in force.
-pub fn apply(exec: &Exec, dns: &DnsPolicy, lockdown: &NetworkLockdown) -> Result<Vec<DnsGap>> {
+pub fn apply(
+    exec: &Exec,
+    dns: &DnsPolicy,
+    lockdown: &NetworkLockdown,
+    server_host: Option<&str>,
+) -> Result<Vec<DnsGap>> {
     let mut gaps = Vec::new();
-    let conf = render_dnsmasq(dns, lockdown);
+    let conf = render_dnsmasq(dns, lockdown, server_host);
     exec.write_file(DNSMASQ_CONF, &conf)?;
 
     // Writing the ruleset does not make dnsmasq read it. Drop the include stub
@@ -224,13 +242,36 @@ pub fn apply(exec: &Exec, dns: &DnsPolicy, lockdown: &NetworkLockdown) -> Result
     if let Err(e) = exec.run("systemctl", &["restart", "dnsmasq"]) {
         tracing::error!("dnsmasq restart failed: {e}");
     }
-    if !exec.dry_run() && !local_resolver_running(exec) {
+    let no_resolver = !exec.dry_run() && !local_resolver_running(exec);
+    if no_resolver {
         gaps.push(DnsGap::NoLocalResolver);
     }
 
-    // Pin resolv.conf to the local resolver, then set the immutable bit so a
-    // managed user can't repoint it. (chattr +i; re-asserted by the tamper loop.)
-    gaps.extend(pin_resolv_conf(exec)?);
+    // Pin resolv.conf to the local resolver — but ONLY if there is a resolver
+    // to point at.
+    //
+    // Pinning unconditionally is how a device loses DNS completely and then
+    // resists being fixed: /etc/resolv.conf says 127.0.0.1, nothing is
+    // listening there, the immutable bit makes `sudo nano /etc/resolv.conf`
+    // fail with "Operation not permitted", and the tamper loop re-pins every
+    // 10 seconds so even a correct `chattr -i` is reverted before the edit
+    // lands. The agent then cannot resolve its own server either, so no policy
+    // can undo it remotely. That is a bricked machine, caused by the failure
+    // handler rather than the failure.
+    //
+    // A device that cannot filter must stay usable and loudly degraded — the
+    // rule this module opens with.
+    if no_resolver {
+        tracing::error!(
+            "not pinning /etc/resolv.conf: no local resolver is listening, so pinning it \
+             would leave this device with no working DNS and no way to edit it back"
+        );
+        // Undo a pin from a previous run that DID have a resolver, otherwise the
+        // device stays broken from then on.
+        let _ = exec.run("chattr", &["-i", RESOLV_CONF]);
+    } else {
+        gaps.extend(pin_resolv_conf(exec)?);
+    }
 
     for gap in &gaps {
         tracing::error!("DNS enforcement gap [{}]: {}", gap.kind(), gap.explain());
@@ -296,7 +337,7 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default());
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None);
         assert!(conf.contains("server=/wikipedia.org/1.1.1.2"));
         assert!(conf.contains("server=/edu/1.1.1.2"));
         assert!(conf.contains("address=/#/"));
@@ -312,7 +353,7 @@ mod tests {
             safe_search: false,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default());
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None);
         assert!(conf.contains("server=1.1.1.2"));
         assert!(!conf.contains("address=/#/"));
     }
@@ -330,7 +371,7 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let conf = render_dnsmasq(&dns, &lockdown);
+        let conf = render_dnsmasq(&dns, &lockdown, None);
         assert!(conf.contains("address=/onion/0.0.0.0"));
         assert!(conf.contains("address=/torproject.org/0.0.0.0"));
     }

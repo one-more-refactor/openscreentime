@@ -50,7 +50,12 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         println!("  └──────────────────────────────────────────────┘");
         println!("  Write this down NOW — it is shown once and stored only as a hash.");
         println!("  If this device ever locks you out with no network:");
-        println!("      sudo sentinel-agent unlock --pin {pin} --minutes 60");
+        // NOT `--pin {pin}`: arguments land in /proc/<pid>/cmdline, which is
+        // world-readable, so any local user — including the child this is meant
+        // to constrain — can capture the plaintext PIN with a five-line loop
+        // the first time a parent uses the documented recovery path. The same
+        // reasoning already governs the PIN *hash* elsewhere in this codebase.
+        println!("      sudo sentinel-agent unlock --minutes 60      (it will ask for the PIN)");
         println!();
     } else {
         // An older server that does not mint one. Say so rather than leaving

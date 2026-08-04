@@ -87,8 +87,11 @@ enum Cmd {
     /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
     /// (nft table + resolv.conf pin torn down, users un-frozen). Requires root.
     Unlock {
+        /// Optional. Prefer omitting it: anything passed here is visible in
+        /// /proc/<pid>/cmdline to every local user, including the person this
+        /// device constrains. Omit it and the PIN is read from the terminal.
         #[arg(long)]
-        pin: String,
+        pin: Option<String>,
         /// How long to suspend enforcement for, in minutes.
         #[arg(long, default_value_t = 60)]
         minutes: u64,
@@ -103,6 +106,32 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+/// Read the PIN from the terminal without echoing it and without ever placing
+/// it on a command line. No new dependency: raw-mode toggling via `stty` is
+/// enough for a one-shot prompt, and falls back to a plain read if that fails.
+fn rpassword_prompt() -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    eprint!("Recovery PIN: ");
+    std::io::stderr().flush().ok();
+    let echo_off = std::process::Command::new("stty")
+        .arg("-echo")
+        .stdin(std::process::Stdio::inherit())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+    if echo_off {
+        let _ = std::process::Command::new("stty")
+            .arg("echo")
+            .stdin(std::process::Stdio::inherit())
+            .status();
+        eprintln!();
+    }
+    read?;
+    Ok(line.trim().to_string())
 }
 
 #[tokio::main]
@@ -178,6 +207,18 @@ async fn main() -> Result<()> {
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
-        Cmd::Unlock { pin, minutes } => unlock::run(&ctx, &pin, minutes),
+        Cmd::Unlock { pin, minutes } => {
+            let pin = match pin {
+                Some(p) => {
+                    eprintln!(
+                        "warning: --pin on the command line is readable by any local user \
+                         via /proc; next time omit it and type it when asked."
+                    );
+                    p
+                }
+                None => rpassword_prompt()?,
+            };
+            unlock::run(&ctx, &pin, minutes)
+        }
     }
 }
