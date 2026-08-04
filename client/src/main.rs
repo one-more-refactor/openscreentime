@@ -5,6 +5,7 @@
 //!   --dry-run       log actions instead of executing them (safe as non-root)
 //!   --tamper-max    raise the tamper ceiling to level 3 (opt-in, TAMPER.md)
 
+mod childcli;
 mod client;
 mod config;
 mod discovery;
@@ -70,6 +71,10 @@ enum Cmd {
     InstallService,
     /// Show enrollment / service status.
     Status,
+    /// How much screen time you have left today. Safe to run as yourself.
+    Time,
+    /// Ask a parent for more time. Safe to run as yourself.
+    Ask,
     /// Pair this machine as a parent companion: store a scoped parent access
     /// token (minted in the web console → Settings → Parent access) so the tray
     /// can show + approve time requests. Runs as the desktop user (no root).
@@ -157,9 +162,9 @@ async fn main() -> Result<()> {
     }
     // The tray companion and `pair` run as the desktop user on purpose — no root nag.
     #[cfg(feature = "tray")]
-    let is_user_cmd = matches!(cli.cmd, Cmd::Tray | Cmd::Pair { .. });
+    let is_user_cmd = matches!(cli.cmd, Cmd::Tray | Cmd::Pair { .. } | Cmd::Time | Cmd::Ask);
     #[cfg(not(feature = "tray"))]
-    let is_user_cmd = matches!(cli.cmd, Cmd::Pair { .. });
+    let is_user_cmd = matches!(cli.cmd, Cmd::Pair { .. } | Cmd::Time | Cmd::Ask);
     if !ctx.is_root && !cli.dry_run && !is_user_cmd {
         tracing::warn!(
             "not running as root; enforcing subcommands will refuse (use --dry-run to simulate)"
@@ -175,6 +180,8 @@ async fn main() -> Result<()> {
         }
         Cmd::InstallService => service::install_service(ctx),
         Cmd::Status => service::status(),
+        Cmd::Time => childcli::time(),
+        Cmd::Ask => childcli::ask(),
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
