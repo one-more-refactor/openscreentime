@@ -84,6 +84,36 @@ fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
 /// tampering with it requires root, at which point the game is over anyway).
 const LAST_CONTACT_PATH: &str = "/var/lib/sentinel/last_contact";
 
+/// Where the whole-device admin lock is persisted.
+///
+/// The lock used to live only in memory, so a power-cycle cleared it — while
+/// the server kept `devices.status = 'locked'` (heartbeats deliberately never
+/// clear it, and an acked `lock` command is never redelivered). A parent locked
+/// the device, the kid held the power button, and the machine came back fully
+/// usable with the console still showing it locked. That is the same
+/// console-disagrees-with-reality failure as the rest of this codebase's
+/// history, just pointing the other way.
+const DEVICE_LOCKED_PATH: &str = "/var/lib/sentinel/device_locked";
+
+/// Was the device admin-locked when we last shut down? Absent file = unlocked,
+/// which is the right default for a device that has never been locked.
+fn load_device_locked() -> bool {
+    std::fs::read_to_string(DEVICE_LOCKED_PATH)
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn save_device_locked(locked: bool) {
+    let path = std::path::Path::new(DEVICE_LOCKED_PATH);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(path, if locked { "1" } else { "0" }) {
+        // warn, not debug: losing this silently is exactly the bug being fixed.
+        tracing::warn!("could not persist device lock state: {e}");
+    }
+}
+
 /// Load the persisted last-contact wall-clock. A fresh install (no file) gets
 /// `now` — the hard-lockdown clock starts at first run, it doesn't punish a
 /// brand-new device for history it doesn't have.
@@ -311,7 +341,8 @@ impl Agent {
             // Reboot-surviving: reload the day's usage so a restart can't reset it.
             tracker: screentime::UsageTracker::load(),
             frozen: HashSet::new(),
-            device_locked: false,
+            // Reboot-surviving: a parent's lock must outlast a power-cycle.
+            device_locked: load_device_locked(),
             policy_version: String::new(),
             expected_wall: None,
             requested_earn: HashMap::new(),
@@ -1184,6 +1215,7 @@ impl Agent {
         let result = match cmd.cmd_type.as_str() {
             CMD_LOCK => {
                 self.device_locked = true;
+                save_device_locked(true);
                 for user in self.policies.keys().cloned().collect::<Vec<_>>() {
                     let pin_hash = self
                         .policies
@@ -1209,6 +1241,7 @@ impl Agent {
             }
             CMD_UNLOCK => {
                 self.device_locked = false;
+                save_device_locked(false);
                 // An admin unlock also lifts a confirmed-evasion lockdown.
                 self.tamper_lockdown = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {
