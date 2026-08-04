@@ -40,5 +40,26 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
     cfg.save()?;
     tracing::info!("wrote {} (0600)", crate::config::CONFIG_PATH);
     println!("Enrolled. Config written to {}", crate::config::CONFIG_PATH);
+    // Loud on purpose. This is the only time the PIN is ever shown, and it is
+    // the only way back into this machine if it locks itself out with no
+    // network — at which point nobody can look it up anywhere.
+    if let Some(pin) = resp.recovery_pin.as_deref() {
+        println!();
+        println!("  ┌──────────────────────────────────────────────┐");
+        println!("  │  RECOVERY PIN   {pin}                     │");
+        println!("  └──────────────────────────────────────────────┘");
+        println!("  Write this down NOW — it is shown once and stored only as a hash.");
+        println!("  If this device ever locks you out with no network:");
+        println!("      sudo sentinel-agent unlock --pin {pin} --minutes 60");
+        println!();
+    } else {
+        // An older server that does not mint one. Say so rather than leaving
+        // the operator assuming a recovery path exists.
+        println!();
+        println!("  WARNING: this server did not issue a recovery PIN.");
+        println!("  If this device locks itself out, there is NO offline way back in");
+        println!("  short of masking the systemd unit from the boot loader.");
+        println!();
+    }
     Ok(())
 }

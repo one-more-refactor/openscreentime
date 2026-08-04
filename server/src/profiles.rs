@@ -27,7 +27,7 @@ const MIN_PIN_LEN: usize = 4;
 /// Hash a parent PIN with Argon2 for storage as `policy.parent_pin_hash`. The
 /// plaintext PIN is never stored or returned; the agent verifies entered PINs
 /// against this hash locally.
-async fn hash_pin(pin: String) -> AppResult<String> {
+pub(crate) async fn hash_pin(pin: String) -> AppResult<String> {
     // Argon2 is deliberately CPU/memory-hard; run it off the async worker so a
     // burst of PIN saves can't stall heartbeats/WS on this internet-exposed box.
     tokio::task::spawn_blocking(move || {
