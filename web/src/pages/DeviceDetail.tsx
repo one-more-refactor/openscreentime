@@ -1,7 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   assignProfile,
+  cancelCommand,
+  listCommands,
   creditTime,
   deleteDevice,
   getDevice,
@@ -23,6 +25,7 @@ import type {
   VpnKind,
 } from "../types";
 import { useAsync } from "../lib/useAsync";
+import type { CommandRow } from "../types";
 import { useToast, errMsg } from "../lib/toast";
 import { PageHeader } from "../layout/Shell";
 import {
@@ -30,10 +33,10 @@ import {
   EnrollCommand,
   ErrorPanel,
   EventFeed,
+  UsageHistory,
   Modal,
   Panel,
   Select,
-  SshTerminal,
   StatusLed,
   statusTone,
   Toggle,
@@ -49,10 +52,19 @@ export function DeviceDetail() {
   const profiles = useAsync<Profile[]>(listProfiles, []);
   // Per-user used/earned minutes today (contract §5).
   const usage = useAsync<DeviceUser[]>(() => listDeviceUsers(id), [id]);
+  const queue = useAsync<CommandRow[]>(() => listCommands(id), [id]);
+  // The queue is live state — poll it while any command is pending.
+  useEffect(() => {
+    const pending = (queue.data ?? []).some(
+      (c) => c.status === "queued" || c.status === "sent",
+    );
+    if (!pending) return;
+    const t = setInterval(queue.reload, 8000);
+    return () => clearInterval(t);
+  }, [queue.data, queue.reload]);
 
   const [confirmL3, setConfirmL3] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [ssh, setSsh] = useState<{ id: string; name: string } | null>(null);
   const [lockBusy, setLockBusy] = useState(false);
   const [lockPending, setLockPending] = useState(false);
   const [tamperBusy, setTamperBusy] = useState(false);
@@ -223,14 +235,6 @@ export function DeviceDetail() {
                 {enrollBusy ? "GENERATING…" : "SHOW ENROLL COMMAND"}
               </Button>
             )}
-            <Button
-              variant="ghost"
-              disabled={d.status !== "online" && d.status !== "locked"}
-              title={d.status === "offline" || d.status === "pending" ? "Device is offline" : undefined}
-              onClick={() => setSsh({ id: d.id, name: d.name })}
-            >
-              SHELL
-            </Button>
             <Button variant="ghost" onClick={() => setConfirmDelete(true)}>
               REMOVE
             </Button>
@@ -300,6 +304,12 @@ export function DeviceDetail() {
                         earned={stats?.earned_minutes_today}
                         loading={usage.loading}
                       />
+                      <details>
+                        <summary className="label text-muted cursor-pointer select-none">
+                          HISTORY
+                        </summary>
+                        <UsageHistory deviceUserId={u.id} />
+                      </details>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="label" style={{ color: "var(--fg-faint)" }}>
                           GRANT TIME
@@ -366,8 +376,22 @@ export function DeviceDetail() {
           </Panel>
         </div>
 
-        {/* Right column: events */}
+        {/* Right column: queue + events */}
         <div className="flex flex-col gap-6">
+          <Panel title="COMMAND QUEUE" refCode="CQ-01">
+            <CommandQueue
+              rows={queue.data ?? []}
+              onCancel={async (cmdId) => {
+                try {
+                  await cancelCommand(cmdId);
+                } catch {
+                  // Raced the ack — the reload below shows the truth either way.
+                }
+                queue.reload();
+                device.reload();
+              }}
+            />
+          </Panel>
           <Panel title="RECENT EVENTS" refCode="EV-01">
             <EventFeed events={d.recent_events} />
             <Link to={`/events?device_id=${d.id}`}>
@@ -476,7 +500,6 @@ export function DeviceDetail() {
         )}
       </Modal>
 
-      <SshTerminal target={ssh} onClose={() => setSsh(null)} />
     </>
   );
 }
@@ -659,6 +682,69 @@ function Field({ k, v, accent }: { k: string; v: string; accent?: boolean }) {
       <dd className="dot text-xs" style={{ color: accent ? "var(--accent)" : "var(--fg)" }}>
         {v}
       </dd>
+    </div>
+  );
+}
+
+/** The device's command queue: pending rows with CANCEL, settled rows dimmed.
+ *  Server-backed — survives reloads, unlike the old optimistic-only chips. */
+function CommandQueue({
+  rows,
+  onCancel,
+}: {
+  rows: CommandRow[];
+  onCancel: (id: string) => void;
+}) {
+  const pending = rows.filter((c) => c.status === "queued" || c.status === "sent");
+  const settled = rows.filter((c) => c.status !== "queued" && c.status !== "sent").slice(0, 8);
+  if (rows.length === 0) {
+    return <p className="label text-muted">NO COMMANDS YET</p>;
+  }
+  const age = (iso: string) => {
+    const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (mins < 1) return "JUST NOW";
+    if (mins < 60) return `${mins}M AGO`;
+    const h = Math.round(mins / 60);
+    return h < 48 ? `${h}H AGO` : `${Math.round(h / 24)}D AGO`;
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      {pending.length === 0 && <p className="label text-muted">NOTHING PENDING</p>}
+      {pending.map((c) => (
+        <div key={c.id} className="flex items-center gap-2 border rounded px-2 py-1.5 hairline">
+          <span className="label" style={{ color: "var(--warn)" }}>
+            {c.type.replace(/_/g, " ").toUpperCase()}
+          </span>
+          <span className="label text-muted">
+            {c.status === "sent" ? "SENT" : "QUEUED"} · {age(c.created_at)}
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            onClick={() => onCancel(c.id)}
+          >
+            CANCEL
+          </Button>
+        </div>
+      ))}
+      {settled.length > 0 && (
+        <details>
+          <summary className="label text-muted cursor-pointer select-none">
+            RECENT ({settled.length})
+          </summary>
+          <div className="mt-2 flex flex-col gap-1">
+            {settled.map((c) => (
+              <div key={c.id} className="flex items-center gap-2 px-2 py-1 opacity-70">
+                <span className="label">{c.type.replace(/_/g, " ").toUpperCase()}</span>
+                <span className="label text-muted ml-auto">
+                  {c.status.toUpperCase()} · {age(c.created_at)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

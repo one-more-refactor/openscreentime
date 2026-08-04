@@ -7,7 +7,7 @@
 //!   * **the parent API** (`ParentAuth`, `/api/parent/*`) — a paired companion
 //!     (tray parent-mode or a phone) reads pending earn-requests + recent
 //!     alerts and approves/denies requests with its bearer token. Deliberately
-//!     narrow: it cannot touch policy, devices, SSH, or admin settings.
+//!     narrow: it cannot touch policy, devices, or admin settings.
 
 use axum::{
     extract::{Path, State},

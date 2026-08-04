@@ -41,11 +41,10 @@ red) · `EventFeed` (severity LEDs) · `Modal` · `LockOverlay` (agent-GUI previ
 
 - **Login** — dot wordmark, single `PasskeyButton`, register/first-admin toggle,
   agent-GUI lock preview.
-- **Devices** — device-count `Stat`, `DeviceCard` grid, lock/ssh quick actions,
+- **Devices** — device-count `Stat`, `DeviceCard` grid, lock/unlock quick actions,
   add-device → enroll token, LAN Discovery panel with per-host enroll.
 - **Device detail** — identity, per-user profile assignment, recent `EventFeed`,
-  tamper-level toggle with the Level-3 confirm + recovery procedure (`TAMPER.md`),
-  SSH session.
+  tamper-level toggle with the Level-3 confirm + recovery procedure (`TAMPER.md`).
 - **Profiles** — kids/teen/default presets + custom, full `PolicyEditor`,
   duplicate/delete/save.
 - **Events** — filterable audit feed (device/type/severity + payload search).

@@ -62,7 +62,7 @@ A light theme mirrors these (white surfaces, black ink, same accent). Dark is de
 - `StatusLed` — colored dot + label (online/offline/locked/pending).
 - `Panel` — bordered card with optional dot-grid background and a mono uppercase header.
 - `Stat` — oversized dot-numeral with a mono caption (e.g. `07` DEVICES).
-- `DeviceCard` — name, StatusLed, last-seen, per-user chips, quick actions (lock/ssh).
+- `DeviceCard` — name, StatusLed, last-seen, per-user chips, quick actions (lock/unlock).
 - `PolicyEditor` — structured form over the Policy jsonb (DNS allowlist, screen-time schedule,
   gamification toggles). Zero-trust framing: "BLOCKED BY DEFAULT — add exceptions below."
 - `PasskeyButton` — the login/register affordance.

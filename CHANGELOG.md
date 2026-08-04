@@ -13,6 +13,24 @@ patch bump means fixes only. The agent self-updates by comparing this version
 
 ## [Unreleased]
 
+Headline: **the remote shell is gone**. Sentinel no longer contains a remote
+shell at all — everything a parent can do now goes through the UI. The
+transparency promise gets simpler and stronger: instead of "a shell is never
+open without the device being told", there is no shell to open.
+
+### Removed
+
+- **Breaking**: the remote shell feature, end to end. The
+  `POST /api/devices/:id/ssh`, `GET /api/ssh/:id/ws`, and
+  `POST /api/ssh/:id/close` routes are gone, the `ssh_open`/`ssh_close`
+  command types are gone, and the `ssh_sessions` table is dropped
+  (`0008_remove_ssh.sql`). The web terminal and the agent's PTY endpoint are
+  removed with them.
+- Historical `ssh` **events remain readable** in the event log — the record
+  that past sessions happened survives; only the capability is removed.
+- A possible future replacement — a secure reverse tunnel carrying native
+  SSH+RDP — was considered and deferred; nothing of it ships today.
+
 ## [0.3.0] - 2026-08-04
 
 Headline: **VPN profiles**. Drop a WireGuard `.conf` or OpenVPN `.ovpn`

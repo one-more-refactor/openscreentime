@@ -10,12 +10,12 @@ A guide for AI agents working in this repository. Documents the architecture, co
 
 | Path | Role | Stack |
 |------|------|-------|
-| `server/` | Backend API, auth, policy engine, SSH broker, agent WS hub | Rust, Axum, SQLx, Postgres, `webauthn-rs` |
+| `server/` | Backend API, auth, policy engine, agent WS hub | Rust, Axum, SQLx, Postgres, `webauthn-rs` |
 | `web/` | Admin control center (Nothing-style monochrome UI) | Bun, React 18, Vite, Tailwind, `@simplewebauthn/browser` |
 | `client/` | Linux device agent (root, systemd, nftables, DNS) | Rust, Tokio, `tokio-tungstenite`, `nix` |
 | `policy/` | Shared `Policy` document (jsonb, serde) | Rust only |
 
-**Architecture**: Web (HTTPS) → Server (API + WS) ← Agent (HTTPS + WS). Agent dials out; no inbound listeners. Server brokers reverse-SSH over the agent's existing WS.
+**Architecture**: Web (HTTPS) → Server (API + WS) ← Agent (HTTPS + WS). Agent dials out; no inbound listeners. There is no remote shell (removed in v0.4) — all parent actions go through the UI.
 
 ---
 
@@ -74,26 +74,25 @@ podman-compose up -d
 
 ```
 main.rs       → AppState, router, middleware stack, static web fallback
-state.rs      → AppState, Hub (agent WS + SSH bridges), AuthAdmin/AgentAuth extractors
+state.rs      → AppState, Hub (agent WS), AuthAdmin/AgentAuth extractors
 error.rs      → AppError (error envelope), AppResult
 auth.rs       → Passkey (WebAuthn) registration/login, session cookies, token hashing
 auth_oidc.rs  → OIDC SSO (Authentik), discovery at startup, admin matching by email
 db.rs         → sqlx pool + embedded migrations
 agent.rs      → Agent API: enroll, heartbeat, policy pull, events push, command ack, WS bus
-devices.rs    → Device CRUD, lock/unlock, SSH session creation, device-user listing
+devices.rs    → Device CRUD, lock/unlock, device-user listing
 profiles.rs   → Profile CRUD, preset seeding, policy updates
 presets.rs    → Hardcoded JSON for kids/teen/default presets (mirrors docs/PROFILES.md)
 earn.rs       → Earn-time request flow (agent → server → web approval → credit_time cmd)
 events.rs     → Event listing (paginated, filtered)
 discovery.rs  → LAN scan command + discovery_result events
-ssh.rs        → Reverse-SSH broker (WS bridge: browser ↔ agent via base64 frames)
 rate_limit.rs → Fixed-window in-memory limiter (auth: 10/60s, enroll: 5/60s)
 static_web.rs → SPA fallback serving + 404→200 HTML rewrite middleware
 ```
 
 **Request flow**: Every handler uses extractors (`AuthAdmin`, `AgentAuth`) that scope queries to `tenant_id`. No handler manually checks tenant — the extractor does it.
 
-**WS Hub**: `Hub` tracks live agent connections (`device_id → mpsc::Sender<Value>`) and SSH bridges (`session_id → SshBridge`). Commands are enqueued in DB + pushed via WS if online. Agent acks via HTTP or WS.
+**WS Hub**: `Hub` tracks live agent connections (`device_id → mpsc::Sender<Value>`). Commands are enqueued in DB + pushed via WS if online. Agent acks via HTTP or WS.
 
 ### Web (`web/src/`)
 
@@ -107,7 +106,7 @@ lib/theme.tsx     → Dark/light toggle (localStorage + :root data-theme)
 lib/toast.tsx     → Toast notifications
 lib/useAsync.ts   → useAsync hook for data fetching
 lib/validate.ts   → Zod-ish validators for forms
-components/       → Design system: Panel, Stat, StatusLed, DeviceCard, PolicyEditor, SshTerminal, etc.
+components/       → Design system: Panel, Stat, StatusLed, DeviceCard, PolicyEditor, etc.
 layout/Shell.tsx  → Left rail + top bar + fleet strip, ambient polling
 pages/            → Login, Devices, DeviceDetail, Profiles, Approvals, Events, Settings
 theme.css         → CSS variables from docs/DESIGN.md (monochrome, accent red, dot grid)
@@ -127,7 +126,6 @@ config.rs     → AgentConfig (TOML at /etc/sentinel/agent.toml, 0600), AgentCtx
 protocol.rs   → Wire types: Command, Event, UsageReport, WS envelope (tagged JSON)
 enforce/      → DNS, firewall, screentime (applies most restrictive across active users)
 lockout.rs    → Full-screen overlay (eframe, optional `gui` feature)
-ssh.rs        → PTY over WS (nix openpty, bash -l, base64 frames)
 tamper.rs     → Watchdog, NM D-Bus signals, polkit masking, config integrity
 gamify.rs     → Streaks, earn offers, lockout challenges
 unlock.rs     → Parent PIN CLI (suspends enforcement for N minutes)
@@ -169,13 +167,6 @@ Single source of truth for `Policy` document. All components serialize/deseriali
 2. Web: `GET /api/earn-requests?status=pending` → parent clicks approve/deny
 3. Approve: upserts `screen_time_ledger.earned_seconds` + enqueues `credit_time` command
 4. Agent handles `credit_time` → `UsageTracker::add_earned` + emits `screen_time_earned` event
-
-### Remote SSH
-1. Admin clicks SSH → `POST /api/devices/:id/ssh` → creates `ssh_sessions` row (`opening`), allocates broker port, enqueues `ssh_open`
-2. Agent receives `ssh_open`, spawns PTY (`nix` openpty + `/bin/bash -l`), streams `ssh_data` (base64) over WS
-3. First agent frame confirms session → `opening` → `open`
-4. Browser connects `GET /api/ssh/:session_id/ws` (cookie auth) → binary frames = raw bytes, text = resize JSON
-5. Server bridges browser ↔ agent (base64 encode/decode), audit `ssh` events
 
 ### Fail-Closed Offline (Agent)
 - Tracks `last_contact` (any WS message or successful heartbeat)
@@ -272,11 +263,9 @@ bun run build          # tsc -b && vite build
 
 3. **WS command push is best-effort**: `Hub::push` returns `false` if agent not connected. Command stays `queued` in DB; agent pulls on next heartbeat.
 
-4. **SSH bridge confirms on first agent frame**: `SshBridge.confirmed` flips `opening` → `open` only when agent sends first `ssh_data`. Prevents marking open prematurely.
+4. **Static web fallback middleware**: `spa_ok` rewrites 404→200 ONLY for `text/html` responses. API 404s (JSON) stay 404.
 
-5. **Static web fallback middleware**: `spa_ok` rewrites 404→200 ONLY for `text/html` responses. API 404s (JSON) stay 404.
-
-6. **CORS allows only `RP_ORIGIN` with credentials**: Set in `main.rs:95-110`. Dev server proxies, so browser talks to `:5173` which proxies to `:8080`.
+5. **CORS allows only `RP_ORIGIN` with credentials**: Set in `main.rs:95-110`. Dev server proxies, so browser talks to `:5173` which proxies to `:8080`.
 
 ### Web
 
@@ -302,11 +291,9 @@ bun run build          # tsc -b && vite build
 
 5. **Most restrictive network policy wins**: DNS/firewall are host-global; agent unions active users' policies and applies strictest. Per-user isolation is future work.
 
-6. **PTY via `nix` crate**: `openpty` + `forkpty` not used (signals). Spawns `/bin/bash -l` on slave, bridges master ↔ WS frames (base64).
+6. **Tamper level = max(device.tamper_level, --tamper-max)**: CLI flag raises ceiling to 3. `AgentCtx.tamper_max` propagates.
 
-7. **Tamper level = max(device.tamper_level, --tamper-max)**: CLI flag raises ceiling to 3. `AgentCtx.tamper_max` propagates.
-
-8. **Earn request dedup**: Client-side `requested_earn` HashMap avoids daily spam; server also dedupes.
+7. **Earn request dedup**: Client-side `requested_earn` HashMap avoids daily spam; server also dedupes.
 
 ### Policy Crate
 
@@ -360,7 +347,6 @@ podman-compose up -d      # rolling restart
 | Auth (passkey + sessions) | `server/src/auth.rs` |
 | OIDC SSO | `server/src/auth_oidc.rs` |
 | Agent WS + commands | `server/src/agent.rs` |
-| SSH broker | `server/src/ssh.rs` |
 | Rate limiting | `server/src/rate_limit.rs` |
 | State + extractors | `server/src/state.rs` |
 | Device CRUD | `server/src/devices.rs` |
@@ -376,7 +362,6 @@ podman-compose up -d      # rolling restart
 | Agent config | `client/src/config.rs` |
 | Wire protocol | `client/src/protocol.rs` |
 | Enforcement | `client/src/enforce/` |
-| SSH PTY | `client/src/ssh.rs` |
 | Tamper | `client/src/tamper.rs` |
 | Policy document | `policy/src/lib.rs` |
 | API contract | `docs/API.md` |
@@ -408,7 +393,7 @@ sudo ./target/release/sentinel-agent run --dry-run --time-accel 60
 # 3. Create device, copy enroll token
 # 4. Agent --dry-run with token → device online, users appear
 # 5. Assign kids profile → agent applies policy, lockout triggers
-# 6. Click Lock → full-screen lock; Click SSH → terminal opens
+# 6. Click Lock → full-screen lock
 
 # Lint/check
 cargo fmt --all && cargo clippy --all-targets --all-features
@@ -435,5 +420,5 @@ cargo run  # auto-migrates
 - ❌ Don't shadow API routes with SPA fallback — `static_web.rs` only mounts on unmatched paths
 - ❌ Don't silently use mock data in prod builds — `VITE_USE_MOCK=1` is build-time opt-in only
 - ❌ Don't change preset JSON without updating both `presets.rs` AND `docs/PROFILES.md` — drift test catches it
-- ❌ Don't assume agent has inbound connectivity — agent ONLY dials out (WS + SSH reverse tunnel)
+- ❌ Don't assume agent has inbound connectivity — agent ONLY dials out (HTTPS + WS)
 - ❌ Don't hardcode ports/paths — use constants and env vars (`BIND_ADDR`, `SENTINEL_WEB_DIR`, etc.)

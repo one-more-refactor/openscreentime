@@ -20,7 +20,6 @@ mod policy;
 mod protocol;
 mod runner;
 mod service;
-mod ssh;
 mod sysusers;
 mod tamper;
 #[cfg(feature = "tray")]

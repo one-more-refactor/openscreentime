@@ -58,8 +58,8 @@ minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production det
   one-way **phone alert** (Discord / Slack / Telegram — send-only, nobody writes
   back to a bot).
 - **Radically transparent** — a first-run intro tells the kid exactly what a parent
-  can and can't see, and the tray always shows when a remote shell is open. What the
-  software can't do, it says so.
+  can and can't see, and there is no remote shell at all: everything a parent can do
+  goes through the UI. What the software can't do, it says so.
 
 **Anti-cheat, both ends**
 - The agent **confirms** tampering before it reacts — a sustained attack on the
@@ -69,8 +69,8 @@ minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production det
 **Operate it like you mean it**
 - **Passkey-only admin auth** (WebAuthn/FIDO2) — no passwords to steal. Optional OIDC SSO.
 - **One-liner enrollment**, sha256-verified, with daily self-updates and a kept-`.bak` rollback.
-- **Remote lockdown & SSH** — lock/unlock from the console, or reach a shell on any
-  device through a server-brokered reverse tunnel, even behind NAT.
+- **Remote lockdown** — lock/unlock any device from the console, even behind NAT:
+  the agent dials out, so there's nothing to port-forward and nothing listening.
 
 ## Architecture
 
@@ -83,7 +83,7 @@ minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production det
                  ┌───────────────▼───────────────┐
                  │        Server (Rust)           │   Axum + SQLx + Postgres
                  │  passkey auth · policy engine  │   multi-tenant
-                 │  command queue · SSH broker    │   WebSocket agent bus
+                 │  command queue · event log     │   WebSocket agent bus
                  │  anti-cheat · phone alerts     │
                  └───────────────┬───────────────┘
                                  │ HTTPS + WS  (agent API, device-token bearer)
@@ -91,7 +91,7 @@ minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production det
                  │     Linux Agent (Rust)         │   static binary, systemd
                  │  zero-trust DNS + firewall     │   per-user enforcement
                  │  screen-time + usage ledger    │   full-screen lockout UI
-                 │  tamper resistance             │   reverse-SSH endpoint · tray
+                 │  tamper resistance             │   transparency tray
                  └────────────────────────────────┘
 ```
 
@@ -102,7 +102,7 @@ boundaries): **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
 
 | Path        | What                                                        | Stack                     |
 |-------------|-------------------------------------------------------------|---------------------------|
-| `server/`   | Backend API, auth, policy engine, SSH broker, anti-cheat    | Rust, Axum, SQLx, Postgres|
+| `server/`   | Backend API, auth, policy engine, agent bus, anti-cheat     | Rust, Axum, SQLx, Postgres|
 | `web/`      | Admin control center (the "Nothing" UI)                     | Bun, React, Vite, Tailwind|
 | `client/`   | Linux device agent                                          | Rust                      |
 | `policy/`   | Shared `Policy` document (used by server **and** client)    | Rust                      |
