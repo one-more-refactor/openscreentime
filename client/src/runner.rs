@@ -196,6 +196,24 @@ pub struct Agent {
 /// a week of offline ticks must not become an unbounded allocation.
 const PENDING_EVENTS_CAP: usize = 512;
 
+/// Max events per `POST /agent/events` request.
+///
+/// MUST stay <= the server's `MAX_EVENTS` (100, `server/src/agent.rs`), which
+/// rejects an oversized batch with a 400. The two constants live in different
+/// crates and nothing links them, so the invariant is asserted in tests rather
+/// than assumed.
+const EVENT_BATCH_MAX: usize = 100;
+
+/// The server's own cap, mirrored here so the invariant is checkable. If
+/// `server/src/agent.rs` ever lowers `MAX_EVENTS`, this must follow — the build
+/// fails below rather than the fleet silently losing its audit trail.
+const SERVER_MAX_EVENTS: usize = 100;
+const _: () = assert!(
+    EVENT_BATCH_MAX > 0 && EVENT_BATCH_MAX <= SERVER_MAX_EVENTS,
+    "EVENT_BATCH_MAX must be within the server's MAX_EVENTS or every event \
+     post 400s and the retry buffer can never drain"
+);
+
 /// The per-user on-demand earn-request marker. The kid's tray drops a file here
 /// (in its own `/run/user/<uid>`, which only that user and root can touch); the
 /// root agent consumes it. Returns `None` if the username has no uid.
@@ -350,12 +368,34 @@ impl Agent {
             let excess = self.pending_events.len() - PENDING_EVENTS_CAP;
             self.pending_events.drain(..excess);
         }
-        match self.client.post_events(&self.pending_events).await {
-            Ok(()) => self.pending_events.clear(),
-            Err(e) => tracing::debug!(
-                "event post failed, {} buffered for retry: {e}",
-                self.pending_events.len()
-            ),
+        // Post in server-sized batches, dropping each only once it lands.
+        //
+        // Posting the whole buffer in one request was a trap: the server rejects
+        // any batch over MAX_EVENTS (100) with a 400, which `error_for_status`
+        // turns into an error, so the batch was kept — and a buffer that has
+        // once exceeded 100 can never shrink again. Roughly 17 minutes offline
+        // is enough to cross it, because the offline re-assert emits a degraded
+        // event per standing gap every 10s tick. After that every event post
+        // fails forever while heartbeats keep succeeding, so the device looks
+        // healthy and the entire tamper/audit trail is silently discarded —
+        // which is precisely the data this buffer exists to protect.
+        while !self.pending_events.is_empty() {
+            let take = self.pending_events.len().min(EVENT_BATCH_MAX);
+            let batch: Vec<Event> = self.pending_events[..take].to_vec();
+            match self.client.post_events(&batch).await {
+                Ok(()) => {
+                    self.pending_events.drain(..take);
+                }
+                Err(e) => {
+                    // warn, not debug: a stalled audit pipeline is exactly the
+                    // kind of quiet failure this codebase keeps getting bitten by.
+                    tracing::warn!(
+                        "event post failed, {} buffered for retry: {e}",
+                        self.pending_events.len()
+                    );
+                    return;
+                }
+            }
         }
     }
 
@@ -1477,6 +1517,18 @@ async fn run_poll(agent: &mut Agent) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A full retry buffer must drain in a bounded number of round-trips.
+    /// (The batch-vs-server-cap invariant itself is a `const` assertion up top,
+    /// so it fails the build rather than waiting for anyone to run tests.)
+    #[test]
+    fn a_full_event_buffer_drains_in_bounded_batches() {
+        let batches = PENDING_EVENTS_CAP.div_ceil(EVENT_BATCH_MAX);
+        assert!(
+            (1..=16).contains(&batches),
+            "a full buffer needs {batches} posts to drain; that is not bounded work per tick"
+        );
+    }
+
     use super::*;
     use crate::enforce::screentime::LockReason;
 
