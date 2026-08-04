@@ -14,6 +14,7 @@ import { useAsync } from "../lib/useAsync";
 import { useToast, errMsg } from "../lib/toast";
 import { PageHeader } from "../layout/Shell";
 import {
+  OnboardingWizard,
   Button,
   DeviceCard,
   ErrorPanel,
@@ -35,6 +36,7 @@ export function Devices() {
   const { toast } = useToast();
 
   const [addOpen, setAddOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
@@ -237,7 +239,16 @@ export function Devices() {
         />
       ) : list.length === 0 ? (
         <Panel dots refCode="DV-00">
+          <div className="flex flex-col items-center gap-4 py-10">
           <Empty label="NO DEVICES ENROLLED" />
+          <p className="text-sm text-center max-w-md leading-relaxed">
+            Enroll your first device in about two minutes — name it, run one
+            command on it, and put each person on a profile.
+          </p>
+          <Button variant="primary" onClick={() => setWizardOpen(true)}>
+            SET UP YOUR FIRST DEVICE →
+          </Button>
+        </div>
         </Panel>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -435,6 +446,15 @@ export function Devices() {
         </p>
       </Modal>
 
+      {wizardOpen && (
+        <OnboardingWizard
+          onClose={() => {
+            setWizardOpen(false);
+            devices.reload();
+          }}
+          onEnrolled={() => devices.reload()}
+        />
+      )}
     </>
   );
 }
