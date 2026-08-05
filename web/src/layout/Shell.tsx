@@ -1,76 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
 import { useTheme } from "../lib/theme";
-import { listDevices, listEarnRequests } from "../api";
-import type { Device } from "../types";
 import { DotMatrix } from "../components/DotMatrix";
-import { goneDarkDays } from "../lib/format";
 
-const POLL_MS = 20_000;
-
-// Ambient fleet data for the header glyph strip + nav counts. Polled quietly;
-// failures leave the previous snapshot in place (pages surface their own errors).
-function useFleet() {
-  const [devices, setDevices] = useState<Device[] | null>(null);
-  const [pending, setPending] = useState<number | null>(null);
-
-  const tick = useCallback(async () => {
-    try {
-      setDevices(await listDevices());
-    } catch {
-      /* ambient — keep last snapshot */
-    }
-    try {
-      setPending((await listEarnRequests("pending")).length);
-    } catch {
-      /* ambient */
-    }
-  }, []);
-
-  useEffect(() => {
-    void tick();
-    const id = window.setInterval(() => void tick(), POLL_MS);
-    const onVis = () => document.visibilityState === "visible" && void tick();
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.clearInterval(id);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [tick]);
-
-  return { devices, pending };
-}
-
-// The signature: one live LED cell per device — the fleet at a glance.
-function FleetStrip({ devices }: { devices: Device[] | null }) {
-  if (!devices || devices.length === 0) return null;
-  const cellClass = (d: Device) =>
-    d.status === "online"
-      ? "fleet-cell fleet-cell-ok"
-      : d.status === "locked"
-        ? "fleet-cell fleet-cell-locked"
-        : d.status === "pending" || goneDarkDays(d.status, d.last_seen) !== null
-          ? "fleet-cell fleet-cell-warn"
-          : "fleet-cell";
-  return (
-    <div
-      className="flex items-center gap-2.5"
-      title="One cell per device — green online, red locked, amber pending or gone dark, dim offline"
-    >
-      <span className="label hidden sm:inline">FLEET</span>
-      <span className="fleet-cells" role="img" aria-label={`Fleet: ${devices.length} devices`}>
-        {devices.map((d, i) => (
-          <i
-            key={d.id}
-            className={cellClass(d)}
-            style={d.status === "online" ? { animationDelay: `${(i % 4) * 0.8}s` } : undefined}
-          />
-        ))}
-      </span>
-    </div>
-  );
-}
+// The old header carried a live LED strip of every enrolled device ("FLEET").
+// That is exactly the machinery this console no longer puts in a parent's
+// face: the fleet runs unattended, and trouble surfaces on the Family page
+// as a plain sentence when a child's computer actually needs attention.
 
 interface NavEntry {
   to: string;
@@ -112,7 +49,6 @@ export function Shell() {
   const { me, mock, logout } = useSession();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
-  const { devices, pending } = useFleet();
   const [menuOpen, setMenuOpen] = useState(false);
 
   async function handleLogout() {
@@ -120,11 +56,11 @@ export function Shell() {
     navigate("/login", { replace: true });
   }
 
+  // Two destinations. Everything else — devices, tokens, events, profiles —
+  // is machinery that now lives inside a child's page or runs unattended.
+  // A console about your children should not have a fleet menu.
   const entries: NavEntry[] = [
-    { to: "/devices", label: "DEVICES", count: devices?.length ?? null },
-    { to: "/profiles", label: "PROFILES" },
-    { to: "/approvals", label: "APPROVALS", count: pending, warn: true },
-    { to: "/events", label: "EVENTS" },
+    { to: "/", label: "FAMILY" },
     { to: "/settings", label: "SETTINGS" },
   ];
 
@@ -170,7 +106,7 @@ export function Shell() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Top bar: wordmark · fleet glyph strip · admin */}
+      {/* Top bar: wordmark · admin */}
       <header
         className="sticky top-0 z-40 flex items-center gap-4 px-4 lg:px-6 h-14 border-b"
         style={{ borderColor: "var(--line)", background: "var(--bg)" }}
@@ -185,11 +121,10 @@ export function Shell() {
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
         </button>
-        <NavLink to="/devices" className="focusable flex items-center" aria-label="Sentinel home">
+        <NavLink to="/" className="focusable flex items-center" aria-label="Sentinel home">
           <DotMatrix text="SENTINEL" dot={3} color="var(--fg)" />
         </NavLink>
         <span className="flex-1" />
-        <FleetStrip devices={devices} />
         <span className="label hidden md:inline" style={{ color: "var(--fg-dim)" }}>
           {me ? `${me.admin.display_name} · admin` : ""}
         </span>
