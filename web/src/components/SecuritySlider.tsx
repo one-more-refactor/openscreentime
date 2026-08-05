@@ -72,10 +72,26 @@ export const LEVELS: SecurityLevel[] = [
     summary: "Everything is blocked except sites you add by hand.",
     detail: [
       "Only sites on your list will open — everything else stops",
+      "Starts with five learning sites (Wikipedia, Khan Academy, PBS Kids, Scratch, Duolingo)",
       "App stores, game launchers and updates will break until you add them",
       "Meant for short periods, not for every day",
     ],
   },
+];
+
+/**
+ * What "Approved sites only" starts with when the parent has not added any
+ * sites yet. Without this, an empty list would block literally everything on
+ * first use — or worse, a leftover "*" wildcard would make the strictest level
+ * silently allow everything (the agent reads `default_deny` + a "*" entry as
+ * "allows everything" and emits no catch-all block at all).
+ */
+export const STARTER_ALLOWLIST = [
+  "wikipedia.org",
+  "khanacademy.org",
+  "pbskids.org",
+  "scratch.mit.edu",
+  "duolingo.com",
 ];
 
 /** Domains that get blocked by name once filtering is on. */
@@ -94,6 +110,10 @@ const BLOCKLIST = [
  */
 export function policyForLevel(level: number, base: Policy): Policy {
   const next: Policy = structuredClone(base);
+  // The parent's real list, with wildcards stripped: "*" is how permissive
+  // levels used to be stored, and a "*" surviving into level 4 turns
+  // "Approved sites only" into "approve everything" on the agent.
+  const curated = (base.dns.allowlist ?? []).filter((d) => d.trim() !== "*");
 
   // Invariants. A level never removes the way back into a device.
   next.firewall = {
@@ -121,11 +141,11 @@ export function policyForLevel(level: number, base: Policy): Policy {
     // 1.1.1.1 no filtering · 1.1.1.2 malware · 1.1.1.3 malware + adult
     upstream: level === 0 ? "1.1.1.1" : level === 1 ? "1.1.1.2" : "1.1.1.3",
     blocklist: level >= 2 ? BLOCKLIST : [],
-    // Never destroy a curated allowlist. Previously dropping below level 4
-    // replaced it with ["*"], so a parent who explored the control lost the
-    // list permanently — and returning to level 4 then read ["*"] as the base.
-    // The list is kept and simply not consulted while the mode is permissive.
-    allowlist: level >= 4 ? (base.dns.allowlist?.length ? base.dns.allowlist : ["*"]) : ["*"],
+    // Never destroy a curated allowlist, and never let "*" reach level 4.
+    // The list is kept at every level and simply not consulted while the mode
+    // is permissive; at level 4 an empty list falls back to a starter set so
+    // the strictest level both works on first use and actually denies.
+    allowlist: level >= 4 ? (curated.length ? curated : STARTER_ALLOWLIST) : curated,
   };
 
   next.screen_time = {
