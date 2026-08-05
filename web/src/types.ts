@@ -210,7 +210,10 @@ export type EventType =
   | "enrolled"
   | "discovery_result"
   | "ssh"
-  | "earn_request";
+  | "earn_request"
+  | "evasion"
+  | "enforcement_degraded"
+  | "vpn_profile";
 
 export type Severity = "info" | "warn" | "critical";
 
