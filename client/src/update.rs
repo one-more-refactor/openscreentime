@@ -50,6 +50,20 @@ struct Artifact {
     sha256: String,
 }
 
+/// The (target, features) pair this build must update *from* — a desktop
+/// (gui/tray) build must pull the glibc desktop artifact, never the musl
+/// headless one, or self-update would silently swap the child's tray and
+/// lockout overlay out from under them. Keyed off the compiled features so the
+/// two variants can never cross the streams.
+#[cfg(any(feature = "gui", feature = "tray"))]
+const SELF_TARGET: &str = "x86_64-linux-gnu";
+#[cfg(any(feature = "gui", feature = "tray"))]
+const SELF_FEATURES: &str = "desktop";
+#[cfg(not(any(feature = "gui", feature = "tray")))]
+const SELF_TARGET: &str = "x86_64-linux-musl";
+#[cfg(not(any(feature = "gui", feature = "tray")))]
+const SELF_FEATURES: &str = "headless";
+
 /// Whether this build/process is allowed to self-update at all.
 fn enabled(cfg: &AgentConfig) -> bool {
     if !cfg.auto_update {
@@ -59,13 +73,11 @@ fn enabled(cfg: &AgentConfig) -> bool {
         tracing::debug!("self-update disabled via SENTINEL_NO_SELF_UPDATE=1");
         return false;
     }
-    // The image only ships the headless x86_64 artifact; a gui/tray (or other
-    // arch) build must never overwrite itself with it.
-    if cfg!(any(
-        feature = "gui",
-        feature = "tray",
-        not(target_arch = "x86_64")
-    )) {
+    // Only x86_64 is built; another arch must never overwrite itself with it.
+    // The gui/tray builds DO self-update now (from the desktop artifact) — the
+    // desktop build is what the managed laptop actually runs, and pinning it to
+    // its install-time version is how devices keep known lockout bugs forever.
+    if cfg!(not(target_arch = "x86_64")) {
         return false;
     }
     // Never self-update a dev `cargo run` — only the installed binary.
@@ -132,9 +144,11 @@ pub async fn check_and_update(
     let Some(art) = manifest
         .artifacts
         .iter()
-        .find(|a| a.target == "x86_64-linux-musl" && a.features == "headless")
+        .find(|a| a.target == SELF_TARGET && a.features == SELF_FEATURES)
     else {
-        tracing::debug!("self-update: no matching headless x86_64 artifact in manifest");
+        tracing::debug!(
+            "self-update: no matching {SELF_FEATURES} {SELF_TARGET} artifact in manifest"
+        );
         return Ok(false);
     };
 
