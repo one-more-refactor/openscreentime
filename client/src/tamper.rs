@@ -73,9 +73,15 @@ pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
     // Disable VT switching via the AllowVTSwitch/`kbd` sysctl-ish knob.
     // (kernel.sysrq + logind ReserveVT are the practical levers; documented in README.)
     let _ = exec.run("loginctl", &["--help"]); // presence check, harmless
+
+    // ReserveVT only. KillUserProcesses=yes used to ride along here, but it
+    // has nothing to do with VT switching — it kills every process the user
+    // owns at logout (tmux, editors mid-save, unattended homework), turning a
+    // screen-time control into unrelated data loss. The freeze/lockout path
+    // already handles sessions; logout behavior stays stock.
     exec.write_file(
         "/etc/systemd/logind.conf.d/50-sentinel.conf",
-        "# Managed by sentinel-agent (tamper level 3)\n[Login]\nReserveVT=0\nKillUserProcesses=yes\n",
+        "# Managed by sentinel-agent (tamper level 3)\n[Login]\nReserveVT=0\n",
     )?;
     tracing::info!("level 3: TTY/VT lockdown drop-in written (sentinel-admin can revert)");
     Ok(())
