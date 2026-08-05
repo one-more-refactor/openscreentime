@@ -153,6 +153,33 @@ pub fn clock_skew_event(
     None
 }
 
+/// Boot-time clock-rollback detector: `saved` is the wall-clock persisted by
+/// the previous run's last tick, `now` is this run's startup. `now` earlier
+/// than `saved` means the clock was set back while the agent was off — the one
+/// direction the per-tick skew detector cannot see (its reference starts every
+/// run as `None`), and the direction that actually pays: rolling back before
+/// bedtime, or onto a date whose ledger counters are empty.
+///
+/// Forward gaps are NOT flagged here — a machine that was simply powered off
+/// looks identical to a forward clock-set from where we sit. WARN, not
+/// CRITICAL: an RTC-less machine (or a dead CMOS battery) legitimately boots
+/// in the past until NTP catches up, so this is a loud signal for the console,
+/// not grounds for an automatic lockdown.
+pub fn clock_rollback_event(
+    saved: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Event> {
+    let rollback = (saved - now).num_seconds();
+    if rollback > 300 {
+        return Some(tamper_event(
+            "clock_rollback",
+            SEV_WARN,
+            &format!("system clock is {rollback}s behind where it was before the last shutdown"),
+        ));
+    }
+    None
+}
+
 pub fn tamper_event(kind: &str, severity: &str, message: &str) -> Event {
     Event::new(
         EV_TAMPER,
@@ -267,6 +294,21 @@ pub fn level3_boot_guidance_event() -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_rollback_fires_only_backwards() {
+        let saved = chrono::Utc::now();
+        // Booting an hour "before" the last shutdown: the clock was set back.
+        let ev = clock_rollback_event(saved, saved - chrono::Duration::hours(1));
+        assert_eq!(
+            ev.unwrap().payload.get("kind").unwrap().as_str(),
+            Some("clock_rollback")
+        );
+        // A forward gap is just a machine that was powered off — never flagged.
+        assert!(clock_rollback_event(saved, saved + chrono::Duration::days(3)).is_none());
+        // Small backward steps (NTP correcting a fast clock) stay quiet.
+        assert!(clock_rollback_event(saved, saved - chrono::Duration::seconds(120)).is_none());
+    }
 
     #[test]
     fn polkit_preserves_admin_recovery() {
