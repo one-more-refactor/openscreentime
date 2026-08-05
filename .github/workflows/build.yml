@@ -105,33 +105,61 @@ jobs:
         with:
           workspaces: client
 
-      - name: Install musl-tools
+      - name: Install build deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools jq
+          # musl-tools + jq for the headless static build; the -dev packages for
+          # the desktop build's GUI (eframe/glow → OpenGL/xkb/wayland) and tray
+          # (notify-rust → dbus). The desktop binary is glibc-dynamic and links
+          # these at runtime — they're present on any GNOME install.
+          sudo apt-get install -y --no-install-recommends \
+            musl-tools jq \
+            pkg-config libdbus-1-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
 
       - name: Build release (musl, headless)
         working-directory: client
         run: cargo build --release --target x86_64-unknown-linux-musl 2>&1 | tee /tmp/agent-build.txt
 
-      - name: Stage versioned artifact + manifest
+      # The desktop build is what actually gives the child a surface: the tray
+      # meter, "10 minutes left" notifications, and the fullscreen lockout
+      # overlay. Without it the installed agent is invisible — enforcement with
+      # no way for the kid to see their own time or ask for more. It can't be
+      # static-musl (eframe/dbus need glibc + system libs), so it ships as a
+      # separate glibc artifact and install.sh prefers it on a graphical host.
+      - name: Build release (glibc, desktop = gui+tray)
+        working-directory: client
+        run: cargo build --release --features gui,tray 2>&1 | tee /tmp/agent-desktop-build.txt
+
+      - name: Stage versioned artifacts + manifest
         working-directory: client
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "sentinel-agent") | .version')
-          FILE="sentinel-agent-${VERSION}-x86_64-musl"
           mkdir -p ../dist-agent
+
+          FILE="sentinel-agent-${VERSION}-x86_64-musl"
           cp target/x86_64-unknown-linux-musl/release/sentinel-agent "../dist-agent/${FILE}"
           SHA256=$(sha256sum "../dist-agent/${FILE}" | cut -d' ' -f1)
+
+          DFILE="sentinel-agent-${VERSION}-x86_64-desktop"
+          cp target/release/sentinel-agent "../dist-agent/${DFILE}"
+          DSHA256=$(sha256sum "../dist-agent/${DFILE}" | cut -d' ' -f1)
+
           jq -n \
             --arg version "$VERSION" \
             --arg file "$FILE" \
             --arg sha256 "$SHA256" \
-            '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}]}' \
+            --arg dfile "$DFILE" \
+            --arg dsha256 "$DSHA256" \
+            '{version: $version, artifacts: [
+               {target: "x86_64-linux-musl",  features: "headless", url: ("/api/agent/download/" + $file),  sha256: $sha256},
+               {target: "x86_64-linux-gnu",   features: "desktop",  url: ("/api/agent/download/" + $dfile), sha256: $dsha256}
+             ]}' \
             > ../dist-agent/manifest.json
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "AGENT_FILE=$FILE" >> $GITHUB_ENV
-          ls -lh "../dist-agent/${FILE}"
+          ls -lh "../dist-agent/${FILE}" "../dist-agent/${DFILE}"
           cat ../dist-agent/manifest.json
 
       - name: Upload agent artifact
