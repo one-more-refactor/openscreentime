@@ -4,17 +4,19 @@
 #   - the sentinel-server binary (Rust, from server/ + policy/)
 #   - the built web SPA (Bun/Vite, from web/), served by the server itself
 #     via SENTINEL_WEB_DIR (see server/src/static_web.rs).
-#   - the HEADLESS sentinel-agent binary (musl-static, from client/ + policy/)
-#     plus its manifest.json under /app/agent, served via SENTINEL_AGENT_DIR
-#     (see server/src/agent_dist.rs and GET /install.sh).
+#   - TWO sentinel-agent binaries under /app/agent, plus a two-artifact
+#     manifest.json, served via SENTINEL_AGENT_DIR (see server/src/agent_dist.rs
+#     and GET /install.sh):
+#       * headless — musl-static, runs on ANY x86_64 Linux (servers, minimal
+#         installs). Enforcement-complete, no user-facing surface.
+#       * desktop  — glibc-dynamic, built with --features gui,tray. Adds the
+#         fullscreen lockout overlay and the per-user tray (the time meter,
+#         notifications, "ask for more time"). install.sh installs this one on
+#         a machine with a graphical session — i.e. the managed child laptop.
 #
-# Agent build decision: only the default-features (headless) agent is built,
-# as a true static musl binary that runs on any x86_64 Linux. The gui/tray
-# features (eframe/glow, ksni→libdbus-sys) link C system libraries and can't
-# realistically cross-build against musl without a full C sysroot — desktop
-# builds come from source (`cargo build --features tray,gui`) until CI exists.
-# The headless agent is enforcement-complete; gui/tray only add the lockout
-# overlay and the per-user tray companion.
+# The desktop build can't be static-musl (eframe/glow and ksni→libdbus-sys link
+# C system libraries), so it ships glibc-dynamic against the runtime libs any
+# GNOME/KDE install already has. Both are x86_64 only for now.
 #
 # Build from the repo root:
 #   podman build -f Containerfile -t sentinel-server:latest .
@@ -42,14 +44,19 @@ WORKDIR /build/server
 RUN cargo build --release && \
     install -Dm755 target/release/sentinel-server /out/sentinel-server
 
-# ---- Stage 1b: Agent builder (headless, musl-static) -----------------------
+# ---- Stage 1b: Agent builder (headless musl-static + desktop glibc) --------
 FROM docker.io/library/rust:1.90-slim-bookworm AS agent-builder
 
 # musl-tools: musl-gcc for the crates with C/asm (ring). jq: manifest generation.
+# The -dev packages are for the desktop build's GUI (eframe/glow → OpenGL/xkb/
+# wayland) and tray (notify-rust → dbus); they're only needed to LINK — the
+# desktop binary loads their runtime .so counterparts on the target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     musl-tools \
     ca-certificates \
     jq \
+    pkg-config libdbus-1-dev libxkbcommon-dev libwayland-dev \
+    libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl
 
@@ -59,18 +66,30 @@ COPY client/ client/
 
 WORKDIR /build/client
 RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release --features gui,tray
 
-# Stage the versioned artifact + manifest.json for /api/agent/latest.
-# jq builds the JSON so a weird value can never produce a malformed manifest.
+# Stage both versioned artifacts + a two-artifact manifest.json for
+# /api/agent/latest. jq builds the JSON so a weird value can never produce a
+# malformed manifest. The image's glibc (bookworm, 2.36) is the floor: the
+# desktop binary runs on any target with glibc >= that, which every current
+# Debian/Ubuntu desktop clears.
 RUN set -eu; \
     VERSION="$(cargo metadata --no-deps --format-version 1 \
         | jq -r '.packages[] | select(.name == "sentinel-agent") | .version')"; \
-    FILE="sentinel-agent-${VERSION}-x86_64-musl"; \
     mkdir -p /out/agent; \
+    FILE="sentinel-agent-${VERSION}-x86_64-musl"; \
     install -m 0755 "target/x86_64-unknown-linux-musl/release/sentinel-agent" "/out/agent/${FILE}"; \
     SHA256="$(sha256sum "/out/agent/${FILE}" | cut -d' ' -f1)"; \
-    jq -n --arg version "$VERSION" --arg file "$FILE" --arg sha256 "$SHA256" \
-        '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}]}' \
+    DFILE="sentinel-agent-${VERSION}-x86_64-desktop"; \
+    install -m 0755 "target/release/sentinel-agent" "/out/agent/${DFILE}"; \
+    DSHA256="$(sha256sum "/out/agent/${DFILE}" | cut -d' ' -f1)"; \
+    jq -n --arg version "$VERSION" \
+          --arg file "$FILE" --arg sha256 "$SHA256" \
+          --arg dfile "$DFILE" --arg dsha256 "$DSHA256" \
+        '{version: $version, artifacts: [
+           {target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file),  sha256: $sha256},
+           {target: "x86_64-linux-gnu",  features: "desktop",  url: ("/api/agent/download/" + $dfile), sha256: $dsha256}
+         ]}' \
         > /out/agent/manifest.json; \
     cat /out/agent/manifest.json
 
