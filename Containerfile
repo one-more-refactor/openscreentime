@@ -83,14 +83,7 @@ RUN set -eu; \
     DFILE="sentinel-agent-${VERSION}-x86_64-desktop"; \
     install -m 0755 "target/release/sentinel-agent" "/out/agent/${DFILE}"; \
     DSHA256="$(sha256sum "/out/agent/${DFILE}" | cut -d' ' -f1)"; \
-    jq -n --arg version "$VERSION" \
-          --arg file "$FILE" --arg sha256 "$SHA256" \
-          --arg dfile "$DFILE" --arg dsha256 "$DSHA256" \
-        '{version: $version, artifacts: [
-           {target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file),  sha256: $sha256},
-           {target: "x86_64-linux-gnu",  features: "desktop",  url: ("/api/agent/download/" + $dfile), sha256: $dsha256}
-         ]}' \
-        > /out/agent/manifest.json; \
+    jq -n --arg version "$VERSION" --arg file "$FILE" --arg sha256 "$SHA256" --arg dfile "$DFILE" --arg dsha256 "$DSHA256" '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}, {target: "x86_64-linux-gnu", features: "desktop", url: ("/api/agent/download/" + $dfile), sha256: $dsha256}]}' > /out/agent/manifest.json; \
     cat /out/agent/manifest.json
 
 # ---- Stage 2: Web builder --------------------------------------------------
