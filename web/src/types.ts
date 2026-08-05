@@ -6,8 +6,14 @@
 
 // ---- Policy (the jsonb document) -------------------------------------------
 
-export type DnsMode = "default_deny" | "default_allow";
-export type FirewallMode = "default_deny" | "default_allow";
+// "allow_all" is the exact string the agent tests for — `Policy::is_default_deny`
+// in the shared crate is `self.mode != "allow_all"`, so ANY other value means
+// default-deny. The web previously declared "default_allow", which is not that
+// string: choosing the permissive option in the console wrote a value the agent
+// read as default-deny, and the UI showed "allow" while the device blocked
+// everything. Same silent drift as the schedule/windows mismatch.
+export type DnsMode = "default_deny" | "allow_all";
+export type FirewallMode = "default_deny" | "allow_all";
 export type UnlockChallenge = "math" | "wait" | "parent_pin";
 export type StreakNudge = "bedtime" | "breaks" | string;
 
