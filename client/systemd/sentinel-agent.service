@@ -36,8 +36,14 @@ OOMScoreAdjust=-1000
 # write failure as Err all the way out of apply_network_policy, which skips
 # gap reporting AND save_cache — so a VPN profile pushed to a hardened host
 # strands in "testing" in the console with no verdict and no event.
+#
+# /usr/local/bin is writable because the self-updater stages, backs up and
+# renames the agent binary there (update.rs). Under plain ProtectSystem=strict
+# every update attempt failed at the first write — a hardened fleet silently
+# pinned itself to whatever version it was installed with, which is exactly
+# how devices end up running builds with known lockout bugs forever.
 ProtectSystem=strict
-ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client
+ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin
 RuntimeDirectory=sentinel
 StateDirectory=sentinel
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.

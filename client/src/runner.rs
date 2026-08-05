@@ -114,6 +114,63 @@ fn save_device_locked(locked: bool) {
     }
 }
 
+/// Where the rest of the reboot-surviving enforcement state lives. The freeze
+/// set, the save-your-work countdowns and the daily challenge-unlock counter
+/// used to be memory-only, so holding the power button was a complete reset:
+/// a fresh 60-second grace and three more math unlocks per boot, repeatable
+/// all night using nothing but features built for the child. `device_locked`
+/// was persisted for exactly this reason; these were missed.
+const FREEZE_STATE_PATH: &str = "/var/lib/sentinel/freeze_state.json";
+
+/// Enforcement state that must survive a power-cycle (see [`FREEZE_STATE_PATH`]).
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct FreezeState {
+    /// Users frozen — or already inside the save-your-work countdown — when
+    /// this was last saved. Loaded as an *expired* countdown: if they are
+    /// still outside policy on their first active tick, the freeze lands
+    /// immediately, with no fresh grace.
+    #[serde(default)]
+    frozen: Vec<String>,
+    /// user → (date, count) of self-serve challenge unlocks already honored.
+    #[serde(default)]
+    challenge_grants: HashMap<String, (chrono::NaiveDate, u32)>,
+    /// A confirmed-evasion lockdown must outlast a reboot too — it is cleared
+    /// by a parent PIN or an admin unlock, never by the power button.
+    #[serde(default)]
+    tamper_lockdown: bool,
+    /// Wall-clock at save time. A boot where `now` is *earlier* than this
+    /// means the clock was set back while the agent was off — the one clock
+    /// cheat the per-tick skew detector structurally cannot see, because
+    /// `expected_wall` starts every run as `None`.
+    #[serde(default)]
+    saved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn load_freeze_state() -> FreezeState {
+    std::fs::read_to_string(FREEZE_STATE_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_freeze_state(st: &FreezeState) {
+    let path = std::path::Path::new(FREEZE_STATE_PATH);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let json = match serde_json::to_string(st) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("could not serialize freeze state: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(path, json) {
+        // warn, not debug: losing this silently is the power-button bypass.
+        tracing::warn!("could not persist freeze state: {e}");
+    }
+}
+
 /// Load the persisted last-contact wall-clock. A fresh install (no file) gets
 /// `now` — the hard-lockdown clock starts at first run, it doesn't punish a
 /// brand-new device for history it doesn't have.
@@ -208,6 +265,12 @@ pub struct Agent {
     warned: HashMap<(String, String), chrono::NaiveDate>,
     /// Armed save-your-work countdowns (user → freeze deadline).
     pending_freeze: HashMap<String, Instant>,
+    /// Users whose freeze was carried over from before a restart (their
+    /// [`Self::pending_freeze`] entry is pre-expired). The lockout overlay from
+    /// the previous run died with it, so when the resumed freeze lands the
+    /// overlay must be presented again — an unexplained frozen session is
+    /// indistinguishable from a hang. Never populated during normal operation.
+    resumed_frozen: HashSet<String>,
     /// Events that couldn't be delivered yet (server unreachable). Events are
     /// the audit trail — offline tamper events are exactly the ones that
     /// matter — so failed posts are kept (capped, oldest dropped) and retried
@@ -328,6 +391,25 @@ impl Agent {
     pub fn new(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<Self> {
         let client = ServerClient::new(&cfg.server_url, &cfg.device_token)?;
         let exec = Exec::new(ctx.clone());
+        // Reboot-surviving: the freeze set, challenge-unlock counter and a
+        // tamper lockdown must not reset because someone held the power button.
+        let carried = load_freeze_state();
+        let mut pending_events = Vec::new();
+        if let Some(saved) = carried.saved_at {
+            if let Some(ev) = tamper::clock_rollback_event(saved, chrono::Utc::now()) {
+                pending_events.push(ev);
+            }
+        }
+        let resumed_frozen: HashSet<String> = carried.frozen.iter().cloned().collect();
+        // Pre-expired countdowns: the grace was already granted before the
+        // restart. If the user is still outside policy on their first active
+        // tick the freeze lands immediately; if they are back within policy
+        // (a reboot the next morning) the entry is simply disarmed.
+        let pending_freeze: HashMap<String, Instant> = carried
+            .frozen
+            .iter()
+            .map(|u| (u.clone(), Instant::now()))
+            .collect();
         Ok(Agent {
             tamper_level: cfg
                 .tamper_level
@@ -346,19 +428,20 @@ impl Agent {
             policy_version: String::new(),
             expected_wall: None,
             requested_earn: HashMap::new(),
-            challenge_grants: HashMap::new(),
+            challenge_grants: carried.challenge_grants,
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
             offline_grace: offline_grace_from_env(),
             last_contact_wall: load_last_contact_wall(),
             last_contact_saved: Instant::now(),
             offline_hard_lockdown: false,
-            tamper_lockdown: false,
+            tamper_lockdown: carried.tamper_lockdown,
             tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
-            pending_freeze: HashMap::new(),
-            pending_events: Vec::new(),
+            pending_freeze,
+            resumed_frozen,
+            pending_events,
             notifications: VecDeque::new(),
             notif_seq: 0,
         })
@@ -714,7 +797,10 @@ impl Agent {
         // rebuild it — it has no policy. Repair it here with the effective
         // policy so a flush/delete can't leave the device with NO firewall
         // (fail-open) until the next full policy apply.
-        if enforce::firewall::table_missing(&self.exec) && !self.exec.dry_run() {
+        // `Some(true)` only — if the probe itself couldn't run (`None`),
+        // applying a ruleset through the same broken spawn path won't work
+        // either; the reassert above already reported it, retry next tick.
+        if enforce::firewall::table_missing(&self.exec) == Some(true) && !self.exec.dry_run() {
             let effective = self.effective_network_policy();
             let server_host = crate::client::server_host(&self.cfg.server_url);
             match enforce::apply_network_policy(
@@ -877,8 +963,11 @@ impl Agent {
             };
             if lock.is_none() {
                 // Lock reason cleared while a save-your-work countdown was
-                // armed (e.g. time credited): disarm it.
+                // armed (e.g. time credited): disarm it. A freeze carried over
+                // from before a restart is disarmed the same way — rebooting
+                // into a new day within policy is not an evasion.
                 self.pending_freeze.remove(&user);
+                self.resumed_frozen.remove(&user);
             }
 
             // 3) Pre-lockout warnings — the teen must never be surprised by a
@@ -944,8 +1033,33 @@ impl Agent {
         // On-demand "request more time" markers dropped by users' trays.
         self.check_ondemand_earn().await;
 
+        // Persist the freeze/grant state every tick, like the usage ledger
+        // above — a power-cycle at any moment must resume, not reset.
+        if !self.exec.dry_run() {
+            self.persist_freeze_state();
+        }
         self.write_status_file();
         events
+    }
+
+    /// Snapshot the reboot-surviving enforcement state to disk. Users inside a
+    /// save-your-work countdown are recorded as frozen on purpose: the grace
+    /// was already granted, and a reboot mid-countdown must not re-arm it.
+    fn persist_freeze_state(&self) {
+        let mut frozen: Vec<String> = self
+            .frozen
+            .iter()
+            .chain(self.pending_freeze.keys())
+            .cloned()
+            .collect();
+        frozen.sort();
+        frozen.dedup();
+        save_freeze_state(&FreezeState {
+            frozen,
+            challenge_grants: self.challenge_grants.clone(),
+            tamper_lockdown: self.tamper_lockdown,
+            saved_at: Some(chrono::Utc::now()),
+        });
     }
 
     /// Screen-time lockout with a save-your-work grace: the first tick with a
@@ -1017,6 +1131,22 @@ impl Agent {
             }
             Some(deadline) if *deadline <= Instant::now() => {
                 self.pending_freeze.remove(user);
+                // A freeze resuming from before a restart has no overlay on
+                // screen (the presenter died with the previous run) — put it
+                // back up, without a countdown, so the frozen session explains
+                // itself. Normal freezes were presented when the countdown was
+                // armed and must NOT be presented again (the GUI presenter is a
+                // detached subprocess; re-presenting would stack a second one).
+                if self.resumed_frozen.remove(user) {
+                    let spec = LockSpec::from_lockout(
+                        &policy.gamification.lockout,
+                        &reason.headline(),
+                        &reason.detail(),
+                        user,
+                        policy.parent_pin_hash.clone(),
+                    );
+                    lockout::present(&self.exec, &spec);
+                }
                 if let Err(e) = screentime::freeze_user(&self.exec, user, true, false) {
                     tracing::warn!("freeze {user} failed: {e}");
                 }
@@ -1255,6 +1385,9 @@ impl Agent {
                     let _ = screentime::freeze_user(&self.exec, &user, true, true);
                     self.frozen.insert(user);
                 }
+                if !self.exec.dry_run() {
+                    self.persist_freeze_state();
+                }
                 events.push(Event::new(
                     EV_LOCK,
                     SEV_WARN,
@@ -1269,6 +1402,14 @@ impl Agent {
                 self.tamper_lockdown = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {
                     let _ = screentime::freeze_user(&self.exec, &user, false, false);
+                }
+                // An unlock also disarms carried-over countdowns — and must
+                // hit disk immediately, or a power-cut right after would boot
+                // back into the lock the parent just lifted.
+                self.pending_freeze.clear();
+                self.resumed_frozen.clear();
+                if !self.exec.dry_run() {
+                    self.persist_freeze_state();
                 }
                 events.push(Event::new(
                     EV_UNLOCK,
@@ -1735,5 +1876,33 @@ mod tests {
             FreezeAction::None,
             "already frozen + still locked out: no change"
         );
+    }
+
+    /// The persisted freeze state must survive a serialize/deserialize cycle
+    /// intact, and an absent or garbled file must load as the harmless default
+    /// (nothing frozen, no grants spent) — never a panic on the boot path.
+    #[test]
+    fn freeze_state_round_trips_and_tolerates_garbage() {
+        let mut grants = HashMap::new();
+        grants.insert(
+            "vali".to_string(),
+            (chrono::NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(), 2u32),
+        );
+        let st = FreezeState {
+            frozen: vec!["vali".to_string()],
+            challenge_grants: grants,
+            tamper_lockdown: true,
+            saved_at: Some(chrono::Utc::now()),
+        };
+        let json = serde_json::to_string(&st).unwrap();
+        let back: FreezeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.frozen, vec!["vali".to_string()]);
+        assert_eq!(back.challenge_grants.get("vali").map(|g| g.1), Some(2));
+        assert!(back.tamper_lockdown);
+        assert!(back.saved_at.is_some());
+
+        let garbled: FreezeState = serde_json::from_str("{}").unwrap();
+        assert!(garbled.frozen.is_empty());
+        assert!(!garbled.tamper_lockdown);
     }
 }
