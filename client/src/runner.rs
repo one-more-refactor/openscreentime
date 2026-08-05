@@ -797,7 +797,10 @@ impl Agent {
         // rebuild it — it has no policy. Repair it here with the effective
         // policy so a flush/delete can't leave the device with NO firewall
         // (fail-open) until the next full policy apply.
-        if enforce::firewall::table_missing(&self.exec) && !self.exec.dry_run() {
+        // `Some(true)` only — if the probe itself couldn't run (`None`),
+        // applying a ruleset through the same broken spawn path won't work
+        // either; the reassert above already reported it, retry next tick.
+        if enforce::firewall::table_missing(&self.exec) == Some(true) && !self.exec.dry_run() {
             let effective = self.effective_network_policy();
             let server_host = crate::client::server_host(&self.cfg.server_url);
             match enforce::apply_network_policy(
