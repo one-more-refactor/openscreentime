@@ -36,6 +36,30 @@ const DOH_RESOLVERS: &[&str] = &[
     "45.90.30.0/24",
 ];
 
+/// The IPv6 twins of [`DOH_RESOLVERS`]. Every rule in this file used to match
+/// on `ip daddr` only, which an IPv6 packet never matches — so on any network
+/// with v6 connectivity, pointing a browser at a resolver's v6 address walked
+/// straight past `block_doh` (and `force_dns`, fixed below the same way).
+const DOH_RESOLVERS_V6: &[&str] = &[
+    "2606:4700:4700::1111",
+    "2606:4700:4700::1001", // Cloudflare
+    "2606:4700:4700::1112",
+    "2606:4700:4700::1002", // Cloudflare family (malware)
+    "2606:4700:4700::1113",
+    "2606:4700:4700::1003", // Cloudflare family (malware + adult)
+    "2001:4860:4860::8888",
+    "2001:4860:4860::8844", // Google
+    "2620:fe::fe",
+    "2620:fe::9", // Quad9
+    "2620:119:35::35",
+    "2620:119:53::53", // OpenDNS
+    "2a10:50c0::ad1:ff",
+    "2a10:50c0::ad2:ff", // AdGuard
+    // NextDNS per-profile addresses live inside these allocations.
+    "2a07:a8c0::/32",
+    "2a07:a8c1::/32",
+];
+
 /// Tor OR/directory/SOCKS ports blocked by `block_tor`.
 const TOR_PORTS: &str = "9001, 9030, 9050, 9051, 9150";
 
@@ -64,6 +88,10 @@ pub fn render_ruleset(
     s.push_str("    ct state established,related accept\n");
     s.push_str("    ct state invalid drop\n");
     s.push_str("    ip protocol icmp accept\n");
+    // ICMPv6 is not optional the way ICMPv4 ping is: neighbor discovery and
+    // router advertisements ride on it, so dropping it under default-deny
+    // doesn't restrict IPv6 — it silently breaks even the allowed ports on v6.
+    s.push_str("    meta l4proto ipv6-icmp accept\n");
     for p in &fw.allow_inbound_ports {
         s.push_str(&format!("    tcp dport {p} accept\n"));
         s.push_str(&format!("    udp dport {p} accept\n"));
@@ -81,6 +109,9 @@ pub fn render_ruleset(
     ));
     s.push_str("    oif lo accept\n");
     s.push_str("    ct state established,related accept\n");
+    // Outbound neighbor solicitation is ICMPv6; without this, default-deny
+    // output kills v6 address resolution before any allowed port can be used.
+    s.push_str("    meta l4proto ipv6-icmp accept\n");
 
     // ---- the device's OWN managed VPN (admin-uploaded profile) — these accepts
     // must come BEFORE the lockdown drops: `block_vpn` drops udp 51820/1194,
@@ -91,9 +122,15 @@ pub fn render_ruleset(
     }
     for ep in &vpn.endpoints {
         if ep.host.parse::<std::net::IpAddr>().is_ok() {
-            // Literal IP: pin the accept to the endpoint address.
+            // Literal IP: pin the accept to the endpoint address (by family —
+            // an `ip daddr` with a v6 literal would abort the ruleset load).
+            let m = if ep.host.parse::<std::net::Ipv6Addr>().is_ok() {
+                "ip6"
+            } else {
+                "ip"
+            };
             s.push_str(&format!(
-                "    ip daddr {} {} dport {} accept\n",
+                "    {m} daddr {} {} dport {} accept\n",
                 ep.host, ep.proto, ep.port
             ));
         } else {
@@ -112,12 +149,29 @@ pub fn render_ruleset(
     }
     if lockdown.force_dns {
         s.push_str("    # force_dns: plaintext DNS only to our own upstream\n");
-        s.push_str(&format!(
-            "    ip daddr != {dns_upstream} udp dport 53 drop\n"
-        ));
-        s.push_str(&format!(
-            "    ip daddr != {dns_upstream} tcp dport 53 drop\n"
-        ));
+        // The `ip daddr` match only sees IPv4 packets, so the other family
+        // must be dropped wholesale on port 53 — otherwise any v6 resolver is
+        // a complete bypass. Loopback (::1 / 127.0.0.1 → dnsmasq) is already
+        // accepted above.
+        if dns_upstream.parse::<std::net::Ipv6Addr>().is_ok() {
+            s.push_str(&format!(
+                "    ip6 daddr != {dns_upstream} udp dport 53 drop\n"
+            ));
+            s.push_str(&format!(
+                "    ip6 daddr != {dns_upstream} tcp dport 53 drop\n"
+            ));
+            s.push_str("    meta nfproto ipv4 udp dport 53 drop\n");
+            s.push_str("    meta nfproto ipv4 tcp dport 53 drop\n");
+        } else {
+            s.push_str(&format!(
+                "    ip daddr != {dns_upstream} udp dport 53 drop\n"
+            ));
+            s.push_str(&format!(
+                "    ip daddr != {dns_upstream} tcp dport 53 drop\n"
+            ));
+            s.push_str("    meta nfproto ipv6 udp dport 53 drop\n");
+            s.push_str("    meta nfproto ipv6 tcp dport 53 drop\n");
+        }
     }
     if lockdown.block_doh {
         // The upstream is NOT exempt. It used to be — "never block our own
@@ -137,6 +191,10 @@ pub fn render_ruleset(
             s.push_str(&format!("    ip daddr {ip} tcp dport 443 drop\n"));
             s.push_str(&format!("    ip daddr {ip} udp dport 443 drop\n"));
         }
+        for ip in DOH_RESOLVERS_V6 {
+            s.push_str(&format!("    ip6 daddr {ip} tcp dport 443 drop\n"));
+            s.push_str(&format!("    ip6 daddr {ip} udp dport 443 drop\n"));
+        }
     }
     if lockdown.block_vpn {
         s.push_str("    # block_vpn: common commercial-VPN ports\n");
@@ -152,12 +210,22 @@ pub fn render_ruleset(
     }
 
     // Always let the agent reach the DNS upstream and the control server.
-    s.push_str(&format!("    ip daddr {dns_upstream} accept\n"));
+    // `ip daddr` with a v6 literal is a syntax error that would abort the
+    // whole (all-or-nothing) ruleset load, so pick the match by family.
+    let daddr_accept = |s: &mut String, addr: &str| {
+        let m = if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+            "ip6"
+        } else {
+            "ip"
+        };
+        s.push_str(&format!("    {m} daddr {addr} accept\n"));
+    };
+    daddr_accept(&mut s, dns_upstream);
     if let Some(srv) = server {
         // If the server is a literal IP, pin it; hostnames are covered by the
         // allowed 80/443 outbound ports below (and DNS resolves via upstream).
         if srv.parse::<std::net::IpAddr>().is_ok() {
-            s.push_str(&format!("    ip daddr {srv} accept\n"));
+            daddr_accept(&mut s, srv);
         }
     }
     for p in &fw.allow_outbound_ports {
@@ -205,10 +273,17 @@ pub fn apply(
     Ok(())
 }
 
-/// True if our table is missing (drifted / was flushed) → re-apply needed.
-pub fn table_missing(exec: &Exec) -> bool {
-    let out = exec.probe("nft", &["list", "table", "inet", NFT_TABLE]);
-    out.trim().is_empty()
+/// Whether our table is missing (drifted / was flushed) → re-apply needed.
+///
+/// Three-valued on purpose: `Some(true)` means nft ran and the table is
+/// verifiably gone, `Some(false)` means it's there, `None` means the check
+/// itself could not run (nft failed to spawn — transient fork/memory failure).
+/// `None` must never be treated as "missing": this answer feeds the tamper
+/// monitor, and two ticks of a conflated spawn failure used to confirm as
+/// "sustained evasion" and lock the whole device down over a fork() hiccup.
+pub fn table_missing(exec: &Exec) -> Option<bool> {
+    exec.try_probe("nft", &["list", "table", "inet", NFT_TABLE])
+        .map(|out| out.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -316,6 +391,72 @@ mod tests {
         // network addresses previously listed matched no real resolver.
         assert!(r.contains("ip daddr 45.90.28.0/24 tcp dport 443 drop"));
         assert!(r.contains("ip daddr 45.90.30.0/24 udp dport 443 drop"));
+    }
+
+    /// `ip daddr` never matches an IPv6 packet, so every lockdown that matters
+    /// must exist in an `ip6`/`nfproto ipv6` form too — otherwise any network
+    /// with v6 connectivity is a wholesale bypass of DNS enforcement.
+    #[test]
+    fn lockdowns_cover_ipv6() {
+        let lockdown = NetworkLockdown {
+            force_dns: true,
+            block_doh: true,
+            ..Default::default()
+        };
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        // force_dns: a v4 upstream means NO v6 destination is ever legitimate
+        // on port 53 (loopback is accepted earlier in the chain).
+        assert!(r.contains("meta nfproto ipv6 udp dport 53 drop"));
+        assert!(r.contains("meta nfproto ipv6 tcp dport 53 drop"));
+        // block_doh: the well-known resolvers' v6 twins are dropped too.
+        assert!(r.contains("ip6 daddr 2606:4700:4700::1112 tcp dport 443 drop"));
+        assert!(r.contains("ip6 daddr 2001:4860:4860::8888 udp dport 443 drop"));
+        assert!(r.contains("ip6 daddr 2620:fe::fe tcp dport 443 drop"));
+        assert!(r.contains("ip6 daddr 2a07:a8c0::/32 tcp dport 443 drop"));
+    }
+
+    /// Under default-deny, ICMPv6 must stay open in both directions: neighbor
+    /// discovery rides on it, so dropping it doesn't restrict IPv6 — it breaks
+    /// even the explicitly allowed ports on v6, silently.
+    #[test]
+    fn default_deny_keeps_icmpv6_alive() {
+        let fw = FirewallPolicy {
+            mode: "default_deny".into(),
+            allow_outbound_ports: vec![443],
+            allow_inbound_ports: vec![],
+        };
+        let r = render_ruleset(
+            &fw,
+            &NetworkLockdown::default(),
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+        );
+        assert_eq!(r.matches("meta l4proto ipv6-icmp accept").count(), 2);
+    }
+
+    /// A v6 upstream or server literal must render as `ip6 daddr` — `ip daddr`
+    /// with a v6 address is a syntax error, and nft loads the file
+    /// all-or-nothing, so one bad line would abort the entire ruleset.
+    #[test]
+    fn v6_literals_use_ip6_daddr() {
+        let lockdown = NetworkLockdown {
+            force_dns: true,
+            ..Default::default()
+        };
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "2606:4700:4700::1113",
+            Some("2001:db8::7"),
+            &VpnPlan::default(),
+        );
+        assert!(r.contains("ip6 daddr 2606:4700:4700::1113 accept"));
+        assert!(r.contains("ip6 daddr 2001:db8::7 accept"));
+        assert!(r.contains("ip6 daddr != 2606:4700:4700::1113 udp dport 53 drop"));
+        // …and the OTHER family gets dropped wholesale on 53.
+        assert!(r.contains("meta nfproto ipv4 udp dport 53 drop"));
+        assert!(!r.contains("ip daddr 2606"));
     }
 
     #[test]
