@@ -102,7 +102,7 @@ pub fn apply_network_policy(
     policy: &Policy,
     vpn_state: &vpn::VpnState,
 ) -> Result<(Vec<Gap>, Option<vpn::VpnReport>)> {
-    let mut gaps: Vec<Gap> = dns::apply(exec, &policy.dns, &policy.lockdown)?
+    let mut gaps: Vec<Gap> = dns::apply(exec, &policy.dns, &policy.lockdown, server_host)?
         .into_iter()
         .map(Gap::Dns)
         .collect();
