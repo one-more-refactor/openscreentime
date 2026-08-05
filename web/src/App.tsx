@@ -3,11 +3,9 @@ import { SessionProvider, useSession } from "./lib/session";
 import { ToastProvider } from "./lib/toast";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
-import { Devices } from "./pages/Devices";
-import { DeviceDetail } from "./pages/DeviceDetail";
-import { Profiles } from "./pages/Profiles";
-import { Approvals } from "./pages/Approvals";
-import { Events } from "./pages/Events";
+import { Family } from "./pages/Family";
+import { ChildDetail } from "./pages/ChildDetail";
+import { AddChild } from "./pages/AddChild";
 import { Settings } from "./pages/Settings";
 import { StatusLed } from "./components";
 
@@ -38,15 +36,14 @@ export function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<Navigate to="/devices" replace />} />
-          <Route path="/devices" element={<Devices />} />
-          <Route path="/devices/:id" element={<DeviceDetail />} />
-          <Route path="/profiles" element={<Profiles />} />
-          <Route path="/approvals" element={<Approvals />} />
-          <Route path="/events" element={<Events />} />
+          {/* Home is the family, not the fleet. */}
+          <Route index element={<Family />} />
+          <Route path="/family" element={<Family />} />
+          <Route path="/child/:key" element={<ChildDetail />} />
+          <Route path="/add" element={<AddChild />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
-        <Route path="*" element={<Navigate to="/devices" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ToastProvider>
     </SessionProvider>
