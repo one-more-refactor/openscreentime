@@ -33,9 +33,11 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     exec.write_file(UNIT_PATH, UNIT)?;
     exec.write_file(WATCHDOG_SVC_PATH, WATCHDOG_SERVICE)?;
     exec.write_file(WATCHDOG_TIMER_PATH, WATCHDOG_TIMER)?;
-    // Best-effort: drop the per-user tray unit so any desktop user can opt in
-    // with `systemctl --user enable --now sentinel-tray` (not auto-enabled;
-    // only useful with a binary built `--features tray`).
+    // Drop the per-user tray unit. On a desktop (tray-featured) build, enable
+    // it GLOBALLY so it starts in every user's graphical session at next login
+    // — the child must not have to run `systemctl --user enable` to see their
+    // own time meter and notifications; on a headless build the `tray`
+    // subcommand doesn't exist, so the unit is installed but left disabled.
     if let Err(e) = exec.write_file(TRAY_UNIT_PATH, TRAY_UNIT) {
         tracing::warn!("could not install {TRAY_UNIT_PATH}: {e}");
     }
@@ -44,6 +46,19 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     exec.run("systemctl", &["daemon-reload"])?;
     exec.run("systemctl", &["enable", "--now", "sentinel-agent.service"])?;
     exec.run("systemctl", &["enable", "--now", "sentinel-watchdog.timer"])?;
+    // `--global` writes the enable symlink into /etc/systemd/user/…wants, so it
+    // applies to every user session without one being active during install.
+    // Not `--now`: there may be no logged-in user to start it for right now.
+    if cfg!(feature = "tray") {
+        if let Err(e) = exec.run(
+            "systemctl",
+            &["--global", "enable", "sentinel-tray.service"],
+        ) {
+            tracing::warn!("could not globally enable the tray unit: {e}");
+        } else {
+            tracing::info!("tray unit enabled globally (starts in each graphical session)");
+        }
+    }
 
     tracing::info!("hardened unit + watchdog + polkit installed and enabled");
     println!("Installed sentinel-agent.service (hardened) + watchdog timer.");
