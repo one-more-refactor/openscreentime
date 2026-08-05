@@ -337,7 +337,12 @@ async fn upsert_usage(
                     Some(device_id),
                     Some(device_user_id),
                     "evasion",
-                    "warn",
+                    // Critical, not warn: this is the one evasion signal the
+                    // server derives independently of the device's honesty, and
+                    // the alert fan-out only pushes `critical` to the parent's
+                    // phone. A warn here means a confirmed ledger reset that
+                    // never leaves the console.
+                    "critical",
                     json!({
                         "kind": "usage_regression",
                         "os_username": u.os_username,
@@ -629,9 +634,13 @@ async fn apply_command_ack(
     } else {
         "acked"
     };
+    // Only a still-open command may be acked. Without the status guard a device
+    // could re-ack any command id it has ever seen — replaying an old `unlock`
+    // to forge its own lock state, resurrecting a `cancelled` command, or
+    // rewriting acked_at/result on historical rows (audit tampering).
     let ctype: Option<String> = sqlx::query_scalar(
         "UPDATE commands SET status = $1, result = $2, acked_at = now()
-         WHERE id = $3 AND device_id = $4 RETURNING type",
+         WHERE id = $3 AND device_id = $4 AND status IN ('queued','sent') RETURNING type",
     )
     .bind(status)
     .bind(result)

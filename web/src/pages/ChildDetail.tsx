@@ -11,13 +11,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import * as api from "../api";
-import type { Device, DeviceUser, EarnRequest, Profile } from "../types";
+import type { Device, DeviceUser, EarnRequest, Event, Profile } from "../types";
 import {
   LEVELS,
   SecuritySlider,
   levelForPolicy,
   policyForLevel,
 } from "../components/SecuritySlider";
+import { EventFeed } from "../components/EventFeed";
 
 function hueFor(key: string): number {
   let h = 0;
@@ -69,6 +70,7 @@ export function ChildDetail() {
   const [users, setUsers] = useState<(DeviceUser & { deviceName: string })[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [requests, setRequests] = useState<EarnRequest[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<string | null>(null);
@@ -95,6 +97,22 @@ export function ChildDetail() {
         setRequests((await api.listEarnRequests("pending")).filter((r) => r.os_username === key));
       } catch {
         setRequests([]);
+      }
+      // The audit trail for this child's devices. Without it, a tamper event the
+      // server recorded is never seen — the "never silent" promise depends on
+      // this being on screen.
+      try {
+        const deviceIds = [...new Set(found.map((u) => u.device_id))];
+        const perDevice = await Promise.all(
+          deviceIds.map((id) => api.listEvents({ device_id: id, limit: 50 }).catch(() => [])),
+        );
+        const merged = perDevice
+          .flat()
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, 50);
+        setEvents(merged);
+      } catch {
+        setEvents([]);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load this child");
@@ -264,6 +282,13 @@ export function ChildDetail() {
           {users.length === 0 && <li className="fam-quiet">No devices yet.</li>}
         </ul>
       </section>
+
+      {users.length > 0 && (
+        <section className="ch-section">
+          <h2 className="ch-h2">Recent activity</h2>
+          <EventFeed events={events} emptyLabel="NOTHING RECORDED YET" />
+        </section>
+      )}
     </div>
   );
 }
