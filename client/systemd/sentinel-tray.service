@@ -1,9 +1,7 @@
 # Sentinel tray — per-user companion (transparency surface).
-# Installed to /etc/systemd/user/sentinel-tray.service by `sentinel-agent install-service`
-# (best-effort; requires a binary built with `--features tray`).
-#
-# This is a systemd USER unit: each desktop user opts in with
-#   systemctl --user enable --now sentinel-tray
+# Installed to /etc/systemd/user/sentinel-tray.service by `sentinel-agent install-service`,
+# which on a desktop (--features tray) build also `systemctl --global enable`s it
+# so it starts in every graphical session automatically — no per-user opt-in.
 #
 # It runs as the desktop user (never root), reads the world-readable status
 # snapshot at /run/sentinel/status.json, and shows a StatusNotifierItem tray
