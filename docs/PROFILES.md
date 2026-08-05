@@ -4,7 +4,7 @@ Every new tenant is seeded with three `is_preset=true` profiles. They are fully 
 edit clones the policy in place — the preset row stays but its `policy` is mutated). Presets can
 also be duplicated into `custom` profiles.
 
-All presets are **zero-trust**: DNS and firewall are `default_deny`. The difference between them
+The `teen` and `default` presets are zero-trust (`default_deny`); **`kids` is not** — see below for why. The difference between them
 is how large the allowlist is, how strict screen-time is, how tight the network lockdown is, and
 how much gamification is on.
 
@@ -59,34 +59,50 @@ connection. It's the master unlock on managed devices: a correct PIN grants a 30
 grace. The stored value never contains the plaintext PIN. None of the three presets set a PIN out
 of the box.
 
-## `kids` — locked down, playful
+## `kids` — filtered, not walled off
 
-- **DNS:** default-deny, small curated allowlist (education, kids' content, the school domain),
-  `safe_search: true`, filtered upstream `1.1.1.2`.
-- **Firewall:** default-deny; outbound `53, 80, 443` only.
-- **Screen time:** 60 min/day; windows 15:00–19:00 weekdays, 09:00–19:00 weekends; bedtime
-  20:00–07:00 hard block.
-- **App limits:** none seeded (`app_limits: []`) — per-app limits are configured per-profile in
-  the admin UI, not baked into the preset.
-- **Lockdown:** full anti-bypass posture — `force_dns`, `block_doh`, `block_dot`, `block_tor`,
-  `block_vpn` all `true`; `offline_lockdown_days: 7` (a week of no server contact escalates to a
-  full parent-PIN lockdown).
+Deliberately **not** zero-trust. The earlier version allowed five domains and denied everything
+else, which broke Minecraft, Steam, school portals and `apt` — so in practice an adult either
+widened the allowlist until it meant nothing or switched enforcement off. Filtering at the
+resolver is stricter in the ways that matter and invisible the rest of the time.
+
+- **DNS:** `allow_all` through a filtering upstream — `1.1.1.3` (Cloudflare for Families:
+  malware **and** adult content), `safe_search: true`, plus an explicit blocklist for the things
+  that slip past a category filter: web proxies, torrent indexes, gambling, stranger-chat.
+- **Firewall:** `allow_all`, with inbound `22` open. Permissive so ordinary software works;
+  the lockdown flags below still emit targeted drops, because chain policy and lockdown rules
+  are independent.
+- **Screen time:** 60 min/day; windows 07:00–20:00 weekdays, 09:00–20:00 weekends; bedtime
+  20:00–07:00.
+- **App limits:** none seeded — and note the Linux agent does not enforce them at all yet; a
+  policy carrying app limits raises `policy_app_limits_unsupported`.
+- **Lockdown:** the bypass paths stay shut — `force_dns`, `block_doh`, `block_dot`, `block_tor`
+  all `true`. Two are deliberately off: **`block_vpn: false`**, because a parent-managed
+  WireGuard profile is a supported feature and enabling both makes the agent apply a tunnel its
+  own firewall then kills; and **`offline_lockdown_days: 0`**, because a device that cannot
+  reach the server must not brick itself — screen time still applies from the cached policy.
 - **Gamification:** earn-time ON (reading, chores tasks), lockout ON with `math` challenge,
-  streaks ON (bedtime + breaks nudges). Full-screen interruptions enabled.
+  streaks ON (bedtime + breaks nudges).
 
 ```jsonc
 {
   "version": 1,
-  "dns": { "mode": "default_deny",
-    "allowlist": ["wikipedia.org","khanacademy.org","pbskids.org","scratch.mit.edu","duolingo.com"],
-    "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
-  "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443], "allow_inbound_ports": [] },
+  "dns": { "mode": "allow_all",
+    "allowlist": ["*"],
+    "blocklist": ["croxyproxy.com","proxysite.com","kproxy.com","hidester.com",
+                  "4everproxy.com","whoer.net","hide.me","vpnbook.com",
+                  "thepiratebay.org","1337x.to","torrentz2.eu","rarbg.to",
+                  "pornhub.com","xvideos.com","xnxx.com","onlyfans.com",
+                  "stake.com","bet365.com","roobet.com",
+                  "omegle.com","chatroulette.com"],
+    "safe_search": true, "upstream": "1.1.1.3" },
+  "firewall": { "mode": "allow_all", "allow_outbound_ports": [], "allow_inbound_ports": [22] },
   "screen_time": { "enabled": true, "daily_limit_minutes": 60,
-    "schedule": [ {"days":[1,2,3,4,5],"start":"15:00","end":"19:00"},
-                  {"days":[0,6],"start":"09:00","end":"19:00"} ],
+    "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"20:00"},
+                  {"days":[0,6],"start":"09:00","end":"20:00"} ],
     "bedtime": { "start":"20:00","end":"07:00" } },
   "app_limits": [],
-  "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": true, "offline_lockdown_days": 7 },
+  "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
   "gamification": {
     "earn_time": { "enabled": true, "tasks": [
       {"id":"reading","label":"Read for 20 min","reward_minutes":15},
