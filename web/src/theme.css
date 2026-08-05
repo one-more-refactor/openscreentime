@@ -42,6 +42,11 @@
 }
 
 :root[data-theme="light"] {
+  /* Status hues need light-theme values of their own: the dark ones measure
+     1.9:1 (ok) and 1.6:1 (warn) on a light surface — effectively invisible. */
+  --ok: #1a7f42;
+  --warn: #8a6300;
+  --crit: #b3151c;
   --bg: #f5f5f5;
   --surface: #ffffff;
   --surface-2: #ededed;
@@ -288,6 +293,13 @@
    borders, elevation by surface step rather than shadow — but the type is a
    readable sans at human sizes instead of technical mono.
    ========================================================================== */
+.fam-wrap, .ch-wrap {
+  /* The shell sets Space Mono on body. These screens are for parents, not
+     operators — the section comment claimed a sans and never declared one, so
+     the entire "human" redesign was rendering in the ops typeface. */
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 1rem;
+}
 .fam-wrap { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
 
 .fam-head { margin-bottom: 2rem; }
@@ -369,3 +381,77 @@
   color: var(--fg); text-decoration: none; font-size: 0.9rem;
 }
 .fam-cta:hover { background: var(--surface-2); }
+
+/* ---- child detail + add-a-child ------------------------------------------ */
+.ch-wrap { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+.ch-back { display: inline-block; margin-bottom: 1.5rem; color: var(--fg-dim); text-decoration: none; font-size: 0.9rem; }
+.ch-back:hover { color: var(--fg); }
+.ch-head { display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
+.ch-head-simple { margin-bottom: 1.75rem; }
+.ch-name { margin: 0; font-size: 1.6rem; font-weight: 600; letter-spacing: -0.02em; }
+.ch-meta { margin: 0.15rem 0 0; color: var(--fg-faint); font-size: 0.85rem; }
+.ch-note { margin: 0 0 1rem; padding: 0.6rem 0.8rem; border-radius: var(--radius);
+  background: color-mix(in oklab, var(--ok) 12%, transparent); color: var(--fg); font-size: 0.88rem; }
+
+/* The one big number this page exists to answer. */
+.ch-today { text-align: center; padding: 2rem 0 1.5rem; }
+.ch-big { margin: 0; font-size: clamp(3.5rem, 2rem + 9vw, 6rem); font-weight: 300;
+  line-height: 1; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.ch-big[data-spent="true"] { color: var(--accent); }
+.ch-big-unit { margin: 0.3rem 0 1.25rem; color: var(--fg-dim); font-size: 0.95rem; }
+.ch-bar { height: 0.5rem; border-radius: 999px; background: var(--line); overflow: hidden; max-width: 26rem; margin: 0 auto; }
+.ch-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--ok); transition: width 260ms ease; }
+.ch-bar-fill[data-spent="true"] { background: var(--accent); }
+.ch-bar-note { margin: 0.5rem 0 0; color: var(--fg-faint); font-size: 0.82rem; }
+
+.ch-actions { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 2.5rem; }
+.ch-btn { padding: 0.5rem 1rem; border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--fg); font-size: 0.9rem; cursor: pointer; }
+.ch-btn:hover:not(:disabled) { background: var(--surface-2); }
+.ch-btn:disabled { opacity: 0.45; cursor: default; }
+.ch-btn-yes { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+.ch-section { margin-bottom: 2.5rem; }
+.ch-h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint); margin: 0 0 0.75rem; font-weight: 600; }
+.ch-reqs, .ch-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.ch-req, .ch-device { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.8rem 0.9rem; border: 1px solid var(--line); border-radius: var(--radius); font-size: 0.9rem; }
+.ch-req-btns { display: flex; gap: 0.4rem; flex: none; }
+.ch-device-state { font-size: 0.78rem; color: var(--fg-faint); }
+.ch-device-state[data-state="online"] { color: var(--ok); }
+.ch-device-state[data-state="locked"] { color: var(--accent); }
+
+/* ---- security slider ----------------------------------------------------- */
+.sec { border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; }
+.sec-title { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); font-weight: 600; }
+.sec-level { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.sec-range { width: 100%; accent-color: var(--fg); }
+.sec-ticks { display: flex; justify-content: space-between; margin: 0.4rem 0 1rem; }
+.sec-tick { font-size: 0.68rem; color: var(--fg-faint); transition: color 140ms ease; }
+.sec-tick[data-on="true"] { color: var(--fg-dim); }
+.sec-summary { margin: 0 0 0.75rem; font-size: 0.95rem; }
+.sec-more summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-dim); }
+.sec-more ul { margin: 0.6rem 0 0.6rem 1.1rem; padding: 0; font-size: 0.85rem; color: var(--fg-dim); }
+.sec-more li { margin-bottom: 0.25rem; }
+.sec-invariant { margin: 0; font-size: 0.8rem; color: var(--fg-faint); font-style: italic; }
+
+/* ---- add a child --------------------------------------------------------- */
+.add-form { display: grid; gap: 0.6rem; max-width: 22rem; }
+.add-label { font-size: 0.9rem; color: var(--fg-dim); }
+.add-input { padding: 0.65rem 0.8rem; border: 1px solid var(--line-2); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg); font-size: 1rem; }
+.add-submit { justify-self: start; margin-top: 0.4rem; }
+.add-code { margin: 0 0 0.75rem; padding: 0.9rem; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--surface); font-size: 0.78rem;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+.add-note { margin: 1.5rem 0; padding: 0.9rem 1rem; border-left: 3px solid var(--warn);
+  background: color-mix(in oklab, var(--warn) 7%, transparent); font-size: 0.9rem; }
+.add-note p { margin: 0 0 0.5rem; }
+.add-note p:last-child { margin: 0; }
+.fam-add { float: right; font-size: 0.9rem; color: var(--fg-dim); text-decoration: none; }
+.fam-add:hover { color: var(--fg); }
+.sec-apply { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;
+  padding-top: 1rem; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.sec-apply-note { margin: 0; flex: 1; font-size: 0.88rem; color: var(--fg-dim); }

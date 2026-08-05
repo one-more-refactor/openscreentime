@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
-import type { Device, DeviceUser } from "../types";
+import type { Device, DeviceUser, Profile } from "../types";
 
 /** A child, assembled from whatever devices they have an account on. */
 interface Child {
@@ -97,32 +97,47 @@ function TimeBar({ used, limit, earned }: { used: number; limit: number | null; 
  * "you just notice when something dramatically fails" is a UI requirement, not
  * a wish, so this is a single line and never a dashboard.
  */
+function since(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 function Trouble({ devices }: { devices: Device[] }) {
-  const dark = devices.filter((d) => d.status === "offline" || d.status === "pending");
+  // "pending" means set up but never contacted — that is normal for minutes
+  // after adding a child, so alarming a parent about it trains them to ignore
+  // the one alert this app ever shows.
+  const dark = devices.filter((d) => d.status === "offline");
   if (dark.length === 0) return null;
+  const ago = since(dark[0].last_seen);
   return (
-    <Link to="/devices" className="fam-trouble">
+    <p className="fam-trouble">
       <span className="fam-trouble-dot" aria-hidden="true" />
       {dark.length === 1
-        ? `${dark[0].name} hasn't checked in`
-        : `${dark.length} devices haven't checked in`}
-      <span className="fam-trouble-go" aria-hidden="true">→</span>
-    </Link>
+        ? `${dark[0].name} was last seen ${ago || "a while ago"}. If it is switched off, that is normal.`
+        : `${dark.length} computers haven't been seen recently. If they are switched off, that is normal.`}
+    </p>
   );
 }
 
 export function Family() {
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [usersByDevice, setUsersByDevice] = useState<Record<string, DeviceUser[]>>({});
+  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const ds = await api.listDevices();
+        const [ds, ps] = await Promise.all([api.listDevices(), api.listProfiles()]);
         if (!alive) return;
-        setDevices(ds);
+        setProfiles(ps);
+        if (!alive) return;
         // Children live on devices, so the family view has to gather them.
         // A dedicated endpoint would be better; noted rather than faked.
         const entries = await Promise.all(
@@ -136,6 +151,10 @@ export function Family() {
         );
         if (!alive) return;
         setUsersByDevice(Object.fromEntries(entries));
+        // Set devices LAST: setting it before the per-device user fetches
+        // resolved made `children` briefly empty, flashing the
+        // "No children set up yet" empty state on every single load.
+        setDevices(ds);
       } catch (e) {
         if (alive) setError(e instanceof Error ? e.message : "Could not load the family");
       }
@@ -164,7 +183,9 @@ export function Family() {
             name,
             usedMinutes: u.used_minutes_today ?? 0,
             earnedMinutes: u.earned_minutes_today ?? 0,
-            limitMinutes: null,
+            limitMinutes:
+              profiles.find((p) => p.id === u.profile_id)?.policy.screen_time
+                ?.daily_limit_minutes ?? null,
             profileName: u.profile_name ?? null,
             devices: [{ id: d.id, name: d.name, status: d.status }],
           });
@@ -172,7 +193,7 @@ export function Family() {
       }
     }
     return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [devices, usersByDevice]);
+  }, [devices, usersByDevice, profiles]);
 
   if (error) {
     return (
@@ -197,6 +218,7 @@ export function Family() {
     <div className="fam-wrap">
       <header className="fam-head">
         <h1 className="fam-greet">{greeting}</h1>
+        <Link to="/add" className="fam-add">+ Add a child</Link>
         <p className="fam-sub">
           {children.length === 0
             ? "No children set up yet."
@@ -209,8 +231,8 @@ export function Family() {
       {children.length === 0 ? (
         <div className="fam-empty">
           <p>Once a device is set up, the people using it appear here.</p>
-          <Link to="/devices" className="fam-cta">
-            Set up a device
+          <Link to="/add" className="fam-cta">
+            Add a child
           </Link>
         </div>
       ) : (
