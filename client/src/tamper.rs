@@ -108,12 +108,24 @@ pub fn reassert_all(exec: &Exec) -> Vec<Event> {
             ));
         }
     }
-    if firewall::table_missing(exec) && !exec.dry_run() {
-        events.push(tamper_event(
-            "nft_flush",
-            SEV_CRITICAL,
-            "sentinel nftables table missing; ruleset must be re-applied",
-        ));
+    if !exec.dry_run() {
+        match firewall::table_missing(exec) {
+            Some(true) => events.push(tamper_event(
+                "nft_flush",
+                SEV_CRITICAL,
+                "sentinel nftables table missing; ruleset must be re-applied",
+            )),
+            Some(false) => {}
+            // Couldn't check ≠ missing. `nft_flush` is the one kind the tamper
+            // monitor escalates to a device lockdown, so it must only ever be
+            // fed a verified observation — a spawn failure gets its own,
+            // never-escalating kind and is retried next tick.
+            None => events.push(tamper_event(
+                "nft_probe_failed",
+                SEV_WARN,
+                "could not run nft to verify the firewall table; will retry",
+            )),
+        }
     }
     events
 }

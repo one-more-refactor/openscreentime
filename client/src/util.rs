@@ -64,7 +64,20 @@ impl Exec {
     }
 
     /// Read-only probe: returns stdout even on nonzero exit (for `loginctl show-*`).
+    /// A spawn failure collapses to `""` — fine for callers where "couldn't ask"
+    /// and "asked, got nothing" mean the same thing. Callers that would take
+    /// *destructive* action on empty output must use [`Self::try_probe`]:
+    /// "the firewall table is gone" and "fork() failed this tick" are not the
+    /// same fact, and conflating them once escalated a transient spawn failure
+    /// into a whole-device tamper lockdown.
     pub fn probe(&self, program: &str, args: &[&str]) -> String {
+        self.try_probe(program, args).unwrap_or_default()
+    }
+
+    /// Like [`Self::probe`], but distinguishes "the command could not be run at
+    /// all" (`None`) from "the command ran and this is its stdout" (`Some`,
+    /// possibly empty, even on nonzero exit).
+    pub fn try_probe(&self, program: &str, args: &[&str]) -> Option<String> {
         // Probes read state and are always safe to run, even under --dry-run.
         match Command::new(program)
             .args(args)
@@ -72,8 +85,11 @@ impl Exec {
             .stderr(Stdio::null())
             .output()
         {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(_) => String::new(),
+            Ok(o) => Some(String::from_utf8_lossy(&o.stdout).to_string()),
+            Err(e) => {
+                tracing::warn!("probe {program} could not run: {e}");
+                None
+            }
         }
     }
 
