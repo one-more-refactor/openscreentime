@@ -14,6 +14,7 @@ import * as api from "../api";
 import type { Device } from "../types";
 import { useStepUp, StepUpCancelled } from "../lib/stepup";
 import { familyChanged } from "../lib/family";
+import { StateRing, type RingTone } from "../components/StateRing";
 
 function minsSince(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -58,6 +59,31 @@ function stateOf(d: Device): { word: string; tone: "ok" | "crit" | "warn" | "idl
       ? { word: "away · allowed", tone: "idle" }
       : { word: "not calling home", tone: "warn" };
   return { word: "connected", tone: "ok" };
+}
+
+/** The ring: color = state, arc = connection freshness, dashed = allowed away. */
+function ringOf(d: Device): { arc: number; tone: RingTone; dashed: boolean } {
+  if (d.status === "locked") return { arc: 1, tone: "crit", dashed: false };
+  if (d.status === "pending") return { arc: 0.25, tone: "idle", dashed: false };
+  if (d.status === "offline" && offlineAllowed(d)) return { arc: 1, tone: "idle", dashed: true };
+  const m = minsSince(d.last_seen);
+  const arc =
+    m === null ? 0.1
+    : m <= 2 ? 1
+    : m <= 10 ? 0.85
+    : m <= 60 ? 0.6
+    : m <= 360 ? 0.4
+    : m <= 1440 ? 0.25
+    : 0.1;
+  const tone: RingTone =
+    d.status === "offline" ? "warn" : m !== null && m > 10 ? "warn" : "ok";
+  return { arc, tone, dashed: false };
+}
+
+function initialsOf(name: string): string {
+  const p = name.trim().split(/\s+/).filter(Boolean);
+  if (!p.length) return "?";
+  return (p.length === 1 ? p[0].slice(0, 2) : p[0][0] + p[p.length - 1][0]).toUpperCase();
 }
 
 /** Connection steadiness, derived from how recently the agent called home. */
@@ -108,12 +134,14 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
   return (
     <li className="dev-card" data-blocked={blocked}>
       <div className="dev-card-head">
-        <div>
-          <h2 className="dev-name">{d.name}</h2>
-          <p className="dev-users">{who || "nobody yet"}</p>
+        <div className="dev-card-id">
+          <StateRing {...ringOf(d)} label={initialsOf(d.name)} />
+          <div>
+            <h2 className="dev-name">{d.name}</h2>
+            <p className="dev-users">{who || "nobody yet"}</p>
+          </div>
         </div>
         <span className="dev-state" data-tone={state.tone}>
-          <span className="led" aria-hidden="true" />
           {state.word}
         </span>
       </div>

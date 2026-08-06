@@ -38,11 +38,27 @@ function subscribe(listener: () => void) {
   };
 }
 
+export type ThemeMode = Theme | "system";
+
+/** "system" until the user pins a mode explicitly. */
+export function themeMode(): ThemeMode {
+  const stored = localStorage.getItem(KEY);
+  return stored === "dark" || stored === "light" ? stored : "system";
+}
+
+/** Un-pin: forget the stored choice and follow the OS again, live. */
+export function followSystem() {
+  localStorage.removeItem(KEY);
+  applyTheme(systemDark.matches ? "dark" : "light", false);
+}
+
 export function useTheme() {
   const theme = useSyncExternalStore(subscribe, () => current);
   return {
     theme,
+    mode: themeMode(),
     toggle: () => applyTheme(current === "dark" ? "light" : "dark"),
     setTheme: applyTheme,
+    followSystem,
   };
 }

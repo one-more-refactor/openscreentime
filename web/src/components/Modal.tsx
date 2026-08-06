@@ -92,7 +92,7 @@ export function Modal({
       <div
         ref={boxRef}
         tabIndex={-1}
-        className={`relative w-full bg-surface hairline rounded flex flex-col ${
+        className={`modal-pop relative w-full bg-surface hairline rounded flex flex-col ${
           size === "full" ? "max-w-5xl h-[min(80vh,44rem)]" : "max-w-lg max-h-[85vh]"
         }`}
         style={{ borderColor: danger ? "var(--accent)" : "var(--line-2)" }}
