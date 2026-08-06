@@ -65,7 +65,6 @@ export function Rules({ profile, busy, onSave }: RulesProps) {
       } />
       <AllowedHours st={st} busy={busy} withScreenTime={withScreenTime} onSave={onSave} />
       <BedtimeRule st={st} busy={busy} withScreenTime={withScreenTime} onSave={onSave} />
-      <AppLimits pol={pol} busy={busy} onSave={onSave} />
       <Websites pol={pol} busy={busy} onSave={onSave} />
       <SafeSearch pol={pol} busy={busy} onSave={onSave} />
       <EarnTime pol={pol} busy={busy} onSave={onSave} />
@@ -265,80 +264,6 @@ function BedtimeRule({
           </button>
         )}
       </span>
-    </div>
-  );
-}
-
-// ---- app limits ------------------------------------------------------------
-
-function AppLimits({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (p: Policy, note: string) => void }) {
-  const [newApp, setNewApp] = useState("");
-
-  function setApp(match: string, minutes: number | null) {
-    const app_limits =
-      minutes === null
-        ? pol.app_limits.filter((a) => a.match !== match)
-        : pol.app_limits.some((a) => a.match === match)
-          ? pol.app_limits.map((a) => (a.match === match ? { ...a, daily_limit_minutes: minutes } : a))
-          : [...pol.app_limits, { match, daily_limit_minutes: minutes }];
-    onSave(
-      { ...pol, app_limits },
-      minutes === null ? `Limit for ${match} removed.` : `${match} limited to ${fmtMin(minutes)} a day.`,
-    );
-  }
-
-  function add() {
-    const name = newApp.trim().toLowerCase();
-    if (!name) return;
-    setApp(name, 30);
-    setNewApp("");
-  }
-
-  return (
-    <div className="rl-row rl-row-stack">
-      <div className="rl-what">
-        <p className="rl-name">App limits</p>
-        <p className="rl-value">
-          {pol.app_limits.length === 0
-            ? "No app has its own cap — the daily limit covers everything"
-            : "Caps inside the daily limit — the app stops, the day continues"}
-        </p>
-      </div>
-      {pol.app_limits.map((a) => (
-        <div className="rl-app" key={a.match}>
-          <span className="rl-app-name">{a.match}</span>
-          <FluentSlider
-            min={15}
-            max={240}
-            step={15}
-            value={a.daily_limit_minutes}
-            disabled={busy}
-            aria-label={`Daily limit for ${a.match}`}
-            format={(v) => `${fmtMin(v)} / day`}
-            onCommit={(v) => setApp(a.match, v)}
-          />
-          <button className="chip-x" disabled={busy} aria-label={`Remove limit for ${a.match}`}
-            onClick={() => setApp(a.match, null)}>
-            ✕
-          </button>
-        </div>
-      ))}
-      <div className="rl-app">
-        <input
-          className="chip-input"
-          placeholder="+ app, e.g. steam"
-          value={newApp}
-          disabled={busy}
-          onChange={(e) => setNewApp(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && add()}
-          aria-label="Add an app limit"
-        />
-        {newApp.trim() && (
-          <button className="ch-btn" disabled={busy} onClick={add}>
-            Limit to 30 min
-          </button>
-        )}
-      </div>
     </div>
   );
 }

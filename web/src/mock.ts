@@ -10,7 +10,6 @@ import type {
   Device,
   DeviceDetail,
   DeviceUser,
-  DiscoveryResult,
   EarnRequest,
   EnrollTokenResponse,
   Event,
@@ -54,7 +53,6 @@ const kidsPolicy: Policy = {
     ],
     bedtime: { start: "20:00", end: "07:00" },
   },
-  app_limits: [{ match: "steam", daily_limit_minutes: 30 }],
   gamification: {
     earn_time: {
       enabled: true,
@@ -64,7 +62,6 @@ const kidsPolicy: Policy = {
       ],
     },
     lockout: { enabled: true, unlock_challenge: "math" },
-    streaks: { enabled: true, nudges: ["bedtime", "breaks"] },
   },
   lockdown: {
     force_dns: true,
@@ -106,14 +103,12 @@ const teenPolicy: Policy = {
     ],
     bedtime: { start: "22:30", end: "06:30" },
   },
-  app_limits: [{ match: "steam", daily_limit_minutes: 90 }],
   gamification: {
     earn_time: {
       enabled: true,
       tasks: [{ id: "homework", label: "Finish homework", reward_minutes: 20 }],
     },
     lockout: { enabled: true, unlock_challenge: "wait" },
-    streaks: { enabled: true, nudges: ["breaks"] },
   },
 };
 
@@ -137,11 +132,9 @@ const defaultPolicy: Policy = {
     schedule: [],
     bedtime: null,
   },
-  app_limits: [],
   gamification: {
     earn_time: { enabled: false, tasks: [] },
     lockout: { enabled: false, unlock_challenge: "wait" },
-    streaks: { enabled: false, nudges: [] },
   },
 };
 
@@ -337,9 +330,9 @@ export const mockEvents: Event[] = [
     tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-leo",
-    type: "streak",
+    type: "screen_time_earned",
     severity: "info",
-    payload: { streak_days: 6, nudge: "breaks" },
+    payload: { reward_minutes: 15, task: "Read for 20 min" },
     created_at: "2026-07-07T12:00:00Z",
   },
   {
@@ -352,29 +345,7 @@ export const mockEvents: Event[] = [
     payload: { hostname: "loft-desk" },
     created_at: "2026-06-14T09:02:00Z",
   },
-  {
-    id: "e8",
-    tenant_id: TENANT_ID,
-    device_id: "d-livingroom",
-    device_user_id: null,
-    type: "discovery_result",
-    severity: "info",
-    payload: { hosts_found: 4 },
-    created_at: "2026-07-07T11:20:00Z",
-  },
 ];
-
-export const mockDiscovery: DiscoveryResult = {
-  id: "disc-1",
-  device_id: "d-livingroom",
-  created_at: "2026-07-07T11:20:00Z",
-  hosts: [
-    { ip: "192.168.1.14", mac: "b8:27:eb:0a:11:22", hostname: "kitchen-tablet", open_ports: [22, 5555], vendor: "Raspberry Pi" },
-    { ip: "192.168.1.22", mac: "44:65:0d:aa:bc:1e", hostname: "noah-switch", open_ports: [], vendor: "Nintendo" },
-    { ip: "192.168.1.31", mac: "dc:a6:32:99:00:5f", hostname: undefined, open_ports: [80, 443], vendor: "Espressif" },
-    { ip: "192.168.1.40", mac: "f0:9f:c2:1a:2b:3c", hostname: "old-laptop", open_ports: [22], vendor: "Ubiquiti" },
-  ],
-};
 
 const mockAdmin: Admin = {
   id: "a-1",
