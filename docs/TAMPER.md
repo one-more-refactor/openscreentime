@@ -31,8 +31,10 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
   its heartbeat file (`/run/sentinel/heartbeat`, touched every enforcement tick) is missing or
   older than 90 s. Killing the agent process buys at most ~30 s.
 - **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-sentinel.rules`) denies
-  `org.freedesktop.login1` power-off / reboot / suspend (and their `-multiple-sessions`
-  variants) to everyone except root and the `sentinel-admin` recovery account.
+  `org.freedesktop.login1` power-off / reboot / halt / suspend / hibernate / suspend-then-hibernate
+  (and their `-multiple-sessions` variants) to everyone except root and the `sentinel-admin`
+  recovery account. The physical power key and Magic SysRq are kernel/firmware levers a polkit
+  rule cannot reach — see "What Sentinel does not do".
 - **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
   re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
 - **Firewall self-repair (fail-closed):** if the sentinel nftables table disappears (e.g.
@@ -60,7 +62,8 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 Everything in level 1 **plus**:
 
 - The polkit rule additionally denies `stop` / `disable` / `mask` of
-  `sentinel-agent.service` via `systemctl` for everyone except root and `sentinel-admin`.
+  `sentinel-agent.service` **and** `sentinel-watchdog.service` / `sentinel-watchdog.timer`
+  (the recovery net) via `systemctl` for everyone except root and `sentinel-admin`.
 - A logind drop-in (`/etc/systemd/logind.conf.d/50-sentinel.conf`) sets `ReserveVT=0` and
   `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
   processes at logout. `sentinel-admin` can revert it.

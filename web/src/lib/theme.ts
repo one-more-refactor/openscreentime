@@ -1,12 +1,15 @@
 import { useSyncExternalStore } from "react";
 
 export type Theme = "dark" | "light";
-const KEY = "sentinel-theme";
+const KEY = "openscreentime-theme";
 
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+/** Stored choice wins; otherwise follow the OS. Both modes are first-class. */
 export function getInitialTheme(): Theme {
   const stored = localStorage.getItem(KEY);
   if (stored === "dark" || stored === "light") return stored;
-  return "dark"; // dark is the primary theme
+  return systemDark.matches ? "dark" : "light";
 }
 
 // Module-level store so every useTheme() consumer shares one state — toggling
@@ -14,12 +17,19 @@ export function getInitialTheme(): Theme {
 let current: Theme = getInitialTheme();
 const listeners = new Set<() => void>();
 
-export function applyTheme(theme: Theme) {
+export function applyTheme(theme: Theme, persist = true) {
   current = theme;
   document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem(KEY, theme);
+  if (persist) localStorage.setItem(KEY, theme);
   listeners.forEach((l) => l());
 }
+
+// Until the user toggles explicitly, track the OS live.
+systemDark.addEventListener("change", (e) => {
+  if (localStorage.getItem(KEY) === null) {
+    applyTheme(e.matches ? "dark" : "light", false);
+  }
+});
 
 function subscribe(listener: () => void) {
   listeners.add(listener);

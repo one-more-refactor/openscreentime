@@ -4,7 +4,7 @@ import { useSession } from "../lib/session";
 import { ApiError, getAuthConfig } from "../api";
 import { useAsync } from "../lib/useAsync";
 import { isEmail } from "../lib/validate";
-import { DotMatrix, PasskeyButton, TextInput, Button } from "../components";
+import { Wordmark, PasskeyButton, TextInput, Button } from "../components";
 import { LockOverlay } from "../components";
 import type { AuthConfig } from "../types";
 
@@ -42,7 +42,7 @@ export function Login() {
     try {
       if (mode === "login") await login(email.trim());
       else await register(email.trim(), displayName.trim() || email.trim());
-      navigate("/devices", { replace: true });
+      navigate("/", { replace: true });
     } catch (e) {
       if (e instanceof ApiError && e.code === "registration_closed") {
         setError(
@@ -64,10 +64,10 @@ export function Login() {
       {/* Left: brand + form */}
       <div className="flex flex-col justify-center px-8 sm:px-16 py-12 max-w-lg w-full mx-auto">
         <div className="mb-2">
-          <DotMatrix text="SENTINEL" dot={4} color="var(--fg)" />
+          <Wordmark size={2} />
         </div>
         <p className="label mb-10" style={{ color: "var(--fg-faint)" }}>
-          ZERO-TRUST DEVICE MANAGEMENT
+          SCREEN TIME FOR THE WHOLE FAMILY
         </p>
 
         <div
