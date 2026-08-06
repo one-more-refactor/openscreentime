@@ -371,6 +371,8 @@ pub mod gui {
     const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
     const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
     const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
+    /// Label ink — quieter than FG, so the PIN prompt does not shout.
+    const FAINT: (u8, u8, u8) = (0x7a, 0x7a, 0x7a);
 
     /// Minutes granted by a verified early dismiss. The parent PIN is the real
     /// escape hatch (enough to matter); a solved challenge is a short breather
@@ -557,6 +559,7 @@ pub mod gui {
                 Ok(Box::new(LockApp {
                     spec: spec.clone(),
                     input: String::new(),
+                    pin: String::new(),
                     deadline,
                 }))
             }),
@@ -567,9 +570,16 @@ pub mod gui {
 
     struct LockApp {
         spec: LockSpec,
-        /// Typed response for `Math`/`ParentPin` challenges (the early-dismiss
-        /// gate — `Challenge::verify` decides whether it's correct).
+        /// Typed response to the *challenge* — a maths answer. Shown as typed:
+        /// a child working out 7 × 8 has to be able to see what they entered.
         input: String,
+        /// The parent PIN, kept separate and masked.
+        ///
+        /// These used to be one field, which meant a parent typed the recovery
+        /// PIN in cleartext on a full-screen overlay, in front of the child it
+        /// exists to constrain — and that PIN is not a one-time code. It opens
+        /// this device for an hour, offline, whenever they like.
+        pin: String,
         /// When the save-your-work grace ends (drives the live countdown line).
         deadline: Option<std::time::Instant>,
     }
@@ -632,14 +642,25 @@ pub mod gui {
                     // challenges when a PIN is configured, since it's always a
                     // valid master escape (a parent physically present can
                     // always get in).
-                    let needs_input = matches!(
-                        self.spec.challenge,
-                        Challenge::Math { .. } | Challenge::ParentPin
-                    ) || self.spec.parent_pin_hash.is_some();
-                    if needs_input {
+                    // The maths answer is visible; the PIN never is.
+                    if matches!(self.spec.challenge, Challenge::Math { .. }) {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.input)
                                 .hint_text("type your answer")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(16.0);
+                    }
+                    if self.spec.parent_pin_hash.is_some() {
+                        ui.label(
+                            egui::RichText::new("Parent PIN")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(FAINT.0, FAINT.1, FAINT.2)),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.pin)
+                                .password(true)
+                                .hint_text("••••••••")
                                 .font(egui::TextStyle::Monospace),
                         );
                         ui.add_space(16.0);
@@ -665,7 +686,7 @@ pub mod gui {
                             .spec
                             .parent_pin_hash
                             .as_deref()
-                            .map(|h| crate::pin::verify_pin(self.input.trim(), h))
+                            .map(|h| crate::pin::verify_pin(self.pin.trim(), h))
                             .unwrap_or(false);
                         let challenge_ok = self.spec.challenge.verify(&self.input, None);
                         if pin_ok {
@@ -696,6 +717,7 @@ pub mod gui {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else {
                             self.input.clear();
+                            self.pin.clear();
                         }
                     }
                 });
