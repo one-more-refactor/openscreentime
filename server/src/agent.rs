@@ -35,12 +35,7 @@ const POLL_INTERVAL_SECS: u64 = 15;
 /// refreshed) instead of stacking duplicates. `credit_time`/`deny_earn` are
 /// deliberately absent — every grant is a distinct command.
 /// Mirrors the partial unique index in migration 0009.
-const COALESCE_TYPES: &[&str] = &[
-    "lock",
-    "unlock",
-    "apply_policy",
-    "set_tamper_level",
-];
+const COALESCE_TYPES: &[&str] = &["lock", "unlock", "apply_policy", "set_tamper_level"];
 
 /// The id of a pending (queued|sent) command of this type, if one exists.
 pub async fn pending_command(

@@ -143,8 +143,18 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     let mut by_key: Vec<Child> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     for u in user_rows {
-        let (id, device_id, os_username, display_name, profile_id, pname, _pkind, policy, used, earned) =
-            u;
+        let (
+            id,
+            device_id,
+            os_username,
+            display_name,
+            profile_id,
+            pname,
+            _pkind,
+            policy,
+            used,
+            earned,
+        ) = u;
         let name = display_name
             .as_deref()
             .map(str::trim)
@@ -191,7 +201,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }
     }
 
-    by_key.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    by_key.sort_by_key(|c| c.name.to_lowercase());
     let children: Vec<Value> = by_key
         .into_iter()
         .map(|c| {

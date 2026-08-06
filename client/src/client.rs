@@ -5,7 +5,7 @@ use crate::protocol::{Command, CommandAck, Event};
 use crate::sysusers::OsUser;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -33,7 +33,7 @@ pub struct EnrollResponse {
     pub poll_interval_secs: u64,
     /// The device's recovery PIN, plaintext, returned exactly once. The server
     /// keeps only an argon2 hash, so if this is not written down here it cannot
-    /// be recovered — only rotated. It is what `sentinel-agent unlock --pin`
+    /// be recovered — only rotated. It is what `openscreentime unlock --pin`
     /// verifies offline when a device has locked itself out.
     #[serde(default)]
     pub recovery_pin: Option<String>,
@@ -47,7 +47,7 @@ fn default_poll() -> u64 {
 pub async fn enroll(base_url: &str, req: &EnrollRequest) -> Result<EnrollResponse> {
     let base = base_url.trim_end_matches('/');
     let http = reqwest::Client::builder()
-        .user_agent(format!("sentinel-agent/{AGENT_VERSION}"))
+        .user_agent(format!("openscreentime/{AGENT_VERSION}"))
         .build()?;
     let resp = http
         .post(format!("{base}/agent/enroll"))
@@ -99,7 +99,7 @@ pub struct ServerClient {
 impl ServerClient {
     pub fn new(base_url: &str, token: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(format!("sentinel-agent/{AGENT_VERSION}"))
+            .user_agent(format!("openscreentime/{AGENT_VERSION}"))
             // Bound every request. Without this, a blackholed server stalls the
             // caller indefinitely — including the earn-request POST that runs
             // inside the enforcement tick on the WS select loop, which would
@@ -183,6 +183,36 @@ impl ServerClient {
             .context("GET /agent/policy")?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    /// POST /agent/voucher — a one-time, two-minute token that a local browser
+    /// exchanges for a session on this machine (`ost login`).
+    ///
+    /// Returns the voucher and its lifetime in seconds. The voucher is a live
+    /// credential for as long as it lasts, so it is never logged here.
+    pub async fn mint_voucher(&self) -> Result<(String, u64)> {
+        let res: Value = self
+            .http
+            .post(format!("{}/agent/voucher", self.base))
+            .header("Authorization", self.bearer())
+            .send()
+            .await
+            .context("POST /agent/voucher")?
+            .error_for_status()?
+            .json()
+            .await
+            .context("reading the voucher response")?;
+
+        let voucher = res
+            .get("voucher")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("server returned no voucher"))?
+            .to_string();
+        let expires = res
+            .get("expires_in_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(120);
+        Ok((voucher, expires))
     }
 
     /// POST /agent/events — buffered telemetry & audit.

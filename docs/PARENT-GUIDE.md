@@ -93,7 +93,7 @@ levels. Level 1 is the default on every device: a root-owned, auto-restarting sy
 boot persistence, and real-time tamper alerts. Level 3 — "MAXIMUM LOCKDOWN" — additionally
 disables TTY switching and locks the systemd unit against a `systemctl stop` from the managed
 user. It requires an explicit confirm because **it can lock the admin out too**; the recovery
-paths are the parent PIN (`sentinel-agent unlock` run locally on the machine, or typed into
+paths are the parent PIN (`ost unlock` run locally on the machine, or typed into
 the lockout screen), the local `sentinel-admin` account (exempt from every lockdown rule), or
 dropping back to Level 1 from the console. Read the confirmation dialog before you enable it.
 
