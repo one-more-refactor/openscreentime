@@ -5,6 +5,7 @@
 // ============================================================================
 
 import type {
+  Account,
   Admin,
   Device,
   DeviceDetail,
@@ -13,11 +14,13 @@ import type {
   EarnRequest,
   EnrollTokenResponse,
   Event,
+  Household,
   Me,
   Passkey,
   Policy,
   Profile,
   Tenant,
+  TwoFactorStatus,
 } from "./types";
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
@@ -209,6 +212,11 @@ function du(
   };
 }
 
+/** Minutes-ago helper so mock devices always look freshly alive in a demo. */
+function ago(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
 export const mockDevices: Device[] = [
   {
     id: "d-livingroom",
@@ -220,7 +228,7 @@ export const mockDevices: Device[] = [
     status: "online",
     tamper_level: 1,
     public_ip: "84.112.22.9",
-    last_seen: "2026-07-07T14:58:12Z",
+    last_seen: ago(2),
     created_at: "2026-06-10T08:00:00Z",
     users: [
       du("u-mia", "d-livingroom", "mia", "Mia", "p-kids", 48, 15),
@@ -237,7 +245,7 @@ export const mockDevices: Device[] = [
     status: "locked",
     tamper_level: 3,
     public_ip: "84.112.22.9",
-    last_seen: "2026-07-07T14:40:03Z",
+    last_seen: ago(18),
     created_at: "2026-06-12T18:20:00Z",
     users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen", 120, 20)],
   },
@@ -251,8 +259,10 @@ export const mockDevices: Device[] = [
     status: "offline",
     tamper_level: 1,
     public_ip: null,
-    last_seen: "2026-07-06T22:10:44Z",
+    last_seen: ago(11 * 60),
     created_at: "2026-06-14T09:00:00Z",
+    // Ada took the desktop to a school project day — offline is allowed.
+    offline_allowed_until: ago(-3 * 60),
     users: [du("u-ada", "d-loft", "ada", "Ada", "p-default")],
   },
   {
@@ -380,7 +390,100 @@ const mockTenant: Tenant = {
   created_at: "2026-06-01T10:00:00Z",
 };
 
-export const mockMe: Me = { admin: mockAdmin, tenant: mockTenant };
+const mockHousehold: Household = {
+  id: TENANT_ID,
+  name: "The Ludwig house",
+  created_at: "2026-06-01T10:00:00Z",
+};
+
+/** The signed-in identity — the founding parent (household owner). */
+const mockAccount: Account = {
+  id: "acc-parent",
+  household_id: TENANT_ID,
+  display_name: "Parent",
+  email: "parent@home.lan",
+  role: "owner",
+  age_bracket: "adult",
+  birthdate: "1988-04-12",
+  self_managed: true,
+  created_at: "2026-06-01T10:00:00Z",
+};
+
+/** The whole household — everyone has an account now, across every bracket. */
+export const mockHouseholdAccounts: Account[] = [
+  mockAccount,
+  {
+    id: "acc-coparent",
+    household_id: TENANT_ID,
+    display_name: "Sam",
+    email: "sam@home.lan",
+    role: "parent",
+    age_bracket: "adult",
+    birthdate: "1990-09-01",
+    self_managed: true,
+    created_at: "2026-06-01T10:05:00Z",
+  },
+  {
+    id: "acc-leo",
+    household_id: TENANT_ID,
+    display_name: "Leo",
+    email: "leo@home.lan",
+    role: "member",
+    age_bracket: "older_teen",
+    birthdate: "2009-02-20",
+    self_managed: true,
+    created_at: "2026-06-02T08:00:00Z",
+  },
+  {
+    id: "acc-noah",
+    household_id: TENANT_ID,
+    display_name: "Noah",
+    email: "noah@home.lan",
+    role: "member",
+    age_bracket: "younger_teen",
+    birthdate: "2012-06-11",
+    self_managed: false,
+    created_at: "2026-06-02T08:05:00Z",
+  },
+  {
+    id: "acc-mia",
+    household_id: TENANT_ID,
+    display_name: "Mia",
+    email: null,
+    role: "member",
+    age_bracket: "kid",
+    birthdate: "2016-11-03",
+    self_managed: false,
+    created_at: "2026-06-02T08:10:00Z",
+  },
+  {
+    id: "acc-ada",
+    household_id: TENANT_ID,
+    display_name: "Ada",
+    email: null,
+    role: "member",
+    age_bracket: "little",
+    birthdate: "2020-01-30",
+    self_managed: false,
+    created_at: "2026-06-02T08:15:00Z",
+  },
+];
+
+export const mockMe: Me = {
+  account: mockAccount,
+  household: mockHousehold,
+  admin: mockAdmin,
+  tenant: mockTenant,
+};
+
+/** Design-review 2FA state: an authenticator is enrolled, email is available. */
+export const mockTwoFactor: TwoFactorStatus = {
+  totp_enrolled: true,
+  email_available: true,
+};
+
+/** The code the mock step-up flow accepts, so the modal is demoable offline. */
+export const MOCK_STEPUP_CODE = "123456";
 
 export const mockEarnRequests: EarnRequest[] = [
   {

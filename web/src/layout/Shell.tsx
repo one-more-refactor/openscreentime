@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
 import { useTheme } from "../lib/theme";
-import { DotMatrix } from "../components/DotMatrix";
+import { Wordmark } from "../components/Wordmark";
 
 // The old header carried a live LED strip of every enrolled device ("FLEET").
 // That is exactly the machinery this console no longer puts in a parent's
@@ -26,8 +26,11 @@ function NavList({ entries, onNavigate }: { entries: NavEntry[]; onNavigate?: ()
           onClick={onNavigate}
           className="focusable flex items-center justify-between gap-2.5 px-5 py-2.5 font-mono uppercase tracking-label text-[0.6875rem] transition-colors"
           style={({ isActive }) => ({
-            color: isActive ? "var(--fg)" : "var(--fg-dim)",
-            borderRight: isActive ? "2px solid var(--accent)" : "2px solid transparent",
+            // Active = ink, not red. Red is an interrupt, not a location.
+            color: isActive ? "var(--fg-display)" : "var(--fg-dim)",
+            borderRight: isActive
+              ? "2px solid var(--fg-display)"
+              : "2px solid transparent",
           })}
         >
           <span>{n.label}</span>
@@ -61,6 +64,7 @@ export function Shell() {
   // A console about your children should not have a fleet menu.
   const entries: NavEntry[] = [
     { to: "/", label: "FAMILY" },
+    { to: "/devices", label: "DEVICES" },
     { to: "/settings", label: "SETTINGS" },
   ];
 
@@ -121,8 +125,8 @@ export function Shell() {
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
           <span className="block w-4 h-px" style={{ background: "var(--fg)" }} />
         </button>
-        <NavLink to="/" className="focusable flex items-center" aria-label="Sentinel home">
-          <DotMatrix text="SENTINEL" dot={3} color="var(--fg)" />
+        <NavLink to="/" className="focusable flex items-center" aria-label="OpenScreenTime home">
+          <Wordmark size={1.25} />
         </NavLink>
         <span className="flex-1" />
         <span className="label hidden md:inline" style={{ color: "var(--fg-dim)" }}>
@@ -157,7 +161,7 @@ export function Shell() {
                 className="flex items-center justify-between px-5 h-14 border-b flex-none"
                 style={{ borderColor: "var(--line)" }}
               >
-                <DotMatrix text="SENTINEL" dot={2.5} color="var(--fg)" />
+                <Wordmark size={1.125} />
                 <button
                   onClick={() => setMenuOpen(false)}
                   className="focusable text-fg-faint hover:text-fg text-sm"

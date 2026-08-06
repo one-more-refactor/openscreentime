@@ -171,6 +171,8 @@ export interface Device {
   created_at: string;
   /** bumped when the device's VPN profiles change (cache-busting stamp) */
   vpn_updated_at?: string | null;
+  /** while set and in the future, being unreachable is allowed, not trouble */
+  offline_allowed_until?: string | null;
   /** present on list + detail responses */
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
@@ -265,9 +267,88 @@ export interface MintedParentToken {
   token: string;
 }
 
+// ---- People, roles, age brackets -------------------------------------------
+// The account model the "everyone has an account" pivot introduces. Grounded
+// in docs/AUTH.md. Kept alongside the legacy Admin/Tenant during the interleave
+// so existing call sites keep working while new ones move to Account/Household.
+
+export type Role = "owner" | "parent" | "member";
+// owner   — the founding parent; full control of the household
+// parent  — a co-parent / guardian with the same hub powers
+// member  — a managed or self-tracking person (kid, teen, or adult)
+
+export type AgeBracket =
+  | "little" // 0–6   hard limits, no login, parent does everything
+  | "kid" // 6–12  hard limits, can request/earn time
+  | "younger_teen" // 12–16 goals + limits, wind-down before a hard stop
+  | "older_teen" // 16–18 mostly self-set, parent can still cap
+  | "adult"; // 18+   private self-tracking, self-imposed limits only
+
+export const AGE_BRACKETS: { key: AgeBracket; label: string; range: string }[] = [
+  { key: "little", label: "Little", range: "0–6" },
+  { key: "kid", label: "Kid", range: "6–12" },
+  { key: "younger_teen", label: "Younger teen", range: "12–16" },
+  { key: "older_teen", label: "Older teen", range: "16–18" },
+  { key: "adult", label: "Adult", range: "18+" },
+];
+
+export interface Household {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface Account {
+  id: string;
+  household_id: string;
+  display_name: string;
+  /** Members young enough not to log in may have no email. */
+  email: string | null;
+  role: Role;
+  age_bracket: AgeBracket;
+  /** YYYY-MM-DD; the source of truth the bracket is derived from. */
+  birthdate: string | null;
+  /** Older teens & adults track privately; the hub sees less of them. */
+  self_managed: boolean;
+  created_at: string;
+}
+
 export interface Me {
+  /** The unified identity going forward. */
+  account: Account;
+  household: Household;
+  /** @deprecated transition aliases while call sites migrate off Admin/Tenant. */
   admin: Admin;
+  /** @deprecated transition alias — use `household`. */
   tenant: Tenant;
+}
+
+// ---- Two-factor / step-up ("reading is free, changing needs a factor") -----
+
+export type SecondFactorMethod = "totp" | "email";
+
+/** Error code the server returns from a mutation with no valid step-up grant. */
+export const STEP_UP_REQUIRED = "step_up_required";
+
+export interface TwoFactorStatus {
+  /** An authenticator-app secret is enrolled and confirmed. */
+  totp_enrolled: boolean;
+  /** The account has an email a code can be sent to. */
+  email_available: boolean;
+}
+
+/** Returned by TOTP enrollment start — the secret is shown exactly once. */
+export interface TotpEnrollment {
+  /** base32 secret for manual entry. */
+  secret: string;
+  /** otpauth://totp/… — render as a QR for scanning into the app. */
+  otpauth_uri: string;
+}
+
+/** A successful step-up: the grant is valid until `expires_at`. */
+export interface StepUpGrant {
+  method: SecondFactorMethod;
+  expires_at: string;
 }
 
 // ---- Command / action responses --------------------------------------------
