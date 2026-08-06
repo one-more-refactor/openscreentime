@@ -20,38 +20,6 @@ use std::sync::Arc;
 pub enum Gap {
     Dns(dns::DnsGap),
     Vpn(vpn::VpnGap),
-    Policy(PolicyGap),
-}
-
-/// A policy field this agent accepts over the wire but does not enforce.
-///
-/// Silently ignoring a setting an admin deliberately configured is the same
-/// class of failure as a firewall that does not load: the console shows the
-/// rule, the device does not apply it, and nothing says so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyGap {
-    /// `policy.app_limits` has entries. Nothing in the agent reads this field —
-    /// there is no per-application enforcement of any kind.
-    AppLimitsUnsupported,
-}
-
-impl PolicyGap {
-    pub fn kind(self) -> &'static str {
-        match self {
-            PolicyGap::AppLimitsUnsupported => "policy_app_limits_unsupported",
-        }
-    }
-
-    pub fn explain(self) -> &'static str {
-        match self {
-            PolicyGap::AppLimitsUnsupported => {
-                "this profile sets per-app limits, but the Linux agent does not \
-                 implement them — no application is being limited or blocked. \
-                 Use screen time and the DNS allowlist instead, or remove the \
-                 app limits so the console stops implying they are in force."
-            }
-        }
-    }
 }
 
 impl Gap {
@@ -60,7 +28,6 @@ impl Gap {
         match self {
             Gap::Dns(g) => g.kind(),
             Gap::Vpn(g) => g.kind(),
-            Gap::Policy(g) => g.kind(),
         }
     }
 
@@ -69,7 +36,6 @@ impl Gap {
         match self {
             Gap::Dns(g) => g.explain(),
             Gap::Vpn(g) => g.explain(),
-            Gap::Policy(g) => g.explain(),
         }
     }
 }
@@ -138,11 +104,35 @@ mod tests {
     /// `kind` lands in stored event payloads and whatever the console filters
     /// on, so it is API. And every gap must tell an operator what to do — an
     /// alert nobody can act on is the failure this reporting exists to remove.
+    ///
+    /// Checked across every variant rather than a sample, so a gap added later
+    /// cannot ship with an empty or non-actionable explanation.
     #[test]
-    fn policy_gap_is_identified_and_actionable() {
-        let g = Gap::Policy(PolicyGap::AppLimitsUnsupported);
-        assert_eq!(g.kind(), "policy_app_limits_unsupported");
-        assert!(g.explain().contains("does not implement"));
-        assert!(g.explain().len() > 60);
+    fn every_gap_is_identified_and_actionable() {
+        use dns::DnsGap::*;
+        use vpn::VpnGap::*;
+
+        let all = [
+            Gap::Dns(NoLocalResolver),
+            Gap::Dns(ResolvConfNotAFile),
+            Gap::Dns(ResolvConfNotLocked),
+            Gap::Dns(PolicyNotLoaded),
+            Gap::Vpn(NotRunning),
+            Gap::Vpn(UnsupportedKind),
+        ];
+
+        let mut kinds = std::collections::HashSet::new();
+        for g in all {
+            let kind = g.kind();
+            assert!(
+                kind.starts_with("dns_") || kind.starts_with("vpn_"),
+                "{kind}: the prefix is what the console filters on"
+            );
+            assert!(kinds.insert(kind), "{kind}: duplicate kind, these are ids");
+            assert!(
+                g.explain().len() > 60,
+                "{kind}: an operator cannot act on a one-liner"
+            );
+        }
     }
 }

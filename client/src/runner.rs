@@ -9,7 +9,7 @@ use crate::lockout::{self, LockSpec};
 use crate::policy::Policy;
 use crate::protocol::*;
 use crate::util::Exec;
-use crate::{discovery, gamify, tamper};
+use crate::{earn, tamper};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -462,13 +462,7 @@ impl Agent {
         while self.notifications.len() > NOTIFY_QUEUE_CAP {
             self.notifications.pop_front();
         }
-        lockout::present_nudge(
-            &self.exec,
-            &gamify::Nudge {
-                kind: "notification".into(),
-                copy: format!("{title} — {body}"),
-            },
-        );
+        lockout::notify(&self.exec, "notification", &format!("{title} — {body}"));
     }
 
     /// Deliver `fresh` events plus any earlier failures. On error the batch is
@@ -697,22 +691,14 @@ impl Agent {
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
-        let (mut gaps, vpn_report) = enforce::apply_network_policy(
+        let (gaps, vpn_report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
             &effective,
             &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
         )?;
-        // Report policy fields this agent accepts but does not enforce. Checked
-        // across every user's policy, not just the merged network one, since
-        // app limits are per-person and the merge only picks a network winner.
-        if self.policies.values().any(|p| !p.app_limits.is_empty()) {
-            gaps.push(enforce::Gap::Policy(
-                enforce::PolicyGap::AppLimitsUnsupported,
-            ));
-        }
-        // Best-effort cache so `sentinel-agent unlock` can work without a live
+        // Best-effort cache so `ost unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
         crate::policy::save_cache(&effective);
         // …and the whole bundle, so a reboot while the server is unreachable
@@ -974,7 +960,7 @@ impl Agent {
             // freeze. Fires while still within policy.
             if is_active && !currently_frozen && !self.device_locked && lock.is_none() && !in_grace
             {
-                self.maybe_warn(&user, &policy, &mut events);
+                self.maybe_warn(&user, &policy);
             }
 
             let effective_device_locked =
@@ -1089,21 +1075,15 @@ impl Agent {
                 // first offer is auto-requested and the copy reflects that
                 // it's already in flight.
                 if matches!(reason, screentime::LockReason::DailyLimit { .. }) {
-                    if let Some(offer) =
-                        gamify::earn_offers(&policy.gamification).into_iter().next()
+                    if let Some(offer) = earn::earn_offers(&policy.gamification).into_iter().next()
                     {
                         spec.action =
                             self.auto_request_earn(user, &offer)
                                 .await
                                 .unwrap_or_else(|| {
-                                    format!("EARN {} MIN — {}", offer.reward_minutes, offer.label)
+                                    format!("Earn {} min — {}", offer.reward_minutes, offer.label)
                                 });
                     }
-                }
-                // Streak nudges (bedtime/breaks) ride along as events.
-                for nudge in gamify::nudges_for(policy) {
-                    lockout::present_nudge(&self.exec, &nudge);
-                    events.push(gamify::streak_event(user, &nudge.kind, 0));
                 }
                 // The full-screen overlay now shows a live save-your-work
                 // countdown itself (no more static "PAUSES IN 60 SECONDS" text).
@@ -1156,9 +1136,13 @@ impl Agent {
         }
     }
 
-    /// Pre-lockout warnings: 10-min and 2-min time-remaining nudges plus a
-    /// bedtime wind-down 15 minutes out, each at most once per user per day.
-    fn maybe_warn(&mut self, user: &str, policy: &Policy, events: &mut Vec<Event>) {
+    /// Pre-lockout wind-down: 10-minute and 2-minute warnings plus a bedtime
+    /// heads-up 15 minutes out, each at most once per user per day.
+    ///
+    /// These deliberately emit no server event. Telling a parent "we warned
+    /// them at 10 minutes" is feed noise; the moment that actually matters —
+    /// the stop itself — already emits `screen_time_exceeded`.
+    fn maybe_warn(&mut self, user: &str, policy: &Policy) {
         let today = chrono::Local::now().date_naive();
         let fire = |warned: &mut HashMap<(String, String), chrono::NaiveDate>,
                     exec: &Exec,
@@ -1166,17 +1150,10 @@ impl Agent {
                     copy: String| {
             let key = (user.to_string(), kind.to_string());
             if warned.get(&key) == Some(&today) {
-                return false;
+                return;
             }
             warned.insert(key, today);
-            lockout::present_nudge(
-                exec,
-                &gamify::Nudge {
-                    kind: kind.into(),
-                    copy,
-                },
-            );
-            true
+            lockout::notify(exec, kind, &copy);
         };
 
         if let Some(rem) = self.tracker.remaining_minutes(user, policy) {
@@ -1185,34 +1162,30 @@ impl Agent {
             let warn = if rem > 0 && rem <= 2 {
                 Some((
                     "time_2min",
-                    format!("{rem} MIN LEFT — WRAP UP AND SAVE NOW"),
+                    format!("{rem} min left — wrap up and save your work now."),
                 ))
             } else if rem > 2 && rem <= 10 {
                 Some((
                     "time_10min",
-                    format!("{rem} MIN LEFT TODAY — GOOD TIME TO FINISH UP"),
+                    format!("{rem} min left today — a good time to finish up."),
                 ))
             } else {
                 None
             };
             if let Some((kind, copy)) = warn {
-                if fire(&mut self.warned, &self.exec, kind, copy) {
-                    events.push(gamify::streak_event(user, kind, 0));
-                }
+                fire(&mut self.warned, &self.exec, kind, copy);
             }
         }
 
         if let Some(bt) = &policy.screen_time.bedtime {
             if let Some(mins) = screentime::minutes_until_bedtime(bt, chrono::Local::now().time()) {
-                if (1..=15).contains(&mins)
-                    && fire(
+                if (1..=15).contains(&mins) {
+                    fire(
                         &mut self.warned,
                         &self.exec,
                         "bedtime_soon",
-                        format!("BEDTIME IN {mins} MIN — WIND DOWN"),
-                    )
-                {
-                    events.push(gamify::streak_event(user, "bedtime_soon", 0));
+                        format!("Bedtime in {mins} min — time to wind down."),
+                    );
                 }
             }
         }
@@ -1316,16 +1289,16 @@ impl Agent {
             let _ = std::fs::remove_file(&path); // single-use
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
             // Use the first configured earn offer, or a plain "more time" ask.
-            let offer = gamify::earn_offers(&policy.gamification)
+            let offer = earn::earn_offers(&policy.gamification)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| gamify::EarnOffer {
+                .unwrap_or_else(|| earn::EarnOffer {
                     id: "more_time".into(),
                     label: "More screen time".into(),
                     reward_minutes: 15,
                 });
             if let Some(copy) = self.auto_request_earn(&user, &offer).await {
-                self.notify_user(Some(&user), "REQUEST SENT", &copy, false);
+                self.notify_user(Some(&user), "Request sent", &copy, false);
             }
         }
     }
@@ -1334,11 +1307,11 @@ impl Agent {
     /// also dedupes by returning the existing pending row, but we avoid spamming
     /// it every tick). Returns the presenter copy to show, if a request was sent
     /// or already pending today.
-    async fn auto_request_earn(&mut self, user: &str, offer: &gamify::EarnOffer) -> Option<String> {
+    async fn auto_request_earn(&mut self, user: &str, offer: &earn::EarnOffer) -> Option<String> {
         let today = chrono::Local::now().date_naive();
         let key = (user.to_string(), offer.id.clone());
         if self.requested_earn.get(&key) == Some(&today) {
-            return Some("REQUEST SENT — WAITING FOR APPROVAL".to_string());
+            return Some("Request sent — waiting for approval.".to_string());
         }
         match self
             .client
@@ -1449,11 +1422,6 @@ impl Agent {
                 }
                 json!({ "tamper_level": self.tamper_level })
             }
-            CMD_DISCOVER => {
-                let ev = discovery::run().await;
-                events.push(ev);
-                json!({ "scanned": true })
-            }
             CMD_CREDIT_TIME => {
                 let os_username = cmd
                     .payload
@@ -1493,7 +1461,7 @@ impl Agent {
                     &format!("+{minutes} MIN — YOU'RE BACK"),
                     false,
                 );
-                events.push(gamify::earned_event(&os_username, &request_id, minutes));
+                events.push(earn::earned_event(&os_username, &request_id, minutes));
                 json!({ "credited": true, "os_username": os_username, "minutes": minutes })
             }
             CMD_DENY_EARN => {

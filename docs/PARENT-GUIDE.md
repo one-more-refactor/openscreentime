@@ -222,7 +222,7 @@ mostly off in Teen, reflecting the different trust levels those two presets are 
 ## The events feed
 
 **Events** is the audit log: every lock/unlock, policy application, screen-time exceed,
-earn-time request/grant/decision, tamper signal, enrollment, and discovery scan (plus
+earn-time request/grant/decision, tamper signal, and enrollment (plus
 historical `ssh` entries from the removed remote-shell feature — see below),
 filterable by device, type, and severity (info / warn / critical), with a free-text search over
 event payloads. It's also linked from each device's detail page, scoped to that device. If

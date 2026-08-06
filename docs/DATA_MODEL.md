@@ -84,7 +84,7 @@ Server → agent command queue. Agent pulls on heartbeat / WS.
 |-------------|-------------|------------------------------------------------------------|
 | id          | uuid pk     |                                                            |
 | device_id   | uuid fk     |                                                            |
-| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `discover` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
+| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
 | payload     | jsonb       | command-specific args                                      |
 | status      | text        | `queued` \| `sent` \| `acked` \| `failed`                  |
 | result      | jsonb       | nullable, agent's response                                 |
@@ -99,7 +99,7 @@ Agent → server telemetry & audit log.
 | tenant_id   | uuid fk     |                                                                |
 | device_id   | uuid fk     | nullable                                                       |
 | device_user_id | uuid fk  | nullable                                                       |
-| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `streak` \| `enrolled` \| `discovery_result` \| `ssh` (historical only — see below) \| `earn_request` |
+| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `enrolled` \| `ssh` (historical only — see below) \| `earn_request` |
 | severity    | text        | `info` \| `warn` \| `critical`                                 |
 | payload     | jsonb       |                                                                |
 | created_at  | timestamptz |                                                                |

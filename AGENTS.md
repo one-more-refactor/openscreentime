@@ -85,7 +85,6 @@ profiles.rs   → Profile CRUD, preset seeding, policy updates
 presets.rs    → Hardcoded JSON for kids/teen/default presets (mirrors docs/PROFILES.md)
 earn.rs       → Earn-time request flow (agent → server → web approval → credit_time cmd)
 events.rs     → Event listing (paginated, filtered)
-discovery.rs  → LAN scan command + discovery_result events
 rate_limit.rs → Fixed-window in-memory limiter (auth: 10/60s, enroll: 5/60s)
 static_web.rs → SPA fallback serving + 404→200 HTML rewrite middleware
 ```
@@ -127,9 +126,8 @@ protocol.rs   → Wire types: Command, Event, UsageReport, WS envelope (tagged J
 enforce/      → DNS, firewall, screentime (applies most restrictive across active users)
 lockout.rs    → Full-screen overlay (eframe, optional `gui` feature)
 tamper.rs     → Watchdog, NM D-Bus signals, polkit masking, config integrity
-gamify.rs     → Streaks, earn offers, lockout challenges
+earn.rs       → Earn-time offers + the screen_time_earned event
 unlock.rs     → Parent PIN CLI (suspends enforcement for N minutes)
-discovery.rs  → ARP + TCP scan for LAN discovery
 sysusers.rs   → OS user enumeration (libc + users crate)
 ```
 
@@ -299,7 +297,7 @@ bun run build          # tsc -b && vite build
 
 1. **Preset JSON must stay byte-identical**: `lockdown` and `parent_pin_hash` omitted when default via `skip_serializing_if`. Tests assert round-trip equality.
 
-2. **`app_limits` deprecated**: Not enforced by agent. Kept in crate for forward compat. Web `PolicyEditor` should hide it (see `CONTRACT-PROD.md` §9).
+2. **`app_limits` and streak nudges are gone**: both removed (migration 0013). `app_limits` was accepted but never enforced; streak nudges were engagement bait the product brief forbids. Wind-down warnings ("2 min left") survive in `runner::maybe_warn` and deliberately emit no event.
 
 3. **Wildcard DNS `allowlist: ["*"]`**: Means "forward everything to filtered upstream" (used by `default` profile). Zero-trust mode stays `default_deny` structurally.
 

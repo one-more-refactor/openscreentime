@@ -8,10 +8,9 @@
 mod childcli;
 mod client;
 mod config;
-mod discovery;
+mod earn;
 mod enforce;
 mod enroll;
-mod gamify;
 #[cfg(feature = "gui")]
 mod intro;
 mod lockout;

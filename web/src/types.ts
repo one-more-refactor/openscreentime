@@ -15,7 +15,6 @@
 export type DnsMode = "default_deny" | "allow_all";
 export type FirewallMode = "default_deny" | "allow_all";
 export type UnlockChallenge = "math" | "wait" | "parent_pin";
-export type StreakNudge = "bedtime" | "breaks" | string;
 
 export interface DnsPolicy {
   mode: DnsMode;
@@ -52,11 +51,6 @@ export interface ScreenTimePolicy {
   bedtime: Bedtime | null;
 }
 
-export interface AppLimit {
-  match: string;
-  daily_limit_minutes: number;
-}
-
 export interface EarnTask {
   id: string;
   label: string;
@@ -73,15 +67,9 @@ export interface LockoutPolicy {
   unlock_challenge: UnlockChallenge;
 }
 
-export interface StreaksPolicy {
-  enabled: boolean;
-  nudges: StreakNudge[];
-}
-
 export interface GamificationPolicy {
   earn_time: EarnTimePolicy;
   lockout: LockoutPolicy;
-  streaks: StreaksPolicy;
 }
 
 export interface NetworkLockdown {
@@ -101,7 +89,6 @@ export interface Policy {
   dns: DnsPolicy;
   firewall: FirewallPolicy;
   screen_time: ScreenTimePolicy;
-  app_limits: AppLimit[];
   gamification: GamificationPolicy;
   /** Absent (or omitted by the server) means all lockdown flags are off. */
   lockdown?: NetworkLockdown;
@@ -208,9 +195,7 @@ export type EventType =
   | "policy_applied"
   | "screen_time_exceeded"
   | "screen_time_earned"
-  | "streak"
   | "enrolled"
-  | "discovery_result"
   | "ssh"
   | "earn_request"
   | "evasion"
@@ -392,23 +377,6 @@ export interface EarnRequest {
 export interface AuthConfig {
   oidc: boolean;
   oidc_name: string;
-}
-
-// ---- Discovery -------------------------------------------------------------
-
-export interface DiscoveryHost {
-  ip: string;
-  mac: string;
-  hostname?: string;
-  open_ports: number[];
-  vendor?: string;
-}
-
-export interface DiscoveryResult {
-  id: string;
-  device_id: string;
-  created_at: string;
-  hosts: DiscoveryHost[];
 }
 
 // ---- API error -------------------------------------------------------------
