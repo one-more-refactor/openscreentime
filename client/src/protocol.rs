@@ -13,7 +13,6 @@ use serde_json::Value;
 pub const CMD_LOCK: &str = "lock";
 pub const CMD_UNLOCK: &str = "unlock";
 pub const CMD_APPLY_POLICY: &str = "apply_policy";
-pub const CMD_DISCOVER: &str = "discover";
 pub const CMD_SET_TAMPER_LEVEL: &str = "set_tamper_level";
 /// Earn-time approval credit (CONTRACT-PROD.md §4): `{os_username, minutes, request_id}`.
 pub const CMD_CREDIT_TIME: &str = "credit_time";
@@ -30,8 +29,6 @@ pub const EV_UNLOCK: &str = "unlock";
 pub const EV_POLICY_APPLIED: &str = "policy_applied";
 pub const EV_SCREEN_TIME_EXCEEDED: &str = "screen_time_exceeded";
 pub const EV_SCREEN_TIME_EARNED: &str = "screen_time_earned";
-pub const EV_STREAK: &str = "streak";
-pub const EV_DISCOVERY_RESULT: &str = "discovery_result";
 /// Policy was accepted but the host cannot actually enforce part of it.
 pub const EV_ENFORCEMENT_DEGRADED: &str = "enforcement_degraded";
 

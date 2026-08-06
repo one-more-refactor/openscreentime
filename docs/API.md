@@ -196,8 +196,6 @@ task_label, minutes, status, created_at, decided_at }` with `status` one of
 
 | Method | Path                    | Notes                                                       |
 |--------|-------------------------|-------------------------------------------------------------|
-| POST   | `/api/discovery/scan`   | `{ device_id }` → `{ command_id }` — ask an enrolled agent to scan its LAN |
-| GET    | `/api/discovery/results`| recent `discovery_result` events (found hosts, open ports)  |
 
 ## Events / audit
 
@@ -302,9 +300,6 @@ This is the single most important shared type. Server stores it, web edits it, a
     ],
     "bedtime": { "start": "21:00", "end": "07:00" }
   },
-  "app_limits": [                    // DEPRECATED: not enforced by the agent; the field
-    { "match": "steam", "daily_limit_minutes": 60 }   // stays in the policy crate for forward compat
-  ],
   "gamification": {
     "earn_time": {
       "enabled": true,
@@ -315,8 +310,7 @@ This is the single most important shared type. Server stores it, web edits it, a
     "lockout": {
       "enabled": true,
       "unlock_challenge": "math"      // "math" | "wait" | "parent_pin"
-    },
-    "streaks": { "enabled": true, "nudges": ["bedtime", "breaks"] }
+    }
   }
 }
 ```

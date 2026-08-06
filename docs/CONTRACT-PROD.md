@@ -142,9 +142,9 @@ Env config (all optional; feature off unless all three set):
 
 ## 9. UI feature visibility
 
-- `app_limits` is not enforced by the agent → REMOVE the app-limits section from PolicyEditor
-  and mark the field deprecated in docs (type stays in the policy crate for forward compat).
-- Discovery vendor/hostname stubs: show "—" instead of fake values.
+- ~~`app_limits`~~ DONE: the field, its PolicyEditor section and the ChildRules card were
+  all removed — an unenforced rule that the console rendered as if it were in force.
+- ~~Discovery vendor/hostname stubs~~ DONE: LAN discovery was removed outright.
 - Mock fallback (`read()` → mock.ts) STAYS, but only when `import.meta.env.VITE_USE_MOCK === "1"`
   — never silently in prod builds.
 

@@ -343,16 +343,20 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
     tracing::warn!("LOCKOUT ({}): {}\n{}", spec.for_user, spec.headline, screen);
 }
 
-/// Show a lightweight streak nudge (bedtime wind-down, break reminder) without
-/// freezing anything. Headless build broadcasts it the same way `present` does
-/// for lockouts; a future GUI presenter could render it as a toast instead.
-pub fn present_nudge(exec: &Exec, nudge: &crate::gamify::Nudge) {
+/// Tell the user something without freezing anything: a wind-down warning
+/// ("2 min left"), or a parent action they should know about.
+///
+/// This is deliberately not a nudge engine. It fires only when there is
+/// something a person actually needs to know — never to re-engage them.
+/// Headless builds broadcast it the way `present` does for lockouts; a GUI
+/// build could render it as a toast instead.
+pub fn notify(exec: &Exec, kind: &str, message: &str) {
     if exec.dry_run() {
-        tracing::info!(target: "dry_run", "WOULD NUDGE: {}", nudge.copy);
+        tracing::info!(target: "dry_run", "WOULD NOTIFY: {message}");
         return;
     }
-    let _ = exec.run("wall", &["-n", &format!("SENTINEL: {}", nudge.copy)]);
-    tracing::info!("nudge ({}): {}", nudge.kind, nudge.copy);
+    let _ = exec.run("wall", &["-n", &format!("OpenScreenTime: {message}")]);
+    tracing::info!("notify ({kind}): {message}");
 }
 
 #[cfg(feature = "gui")]

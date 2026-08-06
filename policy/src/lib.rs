@@ -33,8 +33,6 @@ pub struct Policy {
     #[serde(default)]
     pub screen_time: ScreenTime,
     #[serde(default)]
-    pub app_limits: Vec<AppLimit>,
-    #[serde(default)]
     pub gamification: Gamification,
     /// Network lockdown toggles (block DoH/DoT/Tor/VPN, force DNS). Absent =
     /// all-off; skipped on serialize so presets that don't set it stay byte-
@@ -55,7 +53,6 @@ impl Default for Policy {
             dns: DnsPolicy::default(),
             firewall: FirewallPolicy::default(),
             screen_time: ScreenTime::default(),
-            app_limits: Vec::new(),
             gamification: Gamification::default(),
             lockdown: NetworkLockdown::default(),
             parent_pin_hash: None,
@@ -202,22 +199,19 @@ pub struct Bedtime {
     pub end: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppLimit {
-    #[serde(default)]
-    pub r#match: String,
-    #[serde(default)]
-    pub daily_limit_minutes: u32,
-}
-
+/// Earn-time tasks and the lockout challenge.
+///
+/// Streak nudges used to live here too. They were removed deliberately: an app
+/// that fires "KEEP YOUR STREAK 🔥" at a child is engagement bait, and the
+/// product brief is explicit that this one stays silent unless a human must
+/// act. Wind-down warnings ("2 min left") are not streaks and still ship — see
+/// `runner::warn_user`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Gamification {
     #[serde(default)]
     pub earn_time: EarnTime,
     #[serde(default)]
     pub lockout: Lockout,
-    #[serde(default)]
-    pub streaks: Streaks,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -254,14 +248,6 @@ impl Default for Lockout {
             unlock_challenge: default_challenge(),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Streaks {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub nudges: Vec<String>,
 }
 
 #[cfg(test)]

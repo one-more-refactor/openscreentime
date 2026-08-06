@@ -39,7 +39,6 @@ const COALESCE_TYPES: &[&str] = &[
     "lock",
     "unlock",
     "apply_policy",
-    "discover",
     "set_tamper_level",
 ];
 
@@ -78,7 +77,7 @@ pub async fn enqueue_command_delivered(
             "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, $3)
              ON CONFLICT (device_id, type)
                WHERE status IN ('queued','sent')
-                 AND type IN ('lock','unlock','apply_policy','discover','set_tamper_level')
+                 AND type IN ('lock','unlock','apply_policy','set_tamper_level')
              DO UPDATE SET payload = EXCLUDED.payload
              RETURNING id",
         )

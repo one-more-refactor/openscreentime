@@ -12,7 +12,6 @@ mod auth_oidc;
 mod commands;
 mod db;
 mod devices;
-mod discovery;
 mod earn;
 mod error;
 mod events;
@@ -273,9 +272,6 @@ async fn main() -> anyhow::Result<()> {
                 .put(profiles::update_profile)
                 .delete(profiles::delete_profile),
         )
-        // --- Discovery -----------------------------------------------------
-        .route("/api/discovery/scan", post(discovery::scan))
-        .route("/api/discovery/results", get(discovery::results))
         // --- Events --------------------------------------------------------
         .route("/api/events", get(events::list_events))
         // --- Agent API -----------------------------------------------------
