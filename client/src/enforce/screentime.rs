@@ -49,7 +49,7 @@ impl LockReason {
 }
 
 /// Accumulates active seconds per user, resetting at local midnight. `earned`
-/// seconds (from the gamify tasks) extend the daily budget. Serialized to
+/// seconds (from approved earn-time tasks) extend the daily budget. Serialized to
 /// [`LEDGER_PATH`] so it survives an agent restart.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UsageTracker {

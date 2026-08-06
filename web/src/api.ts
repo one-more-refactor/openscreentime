@@ -23,7 +23,6 @@ import type {
   Device,
   DeviceDetail,
   DeviceUser,
-  DiscoveryResult,
   EarnRequest,
   EarnRequestStatus,
   EnrollTokenResponse,
@@ -49,7 +48,6 @@ import {
   mockCreditTime,
   mockDeviceDetail,
   mockDevices,
-  mockDiscovery,
   mockRegenEnrollToken,
   mockCreateDevice,
   mockEarnRequests,
@@ -508,46 +506,6 @@ export async function denyEarnRequest(id: string): Promise<EarnRequest> {
     { method: "POST", body: JSON.stringify({}) },
   );
   return res.request;
-}
-
-// ---- Discovery -------------------------------------------------------------
-
-export async function scanDiscovery(device_id: string): Promise<void> {
-  return request<void>("/api/discovery/scan", {
-    method: "POST",
-    body: JSON.stringify({ device_id }),
-  });
-}
-
-/** Raw row from GET /api/discovery/results: a `discovery_result` event whose
- *  payload carries the found hosts. */
-interface DiscoveryRow {
-  id: string;
-  device_id: string;
-  payload: { hosts?: DiscoveryResult["hosts"] };
-  created_at: string;
-}
-
-export async function getDiscoveryResults(): Promise<DiscoveryResult[]> {
-  const res = await read<{ results: DiscoveryRow[] }>(
-    "/api/discovery/results",
-    () => ({
-      results: [
-        {
-          id: mockDiscovery.id,
-          device_id: mockDiscovery.device_id,
-          payload: { hosts: mockDiscovery.hosts },
-          created_at: mockDiscovery.created_at,
-        },
-      ],
-    }),
-  );
-  return res.results.map((r) => ({
-    id: r.id,
-    device_id: r.device_id,
-    created_at: r.created_at,
-    hosts: r.payload.hosts ?? [],
-  }));
 }
 
 // ---- Events ----------------------------------------------------------------

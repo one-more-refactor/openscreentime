@@ -142,10 +142,9 @@ opens an inbound listener (it only dials out, preserving default-deny inbound). 
 `ssh` events remain in the event log as the audit record of past sessions. A possible
 replacement — a secure reverse tunnel carrying native SSH+RDP — was considered and deferred.
 
-## Device discovery
+## Device discovery — removed
 
-The `discover` command makes the agent scan its local subnet (ARP table + a light TCP connect
-sweep on common ports) and report findings as a `discovery_result` event:
-`{ ip, mac, open_ports }` — the `hostname`/`vendor` fields exist in the shape but are
-currently never populated. Scans run only when an admin triggers one; there is no periodic
-or unsolicited scanning.
+The agent used to accept a `discover` command that swept its local subnet and reported
+hosts as a `discovery_result` event. It was removed (migration 0013) along with the
+command type, the event type and both API routes. A screen-time app has no business
+port-scanning the household network, and nothing in the product ever consumed the results.

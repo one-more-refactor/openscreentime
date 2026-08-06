@@ -2,28 +2,30 @@ import type { Event } from "../types";
 import { StatusLed, severityTone } from "./StatusLed";
 import { relTime } from "../lib/format";
 
+// Recent activity is the last-resort detail — the place you look when the
+// glanceable views didn't answer your question. So it reads like a sentence,
+// not like a syslog: no ALL-CAPS mono, no jargon, and every row says what
+// happened to whom rather than naming an event type.
 const typeLabel: Record<Event["type"], string> = {
-  heartbeat: "HEARTBEAT",
-  tamper: "TAMPER",
-  lock: "LOCK",
-  unlock: "UNLOCK",
-  policy_applied: "POLICY APPLIED",
-  screen_time_exceeded: "TIME EXCEEDED",
-  screen_time_earned: "TIME EARNED",
-  streak: "STREAK",
-  enrolled: "ENROLLED",
-  discovery_result: "DISCOVERY",
-  ssh: "SSH",
-  earn_request: "EARN REQUEST",
-  evasion: "EVASION",
-  enforcement_degraded: "NOT ENFORCED",
-  vpn_profile: "VPN PROFILE",
+  heartbeat: "Checked in",
+  tamper: "Tampering",
+  lock: "Locked",
+  unlock: "Unlocked",
+  policy_applied: "Rules applied",
+  screen_time_exceeded: "Time ran out",
+  screen_time_earned: "Time earned",
+  enrolled: "Set up",
+  ssh: "Remote session",
+  earn_request: "Asked for time",
+  evasion: "Clock tampering",
+  enforcement_degraded: "Not enforced",
+  vpn_profile: "VPN profile",
 };
 
 // Never render a blank row: an unmapped (e.g. future) type shows its raw name
 // rather than disappearing — the highest-signal events must not be invisible.
 function labelFor(type: Event["type"]): string {
-  return typeLabel[type] ?? String(type).toUpperCase().replace(/_/g, " ");
+  return typeLabel[type] ?? String(type).replace(/_/g, " ");
 }
 
 function summarize(e: Event): string {
@@ -39,15 +41,11 @@ function summarize(e: Event): string {
     case "screen_time_earned":
       return `+${p.reward_minutes ?? "?"} min · ${p.task ?? "task"}`;
     case "screen_time_exceeded":
-      return `balance ${p.balance_minutes ?? 0} min`;
+      return `${p.balance_minutes ?? 0} min left`;
     case "policy_applied":
-      return `v${p.policy_version ?? "?"} · ${p.profile ?? ""}`;
-    case "streak":
-      return `${p.streak_days ?? 0}-day streak`;
-    case "discovery_result":
-      return `${p.hosts_found ?? "?"} hosts found`;
+      return `${p.profile ?? "rules"} · v${p.policy_version ?? "?"}`;
     case "enrolled":
-      return String(p.hostname ?? "device enrolled");
+      return String(p.hostname ?? "device set up");
     default:
       return "";
   }
@@ -58,11 +56,10 @@ interface Props {
   emptyLabel?: string;
 }
 
-// Audit log rows: severity LED + mono type + summary + relative time.
-export function EventFeed({ events, emptyLabel = "NO EVENTS" }: Props) {
+export function EventFeed({ events, emptyLabel = "Nothing has happened yet." }: Props) {
   if (!events.length) {
     return (
-      <p className="label py-6 text-center" style={{ color: "var(--fg-faint)" }}>
+      <p className="py-6 text-center text-sm" style={{ color: "var(--fg-faint)" }}>
         {emptyLabel}
       </p>
     );
@@ -75,27 +72,27 @@ export function EventFeed({ events, emptyLabel = "NO EVENTS" }: Props) {
           className="flex items-start gap-3 py-2.5 border-b last:border-b-0"
           style={{ borderColor: "var(--line)" }}
         >
-          <span className="mt-1">
+          <span className="mt-1.5">
             <StatusLed tone={severityTone(e.severity)} pulse={e.severity === "critical"} />
           </span>
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline gap-2 flex-wrap">
               <span
-                className="dot text-[0.6875rem]"
+                className="text-sm"
                 style={{
-                  color:
-                    e.severity === "critical" ? "var(--accent)" : "var(--fg)",
+                  color: e.severity === "critical" ? "var(--accent)" : "var(--fg)",
+                  fontWeight: 500,
                 }}
               >
                 {labelFor(e.type)}
               </span>
-              <span className="text-xs truncate" style={{ color: "var(--fg-dim)" }}>
+              <span className="text-sm truncate" style={{ color: "var(--fg-dim)" }}>
                 {summarize(e)}
               </span>
             </div>
           </div>
           <time
-            className="text-[0.625rem] tabular-nums flex-none pt-0.5"
+            className="text-xs tabular-nums flex-none pt-1"
             style={{ color: "var(--fg-faint)" }}
             dateTime={e.created_at}
           >

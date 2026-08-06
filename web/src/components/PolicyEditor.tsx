@@ -2,7 +2,6 @@ import type {
   EarnTask,
   NetworkLockdown,
   Policy,
-  StreakNudge,
   TimeWindow,
   UnlockChallenge,
 } from "../types";
@@ -437,58 +436,6 @@ export function PolicyEditor({
             </Select>
           </div>
 
-          {/* streaks */}
-          <div className="flex flex-col gap-3">
-            <Toggle
-              label="STREAK NUDGES"
-              hint="gentle reminders for healthy habits"
-              checked={value.gamification.streaks.enabled}
-              onChange={(v) =>
-                set("gamification", {
-                  ...value.gamification,
-                  streaks: { ...value.gamification.streaks, enabled: v },
-                })
-              }
-              disabled={readOnly}
-            />
-            <div
-              className={
-                value.gamification.streaks.enabled
-                  ? "flex gap-2 flex-wrap"
-                  : "flex gap-2 flex-wrap opacity-40 pointer-events-none"
-              }
-            >
-              {(["bedtime", "breaks"] as StreakNudge[]).map((n) => {
-                const active = value.gamification.streaks.nudges.includes(n);
-                return (
-                  <button
-                    key={n}
-                    type="button"
-                    disabled={readOnly}
-                    onClick={() =>
-                      set("gamification", {
-                        ...value.gamification,
-                        streaks: {
-                          ...value.gamification.streaks,
-                          nudges: active
-                            ? value.gamification.streaks.nudges.filter((x) => x !== n)
-                            : [...value.gamification.streaks.nudges, n],
-                        },
-                      })
-                    }
-                    className="focusable border rounded px-3 py-1.5 text-[0.625rem] font-mono uppercase tracking-label transition-colors"
-                    style={{
-                      borderColor: active ? "var(--fg)" : "var(--line-2)",
-                      background: active ? "var(--fg)" : "transparent",
-                      color: active ? "var(--bg)" : "var(--fg-dim)",
-                    }}
-                  >
-                    {n}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
         </div>
       </Section>
 

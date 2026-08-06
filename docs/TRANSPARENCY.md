@@ -29,11 +29,9 @@ Everything the agent sends the server is one of these, and nothing else:
   attempt, with a severity level.
 - **Earn-time requests**: when you pick a task on the lockout screen to earn extra minutes
   (task name and minutes requested), and how your parent decided it.
-- **Streak/nudge events**: that a bedtime or break nudge fired — not what you were doing
-  when it did.
-- **LAN discovery results** — but only when a parent explicitly triggers a scan (to onboard
-  a new device). It reports IPs, MAC addresses, and open ports of *other devices on your
-  network*, not activity on this one.
+Two things that used to be on this list are gone entirely, not merely hidden: streak/nudge
+events (the app no longer nudges you at all) and LAN discovery scans (it no longer looks at
+other devices on your network under any circumstances).
 
 That's the complete list. There is no hidden channel — `client/src/client.rs` is the only
 code that talks to the server, and every request body it builds is listed above.

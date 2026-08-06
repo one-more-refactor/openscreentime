@@ -60,7 +60,6 @@ pub fn kids_policy() -> Value {
             "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"20:00"},
                           {"days":[0,6],"start":"09:00","end":"20:00"} ],
             "bedtime": { "start":"20:00","end":"07:00" } },
-        "app_limits": [],
         // block_vpn stays OFF: a parent-managed WireGuard profile is a supported
         // feature, and turning both on means the agent applies a tunnel its own
         // firewall then kills — which is exactly how a laptop lost its network.
@@ -71,8 +70,7 @@ pub fn kids_policy() -> Value {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"reading","label":"Read for 20 min","reward_minutes":15},
                 {"id":"chores","label":"Finish chores","reward_minutes":15} ] },
-            "lockout": { "enabled": true, "unlock_challenge": "math" },
-            "streaks": { "enabled": true, "nudges": ["bedtime","breaks"] } }
+            "lockout": { "enabled": true, "unlock_challenge": "math" } }
     })
 }
 
@@ -88,13 +86,11 @@ pub fn teen_policy() -> Value {
             "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"21:00"},
                           {"days":[0,6],"start":"08:00","end":"22:00"} ],
             "bedtime": { "start":"22:30","end":"06:30" } },
-        "app_limits": [],
         "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
-            "lockout": { "enabled": true, "unlock_challenge": "wait" },
-            "streaks": { "enabled": true, "nudges": ["breaks"] } }
+            "lockout": { "enabled": true, "unlock_challenge": "wait" } }
     })
 }
 
@@ -106,11 +102,9 @@ pub fn default_policy() -> Value {
             "allowlist": ["*"], "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
         "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443,123], "allow_inbound_ports": [] },
         "screen_time": { "enabled": false, "daily_limit_minutes": 0, "schedule": [], "bedtime": null },
-        "app_limits": [],
         "gamification": {
             "earn_time": { "enabled": false, "tasks": [] },
-            "lockout": { "enabled": false, "unlock_challenge": "wait" },
-            "streaks": { "enabled": false, "nudges": [] } }
+            "lockout": { "enabled": false, "unlock_challenge": "wait" } }
     })
 }
 
