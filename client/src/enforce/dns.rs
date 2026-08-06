@@ -16,8 +16,8 @@ use crate::policy::{DnsPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
 
-const DNSMASQ_CONF: &str = "/etc/sentinel/dnsmasq.d/sentinel.conf";
-const SENTINEL_CONF_DIR: &str = "/etc/sentinel/dnsmasq.d";
+const DNSMASQ_CONF: &str = "/etc/openscreentime/dnsmasq.d/sentinel.conf";
+const SENTINEL_CONF_DIR: &str = "/etc/openscreentime/dnsmasq.d";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const LOCAL_RESOLVER: &str = "127.0.0.1";
 
@@ -85,7 +85,7 @@ impl DnsGap {
                 "the DNS ruleset was written but dnsmasq never reads it: no \
                  dnsmasq config directory was found to include it from, so \
                  dnsmasq is serving its stock config and NOTHING is filtered. \
-                 Add `conf-dir=/etc/sentinel/dnsmasq.d` to this host's \
+                 Add `conf-dir=/etc/openscreentime/dnsmasq.d` to this host's \
                  dnsmasq.conf."
             }
         }
@@ -115,7 +115,7 @@ fn ensure_include(exec: &Exec) -> Option<DnsGap> {
 
     let stub = format!("{dir}/{INCLUDE_STUB}");
     let body =
-        format!("# Managed by sentinel-agent — do not edit.\nconf-dir={SENTINEL_CONF_DIR}\n");
+        format!("# Managed by openscreentime — do not edit.\nconf-dir={SENTINEL_CONF_DIR}\n");
     if let Err(e) = exec.write_file(&stub, &body) {
         tracing::error!("could not write dnsmasq include stub {stub}: {e}");
         return Some(DnsGap::PolicyNotLoaded);
@@ -136,7 +136,7 @@ pub fn render_dnsmasq(
     server_host: Option<&str>,
 ) -> String {
     let mut out = String::new();
-    out.push_str("# Managed by sentinel-agent — do not edit.\n");
+    out.push_str("# Managed by openscreentime — do not edit.\n");
     out.push_str("no-resolv\n"); // never inherit host resolv.conf upstreams
     out.push_str("bogus-priv\n");
     out.push_str("domain-needed\n");
@@ -212,7 +212,7 @@ pub fn render_dnsmasq(
 
 pub fn render_resolv_conf() -> String {
     format!(
-        "# Managed by sentinel-agent — pinned. Do not edit.\nnameserver {LOCAL_RESOLVER}\noptions edns0 trust-ad\n"
+        "# Managed by openscreentime — pinned. Do not edit.\nnameserver {LOCAL_RESOLVER}\noptions edns0 trust-ad\n"
     )
 }
 
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn include_stub_points_at_the_sentinel_conf_dir() {
         let body = format!("conf-dir={SENTINEL_CONF_DIR}\n");
-        assert!(body.contains("conf-dir=/etc/sentinel/dnsmasq.d"));
+        assert!(body.contains("conf-dir=/etc/openscreentime/dnsmasq.d"));
         // The rendered ruleset must live inside the directory we include.
         assert!(DNSMASQ_CONF.starts_with(SENTINEL_CONF_DIR));
         // Sorts first, so a conflicting option later in the dir still wins

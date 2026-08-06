@@ -16,7 +16,11 @@ use std::path::Path;
 /// watchdog kick, self-update — or a kid who guesses the trick) drops the
 /// in-memory counters to zero and hands out a fresh daily budget. Root-owned
 /// dir; the systemd unit already lists it under `ReadWritePaths`.
-pub const LEDGER_PATH: &str = "/var/lib/sentinel/usage_ledger.json";
+/// Persisted usage ledger. Losing this resets how much time a child has
+/// already spent today, so it lives in the migrated state directory.
+pub fn ledger_path() -> std::path::PathBuf {
+    crate::paths::state("usage_ledger.json")
+}
 
 /// Why a user is being locked out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +54,7 @@ impl LockReason {
 
 /// Accumulates active seconds per user, resetting at local midnight. `earned`
 /// seconds (from approved earn-time tasks) extend the daily budget. Serialized to
-/// [`LEDGER_PATH`] so it survives an agent restart.
+/// [`ledger_path`] so it survives an agent restart.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UsageTracker {
     day: Option<NaiveDate>,
@@ -69,7 +73,7 @@ impl UsageTracker {
 
     /// Load the persisted ledger, or a fresh one if it's missing/corrupt.
     pub fn load() -> Self {
-        Self::load_from(Path::new(LEDGER_PATH))
+        Self::load_from(&ledger_path())
     }
 
     pub fn load_from(path: &Path) -> Self {
@@ -81,7 +85,7 @@ impl UsageTracker {
 
     /// Persist the ledger (best-effort, atomic rename). Callers gate on dry-run.
     pub fn save(&self) {
-        self.save_to(Path::new(LEDGER_PATH));
+        self.save_to(&ledger_path());
     }
 
     pub fn save_to(&self, path: &Path) {

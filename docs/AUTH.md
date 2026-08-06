@@ -20,7 +20,7 @@ wins for auth.
 - **Second factor / email:** **none anywhere.** No TOTP, no email sender. The
   device recovery PIN (argon2) is offline-unlock only, not account 2FA.
 - **Agent:** `enroll_token` (plaintext, 24h) → `device_token` (bearer, hashed).
-  Binary `sentinel-agent`, env `SENTINEL_TOKEN`.
+  Binary `openscreentime`, env `SENTINEL_TOKEN`.
 
 ## Target
 
@@ -107,7 +107,7 @@ wins for auth.
     would be friction with no security in it.
 - **2b — Everyone has an account.** Role + age bracket + birthdate; per-person
   login; adults' private self-tracking; link `device_users` ↔ accounts.
-- **2c — Identifier rename + hardening.** `sentinel-agent` → `openscreentime-agent`,
+- **2c — Identifier rename + hardening.** `openscreentime` → `openscreentime-agent`,
   `SENTINEL_TOKEN` → `OST_TOKEN` (with back-compat); hash `enroll_token` at rest
   (open red-team item); move WebAuthn challenge state out of memory.
 

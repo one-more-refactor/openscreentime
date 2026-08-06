@@ -7,7 +7,7 @@ turns out to be wrong, that's a bug in the product, not an acceptable gap.
 
 ## What this is
 
-Sentinel is a program (`sentinel-agent`) that runs as root on this computer, filters network
+Sentinel is a program (`openscreentime`) that runs as root on this computer, filters network
 traffic, tracks how long you're logged in, and enforces limits your parent sets. It reports
 status back to a server your family controls. It is not hidden — it shows up in your system
 tray (if you have the companion running), in `systemctl status`, and as a running process.

@@ -85,7 +85,7 @@ pub struct Endpoint {
 }
 
 /// Directive for [`reconcile`]: CLI paths that hold no server state (e.g.
-/// `sentinel-agent unlock` re-applying the cached policy) must not tear down a
+/// `openscreentime unlock` re-applying the cached policy) must not tear down a
 /// tunnel they know nothing about.
 #[derive(Debug, Clone, Copy)]
 pub enum VpnState<'a> {

@@ -1,6 +1,6 @@
 //! Parent companion pairing + client.
 //!
-//! A parent runs `sentinel-agent pair --server <url> --token <token>` on their
+//! A parent runs `openscreentime pair --server <url> --token <token>` on their
 //! OWN machine (as themselves, no root) to store a scoped parent access token.
 //! The tray companion (feature `tray`) then reads it and, in parent mode, polls
 //! the server's `/api/parent/*` surface to show pending time requests and
@@ -55,7 +55,7 @@ impl ParentConfig {
     }
 }
 
-/// `sentinel-agent pair` — store a parent pairing token for the tray companion.
+/// `openscreentime pair` — store a parent pairing token for the tray companion.
 pub fn pair(server: &str, token: &str) -> Result<()> {
     let server_url = server.trim().trim_end_matches('/').to_string();
     let token = token.trim().to_string();

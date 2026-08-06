@@ -2262,6 +2262,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openscreentime"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "base64",
+ "chrono",
+ "clap 4.6.1",
+ "eframe",
+ "futures-util",
+ "hex",
+ "hostname",
+ "ksni",
+ "libc",
+ "nix",
+ "notify-rust",
+ "rand 0.8.6",
+ "reqwest",
+ "sentinel-policy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "users",
+ "uuid",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2804,39 +2837,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "sentinel-agent"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "argon2",
- "base64",
- "chrono",
- "clap 4.6.1",
- "eframe",
- "futures-util",
- "hex",
- "hostname",
- "ksni",
- "libc",
- "nix",
- "notify-rust",
- "rand 0.8.6",
- "reqwest",
- "sentinel-policy",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "tracing",
- "tracing-subscriber",
- "users",
- "uuid",
-]
 
 [[package]]
 name = "sentinel-policy"
