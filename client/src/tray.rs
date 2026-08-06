@@ -527,11 +527,17 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!("cannot determine the current user ($USER unset and no uid entry)")
         })?;
-    tracing::info!("tray starting for user {username} (reading {})", status_path());
+    tracing::info!(
+        "tray starting for user {username} (reading {})",
+        status_path()
+    );
 
     let mut prev = read_status(&username);
     if prev.is_none() {
-        tracing::warn!("{} not readable yet — is openscreentime running?", status_path());
+        tracing::warn!(
+            "{} not readable yet — is openscreentime running?",
+            status_path()
+        );
     }
 
     // High-water mark for the notification queue: prime to whatever is already
