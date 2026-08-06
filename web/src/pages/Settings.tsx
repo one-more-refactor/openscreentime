@@ -1,294 +1,366 @@
+// ============================================================================
+// SETTINGS — two rooms with very different locks.
+//
+// The front room is harmless: who you are, how the app looks. It renders
+// immediately, because reading is free.
+//
+// The back room — passkeys, second factors, paired companions — is the set of
+// levers that would let someone take the family over. It is not rendered, and
+// its data is NOT EVEN FETCHED, until a second factor clears: the fetches run
+// only after step-up, and the server (docs/AUTH.md) answers them with 428
+// unless the session holds a live step-up grant. The client gate is comfort;
+// the server is the lock.
+// ============================================================================
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ApiError,
   auth,
+  confirmTotpEnrollment,
   deletePasskey,
   getAuthConfig,
-  listPasskeys,
+  getTwoFactorStatus,
   listParentTokens,
+  listPasskeys,
   mintParentToken,
   revokeParentToken,
+  startTotpEnrollment,
 } from "../api";
-import type { AuthConfig, MintedParentToken, ParentToken, Passkey } from "../types";
+import type {
+  AuthConfig,
+  MintedParentToken,
+  ParentToken,
+  Passkey,
+  TotpEnrollment,
+  TwoFactorStatus,
+} from "../types";
 import { useAsync } from "../lib/useAsync";
-import { useToast, errMsg } from "../lib/toast";
 import { useSession } from "../lib/session";
-import { useTheme } from "../lib/theme";
-import { PageHeader } from "../layout/Shell";
-import {
-  Button,
-  ErrorPanel,
-  Modal,
-  PasskeyButton,
-  Panel,
-  StatusLed,
-  TextInput,
-  TokenBlock,
-  Toggle,
-} from "../components";
+import { useTheme, type ThemeMode } from "../lib/theme";
+import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { Button, Modal, PasskeyButton, TextInput, TokenBlock } from "../components";
 import { relTime } from "../lib/format";
 
 export function Settings() {
-  const { me, mock, logout, refresh } = useSession();
-  const { theme, setTheme } = useTheme();
-  const { toast } = useToast();
+  const { me, mock } = useSession();
+
+  return (
+    <div className="dev-wrap">
+      <header className="dev-head">
+        <p className="fam-sub" style={{ marginBottom: "0.5rem" }}>Settings</p>
+        <h1 className="dev-title">Your household, your rules.</h1>
+      </header>
+
+      <You />
+      <Appearance />
+      <Security />
+
+      {mock && (
+        <p className="rail-mock" style={{ marginTop: "2rem" }}>
+          DESIGN-REVIEW MODE — MOCK DATA (VITE_USE_MOCK=1) · {me?.account?.email ?? ""}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---- the front room --------------------------------------------------------
+
+function You() {
+  const { me, logout } = useSession();
   const navigate = useNavigate();
-  const passkeys = useAsync<Passkey[]>(listPasskeys, []);
-  const authConfig = useAsync<AuthConfig>(getAuthConfig, []);
-  const parentTokens = useAsync<ParentToken[]>(listParentTokens, []);
-
-  const [confirmDelete, setConfirmDelete] = useState<Passkey | null>(null);
-  const [deleting, setDeleting] = useState(false);
-
-  const [pairLabel, setPairLabel] = useState("");
-  const [minting, setMinting] = useState(false);
-  const [minted, setMinted] = useState<MintedParentToken | null>(null);
-
-  async function mintPairing() {
-    setMinting(true);
-    try {
-      const t = await mintParentToken(pairLabel.trim());
-      setMinted(t);
-      setPairLabel("");
-      parentTokens.reload();
-    } catch (e) {
-      toast(errMsg(e, "Couldn't create the pairing token — try again."));
-    } finally {
-      setMinting(false);
-    }
-  }
-
-  async function revokePairing(t: ParentToken) {
-    try {
-      await revokeParentToken(t.id);
-      parentTokens.setData((prev) =>
-        (prev ?? []).map((x) => (x.id === t.id ? { ...x, revoked: true } : x)),
-      );
-      toast(`Revoked "${t.label || "pairing token"}".`, "ok");
-    } catch (e) {
-      toast(errMsg(e, "Couldn't revoke the token — try again."));
-    }
-  }
-
-  const oidc = authConfig.data?.oidc ?? false;
-  const oidcName = authConfig.data?.oidc_name || "SSO";
 
   async function handleLogout() {
     await logout();
     navigate("/login", { replace: true });
   }
 
-  async function addPasskey() {
-    if (!me) return;
-    try {
-      await auth.register(me.admin.email, me.admin.display_name);
-      await refresh();
-      passkeys.reload();
-      toast("Passkey added.", "ok");
-    } catch (e) {
-      toast(errMsg(e, "Passkey registration failed — try again."));
-    }
-  }
+  return (
+    <section className="ch-section">
+      <h2 className="ch-h2">You</h2>
+      <div className="rl">
+        <div className="rl-row">
+          <div className="rl-what">
+            <p className="rl-name">{me?.account?.display_name ?? me?.admin.display_name ?? "—"}</p>
+            <p className="rl-value">
+              {me?.account?.email ?? me?.admin.email ?? "—"} ·{" "}
+              {me?.household?.name ?? me?.tenant.name ?? "your household"}
+            </p>
+          </div>
+          <span className="rl-controls">
+            <button className="ch-btn" onClick={() => void handleLogout()}>
+              Log out
+            </button>
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
 
-  async function handleDelete() {
-    if (!confirmDelete) return;
-    const key = confirmDelete;
-    setDeleting(true);
+function Appearance() {
+  const { mode, setTheme, followSystem } = useTheme();
+  const choices: { key: ThemeMode; label: string }[] = [
+    { key: "system", label: "Match my system" },
+    { key: "dark", label: "Dark" },
+    { key: "light", label: "Light" },
+  ];
+  return (
+    <section className="ch-section">
+      <h2 className="ch-h2">Appearance</h2>
+      <div className="rl">
+        <div className="rl-row">
+          <div className="rl-what">
+            <p className="rl-name">Theme</p>
+            <p className="rl-value">Both modes are first-class — pick one, or let the OS decide</p>
+          </div>
+          <div className="pills">
+            {choices.map((c) => (
+              <button
+                key={c.key}
+                className="pill"
+                data-on={mode === c.key}
+                onClick={() => (c.key === "system" ? followSystem() : setTheme(c.key))}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---- the back room ---------------------------------------------------------
+
+function Security() {
+  const { requireStepUp } = useStepUp();
+  const [unlocked, setUnlocked] = useState(false);
+  const [checking, setChecking] = useState(false);
+
+  async function unlock() {
+    setChecking(true);
     try {
-      await deletePasskey(key.id);
-      passkeys.setData((prev) => (prev ?? []).filter((k) => k.id !== key.id));
-      setConfirmDelete(null);
-      toast(`Passkey "${key.nickname}" removed.`, "ok");
+      await requireStepUp();
+      setUnlocked(true);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        toast(
-          "This is your last passkey — removing it would lock you out. Add another passkey (or enable SSO) first.",
-          "warn",
-        );
-      } else {
-        toast(errMsg(e, "Couldn't remove the passkey — try again."));
-      }
-      setConfirmDelete(null);
+      if (!(e instanceof StepUpCancelled)) throw e;
     } finally {
-      setDeleting(false);
+      setChecking(false);
     }
   }
 
   return (
-    <>
-      <PageHeader title="SETTINGS" />
-
-      <div className="grid lg:grid-cols-2 gap-6 items-start">
-        <Panel title="ADMIN IDENTITY" refCode="AD-01">
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-3">
-            <Field k="DISPLAY NAME" v={me?.admin.display_name ?? "—"} />
-            <Field k="EMAIL" v={me?.admin.email ?? "—"} />
-            <Field k="TENANT" v={me?.tenant.name ?? "—"} />
-            <Field k="AUTH" v={oidc ? `PASSKEY + ${oidcName.toUpperCase()}` : "PASSKEY-ONLY"} />
-          </dl>
-          {oidc && (
-            <div className="mt-4 flex items-center gap-2">
-              <StatusLed tone="ok" label={`${oidcName.toUpperCase()} SSO ENABLED`} />
-            </div>
-          )}
-          <div className="mt-5 pt-4 border-t" style={{ borderColor: "var(--line)" }}>
-            <Button variant="danger" onClick={() => void handleLogout()}>
-              LOGOUT
-            </Button>
-          </div>
-        </Panel>
-
-        <Panel title="APPEARANCE" refCode="AP-01">
-          <div className="flex flex-col gap-4">
-            <Toggle
-              label="LIGHT THEME"
-              hint="silkscreen-on-white — same language"
-              checked={theme === "light"}
-              onChange={(v) => setTheme(v ? "light" : "dark")}
-            />
-            {mock && (
-              <div
-                className="flex items-center gap-2 border rounded px-3 py-2"
-                style={{ borderColor: "var(--warn)" }}
-              >
-                <StatusLed tone="warn" label="DESIGN-REVIEW MODE — MOCK DATA (VITE_USE_MOCK=1)" />
-              </div>
-            )}
-          </div>
-        </Panel>
-
-        <Panel
-          title="PASSKEYS"
-          className="lg:col-span-2"
-          refCode="PK-01"
-          aside={<StatusLed tone="ok" label={`${passkeys.data?.length ?? 0} REGISTERED`} />}
-        >
-          {passkeys.error ? (
-            <ErrorPanel
-              title="Couldn't load your passkeys"
-              detail={passkeys.error}
-              onRetry={passkeys.reload}
-            />
-          ) : (
-            <ul className="flex flex-col mb-4">
-              {(passkeys.data ?? []).map((k) => (
-                <li
-                  key={k.id}
-                  className="flex items-center gap-4 py-3 border-b last:border-b-0 flex-wrap"
-                  style={{ borderColor: "var(--line)" }}
-                >
-                  <span className="led led-glow-ok" style={{ background: "var(--ok)" }} />
-                  <div className="flex-1 min-w-0">
-                    <p className="dot text-xs text-fg">{k.nickname}</p>
-                    <p className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
-                      ADDED {relTime(k.created_at)} · LAST USED {relTime(k.last_used_at)}
-                    </p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    disabled={(passkeys.data?.length ?? 0) <= 1 && !oidc}
-                    title={
-                      (passkeys.data?.length ?? 0) <= 1 && !oidc
-                        ? "Your last passkey can't be removed — you'd lock yourself out"
-                        : undefined
-                    }
-                    onClick={() => setConfirmDelete(k)}
-                  >
-                    REMOVE
-                  </Button>
-                </li>
-              ))}
-              {(passkeys.data ?? []).length === 0 && !passkeys.loading && (
-                <p className="label py-4" style={{ color: "var(--fg-faint)" }}>
-                  NO PASSKEYS
-                </p>
-              )}
-            </ul>
-          )}
-          <div className="max-w-xs">
-            <PasskeyButton label="+ ADD PASSKEY" onActivate={addPasskey} />
-          </div>
-        </Panel>
-
-        <Panel
-          title="PARENT ACCESS"
-          className="lg:col-span-2"
-          refCode="PR-01"
-          aside={
-            <StatusLed
-              tone="ok"
-              label={`${(parentTokens.data ?? []).filter((t) => !t.revoked).length} ACTIVE`}
-            />
-          }
-        >
-          <p className="text-xs leading-relaxed mb-4" style={{ color: "var(--fg-dim)" }}>
-            Pair a companion — the tray parent-mode on your own machine, or your phone —
-            to approve time requests and get alerts without opening the console. Paste the
-            token into the companion once; it's shown only at creation and stored hashed.
-            Revoke any token here at any time.
+    <section className="ch-section">
+      <h2 className="ch-h2">Security &amp; access</h2>
+      {unlocked ? (
+        <SecurityPanels />
+      ) : (
+        <div className="gate">
+          <p className="gate-title">Locked until it's you</p>
+          <p className="gate-sub">
+            Passkeys, second factors and paired companions live here. Seeing them takes a
+            second factor — the server won't hand this data to a session without one.
           </p>
+          <button className="ch-btn ch-btn-yes" disabled={checking} onClick={() => void unlock()}>
+            {checking ? "Checking…" : "Unlock"}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
 
-          {parentTokens.error ? (
-            <ErrorPanel
-              title="Couldn't load pairing tokens"
-              detail={parentTokens.error}
-              onRetry={parentTokens.reload}
-            />
-          ) : (
-            <ul className="flex flex-col mb-4">
-              {(parentTokens.data ?? []).map((t) => (
-                <li
-                  key={t.id}
-                  className="flex items-center gap-4 py-3 border-b last:border-b-0 flex-wrap"
-                  style={{ borderColor: "var(--line)" }}
-                >
-                  <span
-                    className={t.revoked ? "led" : "led led-glow-ok"}
-                    style={{ background: t.revoked ? "var(--fg-faint)" : "var(--ok)" }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="dot text-xs text-fg">{t.label || "PAIRING TOKEN"}</p>
-                    <p className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
-                      ADDED {relTime(t.created_at)} ·{" "}
-                      {t.last_used_at ? `LAST USED ${relTime(t.last_used_at)}` : "NEVER USED"}
-                      {t.revoked ? " · REVOKED" : ""}
-                    </p>
-                  </div>
-                  {!t.revoked && (
-                    <Button size="sm" variant="danger" onClick={() => void revokePairing(t)}>
-                      REVOKE
-                    </Button>
-                  )}
-                </li>
-              ))}
-              {(parentTokens.data ?? []).length === 0 && !parentTokens.loading && (
-                <p className="label py-4" style={{ color: "var(--fg-faint)" }}>
-                  NO PAIRING TOKENS YET
-                </p>
-              )}
-            </ul>
-          )}
+/** Mounted only after step-up — so these fetches never fire on an idle visit. */
+function SecurityPanels() {
+  return (
+    <div className="rl">
+      <TwoFactor />
+      <Passkeys />
+      <ParentAccess />
+    </div>
+  );
+}
 
-          <div className="flex items-end gap-3 flex-wrap">
-            <div className="flex-1 min-w-[12rem]">
-              <TextInput
-                label="LABEL (e.g. MUM'S PHONE)"
-                value={pairLabel}
-                onChange={(e) => setPairLabel(e.target.value)}
-                placeholder="who is this for?"
-                maxLength={60}
-              />
-            </div>
-            <Button disabled={minting} onClick={() => void mintPairing()}>
-              {minting ? "CREATING…" : "+ CREATE PAIRING TOKEN"}
+function TwoFactor() {
+  const { me } = useSession();
+  const twofa = useAsync<TwoFactorStatus>(getTwoFactorStatus, []);
+  const [enrolling, setEnrolling] = useState<TotpEnrollment | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function begin() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      setEnrolling(await startTotpEnrollment());
+      setCode("");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't start enrollment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirm() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await confirmTotpEnrollment(code);
+      setEnrolling(null);
+      setStatus("Authenticator connected.");
+      twofa.reload();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "That code didn't match.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const enrolled = twofa.data?.totp_enrolled ?? false;
+
+  return (
+    <div className="rl-row">
+      <div className="rl-what">
+        <p className="rl-name">Second factor</p>
+        <p className="rl-value">
+          {twofa.loading
+            ? "Checking…"
+            : enrolled
+              ? "Authenticator app connected · email codes as backup"
+              : "Email codes only — an authenticator app is stronger"}
+        </p>
+        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
+      </div>
+      <span className="rl-controls">
+        {!enrolled && !twofa.loading && (
+          <button className="ch-btn" disabled={busy} onClick={() => void begin()}>
+            Connect authenticator
+          </button>
+        )}
+      </span>
+
+      <Modal
+        open={!!enrolling}
+        onClose={() => setEnrolling(null)}
+        title="CONNECT AUTHENTICATOR"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setEnrolling(null)} disabled={busy}>
+              CANCEL
             </Button>
-          </div>
-        </Panel>
+            <Button onClick={() => void confirm()} disabled={busy || code.replace(/\s/g, "").length < 6}>
+              {busy ? "CHECKING…" : "CONFIRM"}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
+            Add this secret to your authenticator app (Google Authenticator, Aegis, 1Password …),
+            then enter the 6-digit code it shows for{" "}
+            <span style={{ color: "var(--fg)" }}>{me?.account?.email ?? "your account"}</span>.
+          </p>
+          {enrolling && <TokenBlock token={enrolling.secret} />}
+          <TextInput
+            label="CODE FROM THE APP"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ""))}
+            placeholder="123456"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={7}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void confirm();
+            }}
+          />
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function Passkeys() {
+  const { me, refresh } = useSession();
+  const authConfig = useAsync<AuthConfig>(getAuthConfig, []);
+  const passkeys = useAsync<Passkey[]>(listPasskeys, []);
+  const [confirmDelete, setConfirmDelete] = useState<Passkey | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const oidc = authConfig.data?.oidc ?? false;
+  const keys = passkeys.data ?? [];
+  const lastKey = keys.length <= 1 && !oidc;
+
+  async function add() {
+    if (!me) return;
+    setStatus(null);
+    try {
+      await auth.register(me.admin.email, me.admin.display_name);
+      await refresh();
+      passkeys.reload();
+      setStatus("Passkey added.");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Passkey registration failed.");
+    }
+  }
+
+  async function remove() {
+    if (!confirmDelete) return;
+    const key = confirmDelete;
+    setBusy(true);
+    try {
+      await deletePasskey(key.id);
+      passkeys.setData((prev) => (prev ?? []).filter((k) => k.id !== key.id));
+      setStatus(`Passkey "${key.nickname}" removed.`);
+    } catch (e) {
+      setStatus(
+        e instanceof ApiError && e.status === 409
+          ? "That's your last passkey — removing it would lock you out."
+          : e instanceof Error
+            ? e.message
+            : "Couldn't remove the passkey.",
+      );
+    } finally {
+      setBusy(false);
+      setConfirmDelete(null);
+    }
+  }
+
+  return (
+    <div className="rl-row rl-row-stack">
+      <div className="rl-what">
+        <p className="rl-name">Passkeys</p>
+        <p className="rl-value">
+          How you sign in — one per device you trust
+          {passkeys.error ? ` · couldn't load: ${passkeys.error}` : ""}
+        </p>
+        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
+      </div>
+      {keys.map((k) => (
+        <div className="rl-app" key={k.id}>
+          <span className="rl-app-name">{k.nickname}</span>
+          <span className="rl-app-mins">
+            added {relTime(k.created_at)} · used {relTime(k.last_used_at)}
+          </span>
+          <button
+            className="chip-x"
+            disabled={lastKey}
+            title={lastKey ? "Your last passkey can't be removed — you'd lock yourself out" : undefined}
+            aria-label={`Remove passkey ${k.nickname}`}
+            onClick={() => setConfirmDelete(k)}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <div style={{ maxWidth: "16rem" }}>
+        <PasskeyButton label="+ ADD PASSKEY" onActivate={add} />
       </div>
 
-      {/* Passkey delete confirm */}
       <Modal
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
@@ -299,43 +371,115 @@ export function Settings() {
             <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
               CANCEL
             </Button>
-            <Button variant="danger" disabled={deleting} onClick={() => void handleDelete()}>
-              {deleting ? "REMOVING…" : "REMOVE PASSKEY"}
+            <Button variant="danger" disabled={busy} onClick={() => void remove()}>
+              {busy ? "REMOVING…" : "REMOVE PASSKEY"}
             </Button>
           </>
         }
       >
         <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
           Remove <span className="dot text-fg">{confirmDelete?.nickname}</span>? Devices that
-          signed in with it will need another passkey{oidc ? ` or ${oidcName}` : ""} to get
-          back in.
+          signed in with it will need another way back in.
         </p>
       </Modal>
+    </div>
+  );
+}
 
-      {/* Freshly minted pairing token — shown exactly once */}
+function ParentAccess() {
+  const parentTokens = useAsync<ParentToken[]>(listParentTokens, []);
+  const [label, setLabel] = useState("");
+  const [minting, setMinting] = useState(false);
+  const [minted, setMinted] = useState<MintedParentToken | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function mint() {
+    setMinting(true);
+    setStatus(null);
+    try {
+      setMinted(await mintParentToken(label.trim()));
+      setLabel("");
+      parentTokens.reload();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't create the pairing token.");
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  async function revoke(t: ParentToken) {
+    try {
+      await revokeParentToken(t.id);
+      parentTokens.setData((prev) =>
+        (prev ?? []).map((x) => (x.id === t.id ? { ...x, revoked: true } : x)),
+      );
+      setStatus(`Revoked "${t.label || "pairing token"}".`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't revoke the token.");
+    }
+  }
+
+  const tokens = parentTokens.data ?? [];
+
+  return (
+    <div className="rl-row rl-row-stack">
+      <div className="rl-what">
+        <p className="rl-name">Paired companions</p>
+        <p className="rl-value">
+          Your phone or tray app, approving requests without opening the console — tokens are
+          shown once and stored hashed
+        </p>
+        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
+      </div>
+      {tokens.map((t) => (
+        <div className="rl-app" key={t.id}>
+          <span className="rl-app-name" style={t.revoked ? { color: "var(--fg-faint)", textDecoration: "line-through" } : undefined}>
+            {t.label || "Pairing token"}
+          </span>
+          <span className="rl-app-mins">
+            {t.revoked
+              ? "revoked"
+              : t.last_used_at
+                ? `last used ${relTime(t.last_used_at)}`
+                : "never used"}
+          </span>
+          {!t.revoked && (
+            <button className="chip-x" aria-label={`Revoke ${t.label || "pairing token"}`} onClick={() => void revoke(t)}>
+              ✕
+            </button>
+          )}
+        </div>
+      ))}
+      <div className="rl-app">
+        <input
+          className="chip-input"
+          style={{ width: "14rem" }}
+          placeholder="+ companion, e.g. Mum's phone"
+          value={label}
+          disabled={minting}
+          onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && label.trim() && void mint()}
+          aria-label="New companion label"
+        />
+        {label.trim() && (
+          <button className="ch-btn" disabled={minting} onClick={() => void mint()}>
+            {minting ? "Creating…" : "Create pairing token"}
+          </button>
+        )}
+      </div>
+
       <Modal
         open={!!minted}
         onClose={() => setMinted(null)}
         title="PAIRING TOKEN"
-        footer={
-          <Button onClick={() => setMinted(null)}>DONE</Button>
-        }
+        footer={<Button onClick={() => setMinted(null)}>DONE</Button>}
       >
         <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--fg-dim)" }}>
-          Copy this now — it's shown only once. Paste it into the parent companion
-          for <span className="dot text-fg">{minted?.label || "this pairing"}</span>.
+          Copy this now — it's shown only once. Paste it into the companion for{" "}
+          <span className="dot text-fg">{minted?.label || "this pairing"}</span>.
         </p>
         {minted && <TokenBlock token={minted.token} />}
       </Modal>
-    </>
-  );
-}
-
-function Field({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <dt className="label">{k}</dt>
-      <dd className="dot text-xs text-fg break-all">{v}</dd>
     </div>
   );
 }
