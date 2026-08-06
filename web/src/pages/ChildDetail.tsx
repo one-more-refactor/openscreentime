@@ -8,16 +8,18 @@
 //   3. protection level                     (the thing they came to change)
 //   4. where they use it                    (machinery, smallest and last)
 // ============================================================================
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useParams } from "react-router-dom";
 import * as api from "../api";
-import type { Device, DeviceUser, EarnRequest, Profile } from "../types";
+import type { Device, DeviceUser, EarnRequest, Event, Profile } from "../types";
 import {
   LEVELS,
   SecuritySlider,
   levelForPolicy,
   policyForLevel,
 } from "../components/SecuritySlider";
+import { EventFeed } from "../components/EventFeed";
+import { useStepUp, StepUpCancelled } from "../lib/stepup";
 
 function hueFor(key: string): number {
   let h = 0;
@@ -51,7 +53,11 @@ function Today({ used, limit, earned }: { used: number; limit: number; earned: n
           <p className="ch-big-unit">
             {spent ? "no time left today" : "minutes left today"}
           </p>
-          <div className="ch-bar">
+          <div
+            className="ch-bar"
+            // One cell per 15 minutes, same grammar as the family cards.
+            style={{ "--segs": Math.max(1, Math.round(total / 15)) } as CSSProperties}
+          >
             <span className="ch-bar-fill" style={{ width: `${pct}%` }} data-spent={spent} />
           </div>
           <p className="ch-bar-note">
@@ -65,10 +71,12 @@ function Today({ used, limit, earned }: { used: number; limit: number; earned: n
 
 export function ChildDetail() {
   const { key = "" } = useParams();
+  const { guard } = useStepUp();
   const [devices, setDevices] = useState<Device[]>([]);
   const [users, setUsers] = useState<(DeviceUser & { deviceName: string })[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [requests, setRequests] = useState<EarnRequest[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<string | null>(null);
@@ -96,6 +104,22 @@ export function ChildDetail() {
       } catch {
         setRequests([]);
       }
+      // The audit trail for this child's devices. Without it, a tamper event the
+      // server recorded is never seen — the "never silent" promise depends on
+      // this being on screen.
+      try {
+        const deviceIds = [...new Set(found.map((u) => u.device_id))];
+        const perDevice = await Promise.all(
+          deviceIds.map((id) => api.listEvents({ device_id: id, limit: 50 }).catch(() => [])),
+        );
+        const merged = perDevice
+          .flat()
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, 50);
+        setEvents(merged);
+      } catch {
+        setEvents([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load this child");
       setLoading(false);
@@ -114,7 +138,10 @@ export function ChildDetail() {
     () => profiles.find((p) => p.id === users[0]?.profile_id) ?? null,
     [profiles, users],
   );
-  const limit = profile?.policy.screen_time?.daily_limit_minutes ?? 0;
+  // A disabled schedule means no limit, whatever number the policy carries.
+  const limit = profile?.policy.screen_time?.enabled
+    ? (profile.policy.screen_time.daily_limit_minutes ?? 0)
+    : 0;
   const level = profile ? levelForPolicy(profile.policy) : 2;
 
   if (loading)
@@ -131,10 +158,11 @@ export function ChildDetail() {
     setBusy(true);
     setNote(null);
     try {
-      await api.updateProfile(profile.id, policyForLevel(next, profile.policy));
+      await guard(() => api.updateProfile(profile.id, policyForLevel(next, profile.policy)));
       setNote(`Protection set to ${LEVELS[next].name}. It reaches the device within a minute.`);
       await load();
     } catch (e) {
+      if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not change protection");
     } finally {
       setBusy(false);
@@ -146,10 +174,11 @@ export function ChildDetail() {
     if (!u) return;
     setBusy(true);
     try {
-      await api.creditTime(u.id, minutes);
+      await guard(() => api.creditTime(u.id, minutes));
       setNote(`Gave ${name} ${minutes} more minutes.`);
       await load();
     } catch (e) {
+      if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not grant time");
     } finally {
       setBusy(false);
@@ -159,9 +188,12 @@ export function ChildDetail() {
   async function answer(r: EarnRequest, approve: boolean) {
     setBusy(true);
     try {
-      approve ? await api.approveEarnRequest(r.id) : await api.denyEarnRequest(r.id);
+      await guard(() =>
+        approve ? api.approveEarnRequest(r.id) : api.denyEarnRequest(r.id),
+      );
       await load();
     } catch (e) {
+      if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not answer the request");
     } finally {
       setBusy(false);
@@ -264,6 +296,13 @@ export function ChildDetail() {
           {users.length === 0 && <li className="fam-quiet">No devices yet.</li>}
         </ul>
       </section>
+
+      {users.length > 0 && (
+        <section className="ch-section">
+          <h2 className="ch-h2">Recent activity</h2>
+          <EventFeed events={events} emptyLabel="NOTHING RECORDED YET" />
+        </section>
+      )}
     </div>
   );
 }
