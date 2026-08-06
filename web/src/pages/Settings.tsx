@@ -38,7 +38,8 @@ import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { useStepUp, StepUpCancelled } from "../lib/stepup";
-import { Button, Modal, PasskeyButton, TextInput, TokenBlock } from "../components";
+import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
+import { CodeRing } from "../components/CodeRing";
 import { relTime } from "../lib/format";
 
 export function Settings() {
@@ -88,7 +89,7 @@ function You() {
             </p>
           </div>
           <span className="rl-controls">
-            <button className="ch-btn" onClick={() => void handleLogout()}>
+            <button className="ch-btn no-code" onClick={() => void handleLogout()}>
               Log out
             </button>
           </span>
@@ -118,7 +119,7 @@ function Appearance() {
             {choices.map((c) => (
               <button
                 key={c.key}
-                className="pill"
+                className="pill no-code"
                 data-on={mode === c.key}
                 onClick={() => (c.key === "system" ? followSystem() : setTheme(c.key))}
               >
@@ -135,15 +136,17 @@ function Appearance() {
 // ---- the back room ---------------------------------------------------------
 
 function Security() {
-  const { requireStepUp } = useStepUp();
-  const [unlocked, setUnlocked] = useState(false);
+  const { requireStepUp, armed } = useStepUp();
   const [checking, setChecking] = useState(false);
+
+  // The room is open exactly while the grant is live — when it lapses, the
+  // gate closes again by itself. No stale "unlocked" state to forget.
+  const unlocked = armed;
 
   async function unlock() {
     setChecking(true);
     try {
       await requireStepUp();
-      setUnlocked(true);
     } catch (e) {
       if (!(e instanceof StepUpCancelled)) throw e;
     } finally {
@@ -163,7 +166,7 @@ function Security() {
             Passkeys, second factors and paired companions live here. Seeing them takes a
             second factor — the server won't hand this data to a session without one.
           </p>
-          <button className="ch-btn ch-btn-yes" disabled={checking} onClick={() => void unlock()}>
+          <button className="ch-btn ch-btn-yes no-code" disabled={checking} onClick={() => void unlock()}>
             {checking ? "Checking…" : "Unlock"}
           </button>
         </div>
@@ -214,6 +217,7 @@ function TwoFactor() {
       twofa.reload();
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "That code didn't match.");
+      setCode("");
     } finally {
       setBusy(false);
     }
@@ -247,14 +251,9 @@ function TwoFactor() {
         onClose={() => setEnrolling(null)}
         title="CONNECT AUTHENTICATOR"
         footer={
-          <>
-            <Button variant="ghost" onClick={() => setEnrolling(null)} disabled={busy}>
-              CANCEL
-            </Button>
-            <Button onClick={() => void confirm()} disabled={busy || code.replace(/\s/g, "").length < 6}>
-              {busy ? "CHECKING…" : "CONFIRM"}
-            </Button>
-          </>
+          <Button variant="ghost" onClick={() => setEnrolling(null)} disabled={busy}>
+            CANCEL
+          </Button>
         }
       >
         <div className="flex flex-col gap-4">
@@ -264,19 +263,22 @@ function TwoFactor() {
             <span style={{ color: "var(--fg)" }}>{me?.account?.email ?? "your account"}</span>.
           </p>
           {enrolling && <TokenBlock token={enrolling.secret} />}
-          <TextInput
-            label="CODE FROM THE APP"
-            value={code}
-            onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ""))}
-            placeholder="123456"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={7}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void confirm();
-            }}
-          />
+          <div className="cr-wrap">
+            <CodeRing
+              value={code}
+              disabled={busy}
+              error={!!status && !!enrolling}
+              aria-label="Code from the app"
+              onChange={(v) => {
+                setCode(v);
+                if (status) setStatus(null);
+              }}
+              onComplete={() => void confirm()}
+            />
+            <p className="cr-note" data-error={!!status && !!enrolling} role={status ? "alert" : undefined}>
+              {busy ? "Checking…" : (status ?? "The 6 digits the app shows")}
+            </p>
+          </div>
         </div>
       </Modal>
     </div>

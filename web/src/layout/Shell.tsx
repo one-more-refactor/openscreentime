@@ -1,9 +1,28 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
 import { useTheme } from "../lib/theme";
 import { useFamily, minutesLeft, type FamilyChild } from "../lib/family";
+import { useStepUp } from "../lib/stepup";
 import { Wordmark } from "../components/Wordmark";
+
+/** While a step-up grant is live, say so — and how long it has left. */
+function ArmedChip() {
+  const { armed, armedUntil } = useStepUp();
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [armed]);
+  if (!armed || !armedUntil) return null;
+  const s = Math.max(0, Math.round((new Date(armedUntil).getTime() - Date.now()) / 1000));
+  return (
+    <span className="armed-chip" title="Changes need no code until this runs out">
+      UNLOCKED · {Math.floor(s / 60)}:{String(s % 60).padStart(2, "0")}
+    </span>
+  );
+}
 
 // The rail is three things, in Nothing's three layers: where you can go
 // (mono nav), how everyone's day is going (the family pulse — glanceable,
@@ -150,6 +169,8 @@ export function Shell() {
         <NavLink to="/" className="focusable flex items-center" aria-label="OpenScreenTime home">
           <Wordmark size={1.25} />
         </NavLink>
+        <span className="flex-1" />
+        <ArmedChip />
       </header>
 
       <div className="flex flex-1 min-h-0">
