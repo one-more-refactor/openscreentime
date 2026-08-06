@@ -124,9 +124,11 @@ pairing tokens — is takeover material, so these GETs are the one class of
 *read* the server also answers with `428 step_up_required` unless the session
 holds a live step-up grant:
 
-- `GET /api/auth/passkeys`
-- `GET /api/me/2fa`
+- `GET /api/me/passkeys`
 - `GET /api/parent-tokens`
+
+(`GET /api/me/2fa` deliberately stays free: the step-up dialog needs it to
+know which factors to offer *before* any grant exists.)
 
 The web console mirrors this honestly: the Security & access section of
 Settings mounts (and fires these fetches) only after `requireStepUp()`
