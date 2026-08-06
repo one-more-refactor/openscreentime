@@ -112,9 +112,14 @@ impl FromRequestParts<AppState> for AuthAdmin {
             .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
         let hash = crate::auth::hash_token(&token);
 
+        // The step-up flow rotates this token (docs/AUTH.md); the superseded
+        // hash stays valid for a short grace so a request already in flight
+        // with the old cookie — or a second tab — does not get thrown out.
         let row: Option<(Uuid, Uuid)> = sqlx::query_as(
             "SELECT admin_id, tenant_id FROM admin_sessions
-             WHERE token_hash = $1 AND expires_at > now()",
+             WHERE (token_hash = $1
+                    OR (prev_token_hash = $1 AND prev_valid_until > now()))
+               AND expires_at > now()",
         )
         .bind(&hash)
         .fetch_optional(&state.db)
