@@ -2,115 +2,137 @@ import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
 import { useTheme } from "../lib/theme";
+import { useFamily, minutesLeft, type FamilyChild } from "../lib/family";
 import { Wordmark } from "../components/Wordmark";
 
-// The old header carried a live LED strip of every enrolled device ("FLEET").
-// That is exactly the machinery this console no longer puts in a parent's
-// face: the fleet runs unattended, and trouble surfaces on the Family page
-// as a plain sentence when a child's computer actually needs attention.
+// The rail is three things, in Nothing's three layers: where you can go
+// (mono nav), how everyone's day is going (the family pulse — glanceable,
+// no clicking required), and who you are (footer, smallest). No LED strips,
+// no fleet, no machinery.
 
 interface NavEntry {
   to: string;
   label: string;
-  count?: number | null;
-  warn?: boolean;
 }
 
 function NavList({ entries, onNavigate }: { entries: NavEntry[]; onNavigate?: () => void }) {
   return (
-    <nav className="flex flex-col py-3 flex-1" aria-label="Main">
+    <nav className="flex flex-col py-3" aria-label="Main">
       {entries.map((n) => (
         <NavLink
           key={n.to}
           to={n.to}
           onClick={onNavigate}
-          className="focusable flex items-center justify-between gap-2.5 px-5 py-2.5 font-mono uppercase tracking-label text-[0.6875rem] transition-colors"
+          className="focusable rail-nav"
           style={({ isActive }) => ({
             // Active = ink, not red. Red is an interrupt, not a location.
             color: isActive ? "var(--fg-display)" : "var(--fg-dim)",
-            borderRight: isActive
+            borderLeft: isActive
               ? "2px solid var(--fg-display)"
               : "2px solid transparent",
           })}
         >
-          <span>{n.label}</span>
-          {n.count != null && n.count > 0 && (
-            <span
-              className="tabular-nums text-[0.625rem]"
-              style={{ color: n.warn ? "var(--warn)" : "var(--fg-faint)" }}
-            >
-              {String(n.count).padStart(2, "0")}
-            </span>
-          )}
+          {n.label}
         </NavLink>
       ))}
     </nav>
   );
 }
 
-export function Shell() {
+function hueFor(key: string): number {
+  let h = 0;
+  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+
+/** One child in the rail: hue dot, name, minutes left — the pulse at a glance. */
+function RailChild({ child, onNavigate }: { child: FamilyChild; onNavigate?: () => void }) {
+  const left = minutesLeft(child);
+  const spent = left === 0;
+  return (
+    <NavLink
+      to={`/child/${encodeURIComponent(child.key)}`}
+      onClick={onNavigate}
+      className="focusable rail-child"
+      style={({ isActive }) => ({
+        color: isActive ? "var(--fg-display)" : "var(--fg)",
+        borderLeft: isActive
+          ? "2px solid var(--fg-display)"
+          : "2px solid transparent",
+      })}
+    >
+      <span
+        className="rail-child-dot"
+        style={{ background: `hsl(${hueFor(child.key)} 45% 70%)` }}
+        aria-hidden="true"
+      />
+      <span className="rail-child-name">{child.name}</span>
+      {child.pendingRequests > 0 && (
+        <span className="rail-child-asks" aria-label={`${child.pendingRequests} requests waiting`}>
+          {child.pendingRequests}
+        </span>
+      )}
+      <span className="rail-child-left" data-spent={spent}>
+        {left === null ? "—" : spent ? "0m" : left >= 60 ? `${Math.floor(left / 60)}h${String(left % 60).padStart(2, "0")}` : `${left}m`}
+      </span>
+    </NavLink>
+  );
+}
+
+function Rail({ onNavigate }: { onNavigate?: () => void }) {
+  const { children } = useFamily();
+  const entries: NavEntry[] = [
+    { to: "/", label: "FAMILY" },
+    { to: "/devices", label: "DEVICES" },
+    { to: "/settings", label: "SETTINGS" },
+  ];
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <NavList entries={entries} onNavigate={onNavigate} />
+      {children.length > 0 && (
+        <div className="rail-fam">
+          <p className="rail-fam-head">TODAY</p>
+          {children.map((c) => (
+            <RailChild key={c.key} child={c} onNavigate={onNavigate} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RailFooter() {
   const { me, mock, logout } = useSession();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
-  const [menuOpen, setMenuOpen] = useState(false);
 
   async function handleLogout() {
     await logout();
     navigate("/login", { replace: true });
   }
 
-  // Two destinations. Everything else — devices, tokens, events, profiles —
-  // is machinery that now lives inside a child's page or runs unattended.
-  // A console about your children should not have a fleet menu.
-  const entries: NavEntry[] = [
-    { to: "/", label: "FAMILY" },
-    { to: "/devices", label: "DEVICES" },
-    { to: "/settings", label: "SETTINGS" },
-  ];
-
-  const railFooter = (
-    <div className="p-4 border-t" style={{ borderColor: "var(--line)" }}>
-      <button
-        onClick={toggle}
-        className="focusable w-full text-left label mb-3 hover:text-fg"
-        style={{ color: "var(--fg-faint)" }}
-      >
-        THEME · {theme.toUpperCase()}
-      </button>
-      {mock && (
-        <div
-          className="mb-3 flex items-center gap-2 border rounded px-2 py-1.5"
-          style={{ borderColor: "var(--warn)" }}
-        >
-          <span className="led led-glow-warn" style={{ background: "var(--warn)" }} />
-          <span className="label" style={{ color: "var(--warn)" }}>
-            MOCK DATA
-          </span>
-        </div>
-      )}
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="dot text-[0.6875rem] text-fg truncate">
-            {me?.admin.display_name ?? "ADMIN"}
-          </p>
-          <p className="text-[0.625rem] truncate" style={{ color: "var(--fg-faint)" }}>
-            {me?.admin.email ?? ""}
-          </p>
-        </div>
-        <button
-          onClick={handleLogout}
-          className="focusable label hover:text-accent flex-none"
-          style={{ color: "var(--fg-dim)" }}
-        >
+  return (
+    <div className="rail-foot">
+      {mock && <p className="rail-mock">MOCK DATA</p>}
+      <p className="rail-who">{me?.account?.display_name ?? me?.admin.display_name ?? "Parent"}</p>
+      <div className="rail-foot-row">
+        <button onClick={toggle} className="focusable rail-foot-btn">
+          THEME · {theme.toUpperCase()}
+        </button>
+        <button onClick={handleLogout} className="focusable rail-foot-btn">
           LOGOUT
         </button>
       </div>
     </div>
   );
+}
+
+export function Shell() {
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Top bar: wordmark · admin */}
+      {/* Top bar: wordmark only. Identity lives in the rail, once. */}
       <header
         className="sticky top-0 z-40 flex items-center gap-4 px-4 lg:px-6 h-14 border-b"
         style={{ borderColor: "var(--line)", background: "var(--bg)" }}
@@ -128,34 +150,30 @@ export function Shell() {
         <NavLink to="/" className="focusable flex items-center" aria-label="OpenScreenTime home">
           <Wordmark size={1.25} />
         </NavLink>
-        <span className="flex-1" />
-        <span className="label hidden md:inline" style={{ color: "var(--fg-dim)" }}>
-          {me ? `${me.admin.display_name} · admin` : ""}
-        </span>
       </header>
 
       <div className="flex flex-1 min-h-0">
         {/* Desktop rail */}
         <aside
-          className="hidden lg:flex w-56 flex-none flex-col border-r sticky top-14 h-[calc(100vh-3.5rem)]"
-          style={{ borderColor: "var(--line)", background: "var(--surface)" }}
+          className="hidden lg:flex w-60 flex-none flex-col border-r sticky top-14 h-[calc(100vh-3.5rem)]"
+          style={{ borderColor: "var(--line)", background: "var(--bg)" }}
         >
-          <NavList entries={entries} />
-          {railFooter}
+          <Rail />
+          <RailFooter />
         </aside>
 
         {/* Mobile slide-over */}
         {menuOpen && (
           <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
             <div
-              className="absolute inset-0 dotgrid"
+              className="absolute inset-0"
               style={{ background: "rgba(0,0,0,0.72)" }}
               onClick={() => setMenuOpen(false)}
               aria-hidden
             />
             <div
               className="relative w-64 h-full flex flex-col border-r"
-              style={{ borderColor: "var(--line-2)", background: "var(--surface)" }}
+              style={{ borderColor: "var(--line-2)", background: "var(--bg)" }}
             >
               <div
                 className="flex items-center justify-between px-5 h-14 border-b flex-none"
@@ -164,14 +182,15 @@ export function Shell() {
                 <Wordmark size={1.125} />
                 <button
                   onClick={() => setMenuOpen(false)}
-                  className="focusable text-fg-faint hover:text-fg text-sm"
+                  className="focusable text-sm"
+                  style={{ color: "var(--fg-dim)" }}
                   aria-label="Close navigation"
                 >
                   ✕
                 </button>
               </div>
-              <NavList entries={entries} onNavigate={() => setMenuOpen(false)} />
-              {railFooter}
+              <Rail onNavigate={() => setMenuOpen(false)} />
+              <RailFooter />
             </div>
           </div>
         )}
@@ -197,7 +216,9 @@ export function PageHeader({ title, stat, actions }: HeaderProps) {
   return (
     <header className="flex items-end justify-between gap-4 mb-8 flex-wrap">
       <div className="flex items-end gap-6 flex-wrap">
-        <h1 className="dot text-xl text-fg">{title}</h1>
+        <h1 className="text-xl" style={{ color: "var(--fg-display)", fontWeight: 500 }}>
+          {title}
+        </h1>
         {stat}
       </div>
       {actions && <div className="flex items-center gap-2 flex-wrap">{actions}</div>}
