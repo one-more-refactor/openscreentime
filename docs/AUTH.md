@@ -97,3 +97,18 @@ wins for auth.
 UI-first against mock for 2a's **sign-in + StepUp modal** (fast, gorgeous, low
 risk), then wire the Rust backend to the same contract. The final authority is
 always the server.
+
+## Sensitive reads (the one exception to "reading is free")
+
+Security & access data — passkey inventory, 2FA enrollment state, parent
+pairing tokens — is takeover material, so these GETs are the one class of
+*read* the server also answers with `428 step_up_required` unless the session
+holds a live step-up grant:
+
+- `GET /api/auth/passkeys`
+- `GET /api/me/2fa`
+- `GET /api/parent-tokens`
+
+The web console mirrors this honestly: the Security & access section of
+Settings mounts (and fires these fetches) only after `requireStepUp()`
+resolves. The client gate is comfort; the 428 is the lock.
