@@ -37,6 +37,32 @@ Settings page reuses the register ceremony) is always allowed.
 | GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
 | POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
 | GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
+| GET    | `/api/me/2fa`               | → `{ totp_enrolled, email_available, locked_until }`     |
+| POST   | `/api/me/2fa/totp/start`    | → `{ secret, otpauth_uri }`; 409 once an authenticator is confirmed |
+| POST   | `/api/me/2fa/totp/confirm`  | `{ code }` → `{ ok, expires_at }` — confirming is itself a step-up |
+| POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `SENTINEL_STEPUP_WEBHOOK`) |
+| POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at }`, rotates the session |
+| POST   | `/api/auth/voucher`         | `{ voucher }` → session (device-voucher autologin); the session can read but never starts stepped up |
+
+### Step-up 2FA
+
+Reading is free; **every mutating `/api/*` request needs a live step-up grant**,
+enforced by a layer (`server/src/stepup.rs`) rather than per-handler, so routes
+added later are guarded automatically. Without a grant: **`428
+step_up_required`** — the client's contract is to run a step-up flow and retry
+the same request. Exempt (they are how a grant is obtained): the register/login
+ceremonies, logout, `/api/auth/voucher`, the two `/api/me/2fa/totp/*` calls and
+both `/api/auth/stepup/*` calls.
+
+A grant lasts 5 minutes and is bound to the session row. Verifying rotates the
+session token, keeping the old one valid for 2 minutes so in-flight requests and
+second tabs survive. TOTP codes are single-use (a spent counter is dead even
+inside its window); five wrong factors start a doubling lockout, capped at 15
+minutes, counted in the database so a restart does not clear it.
+
+### Agent
+
+| POST   | `/agent/voucher`            | mint a one-time (2 min) voucher for a local surface on that machine to exchange at `/api/auth/voucher` |
 | GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
 | DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
 

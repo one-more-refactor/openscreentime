@@ -23,6 +23,12 @@ pub enum AppError {
     /// and `SENTINEL_OPEN_REGISTRATION` isn't set (see docs/DEPLOY.md).
     #[error("{0}")]
     RegistrationClosed(String),
+    /// 428 with the stable code `step_up_required`: the session is valid but
+    /// has no live second-factor grant (docs/AUTH.md). The client's contract is
+    /// to run a step-up flow and retry the same request — which is why this is
+    /// its own status and not a 403.
+    #[error("{0}")]
+    StepUpRequired(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -36,6 +42,7 @@ impl AppError {
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::RegistrationClosed(_) => (StatusCode::FORBIDDEN, "registration_closed"),
+            AppError::StepUpRequired(_) => (StatusCode::PRECONDITION_REQUIRED, "step_up_required"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
