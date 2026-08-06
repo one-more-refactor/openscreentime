@@ -272,6 +272,101 @@
 }
 
 /* ============================================================================
+   RAIL — where you can go (mono), how everyone's day is going (the pulse),
+   who you are (footer, smallest). The rail shares the page background:
+   structure comes from the one hairline, not a surface change.
+   ========================================================================== */
+.rail-nav {
+  display: block;
+  padding: 0.65rem 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  transition: color var(--dur-tick) var(--ease);
+}
+
+.rail-fam { margin-top: 1.5rem; padding-bottom: 1rem; }
+.rail-fam-head {
+  margin: 0 0 0.35rem;
+  padding: 0 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}
+.rail-child {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1.25rem;
+  text-decoration: none;
+  font-size: 0.875rem;
+  transition: color var(--dur-tick) var(--ease);
+}
+.rail-child:hover { color: var(--fg-display); }
+.rail-child-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.rail-child-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A waiting request is the one thing allowed to be red in the rail. */
+.rail-child-asks {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  color: var(--accent);
+  flex: none;
+}
+.rail-child-left {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.rail-child-left[data-spent="true"] { color: var(--accent); }
+
+.rail-foot { padding: 1rem 1.25rem 1.1rem; border-top: 1px solid var(--line); }
+.rail-mock {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  color: var(--warn);
+}
+.rail-who {
+  margin: 0 0 0.45rem;
+  font-size: 0.875rem;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-foot-row { display: flex; justify-content: space-between; gap: 0.5rem; }
+.rail-foot-btn {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color var(--dur-tick) var(--ease);
+}
+.rail-foot-btn:hover { color: var(--fg); }
+
+/* ============================================================================
    FAMILY — home. Three layers: the people (primary), their time (secondary),
    everything else (tertiary, mono, edges). One interrupt line, or nothing.
    ========================================================================== */
@@ -368,6 +463,7 @@
   );
 }
 
+.fam-waiting { margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--accent); }
 .fam-time-label { margin: 0; font-size: 0.9rem; color: var(--fg-dim); }
 .fam-time-label strong { color: var(--fg-display); font-weight: 500; font-variant-numeric: tabular-nums; }
 .fam-time-none { margin: 0; font-size: 0.9rem; color: var(--fg-faint); }
@@ -448,7 +544,45 @@
 .ch-btn:disabled { opacity: 0.45; cursor: default; }
 .ch-btn-yes { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
 
+/* The hard stop reads as ink; while paused, resuming is the loud action. */
+.ch-btn-pause { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
+.ch-btn-pause[data-paused="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 .ch-section { margin-bottom: 3rem; }
+
+/* ---- the rules (parenting options) --------------------------------------- */
+.rl { display: grid; }
+.rl-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.rl-row:last-child { border-bottom: none; }
+.rl-row-stack { flex-direction: column; align-items: stretch; }
+.rl-what { min-width: 0; flex: 1; }
+.rl-name { margin: 0 0 0.1rem; font-size: 1rem; font-weight: 500; color: var(--fg-display); }
+.rl-value { margin: 0; font-size: 0.875rem; color: var(--fg-dim); }
+.rl-controls { display: flex; align-items: center; gap: 0.4rem; flex: none; flex-wrap: wrap; }
+.rl-dash { color: var(--fg-faint); }
+.rl-time {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--fg);
+  font-family: var(--font-mono); font-size: 0.8125rem;
+  color-scheme: light dark;
+}
+.rl-app {
+  display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+  padding: 0.5rem 0 0;
+}
+.rl-app-name { font-size: 0.9rem; color: var(--fg); min-width: 6rem; }
+.rl-app-mins {
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint); flex: 1;
+}
+.rl-app-input { max-width: 14rem; border-radius: 999px; padding: 0.45rem 0.9rem; font-size: 0.9rem; }
 .ch-h2 {
   font-family: var(--font-mono); font-size: 0.6875rem;
   text-transform: uppercase; letter-spacing: 0.08em;
