@@ -3,75 +3,103 @@
 @tailwind utilities;
 
 /* ============================================================================
-   DESIGN TOKENS — Direction 01 "HARDWARE BAY".
-   Panels read like hardware modules: silkscreen ref-codes, registration
-   ticks, LED status language, true 5×7 dot-matrix numerals.
-   Dark is the primary theme; light = silkscreen-on-white, same language.
-   Theme is chosen by [data-theme] on <html>; a prefers-color-scheme fallback
-   is provided for first paint before JS runs.
+   OPENSCREENTIME — Nothing design system, both modes equal-rigor.
+
+   Rules this file enforces (nothing-design SKILL.md):
+   - Hierarchy is grayscale (display/primary/secondary/disabled), never boxes.
+   - Containers use the lightest sufficient tool: spacing → divider → border →
+     surface. The most important element on a screen is never boxed.
+   - Red #D71921 is an urgent interrupt and is ABSENT on a healthy day.
+   - No shadows, no gradients, no glows, no toasts, no skeletons.
+   - Type: Space Grotesk (UI/body) + Space Mono ALL-CAPS (labels/data).
+     Max 3 sizes, 2 weights per screen.
+   - Motion: percussive chrome (150–250ms), living data (300–400ms),
+     ease cubic-bezier(.25,.1,.25,1) only. No spring, no bounce.
+   - Every diagram carries meaning: time bars are segmented, one cell = 15 min.
+   Theme via [data-theme] on <html>; prefers-color-scheme covers first paint.
    ========================================================================== */
 :root,
 :root[data-theme="dark"] {
-  /* surfaces — near-pure monochrome (docs/DESIGN.md tokens, no color cast) */
-  --bg: #0a0a0a;
-  --surface: #141414;
-  --surface-2: #1c1c1c;
-  --line: #2a2a2a;
-  --line-2: #3a3a3a;
+  /* surfaces — OLED black, elevation by surface step */
+  --bg: #000000;
+  --surface: #111111;
+  --surface-2: #1a1a1a;
+  --line: #222222;
+  --line-2: #333333;
 
-  /* ink */
-  --fg: #fafafa;
-  --fg-dim: #9a9a9a;
-  --fg-faint: #5a5a5a;
+  /* ink — the four-level grayscale hierarchy */
+  --fg-display: #ffffff;
+  --fg: #e8e8e8;
+  --fg-dim: #999999;
+  --fg-faint: #666666;
 
-  /* the one accent — red. locked / tamper / destructive ONLY. */
+  /* the one accent — urgent interrupt ONLY (blocked, tamper, time-up) */
   --accent: #d71921;
-  --accent-dim: #7a0f13;
+  --accent-subtle: rgba(215, 25, 33, 0.15);
 
-  /* status LEDs */
-  --ok: #37d67a;
-  --warn: #f2c94c;
+  /* data status — encoded into values themselves, never row backgrounds */
+  --ok: #4a9e5c;
+  --warn: #d4a843;
   --crit: #d71921;
-  --idle: #5a5a5a;
+  --idle: #666666;
 
-  --radius: 4px;
+  /* shape grammar: cards ≤16px, buttons pill or technical 4–8px */
+  --radius: 12px;
+  --radius-sm: 6px;
 
-  /* dot-grid texture spacing */
-  --dot-gap: 16px;
-  --dot-color: var(--line);
+  /* motion */
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dur-tick: 180ms; /* chrome: percussive */
+  --dur-data: 400ms; /* data: living */
+
+  /* type */
+  --font-sans: "Space Grotesk Variable", "Space Grotesk", "DM Sans", system-ui,
+    sans-serif;
+  --font-mono: "Space Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  /* dot-grid texture (background motif only, 0.1–0.2 opacity) */
+  --dot-gap: 14px;
+  --dot-color: rgba(255, 255, 255, 0.12);
 }
 
 :root[data-theme="light"] {
-  /* Status hues need light-theme values of their own: the dark ones measure
-     1.9:1 (ok) and 1.6:1 (warn) on a light surface — effectively invisible. */
-  --ok: #1a7f42;
+  --bg: #f5f5f4; /* warm off-white */
+  --surface: #ffffff;
+  --surface-2: #f0f0ef;
+  --line: #e8e8e6;
+  --line-2: #cccccb;
+
+  --fg-display: #000000;
+  --fg: #1a1a1a;
+  --fg-dim: #666666;
+  --fg-faint: #999999;
+
+  /* status colors re-derived for light contrast (dark values wash out) */
+  --ok: #2e7d46;
   --warn: #8a6300;
   --crit: #b3151c;
-  --bg: #f5f5f5;
-  --surface: #ffffff;
-  --surface-2: #ededed;
-  --line: #dadada;
-  --line-2: #c4c4c4;
+  --idle: #999999;
 
-  --fg: #111111;
-  --fg-dim: #5e5e5e;
-  --fg-faint: #9c9c9c;
-
-  --idle: #b3b3b3;
+  --dot-color: rgba(0, 0, 0, 0.12);
 }
 
-/* prefers-color-scheme fallback when no data-theme is set yet */
+/* first-paint fallback before JS applies the stored theme */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f5f5f5;
+    --bg: #f5f5f4;
     --surface: #ffffff;
-    --surface-2: #ededed;
-    --line: #dadada;
-    --line-2: #c4c4c4;
-    --fg: #111111;
-    --fg-dim: #5e5e5e;
-    --fg-faint: #9c9c9c;
-    --idle: #b3b3b3;
+    --surface-2: #f0f0ef;
+    --line: #e8e8e6;
+    --line-2: #cccccb;
+    --fg-display: #000000;
+    --fg: #1a1a1a;
+    --fg-dim: #666666;
+    --fg-faint: #999999;
+    --ok: #2e7d46;
+    --warn: #8a6300;
+    --crit: #b3151c;
+    --idle: #999999;
+    --dot-color: rgba(0, 0, 0, 0.12);
   }
 }
 
@@ -86,20 +114,18 @@
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font-family: "Space Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas,
-      monospace;
-    font-size: 13px;
+    font-family: var(--font-sans);
+    font-size: 16px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
   ::selection {
-    background: var(--accent);
-    color: #fff;
+    background: var(--fg);
+    color: var(--bg);
   }
 
-  /* thin monochrome scrollbars */
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--line-2) transparent;
@@ -115,55 +141,44 @@
 }
 
 @layer components {
-  /* Mono uppercase label — the workhorse "silkscreen caption" style. */
+  /* Space Mono ALL-CAPS label — the tertiary layer's voice. */
   .label {
-    font-size: 0.625rem;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--fg-dim);
     font-weight: 400;
   }
 
-  /* Display face — Doto (variable round-dot matrix, closest free match to
-     NDot) where a full DotMatrix grid is overkill. Needs weight ≥600 to read
-     crisply at UI sizes; the dots are the point, not a bug. */
+  /* Data face — Space Mono, tabular. (Doto retired: numbers must mean, not pose.) */
   .dot {
-    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
     font-variant-numeric: tabular-nums;
   }
 
-  /* The SENTINEL wordmark fallback (DotMatrix component is preferred). */
-  .wordmark {
-    font-family: "Doto Variable", "Space Mono", ui-monospace, monospace;
-    text-transform: uppercase;
-    letter-spacing: 0.34em;
-    font-weight: 800;
-  }
-
-  /* Silkscreen ref-code (DV-01) — panel head, top right. */
+  /* Small mono ref text (tertiary metadata). */
   .ref {
+    font-family: var(--font-mono);
     color: var(--fg-faint);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
-  /* Dot-grid panel texture. */
+  /* Dot-grid texture — background motif only, never over content. */
   .dotgrid {
     background-image: radial-gradient(var(--dot-color) 1px, transparent 1px);
     background-size: var(--dot-gap) var(--dot-gap);
     background-position: -1px -1px;
   }
 
-  /* Hairline helpers. */
   .hairline {
     border: 1px solid var(--line);
   }
 
-  /* 7px registration corner ticks — used by <Panel>. Parent: relative. */
+  /* Registration corner ticks (Panel) — precision-in-minutiae detail. */
   .tick {
     position: absolute;
     width: 7px;
@@ -178,7 +193,7 @@
   .tick-bl { bottom: -1px; left: -1px; border-bottom-width: 1px; border-left-width: 1px; }
   .tick-br { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
 
-  /* LEDs — glow via box-shadow of the LED color. */
+  /* Status dots — flat. No glow: shadows/blur are banned. */
   .led {
     display: inline-block;
     width: 7px;
@@ -186,26 +201,20 @@
     border-radius: 999px;
     flex: none;
   }
-  .led-glow-ok {
-    box-shadow: 0 0 6px 0 color-mix(in srgb, var(--ok) 55%, transparent);
-  }
-  .led-glow-warn {
-    box-shadow: 0 0 6px 0 color-mix(in srgb, var(--warn) 55%, transparent);
-  }
-  .led-glow-crit {
-    box-shadow: 0 0 7px 0 color-mix(in srgb, var(--crit) 55%, transparent);
-  }
+  .led-glow-ok,
+  .led-glow-warn,
+  .led-glow-crit,
   .led-glow-idle {
     box-shadow: none;
   }
 
-  /* Fleet glyph strip — one cell per device (the signature). */
+  /* Fleet glyph strip (legacy component) — flat cells. */
   .fleet-cells {
     display: flex;
     gap: 4px;
     padding: 6px 8px;
     border: 1px solid var(--line);
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     background: var(--surface);
   }
   .fleet-cell {
@@ -215,27 +224,13 @@
     background: var(--idle);
     flex: none;
   }
-  .fleet-cell-ok {
-    background: var(--ok);
-    animation: breathe 3.2s ease-in-out infinite;
-  }
-  .fleet-cell-locked {
-    background: var(--accent);
-  }
-  .fleet-cell-warn {
-    background: var(--warn);
-  }
+  .fleet-cell-ok { background: var(--ok); }
+  .fleet-cell-locked { background: var(--accent); }
+  .fleet-cell-warn { background: var(--warn); }
 
-  /* Dot-matrix (real 5×7 LED grids) — see <DotMatrix>. */
-  .dm {
-    display: inline-flex;
-    gap: 0.5em;
-  }
-  .dm-ch {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 1.5px;
-  }
+  /* Legacy 5×7 matrix component — kept renderable, no glow. */
+  .dm { display: inline-flex; gap: 0.5em; }
+  .dm-ch { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1.5px; }
   .dm-ch i {
     width: var(--dot, 4px);
     height: var(--dot, 4px);
@@ -243,15 +238,9 @@
     background: var(--fg-faint);
     opacity: 0.28;
   }
-  .dm-ch i.on {
-    background: currentColor;
-    opacity: 1;
-  }
-  .dm-glow .dm-ch i.on {
-    box-shadow: 0 0 6px color-mix(in srgb, currentColor 60%, transparent);
-  }
+  .dm-ch i.on { background: currentColor; opacity: 1; }
 
-  /* Focus ring — square, visible. */
+  /* Focus ring — square, visible, mechanical. */
   .focusable:focus-visible {
     outline: 2px solid var(--fg-dim);
     outline-offset: 2px;
@@ -259,65 +248,58 @@
 }
 
 @keyframes led-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 .led-pulse {
-  animation: led-pulse 2.4s ease-in-out infinite;
+  animation: led-pulse 2.4s var(--ease) infinite;
 }
 
 @keyframes breathe {
-  50% {
-    opacity: 0.45;
-  }
+  50% { opacity: 0.45; }
+}
+
+/* Living data: fills sweep in when a screen mounts. */
+@keyframes fill-in {
+  from { width: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .led-pulse,
-  .fleet-cell-ok {
-    animation: none !important;
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
 /* ============================================================================
-   FAMILY — the home screen's own layer.
-
-   Deliberately quieter than HARDWARE BAY: no dot-matrix numerals, no LED
-   strip, no silkscreen ref-codes. A parent opening this should see their
-   children, not a rack. Structure follows flick's rules — one accent, hairline
-   borders, elevation by surface step rather than shadow — but the type is a
-   readable sans at human sizes instead of technical mono.
+   FAMILY — home. Three layers: the people (primary), their time (secondary),
+   everything else (tertiary, mono, edges). One interrupt line, or nothing.
    ========================================================================== */
-.fam-wrap, .ch-wrap {
-  /* The shell sets Space Mono on body. These screens are for parents, not
-     operators — the section comment claimed a sans and never declared one, so
-     the entire "human" redesign was rendering in the ops typeface. */
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+.fam-wrap, .ch-wrap, .dev-wrap {
   font-size: 1rem;
 }
-.fam-wrap { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+.fam-wrap { max-width: 60rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; }
 
-.fam-head { margin-bottom: 2rem; }
+.fam-head { margin-bottom: 3rem; }
 .fam-greet {
-  font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.3rem);
-  font-weight: 600; letter-spacing: -0.02em; margin: 0 0 0.2rem; color: var(--fg);
+  font-size: clamp(1.75rem, 1.2rem + 2vw, 2.6rem);
+  font-weight: 500; letter-spacing: -0.02em; margin: 0 0 0.3rem;
+  color: var(--fg-display);
 }
-.fam-sub { margin: 0; color: var(--fg-dim); font-size: 0.95rem; }
+.fam-sub {
+  margin: 0; color: var(--fg-dim);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
 .fam-quiet, .fam-error { color: var(--fg-dim); }
 .fam-error { color: var(--crit); }
 
 /* The one interruption. Absent on a healthy day, unmissable when not. */
 .fam-trouble {
   display: flex; align-items: center; gap: 0.6rem;
-  padding: 0.7rem 0.9rem; margin-bottom: 1.5rem;
+  padding: 0.75rem 1rem; margin-bottom: 2rem;
   border: 1px solid var(--warn); border-radius: var(--radius);
   color: var(--fg); text-decoration: none; font-size: 0.9rem;
-  background: color-mix(in oklab, var(--warn) 8%, transparent);
 }
 .fam-trouble-dot {
   width: 0.5rem; height: 0.5rem; border-radius: 50%;
@@ -327,131 +309,292 @@
 
 .fam-grid {
   list-style: none; margin: 0; padding: 0;
-  display: grid; gap: 0.9rem;
+  display: grid; gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
 }
 
 .fam-card {
   display: flex; gap: 1rem; align-items: flex-start;
-  padding: 1.1rem; text-decoration: none;
+  padding: 1.25rem; text-decoration: none;
   border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); color: var(--fg);
-  transition: border-color 140ms ease, background 140ms ease;
+  transition: border-color var(--dur-tick) var(--ease),
+    transform var(--dur-tick) var(--ease);
 }
-.fam-card:hover { border-color: var(--line-2); background: var(--surface-2); }
+.fam-card:hover { border-color: var(--line-2); }
+.fam-card:active { transform: scale(0.985); }
 .fam-card:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 
 .fam-avatar {
   flex: none; border-radius: 50%;
   display: grid; place-items: center;
-  font-weight: 700; letter-spacing: 0.02em;
+  font-weight: 500; letter-spacing: 0.02em;
 }
 
 .fam-card-body { min-width: 0; flex: 1; }
-.fam-name { margin: 0 0 0.1rem; font-size: 1.05rem; font-weight: 600; }
+.fam-name { margin: 0 0 0.15rem; font-size: 1.125rem; font-weight: 500; color: var(--fg-display); }
 .fam-meta {
-  margin: 0 0 0.75rem; font-size: 0.8rem; color: var(--fg-faint);
+  margin: 0 0 0.9rem; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.fam-bar {
-  height: 0.4rem; border-radius: 999px;
-  background: var(--line); overflow: hidden; margin-bottom: 0.4rem;
+/* Segmented time bar — one cell = 15 minutes, so the diagram IS the data.
+   --segs is set inline to total/15; the gaps are cut by the bg-colored grid. */
+.fam-bar, .ch-bar {
+  position: relative;
+  height: 0.5rem; border-radius: 2px;
+  background: var(--surface-2); overflow: hidden;
 }
-.fam-bar-fill {
-  display: block; height: 100%; border-radius: 999px;
-  background: var(--ok); transition: width 260ms ease;
+.fam-bar { margin-bottom: 0.5rem; }
+.fam-bar-fill, .ch-bar-fill {
+  display: block; height: 100%;
+  background: var(--fg);
+  transition: width var(--dur-data) var(--ease);
+  animation: fill-in var(--dur-data) var(--ease);
 }
-/* Red is reserved for "spent" — the one state a parent needs to spot. */
-.fam-bar-fill[data-spent="true"] { background: var(--accent); }
+/* Red only for "spent" — the interrupt state. */
+.fam-bar-fill[data-spent="true"], .ch-bar-fill[data-spent="true"] { background: var(--accent); }
+.fam-bar::after, .ch-bar::after {
+  /* the 15-minute grid, cut into whatever is underneath */
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(100% / var(--segs, 8) - 2px),
+    var(--bg) calc(100% / var(--segs, 8) - 2px),
+    var(--bg) calc(100% / var(--segs, 8))
+  );
+}
 
-.fam-time-label { margin: 0; font-size: 0.85rem; color: var(--fg-dim); }
-.fam-time-label strong { color: var(--fg); font-weight: 600; }
-.fam-time-none { margin: 0; font-size: 0.85rem; color: var(--fg-faint); }
+.fam-time-label { margin: 0; font-size: 0.9rem; color: var(--fg-dim); }
+.fam-time-label strong { color: var(--fg-display); font-weight: 500; font-variant-numeric: tabular-nums; }
+.fam-time-none { margin: 0; font-size: 0.9rem; color: var(--fg-faint); }
 .fam-earned { color: var(--ok); }
-.fam-spent { color: var(--accent); font-weight: 600; }
+.fam-spent { color: var(--accent); font-weight: 500; }
 
 .fam-empty {
   border: 1px dashed var(--line-2); border-radius: var(--radius);
-  padding: 2.5rem 1.5rem; text-align: center; color: var(--fg-dim);
+  padding: 3rem 1.5rem; text-align: center; color: var(--fg-dim);
 }
 .fam-cta {
-  display: inline-block; margin-top: 0.9rem; padding: 0.55rem 1.1rem;
+  display: inline-block; margin-top: 1rem; padding: 0.6rem 1.25rem;
   border: 1px solid var(--line-2); border-radius: 999px;
   color: var(--fg); text-decoration: none; font-size: 0.9rem;
+  transition: transform var(--dur-tick) var(--ease);
 }
 .fam-cta:hover { background: var(--surface-2); }
+.fam-cta:active { transform: scale(0.96); }
+.fam-add {
+  float: right; color: var(--fg-dim); text-decoration: none;
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em; padding-top: 0.6rem;
+}
+.fam-add:hover { color: var(--fg); }
 
-/* ---- child detail + add-a-child ------------------------------------------ */
-.ch-wrap { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
-.ch-back { display: inline-block; margin-bottom: 1.5rem; color: var(--fg-dim); text-decoration: none; font-size: 0.9rem; }
+/* ---- child detail -------------------------------------------------------- */
+.ch-wrap { max-width: 44rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+.ch-back {
+  display: inline-block; margin-bottom: 2rem; color: var(--fg-dim);
+  text-decoration: none; font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
 .ch-back:hover { color: var(--fg); }
-.ch-head { display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
-.ch-head-simple { margin-bottom: 1.75rem; }
-.ch-name { margin: 0; font-size: 1.6rem; font-weight: 600; letter-spacing: -0.02em; }
-.ch-meta { margin: 0.15rem 0 0; color: var(--fg-faint); font-size: 0.85rem; }
-.ch-note { margin: 0 0 1rem; padding: 0.6rem 0.8rem; border-radius: var(--radius);
-  background: color-mix(in oklab, var(--ok) 12%, transparent); color: var(--fg); font-size: 0.88rem; }
+.ch-head { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; }
+.ch-head-simple { margin-bottom: 2rem; }
+.ch-name { margin: 0; font-size: 1.75rem; font-weight: 500; letter-spacing: -0.02em; color: var(--fg-display); }
+.ch-meta {
+  margin: 0.25rem 0 0; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.ch-note {
+  margin: 0 0 1rem; padding: 0.6rem 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ok); font-size: 0.9rem;
+}
 
-/* The one big number this page exists to answer. */
-.ch-today { text-align: center; padding: 2rem 0 1.5rem; }
-.ch-big { margin: 0; font-size: clamp(3.5rem, 2rem + 9vw, 6rem); font-weight: 300;
-  line-height: 1; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+/* The primary layer: the one number this page exists to answer. Unboxed. */
+.ch-today { text-align: center; padding: 2.5rem 0 2rem; }
+.ch-big {
+  margin: 0; font-size: clamp(3.5rem, 2rem + 9vw, 6rem); font-weight: 300;
+  line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+  color: var(--fg-display);
+}
 .ch-big[data-spent="true"] { color: var(--accent); }
-.ch-big-unit { margin: 0.3rem 0 1.25rem; color: var(--fg-dim); font-size: 0.95rem; }
-.ch-bar { height: 0.5rem; border-radius: 999px; background: var(--line); overflow: hidden; max-width: 26rem; margin: 0 auto; }
-.ch-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--ok); transition: width 260ms ease; }
-.ch-bar-fill[data-spent="true"] { background: var(--accent); }
-.ch-bar-note { margin: 0.5rem 0 0; color: var(--fg-faint); font-size: 0.82rem; }
+.ch-big-unit {
+  margin: 0.6rem 0 1.5rem; color: var(--fg-dim);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.ch-bar { height: 0.5rem; max-width: 26rem; margin: 0 auto; }
+.ch-bar-note {
+  margin: 0.6rem 0 0; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
 
-.ch-actions { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 2.5rem; }
-.ch-btn { padding: 0.5rem 1rem; border: 1px solid var(--line-2); border-radius: 999px;
-  background: transparent; color: var(--fg); font-size: 0.9rem; cursor: pointer; }
+.ch-actions { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 3rem; }
+.ch-btn {
+  padding: 0.55rem 1.1rem; border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--fg); font-size: 0.9rem;
+  font-family: var(--font-sans); cursor: pointer;
+  transition: transform var(--dur-tick) var(--ease),
+    background var(--dur-tick) var(--ease);
+}
 .ch-btn:hover:not(:disabled) { background: var(--surface-2); }
+.ch-btn:active:not(:disabled) { transform: scale(0.96); }
 .ch-btn:disabled { opacity: 0.45; cursor: default; }
-.ch-btn-yes { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.ch-btn-yes { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
 
-.ch-section { margin-bottom: 2.5rem; }
-.ch-h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--fg-faint); margin: 0 0 0.75rem; font-weight: 600; }
+.ch-section { margin-bottom: 3rem; }
+.ch-h2 {
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint); margin: 0 0 0.75rem; font-weight: 400;
+}
 .ch-reqs, .ch-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
-.ch-req, .ch-device { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  padding: 0.8rem 0.9rem; border: 1px solid var(--line); border-radius: var(--radius); font-size: 0.9rem; }
+.ch-req, .ch-device {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.85rem 1rem; border: 1px solid var(--line);
+  border-radius: var(--radius); font-size: 0.9rem;
+}
 .ch-req-btns { display: flex; gap: 0.4rem; flex: none; }
-.ch-device-state { font-size: 0.78rem; color: var(--fg-faint); }
+.ch-device-state {
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint);
+}
 .ch-device-state[data-state="online"] { color: var(--ok); }
 .ch-device-state[data-state="locked"] { color: var(--accent); }
 
 /* ---- security slider ----------------------------------------------------- */
 .sec { border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem; }
 .sec-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; }
-.sec-title { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); font-weight: 600; }
-.sec-level { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.sec-title {
+  margin: 0; font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint); font-weight: 400;
+}
+.sec-level { margin: 0; font-size: 1.125rem; font-weight: 500; color: var(--fg-display); }
 .sec-range { width: 100%; accent-color: var(--fg); }
 .sec-ticks { display: flex; justify-content: space-between; margin: 0.4rem 0 1rem; }
-.sec-tick { font-size: 0.68rem; color: var(--fg-faint); transition: color 140ms ease; }
+.sec-tick {
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-faint); transition: color var(--dur-tick) var(--ease);
+}
 .sec-tick[data-on="true"] { color: var(--fg-dim); }
 .sec-summary { margin: 0 0 0.75rem; font-size: 0.95rem; }
 .sec-more summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-dim); }
 .sec-more ul { margin: 0.6rem 0 0.6rem 1.1rem; padding: 0; font-size: 0.85rem; color: var(--fg-dim); }
 .sec-more li { margin-bottom: 0.25rem; }
-.sec-invariant { margin: 0; font-size: 0.8rem; color: var(--fg-faint); font-style: italic; }
+.sec-invariant { margin: 0; font-size: 0.8rem; color: var(--fg-faint); }
+.sec-apply { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;
+  padding-top: 1rem; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.sec-apply-note { margin: 0; flex: 1; font-size: 0.88rem; color: var(--fg-dim); }
 
 /* ---- add a child --------------------------------------------------------- */
 .add-form { display: grid; gap: 0.6rem; max-width: 22rem; }
 .add-label { font-size: 0.9rem; color: var(--fg-dim); }
-.add-input { padding: 0.65rem 0.8rem; border: 1px solid var(--line-2); border-radius: var(--radius);
-  background: var(--surface); color: var(--fg); font-size: 1rem; }
+.add-input {
+  padding: 0.65rem 0.8rem; border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg); font-size: 1rem;
+  font-family: var(--font-sans);
+}
 .add-submit { justify-self: start; margin-top: 0.4rem; }
-.add-code { margin: 0 0 0.75rem; padding: 0.9rem; border: 1px solid var(--line);
-  border-radius: var(--radius); background: var(--surface); font-size: 0.78rem;
-  overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-.add-note { margin: 1.5rem 0; padding: 0.9rem 1rem; border-left: 3px solid var(--warn);
-  background: color-mix(in oklab, var(--warn) 7%, transparent); font-size: 0.9rem; }
+.add-code {
+  margin: 0 0 0.75rem; padding: 0.9rem; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--surface);
+  font-family: var(--font-mono); font-size: 0.78rem;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+}
+.add-note {
+  margin: 1.5rem 0; padding: 0.9rem 1rem; border-left: 2px solid var(--warn);
+  font-size: 0.9rem;
+}
 .add-note p { margin: 0 0 0.5rem; }
 .add-note p:last-child { margin: 0; }
-.fam-add { float: right; font-size: 0.9rem; color: var(--fg-dim); text-decoration: none; }
-.fam-add:hover { color: var(--fg); }
-.sec-apply { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;
-  padding-top: 1rem; border-top: 1px solid var(--line); flex-wrap: wrap; }
-.sec-apply-note { margin: 0; flex: 1; font-size: 0.88rem; color: var(--fg-dim); }
+
+/* ============================================================================
+   DEVICES — the machinery, kept human. One card per device: who uses it,
+   whether it's steady, whether it's blocked, when it last called home, and
+   whether it's allowed to be offline right now. No hostnames, no tokens.
+   ========================================================================== */
+.dev-wrap { max-width: 60rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; }
+.dev-head { margin-bottom: 2.5rem; }
+.dev-title {
+  font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.1rem);
+  font-weight: 500; letter-spacing: -0.02em; margin: 0 0 0.3rem;
+  color: var(--fg-display);
+}
+
+.dev-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr));
+}
+
+.dev-card {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); padding: 1.25rem;
+  display: flex; flex-direction: column; gap: 1rem;
+}
+/* A blocked device is the interrupt — the border says it before any text. */
+.dev-card[data-blocked="true"] { border-color: var(--accent); }
+
+.dev-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.dev-name { margin: 0; font-size: 1.125rem; font-weight: 500; color: var(--fg-display); }
+.dev-users {
+  margin: 0.15rem 0 0; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.dev-state {
+  display: inline-flex; align-items: center; gap: 0.45rem; flex: none;
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim);
+  padding-top: 0.25rem;
+}
+.dev-state[data-tone="ok"] { color: var(--ok); }
+.dev-state[data-tone="crit"] { color: var(--accent); }
+.dev-state[data-tone="warn"] { color: var(--warn); }
+.dev-state[data-tone="idle"] { color: var(--fg-faint); }
+.dev-state .led { width: 6px; height: 6px; background: currentColor; }
+
+/* Facts as a quiet mono list — label left, value right. */
+.dev-facts { display: grid; gap: 0.35rem; margin: 0; }
+.dev-fact {
+  display: flex; justify-content: space-between; gap: 1rem;
+  font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.02em;
+}
+.dev-fact dt { color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.6875rem; padding-top: 1px; }
+.dev-fact dd { margin: 0; color: var(--fg-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.dev-fact dd[data-tone="ok"] { color: var(--ok); }
+.dev-fact dd[data-tone="warn"] { color: var(--warn); }
+.dev-fact dd[data-tone="crit"] { color: var(--crit); }
+
+/* Offline allowance — a live countdown, not an alarm. */
+.dev-offline {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  border-top: 1px solid var(--line); padding-top: 0.9rem;
+}
+.dev-offline-note { margin: 0; font-size: 0.85rem; color: var(--fg-dim); }
+.dev-offline-note strong { color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+.dev-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 0.9rem; }
+.dev-durations { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.dev-durations .label { margin-right: 0.25rem; }
+
+.dev-empty {
+  border: 1px dashed var(--line-2); border-radius: var(--radius);
+  padding: 3rem 1.5rem; text-align: center; color: var(--fg-dim);
+}
+
+/* Inline status text (Nothing: no toasts). */
+.dev-inline-status {
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim);
+}
+.dev-inline-status[data-tone="crit"] { color: var(--crit); }

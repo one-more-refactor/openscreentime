@@ -4,6 +4,7 @@ export type { LedTone } from "./StatusLed";
 export { Panel } from "./Panel";
 export { Stat } from "./Stat";
 export { DotMatrix } from "./DotMatrix";
+export { Wordmark } from "./Wordmark";
 export { ErrorPanel } from "./ErrorPanel";
 export { Toggle } from "./Toggle";
 export { TextInput, Select } from "./TextInput";
