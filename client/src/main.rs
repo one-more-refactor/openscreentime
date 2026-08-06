@@ -1,4 +1,4 @@
-//! sentinel-agent — the Linux client for the Sentinel zero-trust device management
+//! openscreentime — the Linux client for the Sentinel zero-trust device management
 //! platform. Single binary; subcommands: enroll, run, install-service, status.
 //!
 //! Global safety flags (honored everywhere):
@@ -14,7 +14,9 @@ mod enroll;
 #[cfg(feature = "gui")]
 mod intro;
 mod lockout;
+mod login;
 mod parent;
+mod paths;
 mod pin;
 mod policy;
 mod protocol;
@@ -34,9 +36,17 @@ use config::AgentCtx;
 
 #[derive(Parser)]
 #[command(
-    name = "sentinel-agent",
+    name = "openscreentime",
+    bin_name = "ost",
     version,
-    about = "Sentinel zero-trust device agent"
+    about = "OpenScreenTime — screen time for the whole family",
+    long_about = "OpenScreenTime keeps track of screen time on this computer.\n\n\
+                  Everyday commands need no special permissions:\n  \
+                  ost time     how much is left today\n  \
+                  ost ask      ask a parent for more\n  \
+                  ost login    open the console, already signed in\n\n\
+                  Every read command also takes --json.",
+    after_help = "Setup and recovery need root: enroll, run, install-service, unlock."
 )]
 struct Cli {
     /// Log the enforcement actions that WOULD be taken, without touching the host.
@@ -57,7 +67,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Enroll against a server with a one-time token; writes /etc/sentinel/agent.toml.
+    /// Enroll against a server with a one-time token; writes /etc/openscreentime/agent.toml.
     Enroll {
         #[arg(long)]
         server: String,
@@ -69,11 +79,34 @@ enum Cmd {
     /// Install and enable the hardened systemd unit + watchdog + polkit rule.
     InstallService,
     /// Show enrollment / service status.
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// How much screen time you have left today. Safe to run as yourself.
-    Time,
+    Time {
+        /// Machine-readable output, for scripts, status bars and assistants.
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask a parent for more time. Safe to run as yourself.
-    Ask,
+    Ask {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the console in a browser, already signed in.
+    ///
+    /// Uses this computer's own enrollment as proof of identity: no password,
+    /// no passkey prompt. The session can read everything; changing anything
+    /// still asks for a second factor.
+    Login {
+        /// Print the sign-in URL instead of opening a browser (headless boxes,
+        /// or opening it on another machine). stdout is the URL and nothing else.
+        #[arg(long)]
+        print_url: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Pair this machine as a parent companion: store a scoped parent access
     /// token (minted in the web console → Settings → Parent access) so the tray
     /// can show + approve time requests. Runs as the desktop user (no root).
@@ -190,9 +223,24 @@ async fn main() -> Result<()> {
     }
     // The tray companion and `pair` run as the desktop user on purpose — no root nag.
     #[cfg(feature = "tray")]
-    let is_user_cmd = matches!(cli.cmd, Cmd::Tray | Cmd::Pair { .. } | Cmd::Time | Cmd::Ask);
+    let is_user_cmd = matches!(
+        cli.cmd,
+        Cmd::Tray
+            | Cmd::Pair { .. }
+            | Cmd::Time { .. }
+            | Cmd::Ask { .. }
+            | Cmd::Login { .. }
+            | Cmd::Status { .. }
+    );
     #[cfg(not(feature = "tray"))]
-    let is_user_cmd = matches!(cli.cmd, Cmd::Pair { .. } | Cmd::Time | Cmd::Ask);
+    let is_user_cmd = matches!(
+        cli.cmd,
+        Cmd::Pair { .. }
+            | Cmd::Time { .. }
+            | Cmd::Ask { .. }
+            | Cmd::Login { .. }
+            | Cmd::Status { .. }
+    );
     if !ctx.is_root && !cli.dry_run && !is_user_cmd {
         tracing::warn!(
             "not running as root; enforcing subcommands will refuse (use --dry-run to simulate)"
@@ -202,14 +250,26 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Enroll { server, token } => enroll::run(&server, &token).await,
         Cmd::Run => {
+            // Before any state is read: adopt whatever the previous product
+            // name left behind, so an upgrade doesn't start the day with an
+            // empty usage ledger (every child's spent time silently back to 0).
+            paths::migrate_state_dir();
             let cfg = config::AgentConfig::load()
                 .map_err(|e| anyhow::anyhow!("not enrolled? {e} (run `enroll` first)"))?;
             runner::run(ctx, cfg).await
         }
         Cmd::InstallService => service::install_service(ctx),
-        Cmd::Status => service::status(),
-        Cmd::Time => childcli::time(),
-        Cmd::Ask => childcli::ask(),
+        Cmd::Status { json } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&service::status_json())?);
+                Ok(())
+            } else {
+                service::status()
+            }
+        }
+        Cmd::Time { json } => childcli::time(json),
+        Cmd::Ask { json } => childcli::ask(json),
+        Cmd::Login { print_url, json } => login::run(print_url, json).await,
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),

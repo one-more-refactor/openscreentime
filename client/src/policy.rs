@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 /// Where the last-applied effective policy is cached on disk. Enforcement
 /// itself never depends on this file (it's an in-memory `HashMap<String,
 /// Policy>` in the running `Agent`); it exists purely so a separate CLI
-/// invocation — `sentinel-agent unlock` — can verify the parent PIN and know
+/// invocation — `openscreentime unlock` — can verify the parent PIN and know
 /// what to tear down even without a live agent process or server connection.
-pub const POLICY_CACHE_PATH: &str = "/etc/sentinel/policy_cache.json";
+pub const POLICY_CACHE_PATH: &str = "/etc/openscreentime/policy_cache.json";
 
 /// Best-effort persist of the effective policy (called after every successful
 /// `apply_bundle`). Never fails the caller — logs and moves on.
@@ -33,7 +33,7 @@ fn save_cache_to(policy: &Policy, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Load the cached effective policy (used by `sentinel-agent unlock`).
+/// Load the cached effective policy (used by `openscreentime unlock`).
 pub fn load_cache() -> Result<Policy> {
     let body = std::fs::read_to_string(POLICY_CACHE_PATH).with_context(|| {
         format!("reading {POLICY_CACHE_PATH} (no cached policy — has the agent ever applied one?)")
@@ -52,7 +52,7 @@ pub fn load_cache() -> Result<Policy> {
 /// map and evaluates to 0, so the countermeasure is disabled by the very
 /// condition it was written to catch. Pull the plug on the router, power-cycle
 /// the machine, and enforcement is gone until the server comes back.
-pub const BUNDLE_CACHE_PATH: &str = "/etc/sentinel/policy_bundle.json";
+pub const BUNDLE_CACHE_PATH: &str = "/etc/openscreentime/policy_bundle.json";
 
 /// Best-effort persist of the last applied bundle. Never fails the caller.
 pub fn save_bundle_cache(bundle: &PolicyBundle) {

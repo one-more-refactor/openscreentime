@@ -22,13 +22,13 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 
 ### Level 1 — Strong deterrence + alerting (DEFAULT)
 
-- **Hardened root systemd unit** (`client/systemd/sentinel-agent.service`, installed by
-  `sentinel-agent install-service`): `Restart=always`, `RestartSec=1`,
+- **Hardened root systemd unit** (`client/systemd/openscreentime-agent.service`, installed by
+  `ost install-service`): `Restart=always`, `RestartSec=1`,
   `StartLimitIntervalSec=0` (never gives up restarting), `ProtectSystem=strict` with explicit
   `ReadWritePaths` carve-outs, `ProtectHome` off (must watch user sessions), `NoNewPrivileges`
   off (shells out to nft/resolvectl/chattr), `OOMScoreAdjust=-1000`.
-- **Watchdog:** a separate `sentinel-watchdog.timer` runs every 30 s and restarts the agent if
-  its heartbeat file (`/run/sentinel/heartbeat`, touched every enforcement tick) is missing or
+- **Watchdog:** a separate `openscreentime-watchdog.timer` runs every 30 s and restarts the agent if
+  its heartbeat file (`/run/openscreentime/heartbeat`, touched every enforcement tick) is missing or
   older than 90 s. Killing the agent process buys at most ~30 s.
 - **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-sentinel.rules`) denies
   `org.freedesktop.login1` power-off / reboot / halt / suspend / hibernate / suspend-then-hibernate
@@ -49,7 +49,7 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
   back to dodge bedtime" move) emits a `clock_skew` (warn) event.
 - **Boot persistence:** the unit is `WantedBy=multi-user.target` with
   `After/Wants=network-online.target`; policy is pulled and re-applied at startup.
-- **Config at rest:** `/etc/sentinel/agent.toml` (device token inside) is root-owned and
+- **Config at rest:** `/etc/openscreentime/agent.toml` (device token inside) is root-owned and
   chmod'd `0600` (best-effort — a failure to chmod is logged, not fatal).
 - **Event delivery:** every tamper event is posted to the server; batches that can't be
   delivered are **buffered in memory (capped at 512, oldest dropped) and retried every tick**
@@ -62,7 +62,7 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 Everything in level 1 **plus**:
 
 - The polkit rule additionally denies `stop` / `disable` / `mask` of
-  `sentinel-agent.service` **and** `sentinel-watchdog.service` / `sentinel-watchdog.timer`
+  `openscreentime-agent.service` **and** `openscreentime-watchdog.service` / `openscreentime-watchdog.timer`
   (the recovery net) via `systemctl` for everyone except root and `sentinel-admin`.
 - A logind drop-in (`/etc/systemd/logind.conf.d/50-sentinel.conf`) sets `ReserveVT=0` and
   `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
@@ -83,7 +83,7 @@ Losing sight of the server never opens the network:
 - **Offline hard-lockdown** (per-policy `lockdown.offline_lockdown_days`, `0` = disabled): a
   device that hasn't reached the server for N *days* freezes all managed users like an admin
   lock. The clock survives reboots — last contact is persisted as a wall-clock timestamp in
-  `/var/lib/sentinel/last_contact` — so "keep it powered off for a week, then use it offline
+  `/var/lib/openscreentime/last_contact` — so "keep it powered off for a week, then use it offline
   forever" doesn't work. The parent PIN still unlocks.
 
 ## The escape hatches that always work
@@ -91,8 +91,8 @@ Losing sight of the server never opens the network:
 Deterrence must never become a hostage situation. At every level:
 
 - **Parent PIN** (argon2 hash in the policy, never plaintext): typed into the lockout overlay
-  (grants 30 minutes), dropped via the root-only file `/run/sentinel/unlock_pin.<user>`, or
-  used with the `sentinel-agent unlock` CLI. Verification is against the hash and **fails
+  (grants 30 minutes), dropped via the root-only file `/run/openscreentime/unlock_pin.<user>`, or
+  used with the `ost unlock` CLI. Verification is against the hash and **fails
   closed** — no PIN configured means no PIN unlock.
 - **`sentinel-admin`**: a local account by this name is exempt from every polkit denial
   (power controls, and the level-3 unit-stop mask).

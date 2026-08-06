@@ -50,11 +50,11 @@ data — so without the explicit env var, a dead backend just fails loudly inste
 cd client
 cargo build --release
 # enroll against a running server (needs root for enforcement primitives)
-sudo ./target/release/sentinel-agent enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
-sudo ./target/release/sentinel-agent run    # or install the systemd unit
-sudo ./target/release/sentinel-agent install-service   # writes + enables the hardened unit
-sudo ./target/release/sentinel-agent status   # enrollment/service status — the natural post-install check
-sudo ./target/release/sentinel-agent unlock --pin <PARENT_PIN>   # parent-PIN recovery: suspends enforcement (default 60 min, --minutes to override)
+sudo ./target/release/ost enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
+sudo ./target/release/ost run    # or install the systemd unit
+sudo ./target/release/ost install-service   # writes + enables the hardened unit
+sudo ./target/release/ost status   # enrollment/service status — the natural post-install check
+sudo ./target/release/ost unlock --pin <PARENT_PIN>   # parent-PIN recovery: suspends enforcement (default 60 min, --minutes to override)
 ```
 
 Dev tip: the agent supports `--dry-run` so it logs the nft/DNS/lockout actions it *would* take
@@ -65,7 +65,7 @@ Always build from within `client/`. Feature flags (`client/Cargo.toml`):
 - default (no features enabled): headless, enforcement-complete — this is what the server's
   agent-dist image ships. Lockout falls back to `wall` broadcasts since there's no display.
 - `--features gui`: adds the egui full-screen lockout overlay in place of the `wall` fallback.
-- `--features tray`: adds the `sentinel-agent tray` subcommand, a per-user tray companion
+- `--features tray`: adds the `ost tray` subcommand, a per-user tray companion
   (time left, connection state, managed-device disclosure).
 
 ## End-to-end smoke test (the vertical slice)
@@ -101,10 +101,10 @@ enforcement on your workstation. Two safe options:
   enforcement decisions → heartbeat → events) in isolation. `enroll` needs the tenant to
   have a `default` preset profile, or it 404s:
   ```bash
-  podman run --rm --network host -v "$PWD/client/target/debug/sentinel-agent":/usr/local/bin/sentinel-agent:ro \
+  podman run --rm --network host -v "$PWD/client/target/debug/openscreentime":/usr/local/bin/openscreentime:ro \
     docker.io/library/archlinux bash -c '
-      sentinel-agent enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
-      sentinel-agent --dry-run --time-accel 60 run'
+      ost enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
+      ost --dry-run --time-accel 60 run'
   ```
 
 ## Repo conventions

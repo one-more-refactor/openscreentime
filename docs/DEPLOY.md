@@ -149,10 +149,10 @@ curl -fsSL https://sentinel.example.com/install.sh | \
   sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://sentinel.example.com
 ```
 
-It downloads the sha256-verified binary to `/usr/local/bin/sentinel-agent`, enrolls, and
+It downloads the sha256-verified binary to `/usr/local/bin/openscreentime`, enrolls, and
 installs the systemd service. Installed agents self-update from the server daily
-(`auto_update = true` in `/etc/sentinel/agent.toml`; `SENTINEL_NO_SELF_UPDATE=1` disables;
-the previous binary is kept as `/usr/local/bin/sentinel-agent.bak` for manual rollback).
+(`auto_update = true` in `/etc/openscreentime/agent.toml`; `SENTINEL_NO_SELF_UPDATE=1` disables;
+the previous binary is kept as `/usr/local/bin/openscreentime.bak` for manual rollback).
 Desktop builds with the gui/tray features are built from source — see docs/DEVELOPMENT.md.
 
 ## Updating

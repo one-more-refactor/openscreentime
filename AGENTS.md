@@ -39,9 +39,9 @@ bun run dev                 # :5173, proxies /api and /agent → :8080
 # 3. Linux agent (on a device to manage)
 cd client
 cargo build --release
-sudo ./target/release/sentinel-agent enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
-sudo ./target/release/sentinel-agent run
-sudo ./target/release/sentinel-agent install-service
+sudo ./target/release/openscreentime enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
+sudo ./target/release/openscreentime run
+sudo ./target/release/openscreentime install-service
 ```
 
 ### Production Deploy (see `docs/DEPLOY.md`)
@@ -121,7 +121,7 @@ theme.css         → CSS variables from docs/DESIGN.md (monochrome, accent red,
 main.rs       → CLI (enroll, run, install-service, status, unlock), dry-run + tamper-max globals
 runner.rs     → Main loop: WS bus (fallback heartbeat), policy pull, enforcement tick, command dispatch
 client.rs     → HTTP client for enrollment/heartbeat/policy/earn-request
-config.rs     → AgentConfig (TOML at /etc/sentinel/agent.toml, 0600), AgentCtx (dry-run, root check)
+config.rs     → AgentConfig (TOML at /etc/openscreentime/agent.toml, 0600), AgentCtx (dry-run, root check)
 protocol.rs   → Wire types: Command, Event, UsageReport, WS envelope (tagged JSON)
 enforce/      → DNS, firewall, screentime (applies most restrictive across active users)
 lockout.rs    → Full-screen overlay (eframe, optional `gui` feature)
@@ -152,7 +152,7 @@ Single source of truth for `Policy` document. All components serialize/deseriali
 1. Admin creates device via `POST /api/devices` → returns `enroll_token`
 2. Agent runs `enroll --server --token` → `POST /agent/enroll` with `enroll_token`, hostname, OS users
 3. Server consumes token, creates `device_token` (hashed), `device_users` rows (assigned `default` profile), returns `device_id`, `device_token`, `poll_interval`
-4. Agent writes `/etc/sentinel/agent.toml` (0600), then `run`
+4. Agent writes `/etc/openscreentime/agent.toml` (0600), then `run`
 
 ### Policy Application
 1. Agent WS/heartbeat → `GET /agent/policy` → `{ policy_version, users: [{ os_username, profile_kind, policy }] }`
@@ -283,9 +283,9 @@ bun run build          # tsc -b && vite build
 
 2. **Root check at CLI top level**: `AgentCtx::require_root_for_enforcement()` called before `run`/`install-service`/etc.
 
-3. **Config at `/etc/sentinel/agent.toml` 0600**: `set_owner_only_600` best-effort. Token stored in plaintext (root-only readable).
+3. **Config at `/etc/openscreentime/agent.toml` 0600**: `set_owner_only_600` best-effort. Token stored in plaintext (root-only readable).
 
-4. **Heartbeat file at `/run/sentinel/heartbeat`**: Used by systemd watchdog (level 1 tamper). Agent touches it each tick.
+4. **Heartbeat file at `/run/openscreentime/heartbeat`**: Used by systemd watchdog (level 1 tamper). Agent touches it each tick.
 
 5. **Most restrictive network policy wins**: DNS/firewall are host-global; agent unions active users' policies and applies strictest. Per-user isolation is future work.
 
@@ -382,8 +382,8 @@ cd web && bun install && bun run dev
 
 # Agent build + enroll (dry-run safe)
 cd client && cargo build --release
-sudo ./target/release/sentinel-agent enroll --server http://localhost:8080 --token <TOKEN>
-sudo ./target/release/sentinel-agent run --dry-run --time-accel 60
+sudo ./target/release/openscreentime enroll --server http://localhost:8080 --token <TOKEN>
+sudo ./target/release/openscreentime run --dry-run --time-accel 60
 
 # Full test cycle (DEVELOPMENT.md § "End-to-end smoke test")
 # 1. Server + migrations

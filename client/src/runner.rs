@@ -28,7 +28,7 @@ const TICK: Duration = Duration::from_secs(10);
 const FREEZE_GRACE: Duration = Duration::from_secs(60);
 
 /// Minutes granted when a parent PIN arrives via the headless file-drop
-/// override (`/run/sentinel/unlock_pin.<user>`), matching the GUI's PIN grant.
+/// override (`/run/openscreentime/unlock_pin.<user>`), matching the GUI's PIN grant.
 const PIN_OVERRIDE_GRANT_MIN: u32 = 30;
 /// Max self-serve challenge (math) unlock grants honored per user per day, so
 /// the trivial challenge can't be re-solved indefinitely to defeat screen time.
@@ -82,7 +82,9 @@ fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
 
 /// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
 /// tampering with it requires root, at which point the game is over anyway).
-const LAST_CONTACT_PATH: &str = "/var/lib/sentinel/last_contact";
+fn last_contact_path() -> std::path::PathBuf {
+    crate::paths::state("last_contact")
+}
 
 /// Where the whole-device admin lock is persisted.
 ///
@@ -93,18 +95,20 @@ const LAST_CONTACT_PATH: &str = "/var/lib/sentinel/last_contact";
 /// usable with the console still showing it locked. That is the same
 /// console-disagrees-with-reality failure as the rest of this codebase's
 /// history, just pointing the other way.
-const DEVICE_LOCKED_PATH: &str = "/var/lib/sentinel/device_locked";
+fn device_locked_path() -> std::path::PathBuf {
+    crate::paths::state("device_locked")
+}
 
 /// Was the device admin-locked when we last shut down? Absent file = unlocked,
 /// which is the right default for a device that has never been locked.
 fn load_device_locked() -> bool {
-    std::fs::read_to_string(DEVICE_LOCKED_PATH)
+    std::fs::read_to_string(device_locked_path())
         .map(|s| s.trim() == "1")
         .unwrap_or(false)
 }
 
 fn save_device_locked(locked: bool) {
-    let path = std::path::Path::new(DEVICE_LOCKED_PATH);
+    let path = device_locked_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -120,9 +124,11 @@ fn save_device_locked(locked: bool) {
 /// a fresh 60-second grace and three more math unlocks per boot, repeatable
 /// all night using nothing but features built for the child. `device_locked`
 /// was persisted for exactly this reason; these were missed.
-const FREEZE_STATE_PATH: &str = "/var/lib/sentinel/freeze_state.json";
+fn freeze_state_path() -> std::path::PathBuf {
+    crate::paths::state("freeze_state.json")
+}
 
-/// Enforcement state that must survive a power-cycle (see [`FREEZE_STATE_PATH`]).
+/// Enforcement state that must survive a power-cycle (see [`freeze_state_path()`]).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct FreezeState {
     /// Users frozen — or already inside the save-your-work countdown — when
@@ -147,14 +153,14 @@ struct FreezeState {
 }
 
 fn load_freeze_state() -> FreezeState {
-    std::fs::read_to_string(FREEZE_STATE_PATH)
+    std::fs::read_to_string(freeze_state_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
 fn save_freeze_state(st: &FreezeState) {
-    let path = std::path::Path::new(FREEZE_STATE_PATH);
+    let path = freeze_state_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -175,14 +181,14 @@ fn save_freeze_state(st: &FreezeState) {
 /// `now` — the hard-lockdown clock starts at first run, it doesn't punish a
 /// brand-new device for history it doesn't have.
 fn load_last_contact_wall() -> chrono::DateTime<chrono::Utc> {
-    std::fs::read_to_string(LAST_CONTACT_PATH)
+    std::fs::read_to_string(last_contact_path())
         .ok()
         .and_then(|s| s.trim().parse::<chrono::DateTime<chrono::Utc>>().ok())
         .unwrap_or_else(chrono::Utc::now)
 }
 
 fn save_last_contact_wall(ts: chrono::DateTime<chrono::Utc>) {
-    let path = std::path::Path::new(LAST_CONTACT_PATH);
+    let path = last_contact_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -1196,15 +1202,15 @@ impl Agent {
     /// teen deserves to know).
     ///
     /// Split so one managed user can't read another's activity: the shared
-    /// `/run/sentinel/status.json` is world-readable but carries ONLY device-wide
+    /// `/run/openscreentime/status.json` is world-readable but carries ONLY device-wide
     /// state (lock/connection/remote-shell + device-wide notifications). Each
     /// managed user's usage and their own notifications go in a private
-    /// `/run/sentinel/status.<user>.json`, chowned to that user and `0600`.
+    /// `/run/openscreentime/status.<user>.json`, chowned to that user and `0600`.
     fn write_status_file(&self) {
         if self.exec.dry_run() {
             return;
         }
-        let dir = std::path::Path::new("/run/sentinel");
+        let dir = std::path::Path::new(crate::paths::RUN_DIR);
         let _ = std::fs::create_dir_all(dir);
 
         // Global, non-sensitive fields shared by every view.
@@ -1573,7 +1579,7 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
         dry_run = ctx.dry_run,
         is_root = ctx.is_root,
         tamper_level = agent.tamper_level,
-        "sentinel-agent run loop starting"
+        "openscreentime run loop starting"
     );
 
     let boot_events = agent.bootstrap().await.unwrap_or_default();

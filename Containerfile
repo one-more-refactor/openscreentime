@@ -4,7 +4,7 @@
 #   - the sentinel-server binary (Rust, from server/ + policy/)
 #   - the built web SPA (Bun/Vite, from web/), served by the server itself
 #     via SENTINEL_WEB_DIR (see server/src/static_web.rs).
-#   - TWO sentinel-agent binaries under /app/agent, plus a two-artifact
+#   - TWO openscreentime binaries under /app/agent, plus a two-artifact
 #     manifest.json, served via SENTINEL_AGENT_DIR (see server/src/agent_dist.rs
 #     and GET /install.sh):
 #       * headless — musl-static, runs on ANY x86_64 Linux (servers, minimal
@@ -75,13 +75,13 @@ RUN cargo build --release --features gui,tray
 # Debian/Ubuntu desktop clears.
 RUN set -eu; \
     VERSION="$(cargo metadata --no-deps --format-version 1 \
-        | jq -r '.packages[] | select(.name == "sentinel-agent") | .version')"; \
+        | jq -r '.packages[] | select(.name == "openscreentime") | .version')"; \
     mkdir -p /out/agent; \
-    FILE="sentinel-agent-${VERSION}-x86_64-musl"; \
-    install -m 0755 "target/x86_64-unknown-linux-musl/release/sentinel-agent" "/out/agent/${FILE}"; \
+    FILE="openscreentime-${VERSION}-x86_64-musl"; \
+    install -m 0755 "target/x86_64-unknown-linux-musl/release/openscreentime" "/out/agent/${FILE}"; \
     SHA256="$(sha256sum "/out/agent/${FILE}" | cut -d' ' -f1)"; \
-    DFILE="sentinel-agent-${VERSION}-x86_64-desktop"; \
-    install -m 0755 "target/release/sentinel-agent" "/out/agent/${DFILE}"; \
+    DFILE="openscreentime-${VERSION}-x86_64-desktop"; \
+    install -m 0755 "target/release/openscreentime" "/out/agent/${DFILE}"; \
     DSHA256="$(sha256sum "/out/agent/${DFILE}" | cut -d' ' -f1)"; \
     jq -n --arg version "$VERSION" --arg file "$FILE" --arg sha256 "$SHA256" --arg dfile "$DFILE" --arg dsha256 "$DSHA256" '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}, {target: "x86_64-linux-gnu", features: "desktop", url: ("/api/agent/download/" + $dfile), sha256: $dsha256}]}' > /out/agent/manifest.json; \
     cat /out/agent/manifest.json

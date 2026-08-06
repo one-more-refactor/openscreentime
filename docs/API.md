@@ -119,7 +119,7 @@ curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s --
 ```
 
 The script verifies the manifest's sha256 before installing to
-`/usr/local/bin/sentinel-agent`, then runs `enroll` + `install-service`. The installed agent
+`/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The installed agent
 self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by default;
 `SENTINEL_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
 

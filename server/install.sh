@@ -9,7 +9,7 @@
 set -eu
 
 SERVER="" TOKEN="${SENTINEL_TOKEN:-}" INSECURE_HTTP=0 TOKEN_VIA_ARGV=0
-BIN=/usr/local/bin/sentinel-agent
+BIN=/usr/local/bin/openscreentime
 # Which build to install. "auto" picks the desktop (gui+tray) artifact on a
 # machine that has a graphical session and falls back to headless everywhere
 # else; --headless / --desktop force it.
@@ -102,7 +102,7 @@ case "$url" in /*) url="$SERVER$url" ;; esac
 # rename on the same filesystem — a crash mid-install can never leave a
 # truncated binary at $BIN.
 mkdir -p "$(dirname "$BIN")"
-tmp="$(dirname "$BIN")/.sentinel-agent.download.$$"
+tmp="$(dirname "$BIN")/.openscreentime.download.$$"
 trap 'rm -f "$tmp"' EXIT INT TERM
 echo "Downloading $url ..."
 fetch_to "$url" "$tmp"

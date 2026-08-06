@@ -1,7 +1,7 @@
 //! `tray` subcommand — the per-user system tray companion (feature `tray`).
 //!
 //! Runs AS THE DESKTOP USER (not root): it only reads the world-readable
-//! status snapshot the root agent writes to `/run/sentinel/status.json`
+//! status snapshot the root agent writes to `/run/openscreentime/status.json`
 //! every tick, and talks to the session bus (StatusNotifierItem via `ksni`,
 //! desktop notifications via `notify-rust`).
 //!
@@ -19,7 +19,9 @@ use std::time::Duration;
 
 /// Shared, device-wide snapshot (lock/connection/remote-shell). World-readable
 /// but carries NO per-user activity — that lives in the per-user file below.
-const STATUS_PATH: &str = "/run/sentinel/status.json";
+fn status_path() -> String {
+    crate::paths::run_str("status.json")
+}
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How often parent mode polls the server for pending requests + alerts.
 const PARENT_POLL: Duration = Duration::from_secs(15);
@@ -92,9 +94,9 @@ impl Status {
 /// otherwise the shared device-wide snapshot (non-managed user still sees
 /// lock/connection/remote-shell state).
 fn read_status(username: &str) -> Option<Status> {
-    let per_user = format!("/run/sentinel/status.{username}.json");
+    let per_user = crate::paths::run_str(&format!("status.{username}.json"));
     let raw = std::fs::read_to_string(&per_user)
-        .or_else(|_| std::fs::read_to_string(STATUS_PATH))
+        .or_else(|_| std::fs::read_to_string(status_path()))
         .ok()?;
     serde_json::from_str(&raw).ok()
 }
@@ -109,7 +111,7 @@ struct SentinelTray {
     /// `None` when the status file is missing/unreadable (agent not running).
     status: Option<Status>,
     /// Parent-mode: pending time requests (kept current by the worker thread).
-    /// Empty unless this machine is paired (`sentinel-agent pair`).
+    /// Empty unless this machine is paired (`openscreentime pair`).
     pending: Vec<parent::api::PendingReq>,
     /// `Some` in parent mode — menu actions send approve/deny here for the
     /// worker to execute against the server.
@@ -525,11 +527,11 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!("cannot determine the current user ($USER unset and no uid entry)")
         })?;
-    tracing::info!("tray starting for user {username} (reading {STATUS_PATH})");
+    tracing::info!("tray starting for user {username} (reading {})", status_path());
 
     let mut prev = read_status(&username);
     if prev.is_none() {
-        tracing::warn!("{STATUS_PATH} not readable yet — is sentinel-agent running?");
+        tracing::warn!("{} not readable yet — is openscreentime running?", status_path());
     }
 
     // High-water mark for the notification queue: prime to whatever is already

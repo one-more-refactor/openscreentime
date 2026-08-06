@@ -1,20 +1,20 @@
-# Sentinel tray — per-user companion (transparency surface).
-# Installed to /etc/systemd/user/sentinel-tray.service by `sentinel-agent install-service`,
+# OpenScreenTime tray — per-user companion (transparency surface).
+# Installed to /etc/systemd/user/openscreentime-tray.service by `openscreentime install-service`,
 # which on a desktop (--features tray) build also `systemctl --global enable`s it
 # so it starts in every graphical session automatically — no per-user opt-in.
 #
 # It runs as the desktop user (never root), reads the world-readable status
-# snapshot at /run/sentinel/status.json, and shows a StatusNotifierItem tray
+# snapshot at /run/openscreentime/status.json, and shows a StatusNotifierItem tray
 # icon plus desktop notifications — including when a parent opens a remote
 # shell on this device.
 [Unit]
-Description=Sentinel per-user tray companion
+Description=OpenScreenTime per-user tray companion
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sentinel-agent tray
+ExecStart=/usr/local/bin/openscreentime tray
 Restart=on-failure
 RestartSec=5
 

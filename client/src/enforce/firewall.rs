@@ -72,7 +72,7 @@ pub fn render_ruleset(
     vpn: &VpnPlan,
 ) -> String {
     let mut s = String::new();
-    s.push_str("# Managed by sentinel-agent — do not edit.\n");
+    s.push_str("# Managed by openscreentime — do not edit.\n");
     s.push_str(&format!("table inet {NFT_TABLE} {{\n"));
 
     // ---- input chain ----

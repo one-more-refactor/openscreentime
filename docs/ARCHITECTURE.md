@@ -142,7 +142,7 @@ admin clicks ADD DEVICE ─► server mints one-time enroll_token (TTL) ─► o
    │                                          installer downloads + sha256-verifies
    ▼                                          the agent, runs `enroll`
 agent POSTs enroll_token ─► server issues device_token ─► agent writes
-   /etc/sentinel/agent.toml (0600) and installs the systemd unit.
+   /etc/openscreentime/agent.toml (0600) and installs the systemd unit.
 ```
 
 Registration of the **first admin** is open; the moment an admin exists it locks
@@ -159,7 +159,7 @@ poll-mode agent:     notices policy_version changed on its next heartbeat,
                      re-pulls, re-applies.
 ```
 
-The agent caches the last-applied policy to `/etc/sentinel/policy_cache.json`
+The agent caches the last-applied policy to `/etc/openscreentime/policy_cache.json`
 so the offline PIN-unlock path works with no server and no running agent.
 
 ### Heartbeat, usage, and commands
@@ -221,7 +221,7 @@ shown:
 
 The **parent PIN always wins**, offline, at the machine — a dead VPS can never
 permanently brick the family laptop. The PIN is verified against the cached
-policy by `sentinel-agent unlock`, which also tears down the nft table and
+policy by `ost unlock`, which also tears down the nft table and
 un-pins resolv.conf.
 
 ---
@@ -236,7 +236,7 @@ transient technical blip before doing anything drastic.
 ### The usage ledger
 
 The per-user counters (`UsageTracker`) persist to
-`/var/lib/sentinel/usage_ledger.json` every tick and reload on boot. This closes
+`/var/lib/openscreentime/usage_ledger.json` every tick and reload on boot. This closes
 the **restart cheat**: without persistence a `systemctl restart` (crash,
 watchdog, self-update, or a kid who found the trick) dropped the in-memory
 counters to zero and granted a fresh daily budget.
