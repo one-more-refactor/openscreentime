@@ -42,14 +42,27 @@ pub fn render_polkit_rule(level: u8) -> String {
     js.push_str("    \"org.freedesktop.login1.power-off-multiple-sessions\",\n");
     js.push_str("    \"org.freedesktop.login1.reboot\",\n");
     js.push_str("    \"org.freedesktop.login1.reboot-multiple-sessions\",\n");
+    js.push_str("    \"org.freedesktop.login1.halt\",\n");
+    js.push_str("    \"org.freedesktop.login1.halt-multiple-sessions\",\n");
     js.push_str("    \"org.freedesktop.login1.suspend\",\n");
-    js.push_str("    \"org.freedesktop.login1.suspend-multiple-sessions\"\n");
+    js.push_str("    \"org.freedesktop.login1.suspend-multiple-sessions\",\n");
+    js.push_str("    \"org.freedesktop.login1.hibernate\",\n");
+    js.push_str("    \"org.freedesktop.login1.hibernate-multiple-sessions\",\n");
+    js.push_str("    \"org.freedesktop.login1.suspend-then-hibernate\",\n");
+    js.push_str("    \"org.freedesktop.login1.suspend-then-hibernate-multiple-sessions\"\n");
     js.push_str("  ];\n");
     js.push_str("  if (power.indexOf(action.id) >= 0) { return polkit.Result.NO; }\n");
     if level >= 3 {
-        js.push_str("  // Level 3: block user-initiated stop/disable of the sentinel unit.\n");
+        js.push_str("  // Level 3: block user-initiated stop/disable of the sentinel units.\n");
+        js.push_str("  // The watchdog is the recovery net for a killed/stopped agent, so it\n");
+        js.push_str("  // must be protected too — masking it alone would silently disarm recovery.\n");
+        js.push_str("  var guarded = [\n");
+        js.push_str("    \"sentinel-agent.service\",\n");
+        js.push_str("    \"sentinel-watchdog.service\",\n");
+        js.push_str("    \"sentinel-watchdog.timer\"\n");
+        js.push_str("  ];\n");
         js.push_str("  if (action.id == \"org.freedesktop.systemd1.manage-units\" &&\n");
-        js.push_str("      action.lookup(\"unit\") == \"sentinel-agent.service\") {\n");
+        js.push_str("      guarded.indexOf(action.lookup(\"unit\")) >= 0) {\n");
         js.push_str("    var verb = action.lookup(\"verb\");\n");
         js.push_str("    if (verb == \"stop\" || verb == \"disable\" || verb == \"mask\") { return polkit.Result.NO; }\n");
         js.push_str("  }\n");
@@ -334,6 +347,30 @@ mod tests {
         assert!(r.contains("subject.user == \"sentinel-admin\""));
         assert!(r.contains("org.freedesktop.login1.power-off"));
         assert!(r.contains("sentinel-agent.service"));
+    }
+
+    #[test]
+    fn polkit_denies_every_power_path() {
+        // A gap in this list is a GUI-menu bypass (halt/hibernate) with no event.
+        let r = render_polkit_rule(1);
+        for action in [
+            "org.freedesktop.login1.power-off",
+            "org.freedesktop.login1.reboot",
+            "org.freedesktop.login1.halt",
+            "org.freedesktop.login1.suspend",
+            "org.freedesktop.login1.hibernate",
+            "org.freedesktop.login1.suspend-then-hibernate",
+        ] {
+            assert!(r.contains(action), "power path not denied: {action}");
+        }
+    }
+
+    #[test]
+    fn polkit_level3_guards_the_watchdog_too() {
+        // Masking the watchdog alone would silently disarm the recovery net.
+        let r = render_polkit_rule(3);
+        assert!(r.contains("sentinel-watchdog.service"));
+        assert!(r.contains("sentinel-watchdog.timer"));
     }
 
     #[test]

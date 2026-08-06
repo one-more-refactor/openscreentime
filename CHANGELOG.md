@@ -31,6 +31,49 @@ open without the device being told", there is no shell to open.
 - A possible future replacement — a secure reverse tunnel carrying native
   SSH+RDP — was considered and deferred; nothing of it ships today.
 
+### Security
+
+A red-team pass on the enforcement and transparency surface. This round lands
+the fixes that were surgical and low-risk; the deeper enforcement-logic items
+(edge-triggered freeze reconciliation, timezone-anchored day rolls, brick-safe
+lockdown gating) are tracked separately.
+
+- **The console now shows the event feed again.** After the Family/Child
+  redesign, no reachable page rendered events at all — every tamper the server
+  recorded was invisible, quietly breaking the "tampering is never silent"
+  promise. The child page now carries a **Recent activity** audit trail, and
+  the feed renders the previously-unmapped `evasion`, `enforcement_degraded`,
+  and `vpn_profile` types (they used to draw as blank rows) and falls back to
+  the raw type name for any future type.
+- **Devices no longer force inbound SSH (port 22) open.** The protection slider
+  had pinned `allow_inbound_ports: [22]` at every level — a leftover from the
+  removed remote shell — exposing the box's own `sshd` (and the polkit-exempt
+  `sentinel-admin` account) on every network it joined. The agent opens no
+  inbound listener, so this is now `[]`.
+- **A device can no longer forge its own lock state.** Command acks were not
+  status-guarded, so a device could re-ack any command id it had seen —
+  replaying an old `unlock` to appear online, or rewriting the audit timestamp
+  on historical rows. Acks now only apply to still-open (`queued`/`sent`)
+  commands.
+- **Confirmed usage-ledger resets now reach the parent.** The server-side
+  anti-cheat `evasion` event was `warn`, but the alert fan-out only pushes
+  `critical` — so the one signal the server derives independently of the
+  device's honesty never left the console. It is now `critical`.
+- **Power masking covers halt and hibernate.** The polkit rule denied
+  power-off/reboot/suspend but not `halt`, `hibernate`, or
+  `suspend-then-hibernate` — any desktop power menu's Hibernate froze the whole
+  machine (agent included) undetected. All power paths are denied now.
+- **Level 3 now protects the watchdog units too.** The stop/disable/mask block
+  covered `sentinel-agent.service` but not `sentinel-watchdog.{service,timer}` —
+  masking the watchdog alone silently disarmed the recovery net. All three
+  units are guarded.
+- **Enrolling against a plaintext `http://` server is refused** (loopback and
+  `.local` excepted for dev/LAN), since plaintext transport makes the
+  self-update sha256 check decorative against an on-path attacker.
+- Internal server errors no longer leak raw Postgres detail (table/constraint
+  names, cast errors) to API clients; the full error is still logged
+  server-side.
+
 ## [0.3.0] - 2026-08-04
 
 Headline: **VPN profiles**. Drop a WireGuard `.conf` or OpenVPN `.ovpn`

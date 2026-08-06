@@ -11,7 +11,7 @@
 // something is actually broken (see <Trouble/> at the bottom, which renders
 // nothing at all on a healthy day).
 // ============================================================================
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
 import type { Device, DeviceUser, Profile } from "../types";
@@ -75,7 +75,13 @@ function TimeBar({ used, limit, earned }: { used: number; limit: number | null; 
   const spent = pct >= 100;
   return (
     <div className="fam-time">
-      <div className="fam-bar" role="img" aria-label={`${used} of ${total} minutes used`}>
+      <div
+        className="fam-bar"
+        role="img"
+        aria-label={`${used} of ${total} minutes used`}
+        // One cell per 15 minutes — the bar is a diagram of the day, not decoration.
+        style={{ "--segs": Math.max(1, Math.round(total / 15)) } as CSSProperties}
+      >
         <span className="fam-bar-fill" style={{ width: `${pct}%` }} data-spent={spent} />
       </div>
       <p className="fam-time-label">
@@ -110,8 +116,13 @@ function since(iso: string | null | undefined): string {
 function Trouble({ devices }: { devices: Device[] }) {
   // "pending" means set up but never contacted — that is normal for minutes
   // after adding a child, so alarming a parent about it trains them to ignore
-  // the one alert this app ever shows.
-  const dark = devices.filter((d) => d.status === "offline");
+  // the one alert this app ever shows. A device inside an allowed-offline
+  // window is equally not trouble: the parent said it may be away.
+  const dark = devices.filter(
+    (d) =>
+      d.status === "offline" &&
+      !(d.offline_allowed_until && new Date(d.offline_allowed_until).getTime() > Date.now()),
+  );
   if (dark.length === 0) return null;
   const ago = since(dark[0].last_seen);
   return (
@@ -178,15 +189,19 @@ export function Family() {
           existing.earnedMinutes += u.earned_minutes_today ?? 0;
           existing.devices.push({ id: d.id, name: d.name, status: d.status });
         } else {
+          const profile = profiles.find((p) => p.id === u.profile_id) ?? null;
+          const st = profile?.policy.screen_time;
           byKey.set(key, {
             key,
             name,
             usedMinutes: u.used_minutes_today ?? 0,
             earnedMinutes: u.earned_minutes_today ?? 0,
+            // A disabled or zero limit is "no limit", never "0 left of 0".
             limitMinutes:
-              profiles.find((p) => p.id === u.profile_id)?.policy.screen_time
-                ?.daily_limit_minutes ?? null,
-            profileName: u.profile_name ?? null,
+              st?.enabled && (st.daily_limit_minutes ?? 0) > 0
+                ? st.daily_limit_minutes
+                : null,
+            profileName: u.profile_name ?? profile?.name ?? null,
             devices: [{ id: d.id, name: d.name, status: d.status }],
           });
         }

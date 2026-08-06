@@ -37,7 +37,11 @@ import type {
   Policy,
   Profile,
   Severity,
+  StepUpGrant,
+  SecondFactorMethod,
   TamperLevel,
+  TotpEnrollment,
+  TwoFactorStatus,
   VpnKind,
 } from "./types";
 
@@ -53,6 +57,8 @@ import {
   mockMe,
   mockPasskeys,
   mockProfiles,
+  mockTwoFactor,
+  MOCK_STEPUP_CODE,
 } from "./mock";
 
 /** Design-review mode: bundled sample data instead of network reads. */
@@ -147,6 +153,19 @@ export const auth = {
     return request<void>("/api/auth/logout", { method: "POST" });
   },
 
+  /**
+   * Device-voucher autologin: the installed client mints a one-time voucher the
+   * local browser reads; the server verifies the device token + that this
+   * account is permitted on the device, then issues a session. Contract:
+   * voucher in → session out, server-verified (docs/AUTH.md).
+   */
+  async voucher(voucher: string) {
+    return request<void>("/api/auth/voucher", {
+      method: "POST",
+      body: JSON.stringify({ voucher }),
+    });
+  },
+
   /** Full register ceremony: start → browser prompt → finish. */
   async register(email: string, display_name: string) {
     const options = await this.registerStart(email, display_name);
@@ -174,6 +193,66 @@ export async function getAuthConfig(): Promise<AuthConfig> {
 
 export async function getMe(): Promise<Me> {
   return read<Me>("/api/me", () => mockMe);
+}
+
+// ---- Step-up 2FA -----------------------------------------------------------
+// "Reading is free; every change needs a second factor." The mutation itself
+// (in api calls below) returns STEP_UP_REQUIRED when no grant is live; the UI
+// catches that, runs one of these flows, then retries. See docs/AUTH.md.
+
+export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
+  return read<TwoFactorStatus>("/api/me/2fa", () => mockTwoFactor);
+}
+
+/** Begin authenticator-app enrollment — secret + otpauth URI, shown once. */
+export async function startTotpEnrollment(): Promise<TotpEnrollment> {
+  if (usingMock) {
+    const secret = "JBSWY3DPEHPK3PXP";
+    return {
+      secret,
+      otpauth_uri: `otpauth://totp/OpenScreenTime:${mockMe.account.email}?secret=${secret}&issuer=OpenScreenTime`,
+    };
+  }
+  return request<TotpEnrollment>("/api/me/2fa/totp/start", { method: "POST" });
+}
+
+/** Confirm the authenticator by proving one live code before it counts. */
+export async function confirmTotpEnrollment(code: string): Promise<void> {
+  if (usingMock) {
+    if (code.replace(/\s/g, "") !== MOCK_STEPUP_CODE) {
+      throw new ApiError("invalid_code", "That code didn't match. Try again.", 400);
+    }
+    return;
+  }
+  return request<void>("/api/me/2fa/totp/confirm", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+/** Ask the server to email a step-up code. Dev builds log it server-side. */
+export async function startEmailStepUp(): Promise<void> {
+  if (usingMock) return;
+  return request<void>("/api/auth/stepup/email/start", { method: "POST" });
+}
+
+/** Verify a second factor; on success a short-lived step-up grant is set. */
+export async function verifyStepUp(
+  method: SecondFactorMethod,
+  code: string,
+): Promise<StepUpGrant> {
+  if (usingMock) {
+    if (code.replace(/\s/g, "") !== MOCK_STEPUP_CODE) {
+      throw new ApiError("invalid_code", "That code didn't match. Try again.", 400);
+    }
+    // A five-minute grant, mirroring the server's window.
+    const expires = new Date(Date.now() + 5 * 60_000).toISOString();
+    return { method, expires_at: expires };
+  }
+  return request<StepUpGrant>("/api/auth/stepup/verify", {
+    method: "POST",
+    body: JSON.stringify({ method, code }),
+  });
 }
 
 // ---- Devices ---------------------------------------------------------------
@@ -217,15 +296,41 @@ export async function updateDevice(
 }
 
 export async function lockDevice(id: string): Promise<LockResponse> {
-  if (usingMock)
+  if (usingMock) {
+    const d = mockDevices.find((d) => d.id === id);
+    if (d) d.status = "locked";
     return { command_id: "mock-cmd", queued: true, delivered: true };
+  }
   return request<LockResponse>(`/api/devices/${id}/lock`, { method: "POST" });
 }
 
 export async function unlockDevice(id: string): Promise<LockResponse> {
-  if (usingMock)
+  if (usingMock) {
+    const d = mockDevices.find((d) => d.id === id);
+    if (d) d.status = "online";
     return { command_id: "mock-cmd", queued: true, delivered: true };
+  }
   return request<LockResponse>(`/api/devices/${id}/unlock`, { method: "POST" });
+}
+
+/** Allow (or end, with null) a window in which the device may be offline
+ * without counting as trouble. Server: PUT /api/devices/{id}/offline-window. */
+export async function setOfflineWindow(
+  id: string,
+  minutes: number | null,
+): Promise<Device> {
+  if (usingMock) {
+    const d = mockDevices.find((d) => d.id === id);
+    if (!d) throw new ApiError("not_found", "No such device", 404);
+    d.offline_allowed_until =
+      minutes === null ? null : new Date(Date.now() + minutes * 60_000).toISOString();
+    return d;
+  }
+  const res = await request<{ device: Device }>(
+    `/api/devices/${id}/offline-window`,
+    { method: "PUT", body: JSON.stringify({ minutes }) },
+  );
+  return res.device;
 }
 
 /** Regenerate the one-time enroll token for a still-pending device (24 h TTL).

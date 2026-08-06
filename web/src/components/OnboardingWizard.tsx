@@ -96,8 +96,8 @@ export function OnboardingWizard({
       {step === "name" && (
         <div className="flex flex-col gap-4">
           <p className="text-sm leading-relaxed">
-            Sentinel manages a device in three steps: you name it here, run one
-            command on the device itself, and pick who gets which rules. The
+            OpenScreenTime sets up a device in three steps: you name it here, run
+            one command on the device itself, and pick who gets which rules. The
             whole thing takes about two minutes.
           </p>
           <TextInput

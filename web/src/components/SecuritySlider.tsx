@@ -115,11 +115,14 @@ export function policyForLevel(level: number, base: Policy): Policy {
   // "Approved sites only" into "approve everything" on the agent.
   const curated = (base.dns.allowlist ?? []).filter((d) => d.trim() !== "*");
 
-  // Invariants. A level never removes the way back into a device.
+  // The agent never opens an inbound listener — the remote shell is gone
+  // (TAMPER.md). Forcing inbound 22 open only exposed the box's own sshd (and
+  // the polkit-exempt sentinel-admin account) on every café/school network.
+  // The recovery path is the offline PIN + sentinel-admin at the keyboard.
   next.firewall = {
     ...next.firewall,
     mode: level >= 4 ? "default_deny" : "allow_all",
-    allow_inbound_ports: [22],
+    allow_inbound_ports: [],
     allow_outbound_ports: level >= 4 ? [53, 80, 443] : [],
   };
   next.lockdown = {
