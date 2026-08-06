@@ -106,11 +106,20 @@ fn exempt(path: &str) -> bool {
         || path == "/api/me/2fa/totp/confirm"
 }
 
+/// The one exception to "reading is free": inventories that are themselves
+/// takeover surface. A passkey list tells an attacker what to remove; a pairing
+/// token list is standing parent access. Viewing either proves it's you first.
+/// (`GET /api/me/2fa` stays free — the step-up dialog needs it to know which
+/// factors to offer BEFORE any grant exists.)
+fn sensitive_read(path: &str) -> bool {
+    path == "/api/me/passkeys" || path == "/api/parent-tokens"
+}
+
 /// Layer over the `/api` router: any mutating request needs a live grant.
 ///
 /// Reads pass straight through — that is the whole point of the invariant, and
 /// it is what lets a glanceable surface like the notch poll usage without ever
-/// asking for a code.
+/// asking for a code. The only read exceptions are in [`sensitive_read`].
 pub async fn require_step_up(
     State(st): State<AppState>,
     jar: CookieJar,
@@ -124,7 +133,12 @@ pub async fn require_step_up(
         method,
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
-    if !mutating || !path.starts_with("/api/") || exempt(&path) {
+    let guarded = if mutating {
+        path.starts_with("/api/") && !exempt(&path)
+    } else {
+        sensitive_read(&path)
+    };
+    if !guarded {
         return Ok(next.run(req).await);
     }
 
@@ -657,6 +671,17 @@ mod tests {
         assert!(exempt("/api/auth/login/finish"));
         assert!(exempt("/api/me/2fa/totp/confirm"));
         assert!(exempt("/api/auth/voucher"));
+    }
+
+    #[test]
+    fn sensitive_inventories_are_guarded_reads() {
+        assert!(sensitive_read("/api/me/passkeys"));
+        assert!(sensitive_read("/api/parent-tokens"));
+        // The status the step-up dialog itself needs must stay free, or you
+        // would need a grant to find out how to get a grant.
+        assert!(!sensitive_read("/api/me/2fa"));
+        // Ordinary reads stay frictionless.
+        assert!(!sensitive_read("/api/devices"));
     }
 
     #[test]
