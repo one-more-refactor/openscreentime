@@ -884,6 +884,106 @@
 }
 .chip-input:focus { outline: none; border-color: var(--fg-dim); border-style: solid; }
 
+/* ---- code ring — the second factor as a filling circle -------------------- */
+.cr-wrap { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; }
+.cr {
+  position: relative;
+  display: grid;
+  place-items: center;
+  cursor: text;
+  border-radius: 50%;
+}
+.cr-input {
+  /* The real input: invisible but focusable, so paste and autofill work. */
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  cursor: text;
+}
+.cr-seg {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke var(--dur-tick) var(--ease),
+    stroke-width var(--dur-tick) var(--ease),
+    opacity var(--dur-tick) var(--ease);
+}
+.cr-seg[data-filled="true"] { stroke: var(--fg-display); stroke-width: 6; }
+.cr-seg[data-next="true"] { animation: cr-await 1.6s var(--ease) infinite; }
+@keyframes cr-await {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.cr[data-error="true"] .cr-seg { stroke: var(--accent); }
+.cr[data-error="true"] { animation: cr-shake 260ms var(--ease); }
+@keyframes cr-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  55% { transform: translateX(4px); }
+  80% { transform: translateX(-2px); }
+}
+.cr-digits {
+  position: absolute;
+  font-family: var(--font-mono);
+  font-size: 1.125rem;
+  letter-spacing: 0.1em;
+  color: var(--fg-display);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.cr-hint {
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}
+.cr-note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.cr-note[data-error="true"] { color: var(--accent); }
+
+/* ---- locked / armed — the app's visible security state --------------------
+   Everything that would ask for a code sits at half presence until a grant is
+   live; then the whole app relaxes at once. `.no-code` marks the exceptions
+   (navigation, cancel, theme — things that never mutate). */
+[data-stepup="locked"]
+  :is(.ch-btn, .pill, .chip-x, .chip-input, .fs-range, .rl-time):not(.no-code) {
+  opacity: 0.5;
+}
+.ch-btn, .pill, .chip-x, .chip-input, .fs-range, .rl-time {
+  transition-property: opacity, transform, background, color, border-color;
+  transition-duration: var(--dur-data);
+  transition-timing-function: var(--ease);
+}
+
+/* The armed countdown in the top bar — quiet, mono, gone when locked. */
+.armed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  color: var(--ok);
+  font-variant-numeric: tabular-nums;
+}
+.armed-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 /* The locked security section — one calm gate, no data behind it yet. */
 .gate {
   border: 1px solid var(--line);
