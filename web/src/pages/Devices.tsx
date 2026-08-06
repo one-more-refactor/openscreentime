@@ -222,12 +222,12 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
                   >
                     Until tomorrow
                   </button>
-                  <button className="ch-btn" disabled={busy} onClick={() => setPickingDuration(false)}>
+                  <button className="ch-btn no-code" disabled={busy} onClick={() => setPickingDuration(false)}>
                     Cancel
                   </button>
                 </span>
               ) : (
-                <button className="ch-btn" disabled={busy} onClick={() => setPickingDuration(true)}>
+                <button className="ch-btn no-code" disabled={busy} onClick={() => setPickingDuration(true)}>
                   Allow offline…
                 </button>
               ))}

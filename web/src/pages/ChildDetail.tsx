@@ -261,7 +261,7 @@ export function ChildDetail() {
         {/* An error must never be a dead end with no way back. */}
         <Link to="/" className="ch-back">← Family</Link>
         <p className="fam-error">{error}</p>
-        <button className="ch-btn" onClick={() => { setError(null); void load(); }}>
+        <button className="ch-btn no-code" onClick={() => { setError(null); void load(); }}>
           Try again
         </button>
       </div>

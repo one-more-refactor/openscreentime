@@ -28,7 +28,8 @@ import type {
   StepUpGrant,
   TwoFactorStatus,
 } from "../types";
-import { Modal, Button, TextInput } from "../components";
+import { Modal, Button } from "../components";
+import { CodeRing } from "../components/CodeRing";
 
 /** Thrown when the user dismisses the step-up modal — callers no-op on it. */
 export class StepUpCancelled extends Error {
@@ -43,6 +44,10 @@ interface StepUpApi {
   requireStepUp: () => Promise<void>;
   /** Run a mutation behind step-up, retrying once if the server demands it. */
   guard: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** A grant is live right now — the UI un-greys while this is true. */
+  armed: boolean;
+  /** When the live grant lapses (ISO), or null when locked. */
+  armedUntil: string | null;
 }
 
 const Ctx = createContext<StepUpApi | null>(null);
@@ -55,10 +60,28 @@ export function StepUpProvider({ children }: { children: ReactNode }) {
   const grantRef = useRef<StepUpGrant | null>(null);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<TwoFactorStatus | null>(null);
+  // Mirrors grantRef for rendering: controls grey out while locked, and the
+  // whole app visibly relaxes for the grant window after a code clears.
+  const [armedUntil, setArmedUntil] = useState<string | null>(null);
   // The pending promise's settlers, held while the modal is up.
   const pending = useRef<{ resolve: () => void; reject: (e: Error) => void } | null>(
     null,
   );
+
+  // Re-lock the moment the grant lapses, without waiting for a failed call.
+  useEffect(() => {
+    if (!armedUntil) return;
+    const ms = new Date(armedUntil).getTime() - Date.now();
+    if (ms <= 0) {
+      setArmedUntil(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      grantRef.current = null;
+      setArmedUntil(null);
+    }, ms);
+    return () => clearTimeout(t);
+  }, [armedUntil]);
 
   const requireStepUp = useCallback(async () => {
     if (grantLive(grantRef.current)) return;
@@ -83,6 +106,7 @@ export function StepUpProvider({ children }: { children: ReactNode }) {
         // The grant may have lapsed between check and call — step up once more.
         if (e instanceof ApiError && e.code === STEP_UP_REQUIRED) {
           grantRef.current = null;
+          setArmedUntil(null);
           await requireStepUp();
           return await fn();
         }
@@ -94,6 +118,7 @@ export function StepUpProvider({ children }: { children: ReactNode }) {
 
   const onVerified = useCallback((grant: StepUpGrant) => {
     grantRef.current = grant;
+    setArmedUntil(grant.expires_at);
     setOpen(false);
     pending.current?.resolve();
     pending.current = null;
@@ -105,11 +130,19 @@ export function StepUpProvider({ children }: { children: ReactNode }) {
     pending.current = null;
   }, []);
 
-  const api = useMemo(() => ({ requireStepUp, guard }), [requireStepUp, guard]);
+  const armed = armedUntil !== null;
+  const api = useMemo(
+    () => ({ requireStepUp, guard, armed, armedUntil }),
+    [requireStepUp, guard, armed, armedUntil],
+  );
 
   return (
     <Ctx.Provider value={api}>
-      {children}
+      {/* display:contents — a pure CSS scope; locked greys the code-gated
+          controls, armed releases them. */}
+      <div data-stepup={armed ? "armed" : "locked"} style={{ display: "contents" }}>
+        {children}
+      </div>
       <StepUpModal
         open={open}
         status={status}
@@ -166,17 +199,15 @@ function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
     }
   }
 
-  async function verify() {
-    if (code.replace(/\s/g, "").length < 6) {
-      setError("Enter the 6-digit code.");
-      return;
-    }
+  async function verify(full: string) {
     setBusy(true);
     setError(null);
     try {
-      onVerified(await verifyStepUp(method, code));
+      onVerified(await verifyStepUp(method, full));
     } catch (e) {
+      // The ring flashes red and empties; the message says why.
       setError(e instanceof Error ? e.message : "That code didn't match.");
+      setCode("");
     } finally {
       setBusy(false);
     }
@@ -199,14 +230,9 @@ function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
       onClose={onCancel}
       title="CONFIRM IT'S YOU"
       footer={
-        <>
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>
-            CANCEL
-          </Button>
-          <Button onClick={() => void verify()} disabled={busy || (method === "email" && !sent)}>
-            {busy ? "CHECKING…" : "CONFIRM"}
-          </Button>
-        </>
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>
+          CANCEL
+        </Button>
       }
     >
       <div className="flex flex-col gap-4">
@@ -235,24 +261,27 @@ function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
             {busy ? "SENDING…" : "SEND CODE TO MY EMAIL"}
           </Button>
         ) : (
-          <TextInput
-            label={method === "totp" ? "CODE FROM YOUR AUTHENTICATOR" : "CODE FROM YOUR EMAIL"}
-            value={code}
-            onChange={(e) => {
-              setCode(e.target.value.replace(/[^\d ]/g, ""));
-              if (error) setError(null);
-            }}
-            placeholder="123456"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={7}
-            autoFocus
-            aria-invalid={!!error}
-            hint={error ?? (method === "email" && sent ? "We sent a code to your email." : undefined)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void verify();
-            }}
-          />
+          <div className="cr-wrap">
+            <CodeRing
+              value={code}
+              disabled={busy}
+              error={!!error}
+              aria-label={method === "totp" ? "Code from your authenticator" : "Code from your email"}
+              onChange={(v) => {
+                setCode(v);
+                if (error) setError(null);
+              }}
+              onComplete={(full) => void verify(full)}
+            />
+            <p className="cr-note" data-error={!!error} role={error ? "alert" : undefined}>
+              {busy
+                ? "Checking…"
+                : (error ??
+                  (method === "totp"
+                    ? "The 6 digits from your authenticator"
+                    : "The 6 digits we emailed you"))}
+            </p>
+          </div>
         )}
       </div>
     </Modal>
