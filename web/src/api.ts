@@ -26,6 +26,7 @@ import type {
   EarnRequest,
   EarnRequestStatus,
   EnrollTokenResponse,
+  FamilyResponse,
   Event,
   EventType,
   LockResponse,
@@ -52,6 +53,7 @@ import {
   mockCreateDevice,
   mockEarnRequests,
   mockEvents,
+  mockFamily,
   mockMe,
   mockPasskeys,
   mockProfiles,
@@ -251,6 +253,20 @@ export async function verifyStepUp(
     method: "POST",
     body: JSON.stringify({ method, code }),
   });
+}
+
+// ---- Family ----------------------------------------------------------------
+
+/**
+ * The whole home screen in one request: people, their day, their machines,
+ * the profiles and anything waiting on a parent.
+ *
+ * Replaces the old fan-out (devices + profiles + one users call per device +
+ * earn requests) with a single round trip that stays a single round trip as a
+ * family grows.
+ */
+export async function getFamily(): Promise<FamilyResponse> {
+  return read<FamilyResponse>("/api/family", () => mockFamily());
 }
 
 // ---- Devices ---------------------------------------------------------------

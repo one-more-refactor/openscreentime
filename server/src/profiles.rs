@@ -127,16 +127,25 @@ fn normalize_policy(v: Value) -> AppResult<Value> {
     Ok(serde_json::to_value(p).unwrap())
 }
 
-pub async fn list_profiles(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
+/// Every profile in a tenant, as JSON. Shared with the family view so both
+/// return the identical shape from the identical query.
+pub async fn list_for_tenant(db: &sqlx::PgPool, tenant_id: Uuid) -> AppResult<Value> {
     let rows: Vec<ProfileRow> = sqlx::query_as(&format!(
         "SELECT {PROFILE_COLS} FROM profiles WHERE tenant_id = $1 \
          ORDER BY is_preset DESC, name"
     ))
-    .bind(admin.tenant_id)
-    .fetch_all(&st.db)
+    .bind(tenant_id)
+    .fetch_all(db)
     .await?;
+    Ok(json!(rows
+        .into_iter()
+        .map(profile_to_json)
+        .collect::<Vec<_>>()))
+}
+
+pub async fn list_profiles(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     Ok(Json(json!({
-        "profiles": rows.into_iter().map(profile_to_json).collect::<Vec<_>>()
+        "profiles": list_for_tenant(&st.db, admin.tenant_id).await?
     })))
 }
 
