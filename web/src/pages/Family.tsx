@@ -3,14 +3,21 @@
 //
 // This console used to open on a device list, which meant the first thing a
 // parent saw was infrastructure. The product is not a fleet. It is a handful
-// of children and how their day is going: one card per child, today's time
+// of people and how their day is going: one card per person, today's time
 // under their name, and nothing else competing. Machinery interrupts only
 // when actually broken (<Trouble/> renders nothing on a healthy day).
+//
+// The one control that outranks the cards is Pause — the brief's "one tap
+// freezes every screen in the house". It sits above them, and when it fires
+// the freeze visibly sweeps across the family rather than the page silently
+// re-rendering.
 // ============================================================================
-import { type CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import type { Device } from "../types";
-import { useFamily, type FamilyChild } from "../lib/family";
+import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
+import { PauseEverything } from "../components/PauseEverything";
+import { useCountUp } from "../lib/useCountUp";
 
 /** Deterministic warm hue per child, so an avatar is recognisable at a glance. */
 export function hueFor(key: string): number {
@@ -47,22 +54,28 @@ export function Avatar({ name, seed, size = 56 }: { name: string; seed: string; 
 
 /**
  * Today's time as a segmented bar — one cell per 15 minutes, so the diagram
- * is a picture of the day rather than decoration.
+ * is a picture of the day rather than decoration. The fill animates from zero
+ * on mount and the minutes count up to meet it.
  */
-function TimeBar({ used, limit, earned }: { used: number; limit: number | null; earned: number }) {
-  if (limit === null) {
-    return <p className="fam-time-none">{used} min today · no limit set</p>;
+function TimeBar({ child }: { child: FamilyChild }) {
+  const total = minutesTotal(child);
+  const left = minutesLeft(child);
+  // Unconditional: hooks cannot sit behind the no-limit early return below.
+  const shown = useCountUp(left ?? 0);
+
+  if (total === null || left === null) {
+    return <p className="fam-time-none">{child.used_minutes} min today · no limit set</p>;
   }
-  const total = limit + earned;
-  const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
-  const left = Math.max(0, total - used);
-  const spent = pct >= 100;
+
+  const pct = total > 0 ? Math.min(100, Math.round((child.used_minutes / total) * 100)) : 0;
+  const spent = left === 0;
+
   return (
     <div className="fam-time">
       <div
         className="fam-bar"
         role="img"
-        aria-label={`${used} of ${total} minutes used`}
+        aria-label={`${child.used_minutes} of ${total} minutes used`}
         style={{ "--segs": Math.max(1, Math.round(total / 15)) } as CSSProperties}
       >
         <span className="fam-bar-fill" style={{ width: `${pct}%` }} data-spent={spent} />
@@ -72,8 +85,10 @@ function TimeBar({ used, limit, earned }: { used: number; limit: number | null; 
           <span className="fam-spent">Time is up for today</span>
         ) : (
           <>
-            <strong>{left} min</strong> left of {total}
-            {earned > 0 && <span className="fam-earned"> · {earned} earned</span>}
+            <strong>{shown} min</strong> left of {total}
+            {child.earned_minutes > 0 && (
+              <span className="fam-earned"> · {child.earned_minutes} earned</span>
+            )}
           </>
         )}
       </p>
@@ -110,70 +125,117 @@ function Trouble({ devices }: { devices: Device[] }) {
       {dark.length === 1
         ? `${dark[0].name} was last seen ${ago || "a while ago"}. If it is switched off, that is normal.`
         : `${dark.length} computers haven't been seen recently. If they are switched off, that is normal.`}
+      <Link to="/devices" className="fam-trouble-go">
+        Devices →
+      </Link>
     </p>
   );
 }
 
-function ChildCard({ child }: { child: FamilyChild }) {
+function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
+  const paused = child.devices.some((d) => d.status === "locked");
   return (
-    <Link to={`/child/${encodeURIComponent(child.key)}`} className="fam-card">
+    <Link
+      to={`/child/${encodeURIComponent(child.key)}`}
+      className="fam-card"
+      data-paused={paused}
+      // Staggered so the freeze sweeps across the family left-to-right
+      // instead of every card blinking at once.
+      style={{ "--i": index } as CSSProperties}
+    >
       <Avatar name={child.name} seed={child.key} />
       <div className="fam-card-body">
         <p className="fam-name">{child.name}</p>
         <p className="fam-meta">
-          {child.profileName ?? "No profile"}
+          {child.profile_name ?? "No profile"}
           {child.devices.length > 1 && ` · ${child.devices.length} devices`}
         </p>
-        <TimeBar used={child.usedMinutes} limit={child.limitMinutes} earned={child.earnedMinutes} />
-        {child.pendingRequests > 0 && (
+        <TimeBar child={child} />
+        {child.pending_requests > 0 && (
           <p className="fam-waiting">
-            {child.pendingRequests === 1
+            {child.pending_requests === 1
               ? "1 request waiting for you"
-              : `${child.pendingRequests} requests waiting for you`}
+              : `${child.pending_requests} requests waiting for you`}
           </p>
         )}
       </div>
+      {paused && (
+        <span className="fam-card-paused" aria-label="Paused">
+          Paused
+        </span>
+      )}
     </Link>
   );
 }
 
+/**
+ * The waiting state. Not a shimmer: the real layout, drawn in outline, so the
+ * page does not jump when the data lands. One card per person we don't know
+ * about yet — two is the honest guess.
+ */
+function FamilyWaiting() {
+  return (
+    <ul className="fam-grid" aria-busy="true" aria-label="Loading the family">
+      {[0, 1].map((i) => (
+        <li key={i}>
+          <div className="fam-card fam-card-wait" style={{ "--i": i } as CSSProperties}>
+            <span className="fam-avatar fam-wait-block" style={{ width: 56, height: 56 }} />
+            <div className="fam-card-body">
+              <span className="fam-wait-line" style={{ width: "38%", height: "1.125rem" }} />
+              <span className="fam-wait-line" style={{ width: "26%", height: "0.8rem" }} />
+              <span className="fam-wait-line" style={{ width: "100%", height: "10px", marginTop: "0.7rem" }} />
+              <span className="fam-wait-line" style={{ width: "45%", height: "0.9rem" }} />
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function Family() {
-  const { devices, children, error } = useFamily();
-
-  if (error) {
-    return (
-      <div className="fam-wrap">
-        <p className="fam-error">{error}</p>
-      </div>
-    );
-  }
-
-  if (!devices) {
-    return (
-      <div className="fam-wrap">
-        <p className="fam-quiet">Loading…</p>
-      </div>
-    );
-  }
+  const { devices, children, error, loading, refreshing, reload } = useFamily();
+  const [sweeping, setSweeping] = useState(false);
 
   const hour = new Date().getHours();
   const greeting = hour < 11 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
+  // Every device that could be paused. Pending devices have no agent yet.
+  const pausable = (devices ?? []).filter((d) => d.status !== "pending");
+  const allPaused = pausable.length > 0 && pausable.every((d) => d.status === "locked");
+
   return (
-    <div className="fam-wrap">
+    <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>
       <header className="fam-head">
         <h1 className="fam-greet">{greeting}</h1>
-        <Link to="/add" className="fam-add">+ Add a child</Link>
+        <Link to="/add" className="fam-add">
+          + Add a child
+        </Link>
         <p className="fam-sub">
-          {children.length === 0
-            ? "No children set up yet."
-            : `${children.length} ${children.length === 1 ? "child" : "children"} today`}
+          {loading && children.length === 0
+            ? " "
+            : children.length === 0
+              ? "No children set up yet."
+              : `${children.length} ${children.length === 1 ? "child" : "children"} today`}
         </p>
       </header>
 
-      <Trouble devices={devices} />
+      {error && <p className="fam-error">{error}</p>}
 
-      {children.length === 0 ? (
+      {pausable.length > 0 && (
+        <PauseEverything
+          devices={pausable}
+          allPaused={allPaused}
+          onSweep={setSweeping}
+          onDone={reload}
+        />
+      )}
+
+      {devices && <Trouble devices={devices} />}
+
+      {loading && children.length === 0 ? (
+        <FamilyWaiting />
+      ) : children.length === 0 ? (
         <div className="fam-empty">
           <p>Once a device is set up, the people using it appear here.</p>
           <Link to="/add" className="fam-cta">
@@ -182,9 +244,9 @@ export function Family() {
         </div>
       ) : (
         <ul className="fam-grid">
-          {children.map((c) => (
+          {children.map((c, i) => (
             <li key={c.key}>
-              <ChildCard child={c} />
+              <ChildCard child={c} index={i} />
             </li>
           ))}
         </ul>
