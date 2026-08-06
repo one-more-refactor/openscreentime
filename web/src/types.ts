@@ -166,6 +166,45 @@ export interface Device {
   pending_commands?: string[];
 }
 
+// ---- Family (GET /api/family) ----------------------------------------------
+
+/** One device a person uses, as carried on a FamilyChild. */
+export interface ChildDevice {
+  /** the device */
+  id: string;
+  name: string;
+  status: DeviceStatus;
+  /** this person's row on that device — what per-user actions address */
+  device_user_id: string;
+}
+
+/**
+ * A person, assembled server-side across every machine they use. The same OS
+ * username on two devices is one child whose day is the sum of both.
+ */
+export interface FamilyChild {
+  /** os_username — stable identity across devices, and the URL segment */
+  key: string;
+  name: string;
+  used_minutes: number;
+  earned_minutes: number;
+  /** null = no limit configured (disabled or zero — never "0 left of 0") */
+  limit_minutes: number | null;
+  profile_id: string | null;
+  profile_name: string | null;
+  devices: ChildDevice[];
+  /** earn requests waiting on a parent */
+  pending_requests: number;
+}
+
+export interface FamilyResponse {
+  children: FamilyChild[];
+  devices: Device[];
+  profiles: Profile[];
+  requests: EarnRequest[];
+  server_time: string;
+}
+
 export type VpnKind = "wireguard" | "openvpn";
 
 /** A named VPN profile (GET /api/devices/:id/vpn). Configs render MASKED —

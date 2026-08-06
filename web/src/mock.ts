@@ -5,6 +5,8 @@
 // ============================================================================
 
 import type {
+  FamilyChild,
+  FamilyResponse,
   Account,
   Admin,
   Device,
@@ -575,5 +577,56 @@ export function mockDeviceDetail(id: string): DeviceDetail {
     ...dev,
     users: dev.users ?? [],
     recent_events: mockEvents.filter((e) => e.device_id === dev.id).slice(0, 8),
+  };
+}
+
+/**
+ * Mock for GET /api/family — assembled from the mock devices exactly the way
+ * the server assembles it from real rows, so design-review mode exercises the
+ * same shape the console gets in production.
+ */
+export function mockFamily(): FamilyResponse {
+  const byKey = new Map<string, FamilyChild>();
+  for (const d of mockDevices) {
+    for (const u of d.users ?? []) {
+      const profile = mockProfiles.find((p) => p.id === u.profile_id) ?? null;
+      const st = profile?.policy.screen_time;
+      const limit =
+        st?.enabled && (st.daily_limit_minutes ?? 0) > 0 ? st.daily_limit_minutes : null;
+      const entry = {
+        id: d.id,
+        name: d.name,
+        status: d.status,
+        device_user_id: u.id,
+      };
+      const existing = byKey.get(u.os_username);
+      if (existing) {
+        existing.used_minutes += u.used_minutes_today ?? 0;
+        existing.earned_minutes += u.earned_minutes_today ?? 0;
+        existing.devices.push(entry);
+        if (existing.limit_minutes === null) existing.limit_minutes = limit;
+      } else {
+        byKey.set(u.os_username, {
+          key: u.os_username,
+          name: u.display_name?.trim() || u.os_username,
+          used_minutes: u.used_minutes_today ?? 0,
+          earned_minutes: u.earned_minutes_today ?? 0,
+          limit_minutes: limit ?? null,
+          profile_id: profile?.id ?? null,
+          profile_name: u.profile_name ?? profile?.name ?? null,
+          devices: [entry],
+          pending_requests: mockEarnRequests.filter(
+            (r) => r.os_username === u.os_username && r.status === "pending",
+          ).length,
+        });
+      }
+    }
+  }
+  return {
+    children: [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    devices: mockDevices,
+    profiles: mockProfiles,
+    requests: mockEarnRequests.filter((r) => r.status === "pending"),
+    server_time: new Date().toISOString(),
   };
 }
