@@ -1,142 +1,136 @@
 // ============================================================================
-// The family, assembled. Children live on devices (a person = the same OS
-// username across machines), so anything that wants to show people has to
-// gather devices → users → profiles. That logic used to live inside the home
-// page; the sidebar needs it too, so it lives here once.
-// A dedicated /api/family endpoint would replace most of this — noted, not faked.
+// The family, fetched once.
+//
+// This used to assemble itself in the browser: list devices, list profiles,
+// then one request per device for its users, then the pending asks. Worse, the
+// hook had no shared state — the navigation rail and the page each mounted it,
+// so a three-device family paid a dozen round trips *twice* on every single
+// navigation, and the two copies could briefly disagree about who was over
+// their limit.
+//
+// Now the server answers all of it at `GET /api/family` in a fixed number of
+// queries, and this module is a single store every view subscribes to: one
+// fetch, one truth, no matter how many components are watching.
 // ============================================================================
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import * as api from "../api";
-import type { Device, DeviceUser, EarnRequest, Profile } from "../types";
+import type { Device, EarnRequest, FamilyChild, Profile } from "../types";
 
-export interface FamilyChild {
-  key: string;
-  name: string;
-  usedMinutes: number;
-  earnedMinutes: number;
-  /** null = no limit configured (disabled or zero — never "0 left of 0") */
-  limitMinutes: number | null;
-  profileId: string | null;
-  profileName: string | null;
-  devices: { id: string; name: string; status: Device["status"] }[];
-  /** earn requests waiting on a parent */
-  pendingRequests: number;
-}
+export type { FamilyChild } from "../types";
 
 export function minutesLeft(c: FamilyChild): number | null {
-  if (c.limitMinutes === null) return null;
-  return Math.max(0, c.limitMinutes + c.earnedMinutes - c.usedMinutes);
+  if (c.limit_minutes === null) return null;
+  return Math.max(0, c.limit_minutes + c.earned_minutes - c.used_minutes);
 }
 
-interface FamilyState {
+/** Total minutes available today: the limit plus anything earned on top. */
+export function minutesTotal(c: FamilyChild): number | null {
+  if (c.limit_minutes === null) return null;
+  return c.limit_minutes + c.earned_minutes;
+}
+
+export interface FamilyState {
   devices: Device[] | null;
   children: FamilyChild[];
   profiles: Profile[];
   requests: EarnRequest[];
   error: string | null;
+  /** True until the first successful load — drives skeletons, not spinners. */
+  loading: boolean;
+  /** A refresh is in flight over data already on screen. Show a hairline, not
+   *  a blank page: replacing good content with a spinner reads as slower. */
+  refreshing: boolean;
 }
 
-function assemble(
-  devices: Device[],
-  usersByDevice: Record<string, DeviceUser[]>,
-  profiles: Profile[],
-  requests: EarnRequest[],
-): FamilyChild[] {
-  const byKey = new Map<string, FamilyChild>();
-  for (const d of devices) {
-    for (const u of usersByDevice[d.id] ?? []) {
-      const key = u.os_username;
-      const existing = byKey.get(key);
-      const name = u.display_name?.trim() || u.os_username;
-      if (existing) {
-        // Same person on a second machine: their day is the sum of both.
-        existing.usedMinutes += u.used_minutes_today ?? 0;
-        existing.earnedMinutes += u.earned_minutes_today ?? 0;
-        existing.devices.push({ id: d.id, name: d.name, status: d.status });
-      } else {
-        const profile = profiles.find((p) => p.id === u.profile_id) ?? null;
-        const st = profile?.policy.screen_time;
-        byKey.set(key, {
-          key,
-          name,
-          usedMinutes: u.used_minutes_today ?? 0,
-          earnedMinutes: u.earned_minutes_today ?? 0,
-          // A disabled or zero limit is "no limit", never "0 left of 0".
-          limitMinutes:
-            st?.enabled && (st.daily_limit_minutes ?? 0) > 0
-              ? st.daily_limit_minutes
-              : null,
-          profileId: profile?.id ?? null,
-          profileName: u.profile_name ?? profile?.name ?? null,
-          devices: [{ id: d.id, name: d.name, status: d.status }],
-          pendingRequests: requests.filter((r) => r.os_username === key).length,
-        });
-      }
+const EMPTY: FamilyState = {
+  devices: null,
+  children: [],
+  profiles: [],
+  requests: [],
+  error: null,
+  loading: true,
+  refreshing: false,
+};
+
+// ---- the store -------------------------------------------------------------
+
+let state: FamilyState = EMPTY;
+const listeners = new Set<(s: FamilyState) => void>();
+/** In-flight request, so N mounting components cause exactly one fetch. */
+let inflight: Promise<void> | null = null;
+
+function emit(next: Partial<FamilyState>) {
+  state = { ...state, ...next };
+  for (const l of listeners) l(state);
+}
+
+async function load(): Promise<void> {
+  // Coalesce: the rail and the page mount in the same tick.
+  if (inflight) return inflight;
+  emit(state.devices ? { refreshing: true } : { loading: true });
+  inflight = (async () => {
+    try {
+      const f = await api.getFamily();
+      emit({
+        devices: f.devices,
+        children: f.children,
+        profiles: f.profiles,
+        requests: f.requests,
+        error: null,
+        loading: false,
+        refreshing: false,
+      });
+    } catch (e) {
+      // A failed refresh keeps the last good snapshot on screen — a transient
+      // network blip must not blank out a parent's dashboard.
+      emit({
+        error: e instanceof Error ? e.message : "Could not load the family",
+        loading: false,
+        refreshing: false,
+      });
+    } finally {
+      inflight = null;
     }
-  }
-  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
+  })();
+  return inflight;
 }
 
-// Mutations anywhere (a granted quarter-hour, a paused device) announce
-// themselves here so every mounted family view — the rail included — refreshes.
-const bus = new EventTarget();
-export function familyChanged() {
-  bus.dispatchEvent(new Event("change"));
+/** Mutations anywhere (a granted quarter-hour, a pause) announce themselves
+ *  here, and every subscribed view updates from one refetch. */
+export function familyChanged(): void {
+  void load();
+}
+
+/** Drop everything on sign-out so the next account never sees a stale family. */
+export function resetFamily(): void {
+  state = EMPTY;
+  inflight = null;
+  for (const l of listeners) l(state);
+}
+
+/**
+ * Optimistically patch a child in place, before the server round-trip lands.
+ * Used by the pause control so the UI reacts on the tap rather than 300ms
+ * later — the refetch that follows is what makes it true.
+ */
+export function patchChild(key: string, patch: Partial<FamilyChild>): void {
+  emit({
+    children: state.children.map((c) => (c.key === key ? { ...c, ...patch } : c)),
+  });
 }
 
 export function useFamily(): FamilyState & { reload: () => Promise<void> } {
-  const [state, setState] = useState<FamilyState>({
-    devices: null,
-    children: [],
-    profiles: [],
-    requests: [],
-    error: null,
-  });
-
-  const reload = useCallback(async () => {
-    try {
-      const [devices, profiles] = await Promise.all([
-        api.listDevices(),
-        api.listProfiles(),
-      ]);
-      const entries = await Promise.all(
-        devices.map(async (d) => {
-          try {
-            return [d.id, await api.listDeviceUsers(d.id)] as const;
-          } catch {
-            // One unreachable device must not blank the whole family.
-            return [d.id, [] as DeviceUser[]] as const;
-          }
-        }),
-      );
-      const usersByDevice = Object.fromEntries(entries);
-      let requests: EarnRequest[] = [];
-      try {
-        requests = await api.listEarnRequests("pending");
-      } catch {
-        requests = [];
-      }
-      setState({
-        devices: [...devices],
-        children: assemble(devices, usersByDevice, profiles, requests),
-        profiles,
-        requests,
-        error: null,
-      });
-    } catch (e) {
-      setState((s) => ({
-        ...s,
-        error: e instanceof Error ? e.message : "Could not load the family",
-      }));
-    }
-  }, []);
+  const [local, setLocal] = useState<FamilyState>(state);
 
   useEffect(() => {
-    void reload();
-    const onChange = () => void reload();
-    bus.addEventListener("change", onChange);
-    return () => bus.removeEventListener("change", onChange);
-  }, [reload]);
+    listeners.add(setLocal);
+    // Fetch on first subscriber, or when a previous load failed outright.
+    if (!state.devices && !inflight) void load();
+    else setLocal(state);
+    return () => {
+      listeners.delete(setLocal);
+    };
+  }, []);
 
-  return { ...state, reload };
+  return { ...local, reload: load };
 }

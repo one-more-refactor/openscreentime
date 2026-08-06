@@ -15,6 +15,7 @@ mod devices;
 mod earn;
 mod error;
 mod events;
+mod family;
 mod parent;
 mod presets;
 mod profiles;
@@ -225,6 +226,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
         .route("/api/devices/{id}/users", get(devices::list_device_users))
+        .route(
+            "/api/devices/{id}/offline-window",
+            put(family::set_offline_window),
+        )
         .route("/api/devices/{id}/vpn", get(vpn::list).post(vpn::create))
         .route(
             "/api/vpn-profiles/{id}",
@@ -272,6 +277,8 @@ async fn main() -> anyhow::Result<()> {
                 .put(profiles::update_profile)
                 .delete(profiles::delete_profile),
         )
+        // --- Family (the whole home screen in one request) -----------------
+        .route("/api/family", get(family::get_family))
         // --- Events --------------------------------------------------------
         .route("/api/events", get(events::list_events))
         // --- Agent API -----------------------------------------------------

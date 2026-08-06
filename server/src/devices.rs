@@ -15,10 +15,11 @@ use crate::error::{AppError, AppResult};
 use crate::events;
 use crate::state::{AppState, AuthAdmin};
 
-const DEVICE_COLS: &str = "id, tenant_id, name, hostname, os, agent_version, status, \
-    tamper_level, public_ip::text, last_seen, created_at, vpn_updated_at";
+pub const DEVICE_COLS: &str = "id, tenant_id, name, hostname, os, agent_version, status, \
+    tamper_level, public_ip::text, last_seen, created_at, vpn_updated_at, \
+    offline_allowed_until";
 
-type DeviceRow = (
+pub type DeviceRow = (
     Uuid,
     Uuid,
     String,
@@ -30,6 +31,7 @@ type DeviceRow = (
     Option<String>,
     Option<DateTime<Utc>>,
     DateTime<Utc>,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
 );
 
@@ -49,6 +51,9 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
         // Named VPN profiles live in device_vpn_profiles (GET /devices/:id/vpn);
         // this stamp only says "something VPN-ish changed" for cache-busting.
         "vpn_updated_at": r.11,
+        // Set by PUT /devices/:id/offline-window: a parent said this machine
+        // may be away, so being offline is expected rather than trouble.
+        "offline_allowed_until": r.12,
     })
 }
 

@@ -278,22 +278,26 @@
    ========================================================================== */
 .rail-nav {
   display: block;
-  padding: 0.65rem 1.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  padding: 0.5rem 1.25rem;
+  font-size: 0.95rem;
+  color: var(--fg-dim);
   text-decoration: none;
-  transition: color var(--dur-tick) var(--ease);
+  border-left: 2px solid transparent;
+  transition: color var(--dur-tick) var(--ease),
+              border-color var(--dur-tick) var(--ease);
+}
+.rail-nav:hover { color: var(--fg); }
+/* Active = ink, not red. Red is an interrupt, not a location. */
+.rail-nav.active {
+  color: var(--fg-display);
+  border-left-color: var(--fg-display);
 }
 
 .rail-fam { margin-top: 1.5rem; padding-bottom: 1rem; }
 .rail-fam-head {
   margin: 0 0 0.35rem;
   padding: 0 1.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  letter-spacing: 0.08em;
+  font-size: 0.75rem;
   color: var(--fg-faint);
 }
 .rail-child {
@@ -353,10 +357,7 @@
 }
 .rail-foot-row { display: flex; justify-content: space-between; gap: 0.5rem; }
 .rail-foot-btn {
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
   color: var(--fg-faint);
   background: none;
   border: none;
@@ -365,6 +366,7 @@
   transition: color var(--dur-tick) var(--ease);
 }
 .rail-foot-btn:hover { color: var(--fg); }
+.rail-foot-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ============================================================================
    FAMILY — home. Three layers: the people (primary), their time (secondary),
@@ -965,7 +967,7 @@
   transition-timing-function: var(--ease);
 }
 
-/* The armed countdown in the top bar — quiet, mono, gone when locked. */
+/* The armed countdown, now in the rail footer — quiet, gone when locked. */
 .armed-chip {
   display: inline-flex;
   align-items: center;
@@ -976,12 +978,17 @@
   color: var(--ok);
   font-variant-numeric: tabular-nums;
 }
-.armed-chip::before {
-  content: "";
+.armed-chip { margin-bottom: 0.5rem; }
+.armed-chip-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: currentColor;
+  animation: armed-breathe 2.4s var(--ease) infinite;
+}
+@keyframes armed-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 /* The locked security section — one calm gate, no data behind it yet. */
@@ -1000,3 +1007,257 @@
   text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim);
 }
 .dev-inline-status[data-tone="crit"] { color: var(--crit); }
+
+/* ============================================================================
+   SHELL — one rail, one canvas. The top bar is gone: it spent 56px on every
+   screen to show a logo and a chip that is usually absent, and it put the
+   brand above the family. Both moved into the rail, which had room.
+   ========================================================================== */
+.shell { display: flex; min-height: 100vh; }
+
+.shell-rail {
+  display: none;
+  width: 15rem;
+  flex: none;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+@media (min-width: 1024px) { .shell-rail { display: flex; } }
+
+.shell-main { flex: 1; min-width: 0; }
+
+.rail-body { flex: 1; min-height: 0; overflow-y: auto; padding-top: 1.35rem; }
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  padding: 0 1.25rem 1.35rem;
+  text-decoration: none;
+}
+
+.rail-nav-list { display: flex; flex-direction: column; }
+
+/* Mobile: a single floating trigger rather than a permanent bar. */
+.shell-menu-btn {
+  position: fixed;
+  left: 0.9rem;
+  bottom: 0.9rem;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  cursor: pointer;
+}
+.shell-menu-btn > span {
+  display: block;
+  width: 14px;
+  height: 1px;
+  background: var(--fg);
+}
+@media (min-width: 1024px) { .shell-menu-btn { display: none; } }
+
+.shell-drawer { position: fixed; inset: 0; z-index: 50; }
+.shell-drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  animation: fade-in 180ms var(--ease);
+}
+.shell-drawer-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 16rem;
+  height: 100%;
+  border-right: 1px solid var(--line-2);
+  background: var(--bg);
+  animation: drawer-in 220ms var(--ease);
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+/* ============================================================================
+   PAUSE EVERYTHING — the hero. Held, not tapped: freezing every screen in the
+   house mid-sentence should cost a deliberate 600ms.
+   ========================================================================== */
+.pause-wrap {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+.pause-btn {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--fg-display);
+  cursor: pointer;
+  /* No transition on transform while holding — the ring carries the progress,
+     the button only reacts to the press itself. */
+  transition: background var(--dur-tick) var(--ease),
+              border-color var(--dur-tick) var(--ease),
+              transform var(--dur-tick) var(--ease);
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.pause-btn:hover { border-color: var(--fg-faint); }
+.pause-btn[data-phase="holding"] { transform: scale(0.96); }
+.pause-btn:disabled { cursor: default; }
+
+/* The fill ring: a conic sweep driven by --p (0→1) as the hold progresses. */
+.pause-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--fg-display) calc(var(--p, 0) * 360deg),
+    transparent 0
+  );
+  /* Ring, not disc: punch the middle out. */
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+.pause-btn[data-phase="holding"] .pause-ring { opacity: 1; }
+
+.pause-glyph { display: grid; place-items: center; line-height: 0; }
+
+/* Paused: the one state where the house is not itself, so it earns the accent. */
+.pause-wrap[data-paused="true"] .pause-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.pause-wrap[data-busy="true"] .pause-btn { opacity: 0.72; }
+
+.pause-copy { min-width: 0; }
+.pause-label {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 500;
+  color: var(--fg-display);
+}
+.pause-hint { margin: 0.1rem 0 0; font-size: 0.875rem; color: var(--fg-dim); }
+
+/* The sweep: when a pause commits, the freeze travels across the family grid
+   left-to-right instead of every card blinking at once. --i is the card index. */
+.fam-wrap[data-sweeping="true"] .fam-card {
+  animation: freeze-sweep 520ms var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+@keyframes freeze-sweep {
+  0%   { transform: scale(1); filter: saturate(1); }
+  45%  { transform: scale(0.975); filter: saturate(0.15); }
+  100% { transform: scale(1); filter: saturate(1); }
+}
+
+/* A paused person reads as paused at a glance, without a legend. */
+.fam-card[data-paused="true"] { border-color: var(--accent-subtle); }
+.fam-card[data-paused="true"] .fam-avatar { filter: saturate(0.2); }
+.fam-card-paused {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.95rem;
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.fam-card { position: relative; }
+
+/* ============================================================================
+   WAITING — the layout, drawn in outline.
+   The design language bans shimmer skeletons, and it is right to: a gradient
+   sliding over a fake page is decoration pretending to be progress. What it
+   does not ban is showing the *shape* of what is coming, so the page does not
+   jump when the data lands. These are structural placeholders that breathe
+   once, quietly, and never pretend to be content.
+   ========================================================================== */
+@keyframes wait-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.25; }
+}
+.fam-wait-line,
+.fam-wait-block,
+.rail-child-wait {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: var(--line);
+  animation: wait-breathe 1.8s var(--ease) infinite;
+}
+.fam-wait-line { margin-bottom: 0.4rem; }
+.fam-wait-block { border-radius: 50%; }
+.rail-child-wait {
+  height: 0.85rem;
+  margin: 0.55rem 1.25rem;
+  border-radius: 3px;
+}
+.fam-card-wait { cursor: default; }
+.fam-card-wait:hover { border-color: var(--line); }
+.fam-card-wait:active { transform: none; }
+
+/* A refresh over data already on screen: a hairline, never a blanked page. */
+.fam-wrap[data-refreshing="true"]::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--fg-display);
+  transform-origin: 0 50%;
+  animation: refresh-bar 900ms var(--ease) infinite;
+  z-index: 60;
+}
+@keyframes refresh-bar {
+  0%   { transform: scaleX(0); opacity: 1; }
+  70%  { transform: scaleX(1); opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+
+/* Signing out: the console settles before the login screen replaces it, so it
+   reads as a door closing rather than a page failing to load. */
+body[data-leaving="true"] .shell {
+  animation: sign-out 420ms var(--ease) forwards;
+  pointer-events: none;
+}
+@keyframes sign-out {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.985); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fam-wrap[data-sweeping="true"] .fam-card,
+  .fam-wait-line,
+  .fam-wait-block,
+  .rail-child-wait,
+  .armed-chip-dot,
+  .shell-drawer-panel,
+  .shell-drawer-scrim,
+  body[data-leaving="true"] .shell,
+  .fam-wrap[data-refreshing="true"]::before {
+    animation: none;
+  }
+}
