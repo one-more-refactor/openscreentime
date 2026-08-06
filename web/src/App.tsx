@@ -1,10 +1,12 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { SessionProvider, useSession } from "./lib/session";
 import { ToastProvider } from "./lib/toast";
+import { StepUpProvider } from "./lib/stepup";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
 import { Family } from "./pages/Family";
 import { ChildDetail } from "./pages/ChildDetail";
+import { Devices } from "./pages/Devices";
 import { AddChild } from "./pages/AddChild";
 import { Settings } from "./pages/Settings";
 import { StatusLed } from "./components";
@@ -32,7 +34,9 @@ export function App() {
         <Route
           element={
             <RequireAuth>
-              <Shell />
+              <StepUpProvider>
+                <Shell />
+              </StepUpProvider>
             </RequireAuth>
           }
         >
@@ -40,6 +44,7 @@ export function App() {
           <Route index element={<Family />} />
           <Route path="/family" element={<Family />} />
           <Route path="/child/:key" element={<ChildDetail />} />
+          <Route path="/devices" element={<Devices />} />
           <Route path="/add" element={<AddChild />} />
           <Route path="/settings" element={<Settings />} />
         </Route>

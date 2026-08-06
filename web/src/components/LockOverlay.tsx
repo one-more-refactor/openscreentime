@@ -72,7 +72,7 @@ export function LockOverlay({
           className="label"
           style={{ color: "var(--lo-dim)", letterSpacing: "0.3em" }}
         >
-          SENTINEL
+          OPENSCREENTIME
         </span>
 
         <h1

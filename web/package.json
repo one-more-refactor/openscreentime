@@ -1,9 +1,9 @@
 {
-  "name": "sentinel-web",
+  "name": "openscreentime-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Sentinel — zero-trust device management control center (Nothing-style UI)",
+  "description": "OpenScreenTime — screen-time for the whole family",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@fontsource-variable/doto": "^5.2.10",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
     "@fontsource/space-mono": "^5.2.9",
     "@simplewebauthn/browser": "^13.1.0",
     "react": "^18.3.1",
