@@ -22,6 +22,7 @@ mod profiles;
 mod rate_limit;
 mod state;
 mod static_web;
+mod stepup;
 mod vpn;
 
 use std::collections::HashMap;
@@ -204,6 +205,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(auth::me))
         .route("/api/me/passkeys", get(auth::list_passkeys))
         .route("/api/me/passkeys/{id}", delete(auth::delete_passkey))
+        // --- Step-up 2FA (docs/AUTH.md) -------------------------------------
+        .route("/api/me/2fa", get(stepup::status))
+        .route("/api/me/2fa/totp/start", post(stepup::totp_start))
+        .route("/api/me/2fa/totp/confirm", post(stepup::totp_confirm))
+        .route("/api/auth/stepup/email/start", post(stepup::email_start))
+        .route("/api/auth/stepup/verify", post(stepup::verify))
+        .route("/api/auth/voucher", post(stepup::redeem_voucher))
         // --- Devices -------------------------------------------------------
         .route(
             "/api/devices",
@@ -278,8 +286,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/earn-request", post(earn::create_request))
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
+        .route("/agent/voucher", post(stepup::mint_voucher))
         // --- Parent companion API ------------------------------------------
         .merge(parent_api)
+        // Read is free, write is stepped — enforced as a layer rather than a
+        // per-handler extractor so that forgetting it is not possible. See
+        // stepup::require_step_up for why.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            stepup::require_step_up,
+        ))
         .with_state(state);
 
     // Serve the built web UI (see `web/`) as the fallback for any path that

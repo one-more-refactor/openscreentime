@@ -82,10 +82,29 @@ wins for auth.
 
 ## Phasing
 
-- **2a — Mechanics on current (parent) accounts.** Session rotation; `StepUp`
-  extractor + endpoints; TOTP + email-token; the new gorgeous sign-in (passkey
-  or voucher) + the StepUp modal. Everything server-validated. *This is where we
-  start.*
+- **2a — Mechanics on current (parent) accounts. BUILT** (server:
+  `server/src/stepup.rs`, migration `0012_stepup_2fa.sql`). Session rotation on
+  step-up with a 2-minute grace on the superseded token; TOTP (RFC 6238, ±1
+  window, single-use counter) and emailed single-use codes; failure counting
+  with a doubling lockout; device vouchers. The UI half was already built
+  against the mock and needs no change.
+
+  Two decisions taken during implementation, both deliberate departures from
+  the sketch above:
+
+  * **A layer, not a per-handler extractor.** The invariant is "no mutation
+    without a grant". A layer over `/api` with a small explicit exempt list (the
+    auth flow itself) delivers that and *fails closed for routes nobody has
+    written yet* — a new mutating endpoint is guarded the day it exists, with no
+    chance of forgetting a parameter. `require_step_up` documents the exempt
+    list.
+  * **A voucher session starts with no grant.** Possession of a machine is not
+    possession of the second factor, so device-voucher autologin buys reading
+    and identity only; changing anything still needs a code. This is what makes
+    it safe for a local surface (the notch) to hold a session permanently.
+  * **Confirming an authenticator is itself a step-up.** You just proved the
+    factor; making you wait out the 30-second window before your first change
+    would be friction with no security in it.
 - **2b — Everyone has an account.** Role + age bracket + birthdate; per-person
   login; adults' private self-tracking; link `device_users` ↔ accounts.
 - **2c — Identifier rename + hardening.** `sentinel-agent` → `openscreentime-agent`,
