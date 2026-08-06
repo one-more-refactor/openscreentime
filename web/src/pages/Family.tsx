@@ -2,33 +2,18 @@
 // FAMILY — the home screen.
 //
 // This console used to open on a device list, which meant the first thing a
-// parent saw was infrastructure: hostnames, enrollment states, LED strips. The
-// product is not a fleet. It is three children and how their day is going.
-//
-// So: one card per child, avatar and name first, today's screen time under it,
-// and nothing else competing. Devices, tokens, enrollment and server health are
-// machinery — they belong in the background and should only ever interrupt when
-// something is actually broken (see <Trouble/> at the bottom, which renders
-// nothing at all on a healthy day).
+// parent saw was infrastructure. The product is not a fleet. It is a handful
+// of children and how their day is going: one card per child, today's time
+// under their name, and nothing else competing. Machinery interrupts only
+// when actually broken (<Trouble/> renders nothing on a healthy day).
 // ============================================================================
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { type CSSProperties } from "react";
 import { Link } from "react-router-dom";
-import * as api from "../api";
-import type { Device, DeviceUser, Profile } from "../types";
-
-/** A child, assembled from whatever devices they have an account on. */
-interface Child {
-  key: string;
-  name: string;
-  usedMinutes: number;
-  earnedMinutes: number;
-  limitMinutes: number | null;
-  profileName: string | null;
-  devices: { id: string; name: string; status: Device["status"] }[];
-}
+import type { Device } from "../types";
+import { useFamily, type FamilyChild } from "../lib/family";
 
 /** Deterministic warm hue per child, so an avatar is recognisable at a glance. */
-function hueFor(key: string): number {
+export function hueFor(key: string): number {
   let h = 0;
   for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
   return h;
@@ -41,7 +26,7 @@ function initials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-function Avatar({ name, seed, size = 56 }: { name: string; seed: string; size?: number }) {
+export function Avatar({ name, seed, size = 56 }: { name: string; seed: string; size?: number }) {
   const hue = hueFor(seed);
   return (
     <span
@@ -61,9 +46,8 @@ function Avatar({ name, seed, size = 56 }: { name: string; seed: string; size?: 
 }
 
 /**
- * Today's time as a single bar. Deliberately not a ring or a gauge: a parent
- * reads "how much is left" in under a second, and a bar makes the remainder
- * legible at a glance in a way a donut does not.
+ * Today's time as a segmented bar — one cell per 15 minutes, so the diagram
+ * is a picture of the day rather than decoration.
  */
 function TimeBar({ used, limit, earned }: { used: number; limit: number | null; earned: number }) {
   if (limit === null) {
@@ -79,7 +63,6 @@ function TimeBar({ used, limit, earned }: { used: number; limit: number | null; 
         className="fam-bar"
         role="img"
         aria-label={`${used} of ${total} minutes used`}
-        // One cell per 15 minutes — the bar is a diagram of the day, not decoration.
         style={{ "--segs": Math.max(1, Math.round(total / 15)) } as CSSProperties}
       >
         <span className="fam-bar-fill" style={{ width: `${pct}%` }} data-spent={spent} />
@@ -98,11 +81,6 @@ function TimeBar({ used, limit, earned }: { used: number; limit: number | null; 
   );
 }
 
-/**
- * The only thing allowed to interrupt. Renders nothing on a healthy day —
- * "you just notice when something dramatically fails" is a UI requirement, not
- * a wish, so this is a single line and never a dashboard.
- */
 function since(iso: string | null | undefined): string {
   if (!iso) return "";
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -113,11 +91,12 @@ function since(iso: string | null | undefined): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
+/**
+ * The only thing allowed to interrupt. Renders nothing on a healthy day.
+ * A device inside an allowed-offline window is not trouble — the parent said
+ * it may be away — and "pending" is normal minutes after setup.
+ */
 function Trouble({ devices }: { devices: Device[] }) {
-  // "pending" means set up but never contacted — that is normal for minutes
-  // after adding a child, so alarming a parent about it trains them to ignore
-  // the one alert this app ever shows. A device inside an allowed-offline
-  // window is equally not trouble: the parent said it may be away.
   const dark = devices.filter(
     (d) =>
       d.status === "offline" &&
@@ -135,80 +114,31 @@ function Trouble({ devices }: { devices: Device[] }) {
   );
 }
 
+function ChildCard({ child }: { child: FamilyChild }) {
+  return (
+    <Link to={`/child/${encodeURIComponent(child.key)}`} className="fam-card">
+      <Avatar name={child.name} seed={child.key} />
+      <div className="fam-card-body">
+        <p className="fam-name">{child.name}</p>
+        <p className="fam-meta">
+          {child.profileName ?? "No profile"}
+          {child.devices.length > 1 && ` · ${child.devices.length} devices`}
+        </p>
+        <TimeBar used={child.usedMinutes} limit={child.limitMinutes} earned={child.earnedMinutes} />
+        {child.pendingRequests > 0 && (
+          <p className="fam-waiting">
+            {child.pendingRequests === 1
+              ? "1 request waiting for you"
+              : `${child.pendingRequests} requests waiting for you`}
+          </p>
+        )}
+      </div>
+    </Link>
+  );
+}
+
 export function Family() {
-  const [devices, setDevices] = useState<Device[] | null>(null);
-  const [usersByDevice, setUsersByDevice] = useState<Record<string, DeviceUser[]>>({});
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const [ds, ps] = await Promise.all([api.listDevices(), api.listProfiles()]);
-        if (!alive) return;
-        setProfiles(ps);
-        if (!alive) return;
-        // Children live on devices, so the family view has to gather them.
-        // A dedicated endpoint would be better; noted rather than faked.
-        const entries = await Promise.all(
-          ds.map(async (d) => {
-            try {
-              return [d.id, await api.listDeviceUsers(d.id)] as const;
-            } catch {
-              return [d.id, [] as DeviceUser[]] as const;
-            }
-          }),
-        );
-        if (!alive) return;
-        setUsersByDevice(Object.fromEntries(entries));
-        // Set devices LAST: setting it before the per-device user fetches
-        // resolved made `children` briefly empty, flashing the
-        // "No children set up yet" empty state on every single load.
-        setDevices(ds);
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : "Could not load the family");
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const children = useMemo<Child[]>(() => {
-    if (!devices) return [];
-    const byKey = new Map<string, Child>();
-    for (const d of devices) {
-      for (const u of usersByDevice[d.id] ?? []) {
-        const key = u.os_username;
-        const existing = byKey.get(key);
-        const name = u.display_name?.trim() || u.os_username;
-        if (existing) {
-          // Same person on a second machine: their day is the sum of both.
-          existing.usedMinutes += u.used_minutes_today ?? 0;
-          existing.earnedMinutes += u.earned_minutes_today ?? 0;
-          existing.devices.push({ id: d.id, name: d.name, status: d.status });
-        } else {
-          const profile = profiles.find((p) => p.id === u.profile_id) ?? null;
-          const st = profile?.policy.screen_time;
-          byKey.set(key, {
-            key,
-            name,
-            usedMinutes: u.used_minutes_today ?? 0,
-            earnedMinutes: u.earned_minutes_today ?? 0,
-            // A disabled or zero limit is "no limit", never "0 left of 0".
-            limitMinutes:
-              st?.enabled && (st.daily_limit_minutes ?? 0) > 0
-                ? st.daily_limit_minutes
-                : null,
-            profileName: u.profile_name ?? profile?.name ?? null,
-            devices: [{ id: d.id, name: d.name, status: d.status }],
-          });
-        }
-      }
-    }
-    return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [devices, usersByDevice, profiles]);
+  const { devices, children, error } = useFamily();
 
   if (error) {
     return (
@@ -254,17 +184,7 @@ export function Family() {
         <ul className="fam-grid">
           {children.map((c) => (
             <li key={c.key}>
-              <Link to={`/child/${encodeURIComponent(c.key)}`} className="fam-card">
-                <Avatar name={c.name} seed={c.key} />
-                <div className="fam-card-body">
-                  <p className="fam-name">{c.name}</p>
-                  <p className="fam-meta">
-                    {c.profileName ?? "No profile"}
-                    {c.devices.length > 1 && ` · ${c.devices.length} devices`}
-                  </p>
-                  <TimeBar used={c.usedMinutes} limit={c.limitMinutes} earned={c.earnedMinutes} />
-                </div>
-              </Link>
+              <ChildCard child={c} />
             </li>
           ))}
         </ul>

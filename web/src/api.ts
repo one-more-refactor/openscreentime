@@ -458,6 +458,13 @@ export async function updateProfile(
   policy: Policy,
   parent_pin?: string,
 ): Promise<Profile> {
+  if (usingMock) {
+    const p = mockProfiles.find((p) => p.id === id);
+    if (!p) throw new ApiError("not_found", "No such profile", 404);
+    p.policy = policy;
+    p.updated_at = new Date().toISOString();
+    return { ...p };
+  }
   const res = await request<{ profile: Profile }>(`/api/profiles/${id}`, {
     method: "PUT",
     body: JSON.stringify({

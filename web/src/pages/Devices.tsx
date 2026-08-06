@@ -13,6 +13,7 @@ import { Link } from "react-router-dom";
 import * as api from "../api";
 import type { Device } from "../types";
 import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { familyChanged } from "../lib/family";
 
 function minsSince(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -94,6 +95,7 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
       setStatus(label);
       setPickingDuration(false);
       onChanged();
+      familyChanged();
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
       setStatus(e instanceof Error ? e.message : "That didn't work");

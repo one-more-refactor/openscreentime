@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useParams } from "react-router-dom";
 import * as api from "../api";
-import type { Device, DeviceUser, EarnRequest, Event, Profile } from "../types";
+import type { Device, DeviceUser, EarnRequest, Event, Policy, Profile } from "../types";
 import {
   LEVELS,
   SecuritySlider,
@@ -20,6 +20,7 @@ import {
 } from "../components/SecuritySlider";
 import { EventFeed } from "../components/EventFeed";
 import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { familyChanged } from "../lib/family";
 
 function hueFor(key: string): number {
   let h = 0;
@@ -161,6 +162,7 @@ export function ChildDetail() {
       await guard(() => api.updateProfile(profile.id, policyForLevel(next, profile.policy)));
       setNote(`Protection set to ${LEVELS[next].name}. It reaches the device within a minute.`);
       await load();
+      familyChanged();
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not change protection");
@@ -177,9 +179,57 @@ export function ChildDetail() {
       await guard(() => api.creditTime(u.id, minutes));
       setNote(`Gave ${name} ${minutes} more minutes.`);
       await load();
+      familyChanged();
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not grant time");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Every rule edit funnels through here: step-up, save, reload. */
+  async function saveRules(next: Policy, doneNote: string) {
+    if (!profile) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      await guard(() => api.updateProfile(profile.id, next));
+      setNote(doneNote);
+      await load();
+      familyChanged();
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setError(e instanceof Error ? e.message : "Could not change the rules");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** The hard stop: pause (lock) every device this child uses. */
+  const childDevices = devices.filter((d) => users.some((u) => u.device_id === d.id));
+  const allPaused = childDevices.length > 0 && childDevices.every((d) => d.status === "locked");
+
+  async function pause(resume: boolean) {
+    setBusy(true);
+    setNote(null);
+    try {
+      await guard(async () => {
+        for (const d of childDevices) {
+          if (resume) await api.unlockDevice(d.id);
+          else if (d.status !== "locked") await api.lockDevice(d.id);
+        }
+      });
+      setNote(
+        resume
+          ? `${name} can use their devices again.`
+          : `Paused. Every device ${name} uses stops within a minute.`,
+      );
+      await load();
+      familyChanged();
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setError(e instanceof Error ? e.message : "Could not change the devices");
     } finally {
       setBusy(false);
     }
@@ -192,6 +242,7 @@ export function ChildDetail() {
         approve ? api.approveEarnRequest(r.id) : api.denyEarnRequest(r.id),
       );
       await load();
+      familyChanged();
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
       setError(e instanceof Error ? e.message : "Could not answer the request");
@@ -264,7 +315,18 @@ export function ChildDetail() {
           </ul>
         </section>
       )}
+      {/* The controls a parent came for, first: the hard stop, then more time. */}
       <div className="ch-actions">
+        {childDevices.length > 0 &&
+          (allPaused ? (
+            <button className="ch-btn ch-btn-pause" data-paused="true" disabled={busy} onClick={() => void pause(true)}>
+              Resume their devices
+            </button>
+          ) : (
+            <button className="ch-btn ch-btn-pause" disabled={busy} onClick={() => void pause(false)}>
+              Pause their devices
+            </button>
+          ))}
         <button className="ch-btn" disabled={busy || !users.length} onClick={() => void grant(15)}>
           +15 min today
         </button>
@@ -273,6 +335,12 @@ export function ChildDetail() {
         </button>
       </div>
 
+      {profile && (
+        <section className="ch-section">
+          <h2 className="ch-h2">The rules</h2>
+          <Rules profile={profile} busy={busy} onSave={(p, note) => void saveRules(p, note)} />
+        </section>
+      )}
 
       <section className="ch-section">
         {profile ? (
@@ -303,6 +371,273 @@ export function ChildDetail() {
           <EventFeed events={events} emptyLabel="NOTHING RECORDED YET" />
         </section>
       )}
+    </div>
+  );
+}
+
+// ---- The rules -------------------------------------------------------------
+// The actual parenting options, as quiet rows that commit on touch: daily
+// limit, bedtime, per-app limits, earning time back. Every change goes
+// through step-up and lands on the server as a whole policy.
+
+function fmtMin(m: number): string {
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  return r === 0 ? `${h} h` : `${h} h ${r} min`;
+}
+
+/** screen_time.enabled must survive "no daily limit" while bedtime remains. */
+function screenTimeEnabled(p: Policy): boolean {
+  const st = p.screen_time;
+  return st.daily_limit_minutes > 0 || st.bedtime !== null || st.schedule.length > 0;
+}
+
+interface RulesProps {
+  profile: Profile;
+  busy: boolean;
+  onSave: (next: Policy, doneNote: string) => void;
+}
+
+function Rules({ profile, busy, onSave }: RulesProps) {
+  const pol = profile.policy;
+  const st = pol.screen_time;
+  const limit = st.enabled ? st.daily_limit_minutes : 0;
+
+  const [bedStart, setBedStart] = useState(st.bedtime?.start ?? "20:00");
+  const [bedEnd, setBedEnd] = useState(st.bedtime?.end ?? "07:00");
+  const [newApp, setNewApp] = useState("");
+  // Keep the bedtime inputs in sync when a save comes back from the server.
+  useEffect(() => {
+    setBedStart(st.bedtime?.start ?? bedStart);
+    setBedEnd(st.bedtime?.end ?? bedEnd);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [st.bedtime?.start, st.bedtime?.end]);
+  const bedDirty =
+    st.bedtime !== null && (bedStart !== st.bedtime.start || bedEnd !== st.bedtime.end);
+
+  function withScreenTime(next: Partial<Policy["screen_time"]>): Policy {
+    const merged = { ...pol, screen_time: { ...st, ...next } };
+    merged.screen_time.enabled = screenTimeEnabled(merged);
+    return merged;
+  }
+
+  function setLimit(minutes: number) {
+    const m = Math.max(0, minutes);
+    onSave(
+      withScreenTime({ daily_limit_minutes: m }),
+      m === 0 ? "Daily limit removed." : `Daily limit set to ${fmtMin(m)}.`,
+    );
+  }
+
+  function setAppLimit(match: string, minutes: number | null) {
+    const app_limits =
+      minutes === null
+        ? pol.app_limits.filter((a) => a.match !== match)
+        : pol.app_limits.some((a) => a.match === match)
+          ? pol.app_limits.map((a) =>
+              a.match === match ? { ...a, daily_limit_minutes: Math.max(15, minutes) } : a,
+            )
+          : [...pol.app_limits, { match, daily_limit_minutes: Math.max(15, minutes) }];
+    onSave(
+      { ...pol, app_limits },
+      minutes === null ? `Limit for ${match} removed.` : `${match} limited to ${fmtMin(Math.max(15, minutes))} a day.`,
+    );
+  }
+
+  return (
+    <div className="rl">
+      {/* Daily limit */}
+      <div className="rl-row">
+        <div className="rl-what">
+          <p className="rl-name">Daily limit</p>
+          <p className="rl-value">{limit > 0 ? `${fmtMin(limit)} a day` : "No limit"}</p>
+        </div>
+        <span className="rl-controls">
+          {limit > 0 ? (
+            <>
+              <button className="ch-btn" disabled={busy} onClick={() => setLimit(limit - 15)} aria-label="15 minutes less">
+                −15
+              </button>
+              <button className="ch-btn" disabled={busy} onClick={() => setLimit(limit + 15)} aria-label="15 minutes more">
+                +15
+              </button>
+            </>
+          ) : (
+            <button className="ch-btn" disabled={busy} onClick={() => setLimit(60)}>
+              Set 1 h a day
+            </button>
+          )}
+        </span>
+      </div>
+
+      {/* Bedtime */}
+      <div className="rl-row">
+        <div className="rl-what">
+          <p className="rl-name">Bedtime</p>
+          <p className="rl-value">
+            {st.bedtime ? `Screens off ${st.bedtime.start} – ${st.bedtime.end}` : "No bedtime"}
+          </p>
+        </div>
+        <span className="rl-controls">
+          {st.bedtime ? (
+            <>
+              <input
+                type="time"
+                className="rl-time"
+                value={bedStart}
+                disabled={busy}
+                onChange={(e) => setBedStart(e.target.value)}
+                aria-label="Bedtime start"
+              />
+              <span className="rl-dash">–</span>
+              <input
+                type="time"
+                className="rl-time"
+                value={bedEnd}
+                disabled={busy}
+                onChange={(e) => setBedEnd(e.target.value)}
+                aria-label="Bedtime end"
+              />
+              {bedDirty && (
+                <button
+                  className="ch-btn ch-btn-yes"
+                  disabled={busy}
+                  onClick={() =>
+                    onSave(
+                      withScreenTime({ bedtime: { start: bedStart, end: bedEnd } }),
+                      `Bedtime set: ${bedStart} – ${bedEnd}.`,
+                    )
+                  }
+                >
+                  Save
+                </button>
+              )}
+              <button
+                className="ch-btn"
+                disabled={busy}
+                onClick={() => onSave(withScreenTime({ bedtime: null }), "Bedtime removed.")}
+              >
+                Remove
+              </button>
+            </>
+          ) : (
+            <button
+              className="ch-btn"
+              disabled={busy}
+              onClick={() =>
+                onSave(
+                  withScreenTime({ bedtime: { start: bedStart, end: bedEnd } }),
+                  `Bedtime set: ${bedStart} – ${bedEnd}.`,
+                )
+              }
+            >
+              Set {bedStart} – {bedEnd}
+            </button>
+          )}
+        </span>
+      </div>
+
+      {/* Per-app limits */}
+      <div className="rl-row rl-row-stack">
+        <div className="rl-what">
+          <p className="rl-name">App limits</p>
+          <p className="rl-value">
+            {pol.app_limits.length === 0 ? "No app has its own limit" : "On top of the daily limit"}
+          </p>
+        </div>
+        {pol.app_limits.map((a) => (
+          <div className="rl-app" key={a.match}>
+            <span className="rl-app-name">{a.match}</span>
+            <span className="rl-app-mins">{fmtMin(a.daily_limit_minutes)}</span>
+            <span className="rl-controls">
+              <button
+                className="ch-btn"
+                disabled={busy || a.daily_limit_minutes <= 15}
+                onClick={() => setAppLimit(a.match, a.daily_limit_minutes - 15)}
+                aria-label={`15 minutes less for ${a.match}`}
+              >
+                −15
+              </button>
+              <button
+                className="ch-btn"
+                disabled={busy}
+                onClick={() => setAppLimit(a.match, a.daily_limit_minutes + 15)}
+                aria-label={`15 minutes more for ${a.match}`}
+              >
+                +15
+              </button>
+              <button className="ch-btn" disabled={busy} onClick={() => setAppLimit(a.match, null)}>
+                Remove
+              </button>
+            </span>
+          </div>
+        ))}
+        <div className="rl-app">
+          <input
+            className="add-input rl-app-input"
+            placeholder="App name, e.g. steam"
+            value={newApp}
+            disabled={busy}
+            onChange={(e) => setNewApp(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newApp.trim()) {
+                setAppLimit(newApp.trim().toLowerCase(), 30);
+                setNewApp("");
+              }
+            }}
+          />
+          <button
+            className="ch-btn"
+            disabled={busy || !newApp.trim()}
+            onClick={() => {
+              setAppLimit(newApp.trim().toLowerCase(), 30);
+              setNewApp("");
+            }}
+          >
+            Limit to 30 min
+          </button>
+        </div>
+      </div>
+
+      {/* Earning time back */}
+      <div className="rl-row">
+        <div className="rl-what">
+          <p className="rl-name">Earning time back</p>
+          <p className="rl-value">
+            {pol.gamification.earn_time.enabled
+              ? pol.gamification.earn_time.tasks
+                  .map((t) => `${t.label} · +${t.reward_minutes} min`)
+                  .join("  ·  ") || "On, but no tasks set"
+              : "Off — extra time only when you give it"}
+          </p>
+        </div>
+        <span className="rl-controls">
+          <button
+            className="ch-btn"
+            disabled={busy}
+            onClick={() =>
+              onSave(
+                {
+                  ...pol,
+                  gamification: {
+                    ...pol.gamification,
+                    earn_time: {
+                      ...pol.gamification.earn_time,
+                      enabled: !pol.gamification.earn_time.enabled,
+                    },
+                  },
+                },
+                pol.gamification.earn_time.enabled
+                  ? "Earning time is off."
+                  : "Earning time is on.",
+              )
+            }
+          >
+            {pol.gamification.earn_time.enabled ? "Turn off" : "Turn on"}
+          </button>
+        </span>
+      </div>
     </div>
   );
 }
