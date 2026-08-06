@@ -15,13 +15,25 @@ const typeLabel: Record<Event["type"], string> = {
   discovery_result: "DISCOVERY",
   ssh: "SSH",
   earn_request: "EARN REQUEST",
+  evasion: "EVASION",
+  enforcement_degraded: "NOT ENFORCED",
+  vpn_profile: "VPN PROFILE",
 };
+
+// Never render a blank row: an unmapped (e.g. future) type shows its raw name
+// rather than disappearing — the highest-signal events must not be invisible.
+function labelFor(type: Event["type"]): string {
+  return typeLabel[type] ?? String(type).toUpperCase().replace(/_/g, " ");
+}
 
 function summarize(e: Event): string {
   const p = e.payload ?? {};
   switch (e.type) {
     case "tamper":
-      return String(p.detail ?? p.kind ?? "tamper attempt detected");
+    case "enforcement_degraded":
+    case "evasion":
+      // tamper_event() writes {kind, message}; older rows used {detail}.
+      return String(p.message ?? p.detail ?? p.kind ?? "tamper attempt detected");
     case "lock":
       return String(p.reason ?? "device locked");
     case "screen_time_earned":
@@ -75,7 +87,7 @@ export function EventFeed({ events, emptyLabel = "NO EVENTS" }: Props) {
                     e.severity === "critical" ? "var(--accent)" : "var(--fg)",
                 }}
               >
-                {typeLabel[e.type]}
+                {labelFor(e.type)}
               </span>
               <span className="text-xs truncate" style={{ color: "var(--fg-dim)" }}>
                 {summarize(e)}

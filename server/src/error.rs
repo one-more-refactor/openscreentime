@@ -44,11 +44,19 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = self.parts();
-        if let AppError::Internal(ref e) = self {
-            tracing::error!(error = %e, "internal error");
-        }
+        // Internal errors wrap anyhow/sqlx detail (table names, constraint
+        // names, `invalid input syntax for type inet`, …). Log the full error
+        // server-side, but never ship it to the client — an enrolled device is
+        // a hostile caller and would use it to map the schema.
+        let message = match self {
+            AppError::Internal(ref e) => {
+                tracing::error!(error = %e, "internal error");
+                "internal error".to_string()
+            }
+            _ => self.to_string(),
+        };
         let body = Json(json!({
-            "error": { "code": code, "message": self.to_string() }
+            "error": { "code": code, "message": message }
         }));
         (status, body).into_response()
     }
