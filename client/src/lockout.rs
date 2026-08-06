@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// What the overlay should say + how to dismiss it.
 /// Serializable so the GUI presenter can run as a detached subprocess
-/// (`sentinel-agent __lockout <b64 json>`) without stalling the tick loop.
+/// (`openscreentime __lockout <b64 json>`) without stalling the tick loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockSpec {
     pub headline: String,           // "TIME'S UP", "BEDTIME"
@@ -82,7 +82,7 @@ pub mod challenge {
         }
 
         /// Verify a typed response. Shared by the GUI presenter's early-dismiss
-        /// gate and the headless/CLI recovery path (`sentinel-agent unlock`),
+        /// gate and the headless/CLI recovery path (`openscreentime unlock`),
         /// which is why this is *not* gated behind `--features gui` — the same
         /// logic must be exercised (and tested) in the default build too.
         ///
@@ -238,7 +238,7 @@ pub fn render_ascii(spec: &LockSpec) -> String {
 }
 
 /// Headless/no-GUI parent-PIN override: with no display to type into, an
-/// attempt is dropped as plaintext at `/run/sentinel/unlock_pin.<user>` (e.g.
+/// attempt is dropped as plaintext at `/run/openscreentime/unlock_pin.<user>` (e.g.
 /// by a companion tool acting on the parent's behalf) and consumed here —
 /// read once, deleted regardless of outcome (single-use). Returns `true` only
 /// if a parent PIN is configured AND the attempt matches it.
@@ -251,7 +251,7 @@ pub fn render_ascii(spec: &LockSpec) -> String {
 /// file bypass an admin lock even when no PIN is set — so the direct
 /// hash check is the security boundary here, not the challenge type.
 pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
-    let path = format!("/run/sentinel/unlock_pin.{}", spec.for_user);
+    let path = crate::paths::run_str(&format!("unlock_pin.{}", spec.for_user));
     let Ok(attempt) = std::fs::read_to_string(&path) else {
         return false;
     };
@@ -269,10 +269,10 @@ pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
 /// An unlock the overlay has ALREADY verified (parent PIN typed into the GUI,
 /// or a solved challenge). The GUI presenter runs as a detached root
 /// subprocess, so it hands the verdict to the runner through a root-only file:
-/// `/run/sentinel/unlock_grant.<user>` containing the granted minutes.
+/// `/run/openscreentime/unlock_grant.<user>` containing the granted minutes.
 ///
 /// Unlike `unlock_pin.<user>` (an *attempt*, verified by the consumer), a
-/// grant is trusted at face value — which is safe only because `/run/sentinel`
+/// grant is trusted at face value — which is safe only because `/run/openscreentime`
 /// is root-owned (0755): no managed user can write there. The verification
 /// already happened in the presenter, against the same argon2 hash.
 /// `kind` is `"pin"` (parent PIN — a parent present, never rate-limited) or
@@ -281,7 +281,7 @@ pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
 /// limit). The grant file is `"<kind>:<minutes>"`.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))] // written by the gui presenter only
 pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
-    let dir = std::path::Path::new("/run/sentinel");
+    let dir = std::path::Path::new(crate::paths::RUN_DIR);
     let _ = std::fs::create_dir_all(dir);
     let path = dir.join(format!("unlock_grant.{user}"));
     if let Err(e) = std::fs::write(&path, format!("{kind}:{minutes}")) {
@@ -298,7 +298,7 @@ pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
 /// numeric content is read as `"pin"` (uncapped) so a real grant is never
 /// wrongly dropped — the safe direction for an unlock is to let the user in.
 pub fn take_unlock_grant(user: &str) -> Option<(u32, String)> {
-    let path = format!("/run/sentinel/unlock_grant.{user}");
+    let path = crate::paths::run_str(&format!("unlock_grant.{user}"));
     let content = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
     let content = content.trim();
@@ -320,7 +320,7 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
         return;
     }
 
-    // GUI build: present in a DETACHED subprocess (`sentinel-agent __lockout`)
+    // GUI build: present in a DETACHED subprocess (`openscreentime __lockout`)
     // so eframe's blocking event loop can never stall the enforcement tick.
     // The subprocess writes an unlock grant on verified dismissal; the runner
     // consumes it on its next tick.
@@ -379,7 +379,7 @@ pub mod gui {
     const GRANT_CHALLENGE_MIN: u32 = 5;
 
     /// Launch the overlay as a detached subprocess of this same binary
-    /// (`sentinel-agent __lockout <spec-file>`). Returns false if it could not
+    /// (`openscreentime __lockout <spec-file>`). Returns false if it could not
     /// be spawned (caller falls back to the headless broadcast).
     ///
     /// The spec carries `parent_pin_hash` (the argon2 PHC of the master-unlock
@@ -387,7 +387,7 @@ pub mod gui {
     /// world-readable, which would hand the hash to any local user (e.g. the
     /// locked-out managed user on a second VT) for offline brute-force of the
     /// low-entropy PIN. Instead the spec is staged in a root-only (0600) file
-    /// under root-owned `/run/sentinel` and only its *path* — not a secret — is
+    /// under root-owned `/run/openscreentime` and only its *path* — not a secret — is
     /// passed on argv; the child reads it once and unlinks it.
     /// The display environment a root-owned process needs in order to draw on a
     /// logged-in user's session.
@@ -501,12 +501,12 @@ pub mod gui {
     }
 
     /// Stage the base64 lock spec in a private, root-only file and return its
-    /// path. 0600 in the root-owned `/run/sentinel` means no managed user can
+    /// path. 0600 in the root-owned `/run/openscreentime` means no managed user can
     /// read the `parent_pin_hash` the spec contains.
     fn stage_spec_file(user: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let dir = std::path::Path::new("/run/sentinel");
+        let dir = std::path::Path::new(crate::paths::RUN_DIR);
         let _ = std::fs::create_dir_all(dir);
         let path = dir.join(format!("lockspec.{user}"));
         // Drop any stale file so create_new (hence mode 0600) applies to a fresh

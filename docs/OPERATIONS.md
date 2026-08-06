@@ -33,10 +33,10 @@ To pin one device to its current version (skip a bad release):
 
 ```sh
 # on the device, as root
-mkdir -p /etc/systemd/system/sentinel-agent.service.d
+mkdir -p /etc/systemd/system/openscreentime-agent.service.d
 printf '[Service]\nEnvironment=SENTINEL_NO_SELF_UPDATE=1\n' \
-  > /etc/systemd/system/sentinel-agent.service.d/no-self-update.conf
-systemctl daemon-reload && systemctl restart sentinel-agent.service
+  > /etc/systemd/system/openscreentime-agent.service.d/no-self-update.conf
+systemctl daemon-reload && systemctl restart openscreentime-agent.service
 ```
 
 Remove the drop-in and restart to resume. This only stops future
@@ -44,9 +44,9 @@ self-updates — it doesn't roll back a bad one already installed. The agent
 keeps the previous binary as a backup for exactly that case:
 
 ```sh
-systemctl stop sentinel-agent.service
-mv /usr/local/bin/sentinel-agent.bak /usr/local/bin/sentinel-agent
-systemctl start sentinel-agent.service
+systemctl stop openscreentime-agent.service
+mv /usr/local/bin/openscreentime.bak /usr/local/bin/openscreentime
+systemctl start openscreentime-agent.service
 ```
 
 ## Backup & restore
@@ -237,7 +237,7 @@ podman image prune       # add -a to also drop unused-but-tagged images
 
 ## Uninstalling a device
 
-There's no `sentinel-agent uninstall` subcommand (`client/src/main.rs` has
+There's no `ost uninstall` subcommand (`client/src/main.rs` has
 only `enroll`, `run`, `install-service`, `status`, `unlock`) — this is the
 honest manual path.
 
@@ -246,7 +246,7 @@ to the host outside the systemd unit: an `nft` table (`inet sentinel`) and a
 pinned/immutable `/etc/resolv.conf`. Stopping the service does not tear
 these down. If you know the parent PIN, run as root on the device:
 ```sh
-sentinel-agent unlock --pin <PARENT_PIN> --minutes 0
+ost unlock --pin <PARENT_PIN> --minutes 0
 ```
 `--minutes 0` suspends enforcement with no scheduled re-apply — tears down
 the nft table, un-pins `resolv.conf`, un-freezes any frozen users
@@ -259,15 +259,15 @@ chattr -i /etc/resolv.conf
 
 Then remove the agent:
 ```sh
-systemctl disable --now sentinel-agent.service sentinel-watchdog.timer
-rm -f /etc/systemd/system/sentinel-agent.service \
-      /etc/systemd/system/sentinel-watchdog.service \
-      /etc/systemd/system/sentinel-watchdog.timer \
-      /etc/systemd/user/sentinel-tray.service \
+systemctl disable --now openscreentime-agent.service openscreentime-watchdog.timer
+rm -f /etc/systemd/system/openscreentime-agent.service \
+      /etc/systemd/system/openscreentime-watchdog.service \
+      /etc/systemd/system/openscreentime-watchdog.timer \
+      /etc/systemd/user/openscreentime-tray.service \
       /etc/polkit-1/rules.d/49-sentinel.rules
 systemctl daemon-reload
-rm -f /usr/local/bin/sentinel-agent /usr/local/bin/sentinel-agent.bak
-rm -rf /etc/sentinel /var/lib/sentinel
+rm -f /usr/local/bin/ost /usr/local/bin/openscreentime.bak
+rm -rf /etc/sentinel /var/lib/openscreentime
 ```
 
 Finally, **delete the device in the console** (device detail page, or

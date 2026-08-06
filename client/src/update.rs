@@ -8,13 +8,13 @@
 //! key so binaries are verified independently of the transport.
 //!
 //! Safety rails:
-//!   * only runs when this process IS `/usr/local/bin/sentinel-agent` (never
+//!   * only runs when this process IS `/usr/local/bin/openscreentime` (never
 //!     self-updates a dev `cargo run`),
 //!   * gated by `auto_update = true` in agent.toml AND the
 //!     `SENTINEL_NO_SELF_UPDATE=1` env kill switch,
 //!   * only for a headless x86_64 build (the only artifact the image ships),
 //!   * download → verify sha256 of the exact bytes → chmod 0755 → keep the old
-//!     binary as `sentinel-agent.bak` (manual rollback) → atomic rename,
+//!     binary as `openscreentime.bak` (manual rollback) → atomic rename,
 //!   * restart goes through `Exec` so `--dry-run` is honored end to end.
 
 use crate::client::ServerClient;
@@ -26,9 +26,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Where install.sh / install-service put the managed binary.
-const INSTALL_PATH: &str = "/usr/local/bin/sentinel-agent";
-const STAGING_PATH: &str = "/usr/local/bin/.sentinel-agent.new";
-const BACKUP_PATH: &str = "/usr/local/bin/sentinel-agent.bak";
+const INSTALL_PATH: &str = "/usr/local/bin/openscreentime";
+const STAGING_PATH: &str = "/usr/local/bin/.openscreentime.new";
+const BACKUP_PATH: &str = "/usr/local/bin/openscreentime.bak";
 
 /// First check ~2 minutes after startup (catch up quickly after an offline
 /// stretch), then once a day.
@@ -119,7 +119,7 @@ pub async fn check_and_update(
     // Own HTTP client: ServerClient's 10 s budget fits API calls, not a binary
     // download on a slow line. Same TLS stack (rustls via reqwest).
     let http = reqwest::Client::builder()
-        .user_agent(format!("sentinel-agent/{}", crate::client::AGENT_VERSION))
+        .user_agent(format!("openscreentime/{}", crate::client::AGENT_VERSION))
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
@@ -229,7 +229,7 @@ pub async fn check_and_update(
         "self-update installed {} — restarting service",
         manifest.version
     );
-    exec.run("systemctl", &["restart", "sentinel-agent.service"])?;
+    exec.run("systemctl", &["restart", crate::service::AGENT_UNIT])?;
     Ok(true)
 }
 

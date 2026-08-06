@@ -21,7 +21,7 @@ env:
 # ─────────────────────────────────────────────────────────────
 # Jobs:
 #   1. build-server   → sentinel-server binary (glibc, x86_64)
-#   2. build-agent    → sentinel-agent binary  (musl-static, x86_64)
+#   2. build-agent    → openscreentime binary  (musl-static, x86_64)
 #   3. build-web      → dist/ + Playwright screenshots of the UI
 #   4. container      → multi-stage OCI image, pushed to GHCR
 #   5. release        → GitHub Release with all binaries attached (tag-only)
@@ -135,15 +135,15 @@ jobs:
         working-directory: client
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "sentinel-agent") | .version')
+            | jq -r '.packages[] | select(.name == "openscreentime") | .version')
           mkdir -p ../dist-agent
 
-          FILE="sentinel-agent-${VERSION}-x86_64-musl"
-          cp target/x86_64-unknown-linux-musl/release/sentinel-agent "../dist-agent/${FILE}"
+          FILE="openscreentime-${VERSION}-x86_64-musl"
+          cp target/x86_64-unknown-linux-musl/release/openscreentime "../dist-agent/${FILE}"
           SHA256=$(sha256sum "../dist-agent/${FILE}" | cut -d' ' -f1)
 
-          DFILE="sentinel-agent-${VERSION}-x86_64-desktop"
-          cp target/release/sentinel-agent "../dist-agent/${DFILE}"
+          DFILE="openscreentime-${VERSION}-x86_64-desktop"
+          cp target/release/openscreentime "../dist-agent/${DFILE}"
           DSHA256=$(sha256sum "../dist-agent/${DFILE}" | cut -d' ' -f1)
 
           jq -n \
@@ -165,7 +165,7 @@ jobs:
       - name: Upload agent artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sentinel-agent-${{ github.sha }}
+          name: openscreentime-${{ github.sha }}
           path: dist-agent/
           retention-days: 30
 
@@ -397,7 +397,7 @@ jobs:
       - name: Download agent artifacts
         uses: actions/download-artifact@v4
         with:
-          name: sentinel-agent-${{ github.sha }}
+          name: openscreentime-${{ github.sha }}
           path: release-assets/agent/
 
       - name: Download UI screenshots
@@ -411,7 +411,7 @@ jobs:
         run: |
           chmod +x sentinel-server
           sha256sum sentinel-server > SHA256SUMS
-          sha256sum agent/sentinel-agent-* >> SHA256SUMS
+          sha256sum agent/openscreentime-* >> SHA256SUMS
           cat SHA256SUMS
 
       - name: Extract changelog excerpt
@@ -441,7 +441,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             release-assets/sentinel-server
-            release-assets/agent/sentinel-agent-*
+            release-assets/agent/openscreentime-*
             release-assets/agent/manifest.json
             release-assets/SHA256SUMS
             release-assets/screenshots/*.png
@@ -453,7 +453,7 @@ jobs:
           echo "| Asset | |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--|" >> $GITHUB_STEP_SUMMARY
           echo "| 🖥️ \`sentinel-server\` | x86_64-linux-gnu |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🤖 \`sentinel-agent-*-x86_64-musl\` | static, any Linux |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🤖 \`openscreentime-*-x86_64-musl\` | static, any Linux |" >> $GITHUB_STEP_SUMMARY
           echo "| 📋 \`manifest.json\` | agent update manifest |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔐 \`SHA256SUMS\` | checksums |" >> $GITHUB_STEP_SUMMARY
           echo "| 🖼️ UI screenshots | attached to release |" >> $GITHUB_STEP_SUMMARY

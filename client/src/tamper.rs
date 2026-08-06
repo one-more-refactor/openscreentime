@@ -34,7 +34,7 @@ pub fn touch_heartbeat(exec: &Exec) {
 /// and root are always allowed (recovery path).
 pub fn render_polkit_rule(level: u8) -> String {
     let mut js = String::new();
-    js.push_str("// Managed by sentinel-agent — do not edit.\n");
+    js.push_str("// Managed by openscreentime — do not edit.\n");
     js.push_str("polkit.addRule(function(action, subject) {\n");
     js.push_str(&format!("  if (subject.user == \"{ADMIN_USER}\" || subject.user == \"root\") {{ return polkit.Result.YES; }}\n"));
     js.push_str("  var power = [\n");
@@ -55,10 +55,12 @@ pub fn render_polkit_rule(level: u8) -> String {
     if level >= 3 {
         js.push_str("  // Level 3: block user-initiated stop/disable of the sentinel units.\n");
         js.push_str("  // The watchdog is the recovery net for a killed/stopped agent, so it\n");
-        js.push_str("  // must be protected too — masking it alone would silently disarm recovery.\n");
+        js.push_str(
+            "  // must be protected too — masking it alone would silently disarm recovery.\n",
+        );
         js.push_str("  var guarded = [\n");
-        js.push_str("    \"sentinel-agent.service\",\n");
-        js.push_str("    \"sentinel-watchdog.service\",\n");
+        js.push_str(&format!("    \"{}\",\n", crate::service::AGENT_UNIT));
+        js.push_str(&format!("    \"{}\",\n", crate::service::WATCHDOG_UNIT));
         js.push_str("    \"sentinel-watchdog.timer\"\n");
         js.push_str("  ];\n");
         js.push_str("  if (action.id == \"org.freedesktop.systemd1.manage-units\" &&\n");
@@ -94,7 +96,7 @@ pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
     // already handles sessions; logout behavior stays stock.
     exec.write_file(
         "/etc/systemd/logind.conf.d/50-sentinel.conf",
-        "# Managed by sentinel-agent (tamper level 3)\n[Login]\nReserveVT=0\n",
+        "# Managed by openscreentime (tamper level 3)\n[Login]\nReserveVT=0\n",
     )?;
     tracing::info!("level 3: TTY/VT lockdown drop-in written (sentinel-admin can revert)");
     Ok(())
@@ -346,7 +348,7 @@ mod tests {
         let r = render_polkit_rule(3);
         assert!(r.contains("subject.user == \"sentinel-admin\""));
         assert!(r.contains("org.freedesktop.login1.power-off"));
-        assert!(r.contains("sentinel-agent.service"));
+        assert!(r.contains(crate::service::AGENT_UNIT));
     }
 
     #[test]
@@ -369,14 +371,14 @@ mod tests {
     fn polkit_level3_guards_the_watchdog_too() {
         // Masking the watchdog alone would silently disarm the recovery net.
         let r = render_polkit_rule(3);
-        assert!(r.contains("sentinel-watchdog.service"));
+        assert!(r.contains(crate::service::WATCHDOG_UNIT));
         assert!(r.contains("sentinel-watchdog.timer"));
     }
 
     #[test]
     fn level1_does_not_mask_systemctl_stop() {
         let r = render_polkit_rule(1);
-        assert!(!r.contains("sentinel-agent.service"));
+        assert!(!r.contains(crate::service::AGENT_UNIT));
     }
 
     #[test]

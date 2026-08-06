@@ -1,8 +1,8 @@
-# Sentinel agent — hardened unit (TAMPER.md level 1).
-# Installed to /etc/systemd/system/sentinel-agent.service by `sentinel-agent install-service`.
+# OpenScreenTime agent — hardened unit (TAMPER.md level 1).
+# Installed to /etc/systemd/system/openscreentime-agent.service by `openscreentime install-service`.
 [Unit]
-Description=Sentinel zero-trust device management agent
-Documentation=https://sentinel.example/docs
+Description=OpenScreenTime agent
+Documentation=https://github.com/one-more-refactor/openscreentime
 After=network-online.target
 Wants=network-online.target
 # Never give up restarting (level 1: strong persistence).
@@ -10,7 +10,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sentinel-agent run
+ExecStart=/usr/local/bin/openscreentime run
 Restart=always
 RestartSec=1
 # Survive OOM pressure — the agent must not be the first thing killed.
@@ -29,7 +29,7 @@ OOMScoreAdjust=-1000
 #   /etc/dnsmasq.d              — absent until dnsmasq is; the agent writes its
 #                                 conf-dir include stub here, and under
 #                                 ProtectSystem=strict it cannot without this
-#   /etc/wireguard              — managed VPN profile lands in sentinel.conf
+#   /etc/wireguard              — managed VPN profile lands in openscreentime.conf
 #   /etc/openvpn/client         — same, for the openvpn transport
 #
 # The two VPN dirs matter more than they look: enforce/vpn.rs propagates a
@@ -43,16 +43,23 @@ OOMScoreAdjust=-1000
 # pinned itself to whatever version it was installed with, which is exactly
 # how devices end up running builds with known lockout bugs forever.
 ProtectSystem=strict
-ReadWritePaths=/etc/sentinel /var/lib/sentinel /run/sentinel /etc/resolv.conf -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin
-RuntimeDirectory=sentinel
-StateDirectory=sentinel
+#
+# The three "-/…/sentinel" entries are the previous product name. They are
+# OPTIONAL (leading "-") and exist purely so the one-time migration can read
+# and remove them: under ProtectSystem=strict the agent cannot see a path that
+# is not listed, so without these an upgraded device would silently start with
+# an empty usage ledger — i.e. every child's spent time back to zero. They can
+# be dropped once no device predates the rename.
+ReadWritePaths=/etc/openscreentime /var/lib/openscreentime /run/openscreentime /etc/resolv.conf -/etc/sentinel -/var/lib/sentinel -/run/sentinel -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin
+RuntimeDirectory=openscreentime
+StateDirectory=openscreentime
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.
 ProtectHome=false
 # NoNewPrivileges is intentionally OFF: enforcement shells out to nft/resolvectl/chattr.
 NoNewPrivileges=false
-# Watchdog: the agent (or the companion timer) refreshes /run/sentinel/heartbeat.
+# Watchdog: the agent (or the companion timer) refreshes /run/openscreentime/heartbeat.
 # If you build the agent with sd_notify support, enable WatchdogSec here instead of
-# relying on the sentinel-watchdog.timer:
+# relying on the openscreentime-watchdog.timer:
 # WatchdogSec=30
 
 [Install]

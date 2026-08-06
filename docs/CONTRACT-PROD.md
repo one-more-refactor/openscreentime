@@ -186,7 +186,7 @@ hash; `""` clears it; a non-empty value (≥4 chars) sets a new hash. The plaint
 stored or returned.
 
 The agent verifies an entered PIN against this hash locally (works offline): (a) as a master
-override on the lockout overlay, and (b) via `sentinel-agent unlock --pin <PIN> [--minutes N]`,
+override on the lockout overlay, and (b) via `ost unlock --pin <PIN> [--minutes N]`,
 which suspends enforcement (tears down the nft table, un-pins resolv.conf) for N minutes. Root
 required for the CLI unlock.
 
@@ -197,10 +197,10 @@ re-asserts it every loop (so nothing drifts open while the command server is unr
 a `network_offline` tamper event once, and a `network_online` event on recovery. It does NOT
 black out all traffic — the device stays usable under its existing strict allowlist.
 
-## 12. Per-user tray companion (`sentinel-agent tray`, feature `tray`)
+## 12. Per-user tray companion (`ost tray`, feature `tray`)
 
 The root agent publishes an atomically-replaced, world-readable snapshot at
-`/run/sentinel/status.json` every tick (connection state, device/user lock+freeze state,
+`/run/openscreentime/status.json` every tick (connection state, device/user lock+freeze state,
 per-user used/remaining minutes; `remote_shell_open` was dropped with the shell in v0.4,
 see §3). A feature-gated subcommand
 (`cargo build --features tray`, `ksni` + `notify-rust`, session bus only, **no root**) polls it
@@ -216,8 +216,8 @@ every 5s and renders:
   pending freeze countdown, frozen on/off, fail-closed/back-online, device lock/lockdown
   on/off.
 
-`install-service` best-effort drops `client/systemd/sentinel-tray.service` into
-`/etc/systemd/user/`; each desktop user opts in with `systemctl --user enable --now sentinel-tray`
+`install-service` best-effort drops `client/systemd/openscreentime-tray.service` into
+`/etc/systemd/user/`; each desktop user opts in with `systemctl --user enable --now openscreentime-tray`
 (never auto-enabled).
 
 ## 12. Parent daily jobs (2026-07-14)
@@ -257,9 +257,9 @@ every 5s and renders:
 - **Self-update (client `update.rs`):** ~2 min after startup, then daily: fetch the manifest;
   if `version` is newer than `CARGO_PKG_VERSION` and a `x86_64-linux-musl`/`headless`
   artifact exists, download → verify sha256 of the exact bytes → stage as
-  `/usr/local/bin/.sentinel-agent.new` → keep old as `sentinel-agent.bak` → atomic rename →
-  emit `tamper` info event `agent_updated` (old→new) → `systemctl restart sentinel-agent`
-  via `Exec` (dry-run safe). Only runs when the process IS `/usr/local/bin/sentinel-agent`
+  `/usr/local/bin/.openscreentime.new` → keep old as `openscreentime.bak` → atomic rename →
+  emit `tamper` info event `agent_updated` (old→new) → `systemctl restart openscreentime`
+  via `Exec` (dry-run safe). Only runs when the process IS `/usr/local/bin/openscreentime`
   and the build is headless x86_64. Gates: `auto_update = true` (agent.toml, default) and
   `SENTINEL_NO_SELF_UPDATE=1` kill switch.
 - **Trust model v1 (decided):** artifact integrity = sha256-over-TLS from the enrolled
@@ -269,8 +269,8 @@ every 5s and renders:
   binaries verify independently of the transport.
 - **Rollback:** systemd `Restart=` + the watchdog timer is the safety net for a broken
   binary; `install-service` re-copies the running binary (unchanged); manual rollback:
-  `mv /usr/local/bin/sentinel-agent.bak /usr/local/bin/sentinel-agent && systemctl restart
-  sentinel-agent`.
+  `mv /usr/local/bin/openscreentime.bak /usr/local/bin/ost && systemctl restart
+  openscreentime`.
 - **Registration lockdown:** register start/finish → 403 `registration_closed` once ≥1 admin
   exists, unless `SENTINEL_OPEN_REGISTRATION=1`; a valid session whose admin email matches
   the request email bypasses (Settings add-passkey flow). First boot (0 admins) stays open.

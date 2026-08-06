@@ -1,4 +1,4 @@
-//! `sentinel-agent unlock` — the full agent-unlock recovery path ("admin is
+//! `openscreentime unlock` — the full agent-unlock recovery path ("admin is
 //! physically here"). Verifies the parent PIN against the cached policy's
 //! `parent_pin_hash` (argon2, fully offline) and, on success, suspends network
 //! enforcement for a configurable window: tears down the sentinel nft table,
@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// `sentinel-agent unlock --pin <PIN> [--minutes <N>]`.
+/// `openscreentime unlock --pin <PIN> [--minutes <N>]`.
 pub fn run(ctx: &Arc<AgentCtx>, pin: &str, minutes: u64) -> Result<()> {
     ctx.require_root_for_enforcement()?;
 
@@ -92,7 +92,7 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     Ok(())
 }
 
-/// Spawn a detached child (`sentinel-agent __resume-enforcement <secs>`) that
+/// Spawn a detached child (`openscreentime __resume-enforcement <secs>`) that
 /// sleeps out the suspend window, then re-applies the cached policy.
 fn spawn_resume(secs: u64) -> Result<()> {
     let exe = std::env::current_exe().context("resolving current executable")?;
