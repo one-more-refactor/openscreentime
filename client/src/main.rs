@@ -1,4 +1,4 @@
-//! openscreentime — the Linux client for the Sentinel zero-trust device management
+//! openscreentime — the Linux client for the OpenScreenTime zero-trust device management
 //! platform. Single binary; subcommands: enroll, run, install-service, status.
 //!
 //! Global safety flags (honored everywhere):
@@ -138,7 +138,7 @@ enum Cmd {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("sentinel_agent=info,info"));
+        .unwrap_or_else(|_| EnvFilter::new("openscreentime=info,info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

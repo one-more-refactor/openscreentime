@@ -3,7 +3,7 @@ name = "openscreentime"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Sentinel zero-trust device management — Linux client agent"
+description = "OpenScreenTime — zero-trust device management, Linux client agent"
 license = "MIT"
 
 [[bin]]
@@ -11,7 +11,7 @@ name = "openscreentime"
 path = "src/main.rs"
 
 [dependencies]
-sentinel-policy = { path = "../policy" }
+openscreentime-policy = { path = "../policy" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -41,7 +41,7 @@ hex = "0.4"
 # agent builds and runs on a headless dev box (see lockout.rs for the stub path).
 eframe = { version = "0.28", optional = true, default-features = false, features = ["default_fonts", "glow"] }
 
-# Optional per-user system-tray helper (`sentinel-agent tray`): StatusNotifierItem
+# Optional per-user system-tray helper (`openscreentime tray`): StatusNotifierItem
 # icon + desktop notifications. Pure-Rust/DBus (no display libs), but only built
 # with `--features tray` so the headless agent stays lean.
 ksni = { version = "0.2", optional = true }

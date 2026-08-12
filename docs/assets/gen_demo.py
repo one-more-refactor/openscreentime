@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an on-brand animated terminal demo GIF for the Sentinel README.
+"""Generate an on-brand animated terminal demo GIF for the OpenScreenTime README.
 Nothing-style: near-black bg, one red accent, LED status dots, corner ticks."""
 import sys
 from PIL import Image, ImageDraw, ImageFont
@@ -29,14 +29,14 @@ PAD_X, BODY_Y = 40, 118
 # ("type", prompt, cmd) | ("led", color, label, value) | ("plain", color, text)
 # ("section", text) | ("blank",) | ("hold", frames)
 PROG = [
-    ("type", "$ ", "deploy/setup.sh --domain sentinel.example.com"),
+    ("type", "$ ", "deploy/setup.sh --domain ost.example.com"),
     ("hold", 8),
     ("led", OK, "generating secrets", "done"),
     ("led", OK, "building server + database", "done"),
     ("led", OK, "waiting for health", "healthy · 856b11b"),
     ("blank",),
     ("section", "ADD DEVICE — paste on the device you're managing"),
-    ("type", "$ ", "curl -fsSL https://sentinel.example.com/install.sh | sudo sh"),
+    ("type", "$ ", "curl -fsSL https://ost.example.com/install.sh | sudo sh"),
     ("hold", 8),
     ("led", OK, "downloading agent  (sha256 verified)", "done"),
     ("led", OK, "enrolling", "done"),

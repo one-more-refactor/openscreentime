@@ -73,7 +73,7 @@ A light theme mirrors these (white surfaces, black ink, same accent). Dark is de
 
 ## Layout
 
-- Left rail: wordmark (`SENTINEL` in dot font), nav (DEVICES / PROFILES / EVENTS / SETTINGS),
+- Left rail: wordmark (`OpenScreenTime` wordmark), nav (DEVICES / PROFILES / EVENTS / SETTINGS),
   admin identity + logout at the bottom.
 - Main: page header (mono uppercase + count Stat), content grid of `Panel`s.
 - Density: airy. Big margins. Content max-width ~1200px.
