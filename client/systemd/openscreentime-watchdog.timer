@@ -1,6 +1,6 @@
 # Runs the watchdog check every 30s.
 [Unit]
-Description=Sentinel agent watchdog timer
+Description=OpenScreenTime agent watchdog timer
 
 [Timer]
 OnBootSec=60

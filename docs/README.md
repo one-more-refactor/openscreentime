@@ -1,4 +1,4 @@
-# Sentinel documentation
+# OpenScreenTime documentation
 
 Pick your entry point by who you are. Every doc is written against the actual code —
 where a limitation exists, the doc says so instead of rounding up.

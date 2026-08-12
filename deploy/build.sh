@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sentinel — build the compose stack's images.
+# OpenScreenTime — build the compose stack's images.
 #
 # Works both on the VPS (typical: rootless Podman) and locally (Podman or
 # Docker). Safe to re-run; each run rebuilds from the current source tree.
@@ -49,7 +49,7 @@ cat <<'EOF'
 
 Next steps (first-time setup):
   1. cp .env.example .env
-  2. edit .env — set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, SENTINEL_PUBLIC_URL
+  2. edit .env — set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
   3. podman-compose up -d      # (or: podman compose up -d / docker compose up -d)
   4. check logs:  podman-compose logs -f server
 

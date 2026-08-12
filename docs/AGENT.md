@@ -1,4 +1,4 @@
-# The Sentinel Linux Agent
+# The OpenScreenTime Linux Agent
 
 Reference for `openscreentime`, the Rust binary that runs on a managed Linux
 machine: what it installs, what it writes to disk, how it enforces policy,
@@ -15,7 +15,7 @@ explicitly.
 ### One-liner (headless, x86_64 — what the server serves)
 
 ```sh
-curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=xxx sh -s -- --server https://HOST
+curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 ```
 
 or with the token on the command line (`--token xxx` instead of the env
@@ -28,7 +28,7 @@ curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token
 `server/install.sh` (served at `GET /install.sh`) does, in order:
 
 1. Validates args: requires `--server https://HOST` and a token
-   (`SENTINEL_TOKEN` env or `--token`); refuses plain `http://` unless
+   (`OST_TOKEN` env or `--token`); refuses plain `http://` unless
    `--insecure-http` is passed (dev only); requires root and `x86_64`.
 2. `GET {server}/api/agent/latest`, parses out the artifact whose
    `"features"` is `"headless"` (sed, not jq — the target may not have jq).
@@ -41,7 +41,7 @@ curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token
 5. `chmod 0755`, `mv -f` into place, then runs `ost enroll
    --server ... --token ...` followed by `ost install-service`.
 
-Prefer the `SENTINEL_TOKEN=xxx` env form over `--token xxx`: the installer
+Prefer the `OST_TOKEN=xxx` env form over `--token xxx`: the installer
 warns you if you use `--token`, because it can linger in shell history and
 was briefly visible in the process list (`ps`). The token is single-use
 either way.
@@ -88,7 +88,7 @@ Subcommands:
 | `time` | `--json` | How much screen time the calling user has left today. Reads the per-user status snapshot the agent writes each tick. Safe non-root, no display needed. |
 | `ask` | `--json` | Sends a time request to a parent, from the keyboard. Writes a marker inside the caller's own `/run/user/<uid>/openscreentime/` — which is what proves the request came from them. Safe non-root. |
 | `login` | `--print-url` `--json` | Opens the console in a browser, already signed in, using this computer's enrollment as proof. See [Autologin](#autologin-ost-login). |
-| `pair` | `--server <URL>` `--token <TOKEN>` | Stores a scoped **parent access token** (minted in the web console → Settings → Parent access) at `~/.config/sentinel/parent.toml` (`0600`). Enables the tray's parent mode. Runs as the desktop user, never root. |
+| `pair` | `--server <URL>` `--token <TOKEN>` | Stores a scoped **parent access token** (minted in the web console → Settings → Parent access) at `~/.config/openscreentime/parent.toml` (`0600`). Enables the tray's parent mode. Runs as the desktop user, never root. |
 | `tray` | — | *(feature `tray` only)* Per-user tray companion — see [Build features matrix](#build-features-matrix). With a `pair`ed token it also shows and approves time requests. Runs as the desktop user, never root. |
 | `unlock` | `--pin <PIN>` `--minutes <N>` (default 60) | Parent-PIN recovery: verifies the PIN against the cached policy, offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Requires root. See [Lockout](#lockout-gui--wall-fallback). |
 
@@ -171,7 +171,7 @@ What a voucher session can and cannot do:
 | Variable | Purpose |
 |---|---|
 | `OST_CONFIG` | Read/write the agent config at this path instead of `/etc/openscreentime/agent.toml`. For development and tests — it lets `enroll`, `status` and `login` be exercised without root. The systemd unit sets no such variable, so it cannot redirect what the real root agent reads. |
-| `SENTINEL_NO_SELF_UPDATE=1` | Disable the daily self-update at runtime. |
+| `OST_NO_SELF_UPDATE=1` | Disable the daily self-update at runtime. |
 
 ## Files on disk
 
@@ -183,21 +183,21 @@ What a voucher session can and cannot do:
 | `/usr/local/bin/.openscreentime.download.$$` | root : — | `install.sh` (transient) | Staging path for the initial download; renamed atomically into place, cleaned up by a trap on any exit. |
 | `/etc/openscreentime/agent.toml` | root : **0600** | `enroll` | Persisted identity: `server_url`, `device_id`, `device_token`, `poll_interval_secs`, `tamper_level`, `auto_update`. See [Config fields](#config-fields). |
 | `/etc/openscreentime/policy_cache.json` | root : **0600** | `run` (after every applied policy bundle) | Last-applied effective `Policy`, JSON. Not read by enforcement itself (that's in-memory); exists only so `unlock` can verify the parent PIN and know what to tear down without a live agent process. |
-| `/etc/openscreentime/dnsmasq.d/sentinel.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
+| `/etc/openscreentime/dnsmasq.d/openscreentime.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
 | `/etc/resolv.conf` | root : default, **immutable (`chattr +i`)** | `run` (DNS enforcement) | Pinned to `nameserver 127.0.0.1`; the immutable bit stops a managed user from repointing it. Re-asserted every tick if it drifts. |
-| `/etc/wireguard/sentinel.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@sentinel`. |
-| `/etc/openvpn/client/sentinel.conf` | root : **0600** | `run` (VPN enforcement) | Same for an OpenVPN profile; runs as `openvpn-client@sentinel`. |
-| `/etc/polkit-1/rules.d/49-sentinel.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `sentinel-admin` and `root` always retain access. |
-| `/etc/systemd/logind.conf.d/50-sentinel.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
+| `/etc/wireguard/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@openscreentime`. |
+| `/etc/openvpn/client/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | Same for an OpenVPN profile; runs as `openvpn-client@openscreentime`. |
+| `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `ost-admin` and `root` always retain access. |
+| `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
 | `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Transparency snapshot for the tray: connection state, device-lock / offline-lockdown / tamper-lockdown flags, per-user used/remaining minutes, frozen state, freeze countdown, and a short queue of agent-published notifications (id, title, body, urgency, target user) for the tray to deliver as desktop notifications. |
 | `/run/openscreentime/unlock_pin.<user>` | dropped by a companion tool acting for the parent | consumed by `run` every tick | A **PIN attempt** (plaintext), single-use — read once and deleted regardless of outcome. Verified directly against `parent_pin_hash`; grants `PIN_OVERRIDE_GRANT_MIN` (30) minutes on match. This is the headless (no-GUI) parent-PIN override path. |
 | `/run/openscreentime/unlock_grant.<user>` | root-only dir (0755) — no managed user can write here | written by the `__lockout` GUI subprocess on a verified dismissal; consumed by `run` every tick | An **already-verified** unlock, trusted at face value (safe only because `/run/openscreentime` is root-owned). Value is minutes granted, clamped to 1–240: 30 for a parent-PIN dismiss, 5 for a solved math challenge, single-use. |
 | `/var/lib/openscreentime/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
-| `~/.config/sentinel/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
-| `~/.config/sentinel/intro_seen` | the desktop user : default | `__intro` (writes) / `tray` (checks) | Marker that the first-run child intro has been shown. Present = don't show it again. |
-| `/run/user/<uid>/sentinel/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
+| `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
+| `~/.config/openscreentime/intro_seen` | the desktop user : default | `__intro` (writes) / `tray` (checks) | Marker that the first-run child intro has been shown. Present = don't show it again. |
+| `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
 
 ### Config fields
 
@@ -229,7 +229,7 @@ Installed by `install-service` (source in `client/systemd/`):
 - `OOMScoreAdjust=-1000` — survives OOM pressure; the agent must not be the
   first thing killed.
 - `ProtectSystem=strict` with an explicit `ReadWritePaths=` carve-out for
-  `/etc/sentinel /var/lib/openscreentime /run/openscreentime /etc/resolv.conf
+  `/etc/openscreentime /var/lib/openscreentime /run/openscreentime /etc/resolv.conf
   /etc/polkit-1/rules.d /etc/systemd/logind.conf.d` — everything else is
   read-only.
 - `ProtectHome=false` **intentionally** — the agent must watch user
@@ -239,9 +239,9 @@ Installed by `install-service` (source in `client/systemd/`):
 - A commented-out `WatchdogSec=30` line for `sd_notify`-based watchdogging,
   as an alternative to the separate `openscreentime-watchdog.timer`.
 
-The polkit rule (`49-sentinel.rules`) denies non-root
+The polkit rule (`49-openscreentime.rules`) denies non-root
 `power-off`/`reboot`/`suspend`; at tamper level 3 it additionally denies
-`systemctl stop/disable/mask` on `openscreentime-agent.service`. `sentinel-admin`
+`systemctl stop/disable/mask` on `openscreentime-agent.service`. `ost-admin`
 and `root` always retain full access — that's the permanent recovery path
 at every tamper level.
 
@@ -266,7 +266,7 @@ features — the tray *user* unit is always written, it's just inert without
 ### DNS
 
 `client/src/enforce/dns.rs`. Renders a dnsmasq config
-(`/etc/openscreentime/dnsmasq.d/sentinel.conf`) and restarts the local `dnsmasq`
+(`/etc/openscreentime/dnsmasq.d/openscreentime.conf`) and restarts the local `dnsmasq`
 (falling back to `resolvectl flush-caches` if that's what's running
 instead). Under `default_deny` (and not a `*` wildcard allowlist), only
 allowlisted domains get a `server=/domain/upstream` forward line, and a
@@ -280,7 +280,7 @@ drifts off the local resolver.
 
 ### Firewall
 
-`client/src/enforce/firewall.rs`. A single `inet sentinel` nftables table,
+`client/src/enforce/firewall.rs`. A single `inet openscreentime` nftables table,
 applied atomically via one `nft -f -` transaction (`add table` → `delete
 table` → fresh rules) so a malformed policy aborts the whole load and
 leaves the last-known-good table in place, never a fail-open gap.
@@ -302,10 +302,10 @@ policy.
 console (device → VPN PROFILE). The agent reconciles declaratively on
 every policy apply: profile present → write the config (root-only `0600`;
 dry-run logs withhold the body — it contains the private key), `systemctl
-enable` + `restart` the matching unit (`wg-quick@sentinel` /
-`openvpn-client@sentinel`, switching kinds tears the other down); profile
+enable` + `restart` the matching unit (`wg-quick@openscreentime` /
+`openvpn-client@openscreentime`, switching kinds tears the other down); profile
 absent → stop/disable the unit and delete the config. The firewall
-cooperates: the tunnel interface (`sentinel` / `tun*`) and the parsed
+cooperates: the tunnel interface (`openscreentime` / `tun*`) and the parsed
 endpoint(s) (`Endpoint =` / `remote` lines) are accepted **ahead of** the
 lockdown drop rules, so the parent's own tunnel survives `block_vpn` and
 default-deny. A profile whose unit isn't active after apply (wg-quick /
@@ -396,7 +396,7 @@ Kill switches (any one disables it):
 | Switch | Effect |
 |---|---|
 | `auto_update = false` in `agent.toml` | Disables self-update for this device. |
-| `SENTINEL_NO_SELF_UPDATE=1` (env var on the service) | Runtime override, no config edit needed. |
+| `OST_NO_SELF_UPDATE=1` (env var on the service) | Runtime override, no config edit needed. |
 | Built with `--features gui` or `--features tray`, or a non-x86_64 target | Never enabled — the server only ships a headless x86_64 artifact, and a feature-richer local build must never be silently downgraded to it. |
 | Process is not literally `/usr/local/bin/openscreentime` | A `cargo run` dev build (or any binary run from elsewhere) never self-updates. |
 | `--dry-run` | Logs what it would install and restart, does nothing. |
@@ -407,7 +407,7 @@ Kill switches (any one disables it):
 device stays usable under its *existing* policy — self-update and offline
 handling never black out all traffic):
 
-1. **Grace period** (`SENTINEL_OFFLINE_GRACE_SECS`, default 900s / 15 min).
+1. **Grace period** (`OST_OFFLINE_GRACE_SECS`, default 900s / 15 min).
    Measured against the last successful WS message or poll/heartbeat
    (`Instant`-based, does not survive a reboot — a fresh process starts the
    clock at "now"). Past the grace window: emit one `network_offline`
@@ -432,7 +432,7 @@ handling never black out all traffic):
   (add `-u openscreentime-watchdog.service` to see restart-on-stale-heartbeat
   triggers). Verbosity is controlled by `RUST_LOG` (standard
   `tracing-subscriber` `EnvFilter` syntax, e.g.
-  `RUST_LOG=sentinel_agent=debug`); default is `sentinel_agent=info,info`.
+  `RUST_LOG=openscreentime=debug`); default is `openscreentime=info,info`.
 - **Simulate without touching the host**: `sudo ost run
   --dry-run` (or any subcommand). Every enforcement action logs `WOULD RUN:
   ...` / `WOULD WRITE ...` instead of executing — safe even as non-root, and
@@ -445,7 +445,7 @@ handling never black out all traffic):
   `/etc/openscreentime/agent.toml` (enroll wasn't run before `install-service`,
   or the file was deleted) — `run` bails immediately with "not enrolled?".
 - **Firewall/DNS looks wrong or "stuck open"**: check whether the nft table
-  exists (`nft list table inet sentinel`) — the agent repairs a missing
+  exists (`nft list table inet openscreentime`) — the agent repairs a missing
   table on the next tick, but only if it's actually still running; if the
   service is down, nothing is enforced (fail-open is possible only while
   the process itself is dead — this is what the watchdog timer exists to
@@ -469,7 +469,7 @@ handling never black out all traffic):
   `policy_cache.json` doesn't exist yet, this path is unavailable — it
   fails with "no cached policy on this device".
 - **Self-update never happens**: check `auto_update` in `agent.toml`,
-  `SENTINEL_NO_SELF_UPDATE`, that the binary is a plain headless build
+  `OST_NO_SELF_UPDATE`, that the binary is a plain headless build
   (`gui`/`tray` builds never self-update), and that it's actually running
   from `/usr/local/bin/openscreentime` (`current_exe()` must match exactly).
 - **Tray shows "AGENT NOT RUNNING"**: `/run/openscreentime/status.json` is

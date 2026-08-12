@@ -217,7 +217,7 @@ pub fn render_ascii(spec: &LockSpec) -> String {
     s.push_str(&dot_row);
     s.push('\n');
     s.push_str(&format!(
-        "\n    ▍ SENTINEL — {}\n\n",
+        "\n    ▍ OPENSCREENTIME — {}\n\n",
         spec.for_user.to_uppercase()
     ));
     if let Some(n) = &spec.big_number {
@@ -337,7 +337,7 @@ pub fn present(exec: &Exec, spec: &LockSpec) {
         "wall",
         &[
             "-n",
-            &format!("SENTINEL: {} — {}", spec.headline, spec.detail),
+            &format!("OPENSCREENTIME: {} — {}", spec.headline, spec.detail),
         ],
     );
     tracing::warn!("LOCKOUT ({}): {}\n{}", spec.for_user, spec.headline, screen);
@@ -550,7 +550,7 @@ pub mod gui {
         };
         // Best-effort: if there's no display this returns an error we just log.
         if let Err(e) = eframe::run_native(
-            "SENTINEL",
+            "OPENSCREENTIME",
             native,
             Box::new(move |_cc| {
                 let deadline = spec.countdown_secs.map(|s| {

@@ -19,8 +19,8 @@ CREATE TABLE admin_sessions (
 );
 ```
 
-- Cookie: `sentinel_session`, `HttpOnly`, `SameSite=Lax`, **`Secure` unless env
-  `SENTINEL_INSECURE_COOKIES=1`** (dev). TTL 30 days, sliding not required.
+- Cookie: `ost_session`, `HttpOnly`, `SameSite=Lax`, **`Secure` unless env
+  `OST_INSECURE_COOKIES=1`** (dev). TTL 30 days, sliding not required.
 - Expired rows deleted lazily on lookup (`DELETE ... WHERE expires_at < now()` opportunistically).
 - WebAuthn *challenges* stay in-memory (short-lived, single-process acceptable).
 - Logout deletes the row.
@@ -28,7 +28,7 @@ CREATE TABLE admin_sessions (
 ## 2. Rate limiting (server-only)
 
 Simple in-memory fixed-window limiter (no new deps), keyed by client IP
-(`X-Forwarded-For` first value if `SENTINEL_TRUST_PROXY=1`, else peer addr):
+(`X-Forwarded-For` first value if `OST_TRUST_PROXY=1`, else peer addr):
 
 - `/api/auth/*` (all login/register/OIDC starts + finishes): 10 req / 60 s / IP → 429.
 - `/agent/enroll`: 5 req / 60 s / IP → 429.
@@ -97,9 +97,9 @@ earned_minutes_today } ] }` (this previously-unused endpoint becomes real; joine
 ## 6. OIDC SSO (Authentik)
 
 Env config (all optional; feature off unless all three set):
-`SENTINEL_OIDC_ISSUER` (e.g. `https://auth.example.com/application/o/sentinel/`),
-`SENTINEL_OIDC_CLIENT_ID`, `SENTINEL_OIDC_CLIENT_SECRET`, optional
-`SENTINEL_OIDC_NAME` (display label, default "SSO").
+`OST_OIDC_ISSUER` (e.g. `https://auth.example.com/application/o/openscreentime/`),
+`OST_OIDC_CLIENT_ID`, `OST_OIDC_CLIENT_SECRET`, optional
+`OST_OIDC_NAME` (display label, default "SSO").
 
 - Discovery via `<issuer>/.well-known/openid-configuration` fetched at startup (reqwest,
   rustls). Authorization-code flow, scopes `openid email profile`.
@@ -113,8 +113,8 @@ Env config (all optional; feature off unless all three set):
     passkey registration), session, redirect `/`.
   - If admins exist but email unknown → redirect `/login?error=sso_unknown_account` (no
     auto-provisioning of extra admins — this is a family server).
-- Redirect URI: `<SENTINEL_PUBLIC_URL>/api/auth/oidc/callback`; new env
-  `SENTINEL_PUBLIC_URL` (falls back to RP origin already configured for WebAuthn).
+- Redirect URI: `<OST_PUBLIC_URL>/api/auth/oidc/callback`; new env
+  `OST_PUBLIC_URL` (falls back to RP origin already configured for WebAuthn).
 
 ## 7. Passkey management
 
@@ -136,7 +136,7 @@ Env config (all optional; feature off unless all three set):
 - Web: delete unused `api.ts` functions that remain unused after this work
   (`deleteDevice` and `listDeviceUsers` become used; `closeSsh` becomes used; `getProfile`
   delete if still unused), `Device.online` type field.
-- Presets: add a Rust test asserting each preset JSON round-trips through `sentinel_policy::Policy`
+- Presets: add a Rust test asserting each preset JSON round-trips through `openscreentime_policy::Policy`
   with no unknown-field loss (serialize(parse(x)) == normalize(x)) so drift is caught.
 - Command-ack logic: single shared fn used by both HTTP ack and WS ack paths.
 
@@ -157,7 +157,7 @@ event type — the capability behind it is gone (see §3), but the rows and the 
 
 ## 11. Network lockdown + parent PIN (v1 prod)
 
-Two new fields on the shared Policy document (`sentinel-policy` crate; mirrored in
+Two new fields on the shared Policy document (`openscreentime-policy` crate; mirrored in
 `web/src/types.ts`). Both are optional and omitted from serialized output when unset, so
 existing preset JSON stays byte-identical (the preset drift guard depends on this).
 
@@ -192,7 +192,7 @@ required for the CLI unlock.
 
 ### Fail-closed offline behavior
 The agent tracks last successful server contact. Beyond a grace window
-(`SENTINEL_OFFLINE_GRACE_SECS`, default 900) it keeps the last-known policy fully enforced and
+(`OST_OFFLINE_GRACE_SECS`, default 900) it keeps the last-known policy fully enforced and
 re-asserts it every loop (so nothing drifts open while the command server is unreachable), emits
 a `network_offline` tamper event once, and a `network_online` event on recovery. It does NOT
 black out all traffic — the device stays usable under its existing strict allowlist.
@@ -210,7 +210,7 @@ every 5s and renders:
   `security-medium` offline-within-grace, `security-low` fail-closed/locked/frozen/lockdown),
   tooltip `TIME LEFT: NN MIN · ONLINE` (or `NO LIMIT` / `PAUSED`);
 - a read-only menu (time left, connection) plus
-  `ABOUT SENTINEL` → notification "This device is managed. Screen time and network filtering
+  `ABOUT OPENSCREENTIME` → notification "This device is managed. Screen time and network filtering
   are active.";
 - desktop notifications on state **transitions only**: remaining time crossing ≤10/≤2 min,
   pending freeze countdown, frozen on/off, fail-closed/back-online, device lock/lockdown
@@ -261,7 +261,7 @@ every 5s and renders:
   emit `tamper` info event `agent_updated` (old→new) → `systemctl restart openscreentime`
   via `Exec` (dry-run safe). Only runs when the process IS `/usr/local/bin/openscreentime`
   and the build is headless x86_64. Gates: `auto_update = true` (agent.toml, default) and
-  `SENTINEL_NO_SELF_UPDATE=1` kill switch.
+  `OST_NO_SELF_UPDATE=1` kill switch.
 - **Trust model v1 (decided):** artifact integrity = sha256-over-TLS from the enrolled
   server. A compromised server therefore compromises the fleet — this is ALREADY the trust
   reality (the server can push arbitrary root commands to agents), so self-update does not
@@ -272,5 +272,5 @@ every 5s and renders:
   `mv /usr/local/bin/openscreentime.bak /usr/local/bin/ost && systemctl restart
   openscreentime`.
 - **Registration lockdown:** register start/finish → 403 `registration_closed` once ≥1 admin
-  exists, unless `SENTINEL_OPEN_REGISTRATION=1`; a valid session whose admin email matches
+  exists, unless `OST_OPEN_REGISTRATION=1`; a valid session whose admin email matches
   the request email bypasses (Settings add-passkey flow). First boot (0 admins) stays open.

@@ -1,4 +1,4 @@
-# Sentinel — production compose stack (rootless Podman / podman-compose, or
+# OpenScreenTime — production compose stack (rootless Podman / podman-compose, or
 # docker compose). Builds the server+web image from ../Containerfile and runs
 # it behind the operator's EXISTING external reverse proxy (which terminates
 # TLS) — see docs/DEPLOY.md.
@@ -13,20 +13,20 @@
 services:
   db:
     image: docker.io/library/postgres:15
-    container_name: sentinel-db
+    container_name: openscreentime-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_USER: ${POSTGRES_USER:-openscreentime}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-sentinel}
+      POSTGRES_DB: ${POSTGRES_DB:-openscreentime}
     # Prod: keep Postgres internal-only (no host port published). For local
     # debugging you can temporarily uncomment the next two lines.
     # ports:
     #   - "127.0.0.1:5432:5432"
     volumes:
-      - sentinel_pgdata:/var/lib/postgresql/data
+      - ost_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openscreentime} -d ${POSTGRES_DB:-openscreentime}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -35,36 +35,41 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    container_name: sentinel-server
+    container_name: openscreentime-server
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-sentinel}
+      DATABASE_URL: postgres://${POSTGRES_USER:-openscreentime}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-openscreentime}
       RP_ID: ${RP_ID:?set RP_ID in .env}
       RP_ORIGIN: ${RP_ORIGIN:?set RP_ORIGIN in .env}
-      SENTINEL_PUBLIC_URL: ${SENTINEL_PUBLIC_URL:-${RP_ORIGIN}}
+      OST_PUBLIC_URL: ${OST_PUBLIC_URL:-${RP_ORIGIN}}
       BIND_ADDR: 0.0.0.0:8080
       # This stack only ever sits behind the host's reverse proxy (the app
       # port is loopback-published below), so default to trusting the proxy's
       # X-Forwarded-For: without it the rate limiter keys every visitor by
       # the proxy's own IP — one shared bucket → spurious 429 lockouts.
       # Set 0 only if you expose the port directly (not the supported layout).
-      SENTINEL_TRUST_PROXY: ${SENTINEL_TRUST_PROXY:-1}
-      # SENTINEL_INSECURE_COOKIES intentionally NOT set here — cookies stay
+      OST_TRUST_PROXY: ${OST_TRUST_PROXY:-1}
+      # OST_INSECURE_COOKIES intentionally NOT set here — cookies stay
       # Secure in prod. Only set it in .env for local plain-http testing.
-      SENTINEL_INSECURE_COOKIES: ${SENTINEL_INSECURE_COOKIES:-}
-      SENTINEL_OIDC_ISSUER: ${SENTINEL_OIDC_ISSUER:-}
-      SENTINEL_OIDC_CLIENT_ID: ${SENTINEL_OIDC_CLIENT_ID:-}
-      SENTINEL_OIDC_CLIENT_SECRET: ${SENTINEL_OIDC_CLIENT_SECRET:-}
-      SENTINEL_OIDC_NAME: ${SENTINEL_OIDC_NAME:-}
-      RUST_LOG: ${RUST_LOG:-sentinel_server=info,tower_http=info,info}
-    # Bind to loopback only: the app port is reached exclusively via the
-    # host's existing external reverse proxy (which terminates TLS and
-    # forwards to 127.0.0.1:${SENTINEL_PORT}). Do NOT publish on 0.0.0.0.
+      OST_INSECURE_COOKIES: ${OST_INSECURE_COOKIES:-}
+      OST_OIDC_ISSUER: ${OST_OIDC_ISSUER:-}
+      OST_OIDC_CLIENT_ID: ${OST_OIDC_CLIENT_ID:-}
+      OST_OIDC_CLIENT_SECRET: ${OST_OIDC_CLIENT_SECRET:-}
+      OST_OIDC_NAME: ${OST_OIDC_NAME:-}
+      RUST_LOG: ${RUST_LOG:-openscreentime_server=info,tower_http=info,info}
+    # Defaults to loopback: the app port is normally reached only via the host's
+    # own reverse proxy (which terminates TLS and forwards to the port below).
+    #
+    # OST_BIND_ADDR exists for the split deployment — proxy on one host, this
+    # stack on another — where the app must listen on a LAN address the proxy
+    # can route to. Set it to that specific address, never 0.0.0.0: the server
+    # trusts X-Forwarded-For (OST_TRUST_PROXY), so anything that can reach the
+    # port directly can also forge its own client IP past the rate limiter.
     ports:
-      - "127.0.0.1:${SENTINEL_PORT:-8080}:8080"
+      - "${OST_BIND_ADDR:-127.0.0.1}:${OST_PORT:-8080}:8080"
 
 volumes:
-  sentinel_pgdata:
+  ost_pgdata:
