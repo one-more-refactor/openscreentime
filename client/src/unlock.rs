@@ -1,7 +1,7 @@
 //! `openscreentime unlock` — the full agent-unlock recovery path ("admin is
 //! physically here"). Verifies the parent PIN against the cached policy's
 //! `parent_pin_hash` (argon2, fully offline) and, on success, suspends network
-//! enforcement for a configurable window: tears down the sentinel nft table,
+//! enforcement for a configurable window: tears down our nft table (and the legacy one),
 //! un-pins `/etc/resolv.conf`, and un-freezes every login user. Requires root
 //! (same check every other enforcing subcommand uses).
 //!
@@ -65,9 +65,14 @@ pub fn run(ctx: &Arc<AgentCtx>, pin: &str, minutes: u64) -> Result<()> {
 fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     let _ = policy; // reserved: nothing else to key the teardown on today.
 
-    // 1) Remove the sentinel nft table (default-deny gone → normal connectivity).
-    if let Err(e) = exec.run("nft", &["delete", "table", "inet", "sentinel"]) {
-        tracing::debug!("nft table delete (probably already absent): {e}");
+    // 1) Remove our nft table (default-deny gone → normal connectivity). The
+    // legacy table goes too: an agent upgraded from the Sentinel name can have
+    // left one loaded, and half a teardown is worse than none — the user would
+    // still be firewalled by rules nothing on the box admits to owning.
+    for table in [enforce::firewall::NFT_TABLE, enforce::firewall::LEGACY_NFT_TABLE] {
+        if let Err(e) = exec.run("nft", &["delete", "table", "inet", table]) {
+            tracing::debug!("nft table {table} delete (probably already absent): {e}");
+        }
     }
 
     // 2) Un-pin resolv.conf so the host can use whatever resolver it likes.

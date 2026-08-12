@@ -16,20 +16,20 @@ use crate::policy::{DnsPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
 
-const DNSMASQ_CONF: &str = "/etc/openscreentime/dnsmasq.d/sentinel.conf";
-const SENTINEL_CONF_DIR: &str = "/etc/openscreentime/dnsmasq.d";
+const DNSMASQ_CONF: &str = "/etc/openscreentime/dnsmasq.d/openscreentime.conf";
+const OST_CONF_DIR: &str = "/etc/openscreentime/dnsmasq.d";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const LOCAL_RESOLVER: &str = "127.0.0.1";
 
 /// Distro directories dnsmasq already reads on startup. We drop a one-line
 /// `conf-dir=` stub into the first one that exists, because nothing makes
-/// dnsmasq read [`SENTINEL_CONF_DIR`] on its own — a stock Debian
+/// dnsmasq read [`OST_CONF_DIR`] on its own — a stock Debian
 /// `/etc/dnsmasq.conf` has no active directives at all.
 const DISTRO_CONF_DIRS: &[&str] = &["/etc/dnsmasq.d", "/usr/local/etc/dnsmasq.d"];
 
 /// Filename for that stub. `00-` so it is parsed before anything else in the
 /// directory, since ordering decides who wins on conflicting options.
-const INCLUDE_STUB: &str = "00-sentinel.conf";
+const INCLUDE_STUB: &str = "00-openscreentime.conf";
 
 /// A reason DNS enforcement is not actually in force on this host.
 ///
@@ -92,7 +92,7 @@ impl DnsGap {
     }
 }
 
-/// Make dnsmasq actually read [`SENTINEL_CONF_DIR`].
+/// Make dnsmasq actually read [`OST_CONF_DIR`].
 ///
 /// Writing the ruleset is not enough: dnsmasq only parses `/etc/dnsmasq.conf`
 /// plus whatever `conf-dir` it was given, and a stock Debian install has no
@@ -115,7 +115,7 @@ fn ensure_include(exec: &Exec) -> Option<DnsGap> {
 
     let stub = format!("{dir}/{INCLUDE_STUB}");
     let body =
-        format!("# Managed by openscreentime — do not edit.\nconf-dir={SENTINEL_CONF_DIR}\n");
+        format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n");
     if let Err(e) = exec.write_file(&stub, &body) {
         tracing::error!("could not write dnsmasq include stub {stub}: {e}");
         return Some(DnsGap::PolicyNotLoaded);
@@ -395,11 +395,11 @@ mod tests {
     /// The include stub is what makes dnsmasq read our ruleset at all, so its
     /// contents are load-bearing: a typo here is a silently unfiltered device.
     #[test]
-    fn include_stub_points_at_the_sentinel_conf_dir() {
-        let body = format!("conf-dir={SENTINEL_CONF_DIR}\n");
+    fn include_stub_points_at_the_openscreentime_conf_dir() {
+        let body = format!("conf-dir={OST_CONF_DIR}\n");
         assert!(body.contains("conf-dir=/etc/openscreentime/dnsmasq.d"));
         // The rendered ruleset must live inside the directory we include.
-        assert!(DNSMASQ_CONF.starts_with(SENTINEL_CONF_DIR));
+        assert!(DNSMASQ_CONF.starts_with(OST_CONF_DIR));
         // Sorts first, so a conflicting option later in the dir still wins
         // deliberately rather than by filename accident.
         assert!(INCLUDE_STUB.starts_with("00-"));

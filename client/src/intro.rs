@@ -1,7 +1,7 @@
 //! The one-time, skippable first-run intro shown on the kid's device.
 //!
 //! This is the child-facing documentation: instead of a docs site, a few short,
-//! honest cards the first time the companion runs — what Sentinel does, what a
+//! honest cards the first time the companion runs — what OpenScreenTime does, what a
 //! parent can and can't see, and how to ask for more time. Everything is
 //! skippable and it never shows again once seen (a marker in the user's config
 //! dir). Compiled with `--features gui`; the tray spawns it as a detached
@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-/// `~/.config/sentinel/intro_seen` — presence means "already shown".
+/// `~/.config/openscreentime/intro_seen` — presence means "already shown".
 pub fn seen_marker() -> Option<PathBuf> {
     // Same resolution as the parent config, minus the trailing filename.
     crate::parent::config_path().and_then(|p| p.parent().map(|d| d.join("intro_seen")))
@@ -35,16 +35,16 @@ pub fn mark_seen() {
 /// The cards. Short, honest, kid-first — the same promises as TRANSPARENCY.md.
 const SLIDES: &[(&str, &str)] = &[
     (
-        "THIS COMPUTER HAS SENTINEL",
+        "THIS COMPUTER HAS OPENSCREENTIME",
         "It manages screen time and blocks some things on the network. Here's the honest version — swipe through, or skip.",
     ),
     (
         "WHAT A PARENT CAN SEE",
-        "How much screen time you've used, on which device, and if someone tampers with Sentinel. That's it.",
+        "How much screen time you've used, on which device, and if someone tampers with OpenScreenTime. That's it.",
     ),
     (
         "WHAT THEY CAN'T SEE",
-        "Not your screen. Not what you type. Not your messages, and not your browsing history. Sentinel doesn't watch you — it counts time and filters the network.",
+        "Not your screen. Not what you type. Not your messages, and not your browsing history. OpenScreenTime doesn't watch you — it counts time and filters the network.",
     ),
     (
         "SCREEN TIME",
@@ -52,11 +52,11 @@ const SLIDES: &[(&str, &str)] = &[
     ),
     (
         "NEED MORE TIME?",
-        "Click the Sentinel tray icon and choose REQUEST MORE TIME. A parent gets the request and can say yes.",
+        "Click the OpenScreenTime tray icon and choose REQUEST MORE TIME. A parent gets the request and can say yes.",
     ),
     (
         "ONE MORE THING",
-        "There is no remote shell, no camera, no message reading. Sentinel only enforces time and network rules — and everything it does shows up right here. That's the deal.",
+        "There is no remote shell, no camera, no message reading. OpenScreenTime only enforces time and network rules — and everything it does shows up right here. That's the deal.",
     ),
 ];
 
@@ -137,11 +137,11 @@ fn show() {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 380.0])
-            .with_title("Sentinel"),
+            .with_title("OpenScreenTime"),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native(
-        "SENTINEL",
+        "OPENSCREENTIME",
         native,
         Box::new(|_cc| Ok(Box::new(IntroApp { slide: 0 }))),
     ) {

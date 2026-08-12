@@ -1,14 +1,14 @@
 #!/bin/sh
-# Sentinel agent installer — served by the server at GET /install.sh.
+# OpenScreenTime agent installer — served by the server at GET /install.sh.
 #
-#   curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=xxx sh -s -- --server https://HOST
+#   curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 #   curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token xxx
 #
-# The SENTINEL_TOKEN env form is preferred: it keeps the enroll token out of
+# The OST_TOKEN env form is preferred: it keeps the enroll token out of
 # argv, so it never shows up in `ps` or shell history on the target machine.
 set -eu
 
-SERVER="" TOKEN="${SENTINEL_TOKEN:-}" INSECURE_HTTP=0 TOKEN_VIA_ARGV=0
+SERVER="" TOKEN="${OST_TOKEN:-}" INSECURE_HTTP=0 TOKEN_VIA_ARGV=0
 BIN=/usr/local/bin/openscreentime
 # Which build to install. "auto" picks the desktop (gui+tray) artifact on a
 # machine that has a graphical session and falls back to headless everywhere
@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$SERVER" ] || fail "--server https://HOST is required"
-[ -n "$TOKEN" ] || fail "an enroll token is required (SENTINEL_TOKEN env or --token)"
+[ -n "$TOKEN" ] || fail "an enroll token is required (OST_TOKEN env or --token)"
 SERVER="${SERVER%/}"
 
 # Security decision: the enroll token and the downloaded binary must not travel
@@ -128,5 +128,5 @@ echo "Device enrolled — it should appear online in the console within a minute
 if [ "$TOKEN_VIA_ARGV" = 1 ]; then
   echo "NOTE: the enroll token was passed via --token, so it may linger in this"
   echo "shell's history and was briefly visible in the process list. The token is"
-  echo "single-use, but prefer the SENTINEL_TOKEN=... env form next time."
+  echo "single-use, but prefer the OST_TOKEN=... env form next time."
 fi

@@ -1,9 +1,9 @@
 //! Policy wire types. The shared `Policy` document itself lives in the
-//! `sentinel-policy` crate (also used by the server — one definition, no
+//! `openscreentime-policy` crate (also used by the server — one definition, no
 //! drift); this module re-exports it and adds the agent-side
 //! `GET /agent/policy` response envelope.
 
-pub use sentinel_policy::*;
+pub use openscreentime_policy::*;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -132,7 +132,7 @@ mod tests {
     /// `profile_kind` and the VPN profile — this pins that we cache verbatim.
     #[test]
     fn bundle_cache_round_trips_every_field() {
-        let dir = std::env::temp_dir().join("sentinel-bundle-cache-test");
+        let dir = std::env::temp_dir().join("openscreentime-bundle-cache-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("policy_bundle.json");
 

@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn https_is_accepted() {
-        assert!(ensure_secure_server("https://sentinel.example.com").is_ok());
+        assert!(ensure_secure_server("https://ost.example.com").is_ok());
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn public_http_is_rejected() {
-        assert!(ensure_secure_server("http://sentinel.example.com").is_err());
+        assert!(ensure_secure_server("http://ost.example.com").is_err());
         assert!(ensure_secure_server("http://203.0.113.7:8080").is_err());
     }
 }

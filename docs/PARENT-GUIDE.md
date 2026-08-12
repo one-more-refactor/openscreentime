@@ -1,4 +1,4 @@
-# Using Sentinel — a guide for parents
+# Using OpenScreenTime — a guide for parents
 
 This is the day-to-day guide to the web console: enrolling devices, setting policy, granting
 time, and reading what the system is telling you. It assumes the server is already running —
@@ -13,18 +13,18 @@ otherwise.
 
 ## First login & passkeys
 
-Sentinel is passkey-only — no passwords, anywhere. The first time anyone opens the console,
+OpenScreenTime is passkey-only — no passwords, anywhere. The first time anyone opens the console,
 the **FIRST ADMIN** tab on the login page is open: enter an email and register a passkey, and
 the tenant is bootstrapped around that account. The instant that first admin exists, the
 registration endpoints start refusing new accounts (`403 registration_closed`) — a public
-Sentinel URL can't be hijacked by whoever finds it first. If you need a second parent to have
-their own admin login later, the existing admin sets `SENTINEL_OPEN_REGISTRATION=1` on the
+OpenScreenTime URL can't be hijacked by whoever finds it first. If you need a second parent to have
+their own admin login later, the existing admin sets `OST_OPEN_REGISTRATION=1` on the
 server briefly (see DEPLOY.md), or — more simply — adds another passkey to the *same* account.
 
 To add a second passkey (e.g. so both parents can unlock the console from their own phone or
 laptop, or so you have a backup if you lose one device): go to **Settings → Passkeys** and
 click **+ ADD PASSKEY**. Every passkey is listed with when it was added and last used, and can
-be removed individually — except your last one. Sentinel will not let you delete your only
+be removed individually — except your last one. OpenScreenTime will not let you delete your only
 passkey; you'd lock yourself out, and there's no password reset to fall back on. Add a spare
 before you travel.
 
@@ -34,7 +34,7 @@ From **Devices**, click **+ ADD DEVICE** and give it a name (e.g. "Living Room P
 device is created in a `pending` state and you're shown a one-line install command:
 
 ```sh
-curl -fsSL https://your-server/install.sh | sudo SENTINEL_TOKEN=<token> sh -s -- --server https://your-server
+curl -fsSL https://your-server/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://your-server
 ```
 
 Run that as root on the target Linux machine. It downloads a sha256-verified agent binary,
@@ -49,7 +49,7 @@ token with a new 24-hour window. Once a device has actually enrolled it holds it
 token and this option disappears — a re-enroll at that point means deleting and re-adding the
 device.
 
-Sentinel can also find things for you: **LAN DISCOVERY** on the Devices page lets an online
+OpenScreenTime can also find things for you: **LAN DISCOVERY** on the Devices page lets an online
 device scan its local subnet (ARP + a light port sweep) for other hosts. Results show IP, MAC,
 and open ports (the hostname/vendor columns exist but aren't populated yet), each with an
 **ENROLL →** shortcut that pre-fills the add-device name. Scans only run when you trigger them — nothing scans in the background.
@@ -94,11 +94,11 @@ boot persistence, and real-time tamper alerts. Level 3 — "MAXIMUM LOCKDOWN" �
 disables TTY switching and locks the systemd unit against a `systemctl stop` from the managed
 user. It requires an explicit confirm because **it can lock the admin out too**; the recovery
 paths are the parent PIN (`ost unlock` run locally on the machine, or typed into
-the lockout screen), the local `sentinel-admin` account (exempt from every lockdown rule), or
+the lockout screen), the local `ost-admin` account (exempt from every lockdown rule), or
 dropping back to Level 1 from the console. Read the confirmation dialog before you enable it.
 
 And the honest limit that applies to all of this: if the person at the keyboard has physical
-access and root, no software lock is unbypassable — only expensive and detectable. Sentinel's
+access and root, no software lock is unbypassable — only expensive and detectable. OpenScreenTime's
 promise is deterrence plus real-time alerting, not magic. See `docs/TAMPER.md` for the full
 threat model.
 
@@ -145,7 +145,7 @@ once nothing is assigned to them.
 ## Screen time day-to-day
 
 Limits are tracked **per Linux user account**, not per device — the device detail page's
-**USERS · SCREEN TIME TODAY** panel lists every OS user Sentinel has seen on that machine, each
+**USERS · SCREEN TIME TODAY** panel lists every OS user OpenScreenTime has seen on that machine, each
 with a usage bar (used minutes vs. earned minutes, reset daily) and a profile picker.
 
 What the child actually experiences, in order, as their time runs out:
@@ -209,7 +209,7 @@ device, you have to set one.
 Every profile is default-deny for both DNS and firewall — nothing resolves or connects unless
 you've explicitly allowed it. What the child sees when they hit something blocked, today, is
 whatever their browser shows for a domain that doesn't resolve — an NXDOMAIN, "can't reach this
-site," "server not found," depending on the browser. **There is no Sentinel-branded explainer
+site," "server not found," depending on the browser. **There is no OpenScreenTime-branded explainer
 page yet.** It looks like the site is broken or offline, not like a filter. If you're
 troubleshooting "the internet doesn't work" complaints, this is the first thing to check —
 have them try a site that should be allowed, or check the allowlist on their profile.
@@ -233,7 +233,7 @@ used — this is where to see exactly when and why.
 
 Earlier versions had a **SHELL** button that opened a real root terminal to the device,
 always disclosed to the child while it was live. That feature has been **removed
-entirely** — there is no remote shell at all anymore, and nothing in Sentinel can reach a
+entirely** — there is no remote shell at all anymore, and nothing in OpenScreenTime can reach a
 terminal or the files on a managed device. Everything you can do as a parent goes through
 this console. The promise to the child got simpler and stronger in the process: instead of
 "a shell is never open without you knowing," it's now "there is no shell."

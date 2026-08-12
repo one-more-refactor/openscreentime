@@ -1,4 +1,4 @@
-# Operating Sentinel (day 2)
+# Operating OpenScreenTime (day 2)
 
 This is the day-2 operator guide: updating, backup/restore, monitoring,
 recovering access, and cleaning up. For first-time install (reverse proxy,
@@ -12,7 +12,7 @@ that's what you run instead.
 ## Updating
 
 ```sh
-cd sentinel
+cd openscreentime
 deploy/update.sh
 ```
 
@@ -34,7 +34,7 @@ To pin one device to its current version (skip a bad release):
 ```sh
 # on the device, as root
 mkdir -p /etc/systemd/system/openscreentime-agent.service.d
-printf '[Service]\nEnvironment=SENTINEL_NO_SELF_UPDATE=1\n' \
+printf '[Service]\nEnvironment=OST_NO_SELF_UPDATE=1\n' \
   > /etc/systemd/system/openscreentime-agent.service.d/no-self-update.conf
 systemctl daemon-reload && systemctl restart openscreentime-agent.service
 ```
@@ -52,7 +52,7 @@ systemctl start openscreentime-agent.service
 ## Backup & restore
 
 Two things are all the durable state: the Postgres volume
-(`sentinel_pgdata`) and `.env`. Everything else rebuilds from git +
+(`ost_pgdata`) and `.env`. Everything else rebuilds from git +
 `Containerfile`.
 
 **`.env` holds `POSTGRES_PASSWORD` and is not recoverable if lost.** It's
@@ -62,36 +62,36 @@ authenticate until you restore the correct password into `.env`. Back it up
 alongside the DB dump, not instead of it.
 
 **Passkeys live in the database only** — no separate credential store. Lose
-`sentinel_pgdata` with no backup and every admin passkey and every device
+`ost_pgdata` with no backup and every admin passkey and every device
 identity is gone: admins re-register (see below), devices get re-enrolled
 with fresh tokens. Back up the database like you mean it.
 
 ### Backup
 
-Names are from `compose.yaml`: the `db` container is `sentinel-db`, running
-`POSTGRES_USER=sentinel` / `POSTGRES_DB=sentinel` by default (check `.env`
+Names are from `compose.yaml`: the `db` container is `openscreentime-db`, running
+`POSTGRES_USER=openscreentime` / `POSTGRES_DB=openscreentime` by default (check `.env`
 if you changed them).
 
 ```sh
-cd sentinel
-podman exec sentinel-db pg_dump -U sentinel sentinel > backup-$(date +%F).sql
+cd openscreentime
+podman exec openscreentime-db pg_dump -U openscreentime openscreentime > backup-$(date +%F).sql
 cp .env env-backup-$(date +%F)
 ```
 
 Store both off the VPS — the dump is plain-text SQL, pipe it through
 `gzip`/`age`/your backup pipeline. Run this on a schedule; nothing in
-Sentinel does it for you.
+OpenScreenTime does it for you.
 
 ### Restore
 
 Onto a fresh stack (new VPS, or recovering a wiped volume):
 
 ```sh
-cd sentinel
+cd openscreentime
 cp env-backup-<date> .env
 podman-compose -f compose.yaml up -d db
 podman-compose -f compose.yaml ps db     # wait for healthy
-cat backup-<date>.sql | podman exec -i sentinel-db psql -U sentinel sentinel
+cat backup-<date>.sql | podman exec -i openscreentime-db psql -U openscreentime openscreentime
 podman-compose -f compose.yaml up -d server
 ```
 
@@ -101,18 +101,18 @@ on duplicate keys instead of merging:
 
 ```sh
 podman-compose -f compose.yaml down
-podman volume rm sentinel_pgdata
+podman volume rm ost_pgdata
 podman-compose -f compose.yaml up -d db
 # then replay the dump as above
 ```
 
-Verify with `podman exec sentinel-db psql -U sentinel sentinel -c '\dt'`,
+Verify with `podman exec openscreentime-db psql -U openscreentime openscreentime -c '\dt'`,
 then check `/health` and log in.
 
 ## Monitoring
 
 **`/health`** (unauthenticated) returns `{"status":"ok","service":
-"sentinel-server"}` once the server is accepting connections. It's a
+"openscreentime-server"}` once the server is accepting connections. It's a
 **liveness** check only — it never touches the DB pool (`server/src/main.rs`),
 so 200 doesn't prove Postgres is reachable. `deploy/*.sh` poll it after
 `up -d`. For a real DB check, log in or hit any `/api/*` route.
@@ -122,7 +122,7 @@ so 200 doesn't prove Postgres is reachable. `deploy/*.sh` poll it after
 podman-compose -f compose.yaml logs -f server
 podman-compose -f compose.yaml logs -f db
 ```
-`RUST_LOG` in `.env` (default `sentinel_server=info,tower_http=info,info`)
+`RUST_LOG` in `.env` (default `openscreentime_server=info,tower_http=info,info`)
 controls verbosity — `debug` is noisy, use it temporarily.
 
 **Heartbeat cadence.** WS-connected devices (`/agent/ws`) flip `offline`
@@ -143,10 +143,10 @@ console (`goneDarkDays`, `web/src/lib/format.ts`). Nothing emails or pages
 you about it — check the console, or poll `GET /api/devices` and compute
 the same threshold yourself if you want proactive alerting.
 
-**Phone alerts (optional).** For active pushes to your phone, point Sentinel at
+**Phone alerts (optional).** For active pushes to your phone, point OpenScreenTime at
 a chat channel you already have — a Discord/Slack incoming webhook, or a
-Telegram bot — via `.env` (`SENTINEL_ALERT_WEBHOOK`, or
-`SENTINEL_TELEGRAM_BOT_TOKEN` + `SENTINEL_TELEGRAM_CHAT_ID`; see
+Telegram bot — via `.env` (`OST_ALERT_WEBHOOK`, or
+`OST_TELEGRAM_BOT_TOKEN` + `OST_TELEGRAM_CHAT_ID`; see
 `.env.example`). A background worker (`server/src/alerts.rs`) then sends a short,
 one-way message on each confirmed tamper / device lockdown and each new time
 request — it never reads anything back. It's best-effort and global to the
@@ -160,7 +160,7 @@ configured channel.
 **Lost all admin passkeys.** Registration locks the moment the first admin
 exists (`403 registration_closed`, `server/src/auth.rs`). To get back in:
 
-1. Add `SENTINEL_OPEN_REGISTRATION=1` to `.env`.
+1. Add `OST_OPEN_REGISTRATION=1` to `.env`.
 2. `podman-compose -f compose.yaml up -d server` to pick it up.
 3. Register a new admin (email + passkey) from the login page.
 4. **Remove it from `.env` and recreate again immediately.**
@@ -200,33 +200,33 @@ including port if non-standard. Breaks if you changed the domain, hit the
 console by IP, or sit behind a proxy that rewrites Host. Fix `.env`, then
 `podman-compose -f compose.yaml up -d server`.
 
-**Port conflict on startup.** Something else has `SENTINEL_PORT` (default
+**Port conflict on startup.** Something else has `OST_PORT` (default
 8080). Change it in `.env`, `up -d`, and repoint your reverse proxy.
 
 **`registration_closed` adding a second admin.** Expected once an admin
 exists — it's the register endpoint, not a bug. If you're logged in, use
 **Settings** to add a passkey to your account instead; only use
-`SENTINEL_OPEN_REGISTRATION=1` (above) for a genuinely new, separate admin.
+`OST_OPEN_REGISTRATION=1` (above) for a genuinely new, separate admin.
 
 **Rate limiting collapses everyone onto one bucket (mass 429s).** The
 limiter keys on the last `X-Forwarded-For` hop only when
-`SENTINEL_TRUST_PROXY=1` (`server/src/rate_limit.rs`); otherwise it uses the
+`OST_TRUST_PROXY=1` (`server/src/rate_limit.rs`); otherwise it uses the
 raw peer address, which behind a reverse proxy is the proxy itself — one
 shared bucket for every visitor. `compose.yaml` defaults it to `1` because
 this stack only ever sits behind your reverse proxy. If you see mass 429s
-anyway, check that `SENTINEL_TRUST_PROXY` wasn't overridden to `0` in `.env`
+anyway, check that `OST_TRUST_PROXY` wasn't overridden to `0` in `.env`
 and that your proxy actually appends `X-Forwarded-For` (see DEPLOY.md's
 reverse-proxy requirements).
 
 **Stale container/pod name conflicts on Podman.** `podman-compose` names
-the pod after the project directory (`pod_sentinel` for a checkout named
-`sentinel`). A leftover pod from a previous crash/`down` can make `up -d`
+the pod after the project directory (`pod_openscreentime` for a checkout named
+`openscreentime`). A leftover pod from a previous crash/`down` can make `up -d`
 refuse with "name already in use":
 ```sh
-podman pod rm -f pod_sentinel
+podman pod rm -f pod_openscreentime
 podman-compose -f compose.yaml up -d
 ```
-Destroys running containers in that pod, not the `sentinel_pgdata` volume —
+Destroys running containers in that pod, not the `ost_pgdata` volume —
 data survives.
 
 **Disk filling up from old images.** Every rebuild leaves old layers
@@ -242,7 +242,7 @@ only `enroll`, `run`, `install-service`, `status`, `unlock`) — this is the
 honest manual path.
 
 **Release enforcement first, if you can.** The agent applies state directly
-to the host outside the systemd unit: an `nft` table (`inet sentinel`) and a
+to the host outside the systemd unit: an `nft` table (`inet openscreentime`) and a
 pinned/immutable `/etc/resolv.conf`. Stopping the service does not tear
 these down. If you know the parent PIN, run as root on the device:
 ```sh
@@ -252,7 +252,8 @@ ost unlock --pin <PARENT_PIN> --minutes 0
 the nft table, un-pins `resolv.conf`, un-freezes any frozen users
 (`client/src/unlock.rs`). Without the PIN, do the same by hand:
 ```sh
-nft delete table inet sentinel     # ignore "No such file" if already gone
+nft delete table inet openscreentime   # ignore "No such file" if already gone
+nft delete table inet sentinel         # only on a box upgraded from the old name
 chattr -i /etc/resolv.conf
 # then repoint /etc/resolv.conf at whatever resolver the host should use
 ```
@@ -264,10 +265,25 @@ rm -f /etc/systemd/system/openscreentime-agent.service \
       /etc/systemd/system/openscreentime-watchdog.service \
       /etc/systemd/system/openscreentime-watchdog.timer \
       /etc/systemd/user/openscreentime-tray.service \
-      /etc/polkit-1/rules.d/49-sentinel.rules
+      /etc/polkit-1/rules.d/49-openscreentime.rules
 systemctl daemon-reload
 rm -f /usr/local/bin/ost /usr/local/bin/openscreentime.bak
-rm -rf /etc/sentinel /var/lib/openscreentime
+rm -rf /etc/openscreentime /var/lib/openscreentime
+```
+
+On a machine that ran the product under its previous name, the installer
+retires the old units for you, but a manual uninstall should sweep them too —
+leaving `sentinel-agent.service` enabled means a second agent still enforcing:
+```sh
+systemctl disable --now sentinel-agent.service sentinel-watchdog.timer 2>/dev/null
+rm -f /etc/systemd/system/sentinel-agent.service \
+      /etc/systemd/system/sentinel-watchdog.service \
+      /etc/systemd/system/sentinel-watchdog.timer \
+      /etc/systemd/user/sentinel-tray.service \
+      /etc/polkit-1/rules.d/49-sentinel.rules \
+      /usr/local/bin/sentinel-agent
+systemctl daemon-reload
+rm -rf /etc/sentinel /var/lib/sentinel
 ```
 
 Finally, **delete the device in the console** (device detail page, or

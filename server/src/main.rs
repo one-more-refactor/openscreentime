@@ -1,4 +1,4 @@
-//! Sentinel server — Axum + Tokio + SQLx(Postgres) + webauthn-rs.
+//! OpenScreenTime server — Axum + Tokio + SQLx(Postgres) + webauthn-rs.
 //!
 //! Two surfaces (see docs/API.md):
 //!   * Admin API `/api/*`  — session-cookie auth after passkey login (or OIDC SSO).
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sentinel_server=debug,tower_http=info,info".into()),
+                .unwrap_or_else(|_| "openscreentime_server=debug,tower_http=info,info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -62,10 +62,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("RP_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     // Cookies are Secure unless explicitly opted out for plain-http dev.
-    let cookie_secure = std::env::var("SENTINEL_INSECURE_COOKIES").map(|v| v == "1") != Ok(true);
+    let cookie_secure = std::env::var("OST_INSECURE_COOKIES").map(|v| v == "1") != Ok(true);
     // Public base URL (OIDC redirect URI + post-login redirects); falls back
     // to the WebAuthn RP origin.
-    let public_url = std::env::var("SENTINEL_PUBLIC_URL")
+    let public_url = std::env::var("OST_PUBLIC_URL")
         .ok()
         .filter(|v| !v.trim().is_empty()) // "" from `${VAR:-}` in compose = unset
         .unwrap_or_else(|| rp_origin_str.clone())
@@ -80,10 +80,10 @@ async fn main() -> anyhow::Result<()> {
     // WebAuthn relying party.
     let rp_origin = Url::parse(&rp_origin_str)?;
     let webauthn = WebauthnBuilder::new(&rp_id, &rp_origin)?
-        .rp_name("Sentinel")
+        .rp_name("OpenScreenTime")
         .build()?;
 
-    // OIDC SSO (off unless the SENTINEL_OIDC_* env vars are all set).
+    // OIDC SSO (off unless the OST_OIDC_* env vars are all set).
     let oidc = auth_oidc::init_from_env(&public_url).await?;
 
     let state = AppState {
@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
     // Serve the built web UI (see `web/`) as the fallback for any path that
     // didn't match an /api, /agent, or /health route above — this never
     // shadows those routes since fallbacks only run on unmatched requests.
-    // No-op (API-only) if SENTINEL_WEB_DIR isn't present, e.g. plain `cargo
+    // No-op (API-only) if OST_WEB_DIR isn't present, e.g. plain `cargo
     // run` in dev without a web build.
     let app = match static_web::web_dir() {
         Some(dir) => {
@@ -323,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
     let app = app.layer(cors).layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!("Sentinel server listening on {bind_addr}");
+    tracing::info!("OpenScreenTime server listening on {bind_addr}");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -333,5 +333,5 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "sentinel-server" }))
+    Json(serde_json::json!({ "status": "ok", "service": "openscreentime-server" }))
 }

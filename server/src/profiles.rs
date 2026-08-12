@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::agent::enqueue_command;
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, AuthAdmin};
-use sentinel_policy::Policy;
+use openscreentime_policy::Policy;
 
 /// Minimum parent-PIN length. Short PINs are still hashed, but we reject them
 /// up front so a fat-fingered "1" doesn't become the household's lockout key.

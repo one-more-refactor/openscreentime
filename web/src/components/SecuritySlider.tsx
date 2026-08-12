@@ -117,8 +117,8 @@ export function policyForLevel(level: number, base: Policy): Policy {
 
   // The agent never opens an inbound listener — the remote shell is gone
   // (TAMPER.md). Forcing inbound 22 open only exposed the box's own sshd (and
-  // the polkit-exempt sentinel-admin account) on every café/school network.
-  // The recovery path is the offline PIN + sentinel-admin at the keyboard.
+  // the polkit-exempt ost-admin account) on every café/school network.
+  // The recovery path is the offline PIN + ost-admin at the keyboard.
   next.firewall = {
     ...next.firewall,
     mode: level >= 4 ? "default_deny" : "allow_all",

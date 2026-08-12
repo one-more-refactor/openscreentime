@@ -11,7 +11,7 @@
 //!   * only runs when this process IS `/usr/local/bin/openscreentime` (never
 //!     self-updates a dev `cargo run`),
 //!   * gated by `auto_update = true` in agent.toml AND the
-//!     `SENTINEL_NO_SELF_UPDATE=1` env kill switch,
+//!     `OST_NO_SELF_UPDATE=1` env kill switch,
 //!   * only for a headless x86_64 build (the only artifact the image ships),
 //!   * download → verify sha256 of the exact bytes → chmod 0755 → keep the old
 //!     binary as `openscreentime.bak` (manual rollback) → atomic rename,
@@ -69,8 +69,8 @@ fn enabled(cfg: &AgentConfig) -> bool {
     if !cfg.auto_update {
         return false;
     }
-    if std::env::var("SENTINEL_NO_SELF_UPDATE").map(|v| v == "1") == Ok(true) {
-        tracing::debug!("self-update disabled via SENTINEL_NO_SELF_UPDATE=1");
+    if std::env::var("OST_NO_SELF_UPDATE").map(|v| v == "1") == Ok(true) {
+        tracing::debug!("self-update disabled via OST_NO_SELF_UPDATE=1");
         return false;
     }
     // Only x86_64 is built; another arch must never overwrite itself with it.

@@ -1,11 +1,11 @@
-# Sentinel — production container image.
+# OpenScreenTime — production container image.
 #
 # Multi-stage build producing a single runtime image containing:
-#   - the sentinel-server binary (Rust, from server/ + policy/)
+#   - the openscreentime-server binary (Rust, from server/ + policy/)
 #   - the built web SPA (Bun/Vite, from web/), served by the server itself
-#     via SENTINEL_WEB_DIR (see server/src/static_web.rs).
+#     via OST_WEB_DIR (see server/src/static_web.rs).
 #   - TWO openscreentime binaries under /app/agent, plus a two-artifact
-#     manifest.json, served via SENTINEL_AGENT_DIR (see server/src/agent_dist.rs
+#     manifest.json, served via OST_AGENT_DIR (see server/src/agent_dist.rs
 #     and GET /install.sh):
 #       * headless — musl-static, runs on ANY x86_64 Linux (servers, minimal
 #         installs). Enforcement-complete, no user-facing surface.
@@ -19,7 +19,7 @@
 # GNOME/KDE install already has. Both are x86_64 only for now.
 #
 # Build from the repo root:
-#   podman build -f Containerfile -t sentinel-server:latest .
+#   podman build -f Containerfile -t openscreentime-server:latest .
 
 # ---- Stage 1: Rust builder ------------------------------------------------
 # Rust 1.85+ is required: transitive deps (idna_adapter, via url) declare
@@ -42,7 +42,7 @@ COPY server/ server/
 
 WORKDIR /build/server
 RUN cargo build --release && \
-    install -Dm755 target/release/sentinel-server /out/sentinel-server
+    install -Dm755 target/release/openscreentime-server /out/openscreentime-server
 
 # ---- Stage 1b: Agent builder (headless musl-static + desktop glibc) --------
 FROM docker.io/library/rust:1.90-slim-bookworm AS agent-builder
@@ -102,23 +102,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 sentinel \
-    && useradd --uid 10001 --gid sentinel --no-create-home --shell /usr/sbin/nologin sentinel \
+    && groupadd --gid 10001 openscreentime \
+    && useradd --uid 10001 --gid openscreentime --no-create-home --shell /usr/sbin/nologin openscreentime \
     && mkdir -p /app
 
-COPY --from=server-builder /out/sentinel-server /app/sentinel-server
+COPY --from=server-builder /out/openscreentime-server /app/openscreentime-server
 COPY --from=web-builder /build/web/dist /app/web
 COPY --from=agent-builder /out/agent /app/agent
 
-RUN chown -R sentinel:sentinel /app
+RUN chown -R openscreentime:openscreentime /app
 
-ENV SENTINEL_WEB_DIR=/app/web
-ENV SENTINEL_AGENT_DIR=/app/agent
+ENV OST_WEB_DIR=/app/web
+ENV OST_AGENT_DIR=/app/agent
 ENV BIND_ADDR=0.0.0.0:8080
 
-USER sentinel:sentinel
+USER openscreentime:openscreentime
 WORKDIR /app
 
 EXPOSE 8080
 
-ENTRYPOINT ["/app/sentinel-server"]
+ENTRYPOINT ["/app/openscreentime-server"]

@@ -1,9 +1,9 @@
 //! Device VPN profile enforcement: reconcile the admin-uploaded WireGuard /
 //! OpenVPN client config from the policy bundle onto this host.
 //!
-//! WireGuard configs land in `/etc/wireguard/sentinel.conf` and run as
-//! `wg-quick@sentinel`; OpenVPN configs land in
-//! `/etc/openvpn/client/sentinel.conf` and run as `openvpn-client@sentinel`.
+//! WireGuard configs land in `/etc/wireguard/openscreentime.conf` and run as
+//! `wg-quick@openscreentime`; OpenVPN configs land in
+//! `/etc/openvpn/client/openscreentime.conf` and run as `openvpn-client@openscreentime`.
 //! Config bodies carry private keys, so files are written `0600` root-only and
 //! their contents are withheld from dry-run logs.
 //!
@@ -18,13 +18,13 @@ use crate::policy::VpnProfile;
 use crate::util::Exec;
 use anyhow::Result;
 
-const WG_CONF: &str = "/etc/wireguard/sentinel.conf";
-const WG_UNIT: &str = "wg-quick@sentinel";
-/// wg-quick@sentinel names the tunnel interface after the unit instance.
-const WG_IFACE: &str = "sentinel";
+const WG_CONF: &str = "/etc/wireguard/openscreentime.conf";
+const WG_UNIT: &str = "wg-quick@openscreentime";
+/// wg-quick@openscreentime names the tunnel interface after the unit instance.
+const WG_IFACE: &str = "openscreentime";
 
-const OVPN_CONF: &str = "/etc/openvpn/client/sentinel.conf";
-const OVPN_UNIT: &str = "openvpn-client@sentinel";
+const OVPN_CONF: &str = "/etc/openvpn/client/openscreentime.conf";
+const OVPN_UNIT: &str = "openvpn-client@openscreentime";
 /// OpenVPN's default `dev tun` allocates tun0/tun1/… — match them all.
 const OVPN_IFACE: &str = "tun*";
 
@@ -68,7 +68,7 @@ impl VpnGap {
 /// precede the lockdown drop rules (`block_vpn` drops udp 51820/1194!).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VpnPlan {
-    /// nft `oifname` pattern of the tunnel interface (`"sentinel"` / `"tun*"`).
+    /// nft `oifname` pattern of the tunnel interface (`"openscreentime"` / `"tun*"`).
     pub iface: Option<&'static str>,
     /// Tunnel endpoints to whitelist in the output chain.
     pub endpoints: Vec<Endpoint>,
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn plan_matches_kind() {
         let wg = plan_for("wireguard", "Endpoint = 1.2.3.4:51820\n");
-        assert_eq!(wg.iface, Some("sentinel"));
+        assert_eq!(wg.iface, Some("openscreentime"));
         assert_eq!(wg.endpoints.len(), 1);
         let ovpn = plan_for("openvpn", "remote 1.2.3.4 1194 udp\n");
         assert_eq!(ovpn.iface, Some("tun*"));

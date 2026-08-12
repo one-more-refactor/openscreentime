@@ -1,6 +1,6 @@
-# Sentinel — Web Control Center
+# OpenScreenTime — Web Control Center
 
-The admin web app for **Sentinel**, a zero-trust device-management platform.
+The admin web app for **OpenScreenTime**, a zero-trust device-management platform.
 Nothing-style monochrome UI: dot-grid texture, hairlines, mono uppercase labels,
 oversized dot-numerals, and one restrained accent (Nothing red).
 

@@ -181,14 +181,14 @@ async fn find_admin(db: &sqlx::PgPool, email: &str) -> AppResult<Option<(Uuid, U
 // Registration
 // ---------------------------------------------------------------------------
 
-/// Whether `SENTINEL_OPEN_REGISTRATION=1` re-opens self-registration.
+/// Whether `OST_OPEN_REGISTRATION=1` re-opens self-registration.
 fn open_registration() -> bool {
-    std::env::var("SENTINEL_OPEN_REGISTRATION").map(|v| v == "1") == Ok(true)
+    std::env::var("OST_OPEN_REGISTRATION").map(|v| v == "1") == Ok(true)
 }
 
 /// Registration lockdown (docs/DEPLOY.md): once at least one admin exists the
 /// open register endpoints refuse with 403 `registration_closed`, unless
-/// `SENTINEL_OPEN_REGISTRATION=1` re-opens them. First boot (zero admins) is
+/// `OST_OPEN_REGISTRATION=1` re-opens them. First boot (zero admins) is
 /// always open so the first parent can bootstrap the tenant.
 ///
 /// Exemption: a logged-in admin adding a passkey to their OWN account (the

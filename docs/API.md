@@ -13,7 +13,7 @@ with an appropriate HTTP status.
 Base URL in dev: `http://localhost:8080`.
 
 `GET /health` — unauthenticated liveness check → `{ "status": "ok", "service":
-"sentinel-server" }`.
+"openscreentime-server" }`.
 
 ---
 
@@ -22,7 +22,7 @@ Base URL in dev: `http://localhost:8080`.
 Uses `webauthn-rs`. Registration is first-boot only: while zero admins exist, any email can
 register the first admin (bootstrapping the tenant). Once at least one admin exists,
 `register/start` and `register/finish` refuse with **403 `{ error: { code:
-"registration_closed" } }`** unless `SENTINEL_OPEN_REGISTRATION=1` is set (see
+"registration_closed" } }`** unless `OST_OPEN_REGISTRATION=1` is set (see
 docs/DEPLOY.md). A logged-in admin adding another passkey to their *own* account (the
 Settings page reuses the register ceremony) is always allowed.
 
@@ -40,7 +40,7 @@ Settings page reuses the register ceremony) is always allowed.
 | GET    | `/api/me/2fa`               | → `{ totp_enrolled, email_available, locked_until }`     |
 | POST   | `/api/me/2fa/totp/start`    | → `{ secret, otpauth_uri }`; 409 once an authenticator is confirmed |
 | POST   | `/api/me/2fa/totp/confirm`  | `{ code }` → `{ ok, expires_at }` — confirming is itself a step-up |
-| POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `SENTINEL_STEPUP_WEBHOOK`) |
+| POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `OST_STEPUP_WEBHOOK`) |
 | POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at }`, rotates the session |
 | POST   | `/api/auth/voucher`         | `{ voucher }` → session (device-voucher autologin); the session can read but never starts stepped up |
 
@@ -67,17 +67,17 @@ minutes, counted in the database so a restart does not clear it.
 | DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
 
 Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
-`sentinel_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
-`SENTINEL_INSECURE_COOKIES=1`. WebAuthn *challenge* state is held server-side in a short-TTL
+`ost_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
+`OST_INSECURE_COOKIES=1`. WebAuthn *challenge* state is held server-side in a short-TTL
 in-memory store keyed by a temporary cookie.
 
 ### OIDC SSO (e.g. Authentik)
 
-Enabled when `SENTINEL_OIDC_ISSUER`, `SENTINEL_OIDC_CLIENT_ID` and `SENTINEL_OIDC_CLIENT_SECRET`
-are all set (`SENTINEL_OIDC_NAME` optionally labels the login button, default "SSO"). Endpoints
+Enabled when `OST_OIDC_ISSUER`, `OST_OIDC_CLIENT_ID` and `OST_OIDC_CLIENT_SECRET`
+are all set (`OST_OIDC_NAME` optionally labels the login button, default "SSO"). Endpoints
 are discovered at startup from `<issuer>/.well-known/openid-configuration`; authorization-code
 flow with scopes `openid email profile`; redirect URI is
-`<SENTINEL_PUBLIC_URL>/api/auth/oidc/callback` (`SENTINEL_PUBLIC_URL` falls back to `RP_ORIGIN`).
+`<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL` falls back to `RP_ORIGIN`).
 The callback matches the verified userinfo email against existing admins (any tenant). Fresh
 installs (no admins at all) bootstrap a tenant + admin; an unknown email on a non-empty install
 redirects to `/login?error=sso_unknown_account` (no auto-provisioning); other failures redirect
@@ -86,11 +86,11 @@ to `/login?error=sso_failed`.
 ### Rate limiting
 
 Fixed-window, in-memory, per client IP (**last** `X-Forwarded-For` value when
-`SENTINEL_TRUST_PROXY=1`, else the peer address). A trusted reverse proxy appends the real peer
+`OST_TRUST_PROXY=1`, else the peer address). A trusted reverse proxy appends the real peer
 IP to the end of XFF, so the last hop is the only element the client can't forge — keying on the
 first value would let an attacker rotate `X-Forwarded-For` per request and land each one in a
 fresh bucket, defeating the limiter entirely. Over-limit requests get a 429 error envelope.
-`SENTINEL_TRUST_PROXY` defaults to `1` in the prod compose stack (`compose.yaml`), since the
+`OST_TRUST_PROXY` defaults to `1` in the prod compose stack (`compose.yaml`), since the
 supported deploy always sits behind the bundled reverse proxy.
 
 - auth attempt endpoints (register/login/OIDC start + finish): 10 req / 60 s / IP
@@ -102,7 +102,7 @@ supported deploy always sits behind the bundled reverse proxy.
 ## Agent distribution (public, no auth)
 
 The production image bundles the headless musl-static agent under `/app/agent`
-(`SENTINEL_AGENT_DIR`); a dev `cargo run` has no bundle and these return 404. The binary is
+(`OST_AGENT_DIR`); a dev `cargo run` has no bundle and these return 404. The binary is
 not a secret — enrollment (one-time token) is the auth boundary.
 
 | Method | Path                        | Notes                                                     |
@@ -111,17 +111,17 @@ not a secret — enrollment (one-time token) is the auth boundary.
 | GET    | `/api/agent/download/:file` | the artifact bytes (`application/octet-stream`); `:file` must be a bare filename (no `/` or `..`) |
 | GET    | `/install.sh`               | POSIX installer (embedded from `server/install.sh`)       |
 
-Install one-liner (shown in the web enroll modal; the `SENTINEL_TOKEN` env form keeps the
+Install one-liner (shown in the web enroll modal; the `OST_TOKEN` env form keeps the
 token out of argv/shell history):
 
 ```
-curl -fsSL https://HOST/install.sh | sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
 The script verifies the manifest's sha256 before installing to
 `/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The installed agent
 self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by default;
-`SENTINEL_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
+`OST_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
 
 ---
 
