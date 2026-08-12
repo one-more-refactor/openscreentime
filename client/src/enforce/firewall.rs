@@ -7,7 +7,13 @@ use crate::policy::{FirewallPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
 
-const NFT_TABLE: &str = "sentinel";
+pub(crate) const NFT_TABLE: &str = "openscreentime";
+/// The table name used when the product was called Sentinel.
+///
+/// An agent upgrading in place leaves the old table loaded and still enforcing
+/// its stale ruleset — invisible to everything that now looks for `NFT_TABLE`,
+/// and impossible to notice from the console. Every teardown removes it too.
+pub(crate) const LEGACY_NFT_TABLE: &str = "sentinel";
 
 /// Well-known public DoH resolver addresses (Cloudflare/Google/Quad9/OpenDNS/
 /// AdGuard/NextDNS). `block_doh` drops tcp/udp 443 to all of them — including
@@ -117,7 +123,7 @@ pub fn render_ruleset(
     // must come BEFORE the lockdown drops: `block_vpn` drops udp 51820/1194,
     // which would kill the parent's own tunnel handshake. ----
     if let Some(iface) = vpn.iface {
-        s.push_str("    # sentinel VPN profile: tunnel traffic + endpoint handshake\n");
+        s.push_str("    # openscreentime VPN profile: tunnel traffic + endpoint handshake\n");
         s.push_str(&format!("    oifname \"{iface}\" accept\n"));
     }
     for ep in &vpn.endpoints {
@@ -264,7 +270,14 @@ pub fn apply(
     // upstream) aborts the whole load and leaves the last-known-good table in
     // place — never a window with no table (which would fail OPEN). Other tables
     // (docker, etc.) are untouched.
-    let ruleset = format!("add table inet {NFT_TABLE}\ndelete table inet {NFT_TABLE}\n{body}");
+    // The legacy table is retired in the same transaction, with the same
+    // add-then-delete trick so a box that never had one doesn't abort the load.
+    // An agent upgraded from the Sentinel name otherwise keeps enforcing a
+    // second, stale ruleset that nothing here ever writes to again.
+    let ruleset = format!(
+        "add table inet {LEGACY_NFT_TABLE}\ndelete table inet {LEGACY_NFT_TABLE}\n\
+         add table inet {NFT_TABLE}\ndelete table inet {NFT_TABLE}\n{body}"
+    );
     exec.run_with_stdin("nft", &["-f", "-"], &ruleset)?;
     tracing::info!(
         "firewall applied: default-deny, {} outbound port(s) allowed",
@@ -491,7 +504,7 @@ mod tests {
             ..Default::default()
         };
         let vpn = VpnPlan {
-            iface: Some("sentinel"),
+            iface: Some("openscreentime"),
             endpoints: vec![Endpoint {
                 host: "203.0.113.7".into(),
                 port: 51820,
@@ -499,7 +512,7 @@ mod tests {
             }],
         };
         let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &vpn);
-        let iface_pos = r.find("oifname \"sentinel\" accept").unwrap();
+        let iface_pos = r.find("oifname \"openscreentime\" accept").unwrap();
         let ep_pos = r
             .find("ip daddr 203.0.113.7 udp dport 51820 accept")
             .unwrap();

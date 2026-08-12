@@ -1,4 +1,4 @@
-# AGENTS.md — Sentinel Device Management Platform
+# AGENTS.md — OpenScreenTime Device Management Platform
 
 A guide for AI agents working in this repository. Documents the architecture, commands, patterns, conventions, and gotchas that aren't obvious from reading individual files.
 
@@ -6,7 +6,7 @@ A guide for AI agents working in this repository. Documents the architecture, co
 
 ## Project Overview
 
-**Sentinel** is a zero-trust device management platform for families/small organizations. Three components + shared policy crate:
+**OpenScreenTime** is a zero-trust device management platform for families/small organizations. Three components + shared policy crate:
 
 | Path | Role | Stack |
 |------|------|-------|
@@ -47,8 +47,8 @@ sudo ./target/release/openscreentime install-service
 ### Production Deploy (see `docs/DEPLOY.md`)
 
 ```bash
-git clone <repo> sentinel && cd sentinel
-cp .env.example .env        # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, SENTINEL_PUBLIC_URL
+git clone <repo> openscreentime && cd openscreentime
+cp .env.example .env        # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
 deploy/build.sh             # builds server+web image from Containerfile
 podman-compose up -d
 ```
@@ -60,11 +60,11 @@ podman-compose up -d
 | `DATABASE_URL` | Postgres connection string | Yes (server) |
 | `RP_ID` | WebAuthn relying party ID (bare domain) | Yes |
 | `RP_ORIGIN` | WebAuthn origin (`https://...`) | Yes |
-| `SENTINEL_PUBLIC_URL` | Public HTTPS base URL (OIDC redirect, falls back to RP_ORIGIN) | Prod |
-| `SENTINEL_INSECURE_COOKIES=1` | Allow non-Secure cookies (dev only) | Dev only |
-| `SENTINEL_TRUST_PROXY=1` | Rate limiter keys on last X-Forwarded-For hop | Behind proxy |
-| `SENTINEL_OIDC_ISSUER/CLIENT_ID/CLIENT_SECRET` | OIDC SSO (all three required to enable) | Optional |
-| `SENTINEL_OFFLINE_GRACE_SECS` | Agent fail-closed grace period (default 900s) | Optional |
+| `OST_PUBLIC_URL` | Public HTTPS base URL (OIDC redirect, falls back to RP_ORIGIN) | Prod |
+| `OST_INSECURE_COOKIES=1` | Allow non-Secure cookies (dev only) | Dev only |
+| `OST_TRUST_PROXY=1` | Rate limiter keys on last X-Forwarded-For hop | Behind proxy |
+| `OST_OIDC_ISSUER/CLIENT_ID/CLIENT_SECRET` | OIDC SSO (all three required to enable) | Optional |
+| `OST_OFFLINE_GRACE_SECS` | Agent fail-closed grace period (default 900s) | Optional |
 
 ---
 
@@ -168,7 +168,7 @@ Single source of truth for `Policy` document. All components serialize/deseriali
 
 ### Fail-Closed Offline (Agent)
 - Tracks `last_contact` (any WS message or successful heartbeat)
-- Beyond grace period (`SENTINEL_OFFLINE_GRACE_SECS`, default 900s): `ContactState::OfflineFailClosed`
+- Beyond grace period (`OST_OFFLINE_GRACE_SECS`, default 900s): `ContactState::OfflineFailClosed`
 - Re-asserts last-known policy every tick, emits `network_offline` tamper event once
 - **Does NOT blackhole traffic** — device stays usable under strict allowlist
 
@@ -255,9 +255,9 @@ bun run build          # tsc -b && vite build
 
 1. **Extractor = tenant scoping**: Never write `WHERE tenant_id = ...` manually. Use `AuthAdmin` / `AgentAuth` extractors — they embed `tenant_id` and return 401 if session/token invalid.
 
-2. **Session cookies are DB-backed**: `admin_sessions` table, sha256-hashed token, 30-day TTL (not sliding). `SENTINEL_INSECURE_COOKIES=1` disables `Secure` flag for plain-http dev.
+2. **Session cookies are DB-backed**: `admin_sessions` table, sha256-hashed token, 30-day TTL (not sliding). `OST_INSECURE_COOKIES=1` disables `Secure` flag for plain-http dev.
 
-3. **Rate limiter keys on LAST X-Forwarded-For hop** when `SENTINEL_TRUST_PROXY=1`. First hop is spoofable; last hop = real peer appended by trusted proxy. See `rate_limit.rs:67-78` + test.
+3. **Rate limiter keys on LAST X-Forwarded-For hop** when `OST_TRUST_PROXY=1`. First hop is spoofable; last hop = real peer appended by trusted proxy. See `rate_limit.rs:67-78` + test.
 
 3. **WS command push is best-effort**: `Hub::push` returns `false` if agent not connected. Command stays `queued` in DB; agent pulls on next heartbeat.
 
@@ -330,7 +330,7 @@ bun run build          # tsc -b && vite build
 
 ```bash
 # On VPS
-cd sentinel
+cd openscreentime
 deploy/build.sh --pull    # git pull --ff-only + rebuild
 podman-compose up -d      # rolling restart
 ```
@@ -419,4 +419,4 @@ cargo run  # auto-migrates
 - ❌ Don't silently use mock data in prod builds — `VITE_USE_MOCK=1` is build-time opt-in only
 - ❌ Don't change preset JSON without updating both `presets.rs` AND `docs/PROFILES.md` — drift test catches it
 - ❌ Don't assume agent has inbound connectivity — agent ONLY dials out (HTTPS + WS)
-- ❌ Don't hardcode ports/paths — use constants and env vars (`BIND_ADDR`, `SENTINEL_WEB_DIR`, etc.)
+- ❌ Don't hardcode ports/paths — use constants and env vars (`BIND_ADDR`, `OST_WEB_DIR`, etc.)

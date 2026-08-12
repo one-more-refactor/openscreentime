@@ -1,6 +1,6 @@
-# Sentinel architecture
+# OpenScreenTime architecture
 
-This is the technical map of how Sentinel is put together: the four components,
+This is the technical map of how OpenScreenTime is put together: the four components,
 how they talk, how enforcement actually works on a device, and the trust
 boundaries that decide what the software can and cannot promise. It's written
 against the code — where a limitation exists, it's named rather than rounded up.
@@ -12,7 +12,7 @@ for people building on, operating, or auditing the system.
 
 ## The shape of it
 
-Sentinel is a self-hosted, zero-trust device manager for families and small
+OpenScreenTime is a self-hosted, zero-trust device manager for families and small
 organizations. One server holds policy and identity; each managed device runs a
 root agent that enforces that policy locally and keeps working when the server
 is unreachable. Everything is owned by the operator — their VPS, their domain,
@@ -59,7 +59,7 @@ those shapes (no codegen) — keep it in step when the Rust changes.
 ### Server (`server/`)
 
 Axum over SQLx/Postgres, multi-tenant, single origin. It also serves the built
-web SPA itself (`static_web.rs`, `SENTINEL_WEB_DIR`, SPA fallback), so there's
+web SPA itself (`static_web.rs`, `OST_WEB_DIR`, SPA fallback), so there's
 one origin and no production CORS. Responsibilities:
 
 - **Admin auth** — passkeys only (WebAuthn/FIDO2 via `webauthn-rs`). No
@@ -101,7 +101,7 @@ defenses, and reports usage. Enforcement primitives:
 
 - **DNS** (`enforce/dns.rs`) — pins `/etc/resolv.conf` to a local resolver
   (dnsmasq), sets the immutable bit, re-pins on drift.
-- **Firewall** (`enforce/firewall.rs`) — an `nft` table (`inet sentinel`),
+- **Firewall** (`enforce/firewall.rs`) — an `nft` table (`inet openscreentime`),
   default-deny, applied atomically (`add; delete; table{}` in one `nft -f` so a
   bad rule can never leave the host with no table).
 - **Screen time** (`enforce/screentime.rs`) — per-Linux-user active-seat
@@ -138,7 +138,7 @@ loudly. Pages: Devices, Device detail, Profiles, Approvals, Events, Settings.
 ```
 admin clicks ADD DEVICE ─► server mints one-time enroll_token (TTL) ─► one-liner
    │                                                                      │
-   │   curl install.sh | sudo SENTINEL_TOKEN=… sh                         ▼
+   │   curl install.sh | sudo OST_TOKEN=… sh                         ▼
    │                                          installer downloads + sha256-verifies
    ▼                                          the agent, runs `enroll`
 agent POSTs enroll_token ─► server issues device_token ─► agent writes
@@ -147,7 +147,7 @@ agent POSTs enroll_token ─► server issues device_token ─► agent writes
 
 Registration of the **first admin** is open; the moment an admin exists it locks
 (`403 registration_closed`). Recovery is a deliberate, temporary
-`SENTINEL_OPEN_REGISTRATION=1` window (see [OPERATIONS.md](OPERATIONS.md)).
+`OST_OPEN_REGISTRATION=1` window (see [OPERATIONS.md](OPERATIONS.md)).
 
 ### Policy propagation
 
@@ -188,7 +188,7 @@ own audit events (lock/unlock decisions, earn approvals, anti-cheat findings).
 
 ### No remote shell
 
-Sentinel used to broker a reverse-SSH session from the agent to a browser
+OpenScreenTime used to broker a reverse-SSH session from the agent to a browser
 terminal. That capability was removed in v0.4 — there is no remote shell at
 all anymore; everything an operator can do goes through the UI. Historical
 `ssh` events remain readable in the event log as the record of past sessions.
@@ -229,7 +229,7 @@ un-pins resolv.conf.
 ## Anti-cheat
 
 Screen-time enforcement is only meaningful if the accounting can't be trivially
-reset. Sentinel treats this like an anti-cheat problem with checks on **both**
+reset. OpenScreenTime treats this like an anti-cheat problem with checks on **both**
 ends, and — importantly — it distinguishes a real evasion attempt from a
 transient technical blip before doing anything drastic.
 
@@ -286,7 +286,7 @@ recorded total can't go down); the event makes it visible instead of silent.
 On a device where the user has **physical access and root**, shutdown and
 network disconnection can never be made truly impossible — only expensive and
 detectable. Booting a live USB, pulling the disk, or holding the power button
-are outside software's reach and Sentinel says so. The anti-cheat layer raises
+are outside software's reach and OpenScreenTime says so. The anti-cheat layer raises
 the cost of the *casual* cheats (restart, clock, DNS bypass, firewall tamper)
 and makes the rest loud. See [TAMPER.md](TAMPER.md) for the full boundary.
 
@@ -311,8 +311,8 @@ managed Linux user  ── device_token ─►  agent (root)  ── passkey ─
   it can make correct decisions with no network.
 - The **operator** is trusted, and proves it with a passkey — a phishing- and
   password-database-resistant credential. There is no password to steal.
-- A managed user **with root** collapses the first boundary. Sentinel detects
-  and reports sustained tampering and preserves a `sentinel-admin` recovery path
+- A managed user **with root** collapses the first boundary. OpenScreenTime detects
+  and reports sustained tampering and preserves a `ost-admin` recovery path
   at every tamper level, but does not pretend root can't eventually win.
 
 ---

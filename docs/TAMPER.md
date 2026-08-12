@@ -3,7 +3,7 @@
 ## Threat model & honesty
 
 The managed user may have physical access. If they also have root, **no software can make
-shutdown or network disconnection truly impossible.** Sentinel's goal is therefore:
+shutdown or network disconnection truly impossible.** OpenScreenTime's goal is therefore:
 
 1. **Raise the cost** of tampering (make casual bypass hard).
 2. **Detect and report** every tamper attempt.
@@ -11,7 +11,7 @@ shutdown or network disconnection truly impossible.** Sentinel's goal is therefo
 
 We do NOT claim unbypassable enforcement. Anti-tamper marketing that claims otherwise is
 lying. In the same spirit, everything below describes what the code **actually does today** —
-aspirations live in the "What Sentinel does not do" section, not disguised as features.
+aspirations live in the "What OpenScreenTime does not do" section, not disguised as features.
 The flip side of this doc is [`TRANSPARENCY.md`](TRANSPARENCY.md), which explains the same
 system to the person being managed.
 
@@ -30,20 +30,20 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 - **Watchdog:** a separate `openscreentime-watchdog.timer` runs every 30 s and restarts the agent if
   its heartbeat file (`/run/openscreentime/heartbeat`, touched every enforcement tick) is missing or
   older than 90 s. Killing the agent process buys at most ~30 s.
-- **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-sentinel.rules`) denies
+- **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-openscreentime.rules`) denies
   `org.freedesktop.login1` power-off / reboot / halt / suspend / hibernate / suspend-then-hibernate
-  (and their `-multiple-sessions` variants) to everyone except root and the `sentinel-admin`
+  (and their `-multiple-sessions` variants) to everyone except root and the `ost-admin`
   recovery account. The physical power key and Magic SysRq are kernel/firmware levers a polkit
-  rule cannot reach — see "What Sentinel does not do".
+  rule cannot reach — see "What OpenScreenTime does not do".
 - **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
   re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
-- **Firewall self-repair (fail-closed):** if the sentinel nftables table disappears (e.g.
+- **Firewall self-repair (fail-closed):** if the openscreentime nftables table disappears (e.g.
   `nft flush ruleset`), the tick emits an `nft_flush` (critical) event **and rebuilds the
   table from the effective policy** — a flush buys seconds of open network, not a session.
 - **NetworkManager guard:** each tick polls `nmcli` for overall state; if NetworkManager
   reports disconnected, the agent runs `nmcli networking on` (best-effort) and emits an
   `nm_disconnect` (warn) event. This is a 10-second poll, not a D-Bus subscription — see
-  "What Sentinel does not do".
+  "What OpenScreenTime does not do".
 - **Clock-skew detection:** the enforcement tick runs on a monotonic timer, so wall-clock is
   expected to advance ~10 s per tick. A jump of more than an hour (the classic "set the clock
   back to dodge bedtime" move) emits a `clock_skew` (warn) event.
@@ -63,21 +63,21 @@ Everything in level 1 **plus**:
 
 - The polkit rule additionally denies `stop` / `disable` / `mask` of
   `openscreentime-agent.service` **and** `openscreentime-watchdog.service` / `openscreentime-watchdog.timer`
-  (the recovery net) via `systemctl` for everyone except root and `sentinel-admin`.
-- A logind drop-in (`/etc/systemd/logind.conf.d/50-sentinel.conf`) sets `ReserveVT=0` and
+  (the recovery net) via `systemctl` for everyone except root and `ost-admin`.
+- A logind drop-in (`/etc/systemd/logind.conf.d/50-openscreentime.conf`) sets `ReserveVT=0` and
   `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
-  processes at logout. `sentinel-admin` can revert it.
+  processes at logout. `ost-admin` can revert it.
 - A `boot_guidance` advisory event tells the admin to set a GRUB password, a BIOS/UEFI admin
   password, and disable USB boot. **These are recommendations** — bootloader and firmware are
   physical mitigations software can only advise on, never enforce.
 - **Danger:** level 3 can lock the admin out of their own machine too. The UI requires an
-  explicit confirm; keep the `sentinel-admin` account working before enabling.
+  explicit confirm; keep the `ost-admin` account working before enabling.
 
 ## Offline behavior (fail-closed)
 
 Losing sight of the server never opens the network:
 
-- **Grace window** (default 900 s, `SENTINEL_OFFLINE_GRACE_SECS`): past it, the agent emits a
+- **Grace window** (default 900 s, `OST_OFFLINE_GRACE_SECS`): past it, the agent emits a
   `network_offline` event, keeps the last-known policy enforced, and re-asserts DNS + firewall
   aggressively every tick until contact resumes (`network_online`).
 - **Offline hard-lockdown** (per-policy `lockdown.offline_lockdown_days`, `0` = disabled): a
@@ -94,12 +94,12 @@ Deterrence must never become a hostage situation. At every level:
   (grants 30 minutes), dropped via the root-only file `/run/openscreentime/unlock_pin.<user>`, or
   used with the `ost unlock` CLI. Verification is against the hash and **fails
   closed** — no PIN configured means no PIN unlock.
-- **`sentinel-admin`**: a local account by this name is exempt from every polkit denial
+- **`ost-admin`**: a local account by this name is exempt from every polkit denial
   (power controls, and the level-3 unit-stop mask).
 - Root can always stop the agent (`systemctl stop` at level 1; at level 3 root remains
   exempt from the polkit mask). That is by design — see the threat model.
 
-## What Sentinel does not do
+## What OpenScreenTime does not do
 
 Claims you might expect from this category of product that we deliberately do not make:
 
@@ -135,7 +135,7 @@ Claims you might expect from this category of product that we deliberately do no
 
 ## Remote shell — removed
 
-Sentinel used to include a server-brokered, disclosed remote shell (a root PTY bridged from
+OpenScreenTime used to include a server-brokered, disclosed remote shell (a root PTY bridged from
 the agent to a browser terminal). It was removed in v0.4: **there is no remote shell at
 all anymore** — everything an admin can do goes through the UI, and the agent still never
 opens an inbound listener (it only dials out, preserving default-deny inbound). Historical

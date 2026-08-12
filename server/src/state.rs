@@ -15,7 +15,7 @@ use webauthn_rs::Webauthn;
 
 use crate::error::AppError;
 
-pub const SESSION_COOKIE: &str = "sentinel_session";
+pub const SESSION_COOKIE: &str = "ost_session";
 pub const REG_COOKIE: &str = "reg_sid";
 pub const AUTH_COOKIE: &str = "auth_sid";
 
@@ -77,9 +77,9 @@ impl Hub {
 pub struct AppState {
     pub db: PgPool,
     pub webauthn: Arc<Webauthn>,
-    /// Session cookies are `Secure` unless SENTINEL_INSECURE_COOKIES=1 (dev).
+    /// Session cookies are `Secure` unless OST_INSECURE_COOKIES=1 (dev).
     pub cookie_secure: bool,
-    /// Public base URL (SENTINEL_PUBLIC_URL, falls back to the WebAuthn RP
+    /// Public base URL (OST_PUBLIC_URL, falls back to the WebAuthn RP
     /// origin) — used for OIDC redirect URIs and post-login redirects.
     pub public_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, RegChallenge>>>,

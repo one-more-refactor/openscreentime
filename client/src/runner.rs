@@ -36,12 +36,12 @@ const CHALLENGE_GRANTS_PER_DAY: u32 = 3;
 
 /// Default fail-closed offline grace period: how long the agent tolerates no
 /// server contact (WS message or successful poll/heartbeat) before treating
-/// itself as offline-beyond-grace. Overridable via `SENTINEL_OFFLINE_GRACE_SECS`
+/// itself as offline-beyond-grace. Overridable via `OST_OFFLINE_GRACE_SECS`
 /// (no new Cargo dependency — plain env var).
 const DEFAULT_OFFLINE_GRACE_SECS: u64 = 900;
 
 fn offline_grace_from_env() -> Duration {
-    let secs = std::env::var("SENTINEL_OFFLINE_GRACE_SECS")
+    let secs = std::env::var("OST_OFFLINE_GRACE_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_OFFLINE_GRACE_SECS);
@@ -319,7 +319,7 @@ const _: () = assert!(
 fn ondemand_earn_marker(user: &str) -> Option<std::path::PathBuf> {
     let uid = crate::sysusers::uid_of(user)?;
     Some(std::path::PathBuf::from(format!(
-        "/run/user/{uid}/sentinel/earn_request"
+        "/run/user/{uid}/openscreentime/earn_request"
     )))
 }
 
@@ -985,7 +985,7 @@ impl Agent {
                         } else if self.tamper_lockdown {
                             (
                                 "TAMPERING DETECTED",
-                                "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+                                "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
                             )
                         } else {
                             (
