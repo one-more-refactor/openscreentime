@@ -6,12 +6,12 @@ wins for auth.
 
 ## Today (as-built)
 
-- **Sessions:** opaque token in an HttpOnly cookie `sentinel_session`; DB table
+- **Sessions:** opaque token in an HttpOnly cookie `ost_session`; DB table
   `admin_sessions` stores it sha256-hashed. **Fixed 30-day TTL, no rotation, no
   refresh.** Validated by the `AuthAdmin` extractor. Challenge state (WebAuthn)
   is **in-memory** → single-instance only.
 - **Passkeys:** webauthn-rs 0.5, table `webauthn_credentials`. Registration
-  closes after the first admin unless `SENTINEL_OPEN_REGISTRATION=1`. OIDC SSO
+  closes after the first admin unless `OST_OPEN_REGISTRATION=1`. OIDC SSO
   is hand-rolled.
 - **Accounts:** `tenants` (the family) → `admins` (parents — **no role column,
   no password**) → `device_users` (OS accounts on devices — the kids, **cannot
@@ -20,7 +20,7 @@ wins for auth.
 - **Second factor / email:** **none anywhere.** No TOTP, no email sender. The
   device recovery PIN (argon2) is offline-unlock only, not account 2FA.
 - **Agent:** `enroll_token` (plaintext, 24h) → `device_token` (bearer, hashed).
-  Binary `openscreentime`, env `SENTINEL_TOKEN`.
+  Binary `openscreentime`, env `OST_TOKEN`.
 
 ## Target
 
@@ -108,7 +108,7 @@ wins for auth.
 - **2b — Everyone has an account.** Role + age bracket + birthdate; per-person
   login; adults' private self-tracking; link `device_users` ↔ accounts.
 - **2c — Identifier rename + hardening.** `openscreentime` → `openscreentime-agent`,
-  `SENTINEL_TOKEN` → `OST_TOKEN` (with back-compat); hash `enroll_token` at rest
+  `OST_TOKEN` → `OST_TOKEN` (with back-compat); hash `enroll_token` at rest
   (open red-team item); move WebAuthn challenge state out of memory.
 
 ## Build approach

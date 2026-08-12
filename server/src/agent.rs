@@ -21,7 +21,7 @@ use crate::auth::{gen_token, hash_token};
 use crate::error::{AppError, AppResult};
 use crate::events;
 use crate::state::{AgentAuth, AppState};
-use sentinel_policy::Policy;
+use openscreentime_policy::Policy;
 
 /// Default poll interval handed to agents that fall back to heartbeat polling.
 const POLL_INTERVAL_SECS: u64 = 15;
@@ -469,7 +469,7 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
     .await?;
 
     // The device's own recovery PIN, used wherever the profile does not set one.
-    // Without this the agent never caches a parent_pin_hash, and `sentinel-agent
+    // Without this the agent never caches a parent_pin_hash, and `ost
     // unlock --pin` — the only offline way out of a self-inflicted lockout —
     // refuses before it checks anything.
     let device_pin_hash: Option<String> =
@@ -875,7 +875,7 @@ mod tests {
     }
 
     /// The whole point: a policy served to an agent must carry a
-    /// parent_pin_hash, or `sentinel-agent unlock --pin` refuses and the device
+    /// parent_pin_hash, or `ost unlock --pin` refuses and the device
     /// has no offline way back in. A profile-set PIN must win over the
     /// device-level fallback.
     #[test]

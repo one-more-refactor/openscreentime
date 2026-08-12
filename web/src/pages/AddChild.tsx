@@ -24,7 +24,7 @@ export function AddChild() {
 
   const origin = window.location.origin;
   const oneLiner = enroll
-    ? `curl -fsSL ${origin}/install.sh | sudo SENTINEL_TOKEN=${enroll.enroll_token} sh -s -- --server ${origin}`
+    ? `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${enroll.enroll_token} sh -s -- --server ${origin}`
     : "";
 
   async function create(e: React.FormEvent) {

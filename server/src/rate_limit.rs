@@ -3,10 +3,10 @@
 //!
 //! Keyed by client IP: the *last* `X-Forwarded-For` value (the hop the trusted
 //! proxy appended — the only one a client can't forge) when
-//! `SENTINEL_TRUST_PROXY=1`, otherwise the peer address. Over-limit requests get
+//! `OST_TRUST_PROXY=1`, otherwise the peer address. Over-limit requests get
 //! a 429 with the standard error envelope.
 //!
-//! Correctness depends on `SENTINEL_TRUST_PROXY` matching the deployment: set it
+//! Correctness depends on `OST_TRUST_PROXY` matching the deployment: set it
 //! only when a reverse proxy actually fronts the server (the supported layout,
 //! and the compose default). If it is set while requests can reach the server
 //! directly, a client controls the last XFF hop and can rotate it to dodge the
@@ -50,7 +50,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn from_env() -> Self {
-        let trust_proxy = std::env::var("SENTINEL_TRUST_PROXY").map(|v| v == "1") == Ok(true);
+        let trust_proxy = std::env::var("OST_TRUST_PROXY").map(|v| v == "1") == Ok(true);
         RateLimiter {
             trust_proxy,
             buckets: Mutex::new(HashMap::new()),

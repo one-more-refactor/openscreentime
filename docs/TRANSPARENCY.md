@@ -1,13 +1,13 @@
-# Transparency: what Sentinel actually does on your machine
+# Transparency: what OpenScreenTime actually does on your machine
 
 This document is for you — the person using the managed device, not the parent who set it
-up. It exists because the whole point of Sentinel is that it doesn't lie to you by omission.
+up. It exists because the whole point of OpenScreenTime is that it doesn't lie to you by omission.
 Every claim below is backed by the actual agent code, not marketing copy. If something here
 turns out to be wrong, that's a bug in the product, not an acceptable gap.
 
 ## What this is
 
-Sentinel is a program (`openscreentime`) that runs as root on this computer, filters network
+OpenScreenTime is a program (`openscreentime`) that runs as root on this computer, filters network
 traffic, tracks how long you're logged in, and enforces limits your parent sets. It reports
 status back to a server your family controls. It is not hidden — it shows up in your system
 tray (if you have the companion running), in `systemctl status`, and as a running process.
@@ -53,7 +53,7 @@ somewhere else, not planned, not collected and just "not shown to you":
   forwarded or answered with NXDOMAIN, on your machine, on the spot. The agent does not
   log which domains you requested and does not ship a query log anywhere.
 
-- **No remote shell.** Earlier versions of Sentinel let a parent open a root shell on this
+- **No remote shell.** Earlier versions of OpenScreenTime let a parent open a root shell on this
   device (always disclosed to you while it was live). That capability has been **removed
   entirely** — there is no remote shell at all anymore, and no code path that could open
   one. The promise got stronger: it's no longer "a shell is never open without you
@@ -76,7 +76,7 @@ A parent, from the web dashboard, can push these commands to the agent:
 
 That's everything — and everything on that list goes through the same UI and the same
 audited command queue. There is **no remote shell**: a parent cannot reach a terminal,
-your files, or arbitrary commands on this device through Sentinel. Older versions had a
+your files, or arbitrary commands on this device through OpenScreenTime. Older versions had a
 (always-disclosed) remote shell; it has been removed outright, and any past sessions
 remain visible as `ssh` entries in the event log.
 
@@ -108,7 +108,7 @@ remain visible as `ssh` entries in the event log.
 
 ## What happens if you fight it
 
-Sentinel is honest that it cannot make tampering physically impossible if you have root and
+OpenScreenTime is honest that it cannot make tampering physically impossible if you have root and
 physical access to the machine. What it does instead:
 
 - **Local tampering is detected and repaired automatically.** Editing `/etc/resolv.conf`,
@@ -122,14 +122,14 @@ physical access to the machine. What it does instead:
   checks its heartbeat file on a timer and restarts it again if that goes stale — killing
   the process once doesn't get you anywhere.
 - **If you have root, you can ultimately remove the agent.** No software can prevent that,
-  and Sentinel doesn't claim otherwise — claiming unbypassable enforcement would be a lie.
+  and OpenScreenTime doesn't claim otherwise — claiming unbypassable enforcement would be a lie.
   But it is never a silent bypass: the server marks a device offline within minutes of
   losing contact, and that shows up on your parent's dashboard as plainly as if you'd
   smashed the laptop. Going dark is visible, not invisible.
 
 ## Why it's built this way
 
-The point of Sentinel isn't to spy on you without your knowledge — it's to enforce agreed
+The point of OpenScreenTime isn't to spy on you without your knowledge — it's to enforce agreed
 limits (time, content, bedtime) in a way that's checkable. Every mechanism above either
 reports something structural (time used, lock state, a policy change) or an
 attempt to bypass enforcement. Nothing reports the content of what you do, say, or look at.

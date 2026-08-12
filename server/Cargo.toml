@@ -1,16 +1,16 @@
 [package]
-name = "sentinel-server"
+name = "openscreentime-server"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Sentinel — zero-trust device management platform (server)"
+description = "OpenScreenTime — zero-trust device management platform (server)"
 
 [[bin]]
-name = "sentinel-server"
+name = "openscreentime-server"
 path = "src/main.rs"
 
 [dependencies]
-sentinel-policy = { path = "../policy" }
+openscreentime-policy = { path = "../policy" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
 tokio = { version = "1", features = ["full"] }

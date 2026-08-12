@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to Sentinel, newest first. Each version's section becomes
+All notable changes to OpenScreenTime, newest first. Sections below `0.4.0`
+were written when the product was called Sentinel and keep that name — they
+describe what actually shipped. Each version's section becomes
 the GitHub Release notes verbatim (see `.github/workflows/build.yml`), so it
 is written to be read by a person: the first paragraph says what changed in
 plain language, the bullets carry the detail. Unreleased work accumulates
@@ -12,6 +14,41 @@ patch bump means fixes only. The agent self-updates by comparing this version
 (`x.y.z`, from the crate metadata) against its server's bundled build.
 
 ## [Unreleased]
+
+**Breaking: the product is now OpenScreenTime.** The agent was renamed in the
+previous release; this one finishes the job across the server, the deployment
+and the docs. There are no compatibility shims for the server side — an
+existing deployment needs its `.env` rewritten and its stack recreated.
+
+What changed, and what you have to do about it:
+
+- **Every `SENTINEL_*` environment variable is now `OST_*`** — same names
+  otherwise (`OST_PUBLIC_URL`, `OST_TRUST_PROXY`, `OST_OIDC_*`,
+  `OST_ALERT_WEBHOOK`, `OST_TOKEN`, …). The old names are not read. Rename
+  them in `.env` before redeploying or the server starts with defaults.
+- **Container, volume and database names changed**: `sentinel-db` →
+  `openscreentime-db`, `sentinel-server` → `openscreentime-server`,
+  `sentinel_pgdata` → `ost_pgdata`, and the default Postgres user/database are
+  now `openscreentime`. Compose will not adopt the old volume — dump the
+  database first (`docs/OPERATIONS.md`) and restore into the new stack, or
+  point `POSTGRES_USER`/`POSTGRES_DB` at the old values in `.env`.
+- **The admin session cookie is now `ost_session`**, so every logged-in admin
+  is signed out once on upgrade. Passkeys themselves are unaffected.
+- **New `OST_BIND_ADDR`** (default `127.0.0.1`) publishes the app port on a
+  specific host address, for deployments whose reverse proxy runs on a
+  different machine. Do not set it to `0.0.0.0`: the server trusts
+  `X-Forwarded-For`, so a directly reachable port is a rate-limiter bypass.
+- **Crates renamed** to `openscreentime-server` and `openscreentime-policy`.
+- **Agent-side identifiers** follow the binary: the nftables table is now
+  `inet openscreentime`, the polkit rule `49-openscreentime.rules`, the VPN
+  tunnel `wg-quick@openscreentime` / `openvpn-client@openscreentime`, and the
+  recovery account is **`ost-admin`** (create it before raising the tamper
+  level — the old `sentinel-admin` is no longer exempt from anything).
+- The agent tears down a leftover `inet sentinel` table in the same atomic
+  `nft` transaction as every apply, so an upgraded device can't be left
+  enforcing a stale ruleset that nothing writes to any more.
+- Migration files keep their original wording: sqlx checksums them, and
+  editing one would fail validation on every existing database.
 
 Headline: **the remote shell is gone**. Sentinel no longer contains a remote
 shell at all — everything a parent can do now goes through the UI. The
