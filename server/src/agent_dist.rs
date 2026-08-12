@@ -1,5 +1,5 @@
 //! Agent binary distribution: the container image bundles the musl-static
-//! headless agent under `SENTINEL_AGENT_DIR` (default `/app/agent`, see
+//! headless agent under `OST_AGENT_DIR` (default `/app/agent`, see
 //! Containerfile) together with a `manifest.json` describing version, target,
 //! and sha256. Three public (unauthenticated) endpoints serve it:
 //!
@@ -28,7 +28,7 @@ use crate::error::{AppError, AppResult};
 const INSTALL_SH: &str = include_str!("../install.sh");
 
 fn agent_dir() -> PathBuf {
-    PathBuf::from(std::env::var("SENTINEL_AGENT_DIR").unwrap_or_else(|_| "/app/agent".into()))
+    PathBuf::from(std::env::var("OST_AGENT_DIR").unwrap_or_else(|_| "/app/agent".into()))
 }
 
 /// `GET /api/agent/latest` — the artifact manifest bundled with this image.
@@ -46,7 +46,7 @@ pub async fn latest() -> AppResult<Json<Value>> {
 ///
 /// `:file` is matched as a single path segment (so `/` can't appear), but we
 /// still reject separators and `..` defensively — this handler must never be
-/// able to read outside `SENTINEL_AGENT_DIR`.
+/// able to read outside `OST_AGENT_DIR`.
 pub async fn download(Path(file): Path<String>) -> AppResult<Response> {
     if file.is_empty()
         || file.contains('/')

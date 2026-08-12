@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/deploy-demo.gif" alt="Deploy Sentinel and enroll a device in two commands" width="820">
+<img src="docs/assets/deploy-demo.gif" alt="Deploy OpenScreenTime and enroll a device in two commands" width="820">
 
 ### Zero-trust device management for families — self-hosted, honest, and yours.
 
@@ -8,10 +8,10 @@ Enroll a device, lock it down by default, enforce screen-time and DNS per person
 and approve requests from your phone or your desk. One monochrome control center,
 on **your** infrastructure — no cloud, no accounts, no telemetry.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/one-more-refactor/sentinel/ci.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=CI&color=0a0a0a)](https://github.com/one-more-refactor/sentinel/actions/workflows/ci.yml)
-&nbsp;[![Build](https://img.shields.io/github/actions/workflow/status/one-more-refactor/sentinel/build.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=Build&color=0a0a0a)](https://github.com/one-more-refactor/sentinel/actions/workflows/build.yml)
-&nbsp;[![Release](https://img.shields.io/github/v/release/one-more-refactor/sentinel?style=flat-square&logo=github&logoColor=white&color=0a0a0a&label=Release)](https://github.com/one-more-refactor/sentinel/releases/latest)
-&nbsp;[![GHCR](https://img.shields.io/badge/ghcr.io-sentinel-0a0a0a?style=flat-square&logo=github&logoColor=white)](https://github.com/one-more-refactor/sentinel/pkgs/container/sentinel)
+[![CI](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/ci.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=CI&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/ci.yml)
+&nbsp;[![Build](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/build.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=Build&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/build.yml)
+&nbsp;[![Release](https://img.shields.io/github/v/release/one-more-refactor/openscreentime?style=flat-square&logo=github&logoColor=white&color=0a0a0a&label=Release)](https://github.com/one-more-refactor/openscreentime/releases/latest)
+&nbsp;[![GHCR](https://img.shields.io/badge/ghcr.io-openscreentime-0a0a0a?style=flat-square&logo=github&logoColor=white)](https://github.com/one-more-refactor/openscreentime/pkgs/container/openscreentime)
 
 ![Rust](https://img.shields.io/badge/Rust-1.85+-0a0a0a?style=flat-square&logo=rust&logoColor=white)
 &nbsp;![Postgres](https://img.shields.io/badge/Postgres-16-0a0a0a?style=flat-square&logo=postgresql&logoColor=white)
@@ -29,14 +29,14 @@ Everything below is the whole first run — a server, then a managed device.
 
 ```bash
 # 1 · stand up the server (writes .env, builds, starts, waits for health)
-git clone <this-repo-url> sentinel && cd sentinel
-deploy/setup.sh --domain sentinel.example.com
+git clone <this-repo-url> openscreentime && cd openscreentime
+deploy/setup.sh --domain ost.example.com
 
 # 2 · on the device you want to manage — the console hands you this line
-curl -fsSL https://sentinel.example.com/install.sh | sudo sh
+curl -fsSL https://ost.example.com/install.sh | sudo sh
 ```
 
-Open `https://sentinel.example.com`, register the first admin with a passkey
+Open `https://ost.example.com`, register the first admin with a passkey
 (registration locks the moment you do), and the device shows up online within a
 minute. That's it. See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production details.
 
@@ -151,7 +151,7 @@ root — see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 On a device where someone has **physical access and root**, shutdown and network
 disconnection can never be made *truly* impossible — only expensive and detectable.
-Sentinel's tamper resistance is **strong deterrence + real-time alerting** by default,
+OpenScreenTime's tamper resistance is **strong deterrence + real-time alerting** by default,
 with an opt-in **maximum-lockdown** mode. It never claims otherwise, and it always
 keeps a recovery path. See [`docs/TAMPER.md`](docs/TAMPER.md).
 

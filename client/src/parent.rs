@@ -7,7 +7,7 @@
 //! recent alerts — and lets the parent approve/deny right from the tray menu.
 //!
 //! The token is minted in the web console (Settings → Parent access) and can be
-//! revoked there at any time. It's stored `0600` in `~/.config/sentinel/`.
+//! revoked there at any time. It's stored `0600` in `~/.config/openscreentime/`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub struct ParentConfig {
     pub token: String,
 }
 
-/// `~/.config/sentinel/parent.toml` (honoring `XDG_CONFIG_HOME`).
+/// `~/.config/openscreentime/parent.toml` (honoring `XDG_CONFIG_HOME`).
 ///
 /// An empty env var counts as unset — otherwise `XDG_CONFIG_HOME=""` (which some
 /// launchers export) would resolve to a *relative* path and drop the config in
@@ -33,7 +33,7 @@ pub fn config_path() -> Option<PathBuf> {
     };
     let base =
         non_empty("XDG_CONFIG_HOME").or_else(|| non_empty("HOME").map(|h| h.join(".config")))?;
-    Some(base.join("sentinel").join("parent.toml"))
+    Some(base.join("openscreentime").join("parent.toml"))
 }
 
 impl ParentConfig {
@@ -67,7 +67,7 @@ pub fn pair(server: &str, token: &str) -> Result<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     println!("Paired — saved to {path}");
-    println!("Start the companion:  systemctl --user enable --now sentinel-tray");
+    println!("Start the companion:  systemctl --user enable --now openscreentime-tray");
     Ok(())
 }
 

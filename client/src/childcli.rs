@@ -31,7 +31,7 @@ fn request_dir(uid: u32) -> std::path::PathBuf {
 }
 
 fn legacy_request_dir(uid: u32) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("/run/user/{uid}/sentinel"))
+    std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"))
 }
 
 fn status_path() -> String {
