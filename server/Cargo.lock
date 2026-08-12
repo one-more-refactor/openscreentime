@@ -1328,6 +1328,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "openscreentime-policy"
+version = "0.3.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "openscreentime-server"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "axum-extra",
+ "base32",
+ "base64 0.22.1",
+ "chrono",
+ "dotenvy",
+ "futures",
+ "hex",
+ "hmac",
+ "openscreentime-policy",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webauthn-rs",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1833,47 +1874,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sentinel-policy"
-version = "0.3.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "sentinel-server"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "argon2",
- "axum",
- "axum-extra",
- "base32",
- "base64 0.22.1",
- "chrono",
- "dotenvy",
- "futures",
- "hex",
- "hmac",
- "rand 0.8.6",
- "reqwest",
- "sentinel-policy",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webauthn-rs",
-]
 
 [[package]]
 name = "serde"

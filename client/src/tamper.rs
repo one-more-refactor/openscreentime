@@ -1,6 +1,6 @@
 //! Tamper resistance (TAMPER.md). The honest posture: raise the cost, detect &
 //! report every attempt, recover automatically. We never claim unbypassable
-//! enforcement, and we ALWAYS preserve a `sentinel-admin` root recovery path.
+//! enforcement, and we ALWAYS preserve an `ost-admin` root recovery path.
 //!
 //! Level 1 (default): hardened unit (see `systemd/`), watchdog heartbeat file,
 //! polkit masking of user power controls, NetworkManager disconnect guard,
@@ -16,9 +16,9 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-sentinel.rules";
+pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-openscreentime.rules";
 /// The recovery account that must always retain power/stop rights at every level.
-pub const ADMIN_USER: &str = "sentinel-admin";
+pub const ADMIN_USER: &str = "ost-admin";
 
 /// Write/update the watchdog heartbeat file (mtime = liveness). The watchdog unit
 /// restarts the agent if this goes stale (TAMPER.md L1).
@@ -30,7 +30,7 @@ pub fn touch_heartbeat(exec: &Exec) {
 }
 
 /// The polkit rule content. Denies power-off/reboot/suspend to non-root managed
-/// users; at level 3 also denies stopping the sentinel unit — but `sentinel-admin`
+/// users; at level 3 also denies stopping the openscreentime unit — but `ost-admin`
 /// and root are always allowed (recovery path).
 pub fn render_polkit_rule(level: u8) -> String {
     let mut js = String::new();
@@ -53,7 +53,7 @@ pub fn render_polkit_rule(level: u8) -> String {
     js.push_str("  ];\n");
     js.push_str("  if (power.indexOf(action.id) >= 0) { return polkit.Result.NO; }\n");
     if level >= 3 {
-        js.push_str("  // Level 3: block user-initiated stop/disable of the sentinel units.\n");
+        js.push_str("  // Level 3: block user-initiated stop/disable of the openscreentime units.\n");
         js.push_str("  // The watchdog is the recovery net for a killed/stopped agent, so it\n");
         js.push_str(
             "  // must be protected too — masking it alone would silently disarm recovery.\n",
@@ -61,7 +61,7 @@ pub fn render_polkit_rule(level: u8) -> String {
         js.push_str("  var guarded = [\n");
         js.push_str(&format!("    \"{}\",\n", crate::service::AGENT_UNIT));
         js.push_str(&format!("    \"{}\",\n", crate::service::WATCHDOG_UNIT));
-        js.push_str("    \"sentinel-watchdog.timer\"\n");
+        js.push_str("    \"openscreentime-watchdog.timer\"\n");
         js.push_str("  ];\n");
         js.push_str("  if (action.id == \"org.freedesktop.systemd1.manage-units\" &&\n");
         js.push_str("      guarded.indexOf(action.lookup(\"unit\")) >= 0) {\n");
@@ -83,7 +83,7 @@ pub fn install_polkit(exec: &Exec, level: u8) -> anyhow::Result<()> {
 }
 
 /// Level 3 extras: disable VT switching for managed sessions. We set the kernel
-/// knob that blocks `Ctrl+Alt+F*` (reversible; sentinel-admin can restore).
+/// knob that blocks `Ctrl+Alt+F*` (reversible; ost-admin can restore).
 pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
     // Disable VT switching via the AllowVTSwitch/`kbd` sysctl-ish knob.
     // (kernel.sysrq + logind ReserveVT are the practical levers; documented in README.)
@@ -95,10 +95,10 @@ pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
     // screen-time control into unrelated data loss. The freeze/lockout path
     // already handles sessions; logout behavior stays stock.
     exec.write_file(
-        "/etc/systemd/logind.conf.d/50-sentinel.conf",
+        "/etc/systemd/logind.conf.d/50-openscreentime.conf",
         "# Managed by openscreentime (tamper level 3)\n[Login]\nReserveVT=0\n",
     )?;
-    tracing::info!("level 3: TTY/VT lockdown drop-in written (sentinel-admin can revert)");
+    tracing::info!("level 3: TTY/VT lockdown drop-in written (ost-admin can revert)");
     Ok(())
 }
 
@@ -134,7 +134,7 @@ pub fn reassert_all(exec: &Exec) -> Vec<Event> {
             Some(true) => events.push(tamper_event(
                 "nft_flush",
                 SEV_CRITICAL,
-                "sentinel nftables table missing; ruleset must be re-applied",
+                "openscreentime nftables table missing; ruleset must be re-applied",
             )),
             Some(false) => {}
             // Couldn't check ≠ missing. `nft_flush` is the one kind the tamper
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn polkit_preserves_admin_recovery() {
         let r = render_polkit_rule(3);
-        assert!(r.contains("subject.user == \"sentinel-admin\""));
+        assert!(r.contains("subject.user == \"ost-admin\""));
         assert!(r.contains("org.freedesktop.login1.power-off"));
         assert!(r.contains(crate::service::AGENT_UNIT));
     }
@@ -372,7 +372,7 @@ mod tests {
         // Masking the watchdog alone would silently disarm the recovery net.
         let r = render_polkit_rule(3);
         assert!(r.contains(crate::service::WATCHDOG_UNIT));
-        assert!(r.contains("sentinel-watchdog.timer"));
+        assert!(r.contains("openscreentime-watchdog.timer"));
     }
 
     #[test]

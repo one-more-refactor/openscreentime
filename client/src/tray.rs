@@ -105,7 +105,7 @@ fn read_status(username: &str) -> Option<Status> {
 // Tray model
 // ---------------------------------------------------------------------------
 
-struct SentinelTray {
+struct OpenScreenTimeTray {
     /// Desktop user we render for; matched against `status.users[]`.
     username: String,
     /// `None` when the status file is missing/unreadable (agent not running).
@@ -118,7 +118,7 @@ struct SentinelTray {
     action_tx: Option<mpsc::Sender<ParentAction>>,
 }
 
-impl SentinelTray {
+impl OpenScreenTimeTray {
     fn me(&self) -> Option<&UserStatus> {
         self.status.as_ref().and_then(|s| s.user(&self.username))
     }
@@ -156,13 +156,13 @@ impl SentinelTray {
     }
 }
 
-impl ksni::Tray for SentinelTray {
+impl ksni::Tray for OpenScreenTimeTray {
     fn id(&self) -> String {
-        "sentinel".into()
+        "openscreentime".into()
     }
 
     fn title(&self) -> String {
-        "SENTINEL".into()
+        "OPENSCREENTIME".into()
     }
 
     fn icon_name(&self) -> String {
@@ -178,7 +178,7 @@ impl ksni::Tray for SentinelTray {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "SENTINEL".into(),
+            title: "OPENSCREENTIME".into(),
             description: format!("{} · {}", self.time_line(), self.connection_line()),
             ..Default::default()
         }
@@ -263,10 +263,10 @@ impl ksni::Tray for SentinelTray {
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "ABOUT SENTINEL".into(),
+                label: "ABOUT OPENSCREENTIME".into(),
                 activate: Box::new(|_: &mut Self| {
                     notify(
-                        "SENTINEL",
+                        "OPENSCREENTIME",
                         "This device is managed. Screen time and network filtering are active.",
                         false,
                     );
@@ -289,7 +289,7 @@ impl ksni::Tray for SentinelTray {
 /// spoof-proof, since `/run/user/<uid>` is the user's own 0700 directory.
 fn request_more_time() {
     let uid = users::get_current_uid();
-    let dir = std::path::PathBuf::from(format!("/run/user/{uid}/sentinel"));
+    let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::debug!("could not create runtime dir for earn request: {e}");
         notify("COULDN'T SEND", "Try again in a moment", false);
@@ -309,7 +309,7 @@ fn request_more_time() {
 
 fn notify(summary: &str, body: &str, critical: bool) {
     let mut n = notify_rust::Notification::new();
-    n.appname("SENTINEL")
+    n.appname("OpenScreenTime")
         .summary(summary)
         .body(body)
         .icon("security-medium");
@@ -377,7 +377,7 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
     match (prev.tamper_lockdown, next.tamper_lockdown) {
         (false, true) => notify(
             "TAMPERING DETECTED",
-            "SENTINEL WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+            "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
             true,
         ),
         (true, false) => notify("TAMPER LOCK LIFTED", "NORMAL USE HAS RESUMED", false),
@@ -427,7 +427,7 @@ fn deliver_notifications(username: &str, status: &Status, last_id: u64) -> u64 {
 /// service or the status poll.
 fn spawn_parent_worker(
     cfg: parent::ParentConfig,
-    handle: ksni::Handle<SentinelTray>,
+    handle: ksni::Handle<OpenScreenTimeTray>,
     rx: mpsc::Receiver<ParentAction>,
 ) {
     std::thread::spawn(move || {
@@ -490,7 +490,7 @@ fn spawn_parent_worker(
                         }
                     }
                     seen_pending = pending.iter().map(|r| r.id.clone()).collect();
-                    handle.update(move |t: &mut SentinelTray| t.pending = pending.clone());
+                    handle.update(move |t: &mut OpenScreenTimeTray| t.pending = pending.clone());
                 }
                 Err(e) => tracing::debug!("parent pending poll failed: {e}"),
             }
@@ -557,7 +557,7 @@ pub fn run() -> Result<()> {
         None => (None, None),
     };
 
-    let service = ksni::TrayService::new(SentinelTray {
+    let service = ksni::TrayService::new(OpenScreenTimeTray {
         username: username.clone(),
         status: prev.clone(),
         pending: Vec::new(),

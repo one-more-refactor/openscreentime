@@ -383,9 +383,9 @@ pub async fn totp_confirm(
 fn email_sender_configured() -> bool {
     // Dev builds emit the code to the server log, which is a real (if blunt)
     // delivery channel for a homelab. Prod points this at a webhook.
-    std::env::var("SENTINEL_STEPUP_WEBHOOK").is_ok()
+    std::env::var("OST_STEPUP_WEBHOOK").is_ok()
         || cfg!(debug_assertions)
-        || std::env::var("SENTINEL_STEPUP_LOG_CODES").is_ok()
+        || std::env::var("OST_STEPUP_LOG_CODES").is_ok()
 }
 
 /// `POST /api/auth/stepup/email/start` — mint a single-use code and send it.
@@ -413,7 +413,7 @@ pub async fn email_start(State(st): State<AppState>, admin: AuthAdmin) -> AppRes
         .fetch_one(&st.db)
         .await?;
 
-    if let Ok(hook) = std::env::var("SENTINEL_STEPUP_WEBHOOK") {
+    if let Ok(hook) = std::env::var("OST_STEPUP_WEBHOOK") {
         // Fire-and-forget: a slow or broken notifier must not hold the request
         // open, and the code is already valid either way.
         let body = json!({ "email": email, "code": code, "kind": "stepup" });
