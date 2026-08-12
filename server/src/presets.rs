@@ -199,7 +199,7 @@ mod tests {
     }
 
     use super::*;
-    use sentinel_policy::Policy;
+    use openscreentime_policy::Policy;
 
     /// Drift guard: every preset must parse into the shared `Policy` type and
     /// re-serialize to exactly its normalized form. If a preset ever carries a
@@ -213,7 +213,7 @@ mod tests {
             let normalized = serde_json::to_value(&parsed).unwrap();
             assert_eq!(
                 normalized, preset.policy,
-                "preset '{}' drifts from sentinel_policy::Policy \
+                "preset '{}' drifts from openscreentime_policy::Policy \
                  (a field is being dropped or defaulted during normalization)",
                 preset.name
             );

@@ -4,7 +4,7 @@
 //! image bundles the Vite build output and this module serves it directly,
 //! so there is no separate web server / CORS hop in front of the API.
 //!
-//! Controlled by `SENTINEL_WEB_DIR` (default `/app/web`). If the directory
+//! Controlled by `OST_WEB_DIR` (default `/app/web`). If the directory
 //! doesn't exist — e.g. running `cargo run` in dev without a web build — we
 //! just skip mounting it and log a warning; the API still works on its own
 //! (paired with the Vite dev server's proxy in that case).
@@ -17,13 +17,13 @@ use axum::response::Response;
 /// The directory to serve the web UI from, if it exists. `None` (and a warning)
 /// when absent, so the caller mounts no fallback and serves the API only.
 pub fn web_dir() -> Option<PathBuf> {
-    let dir = std::env::var("SENTINEL_WEB_DIR").unwrap_or_else(|_| "/app/web".into());
+    let dir = std::env::var("OST_WEB_DIR").unwrap_or_else(|_| "/app/web".into());
     let path = PathBuf::from(&dir);
     if path.is_dir() {
         tracing::info!("serving web UI from {dir}");
         Some(path)
     } else {
-        tracing::warn!("SENTINEL_WEB_DIR ({dir}) not found; serving API only (no web UI mounted)");
+        tracing::warn!("OST_WEB_DIR ({dir}) not found; serving API only (no web UI mounted)");
         None
     }
 }

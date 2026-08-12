@@ -20,7 +20,7 @@ pub enum AppError {
     #[error("{0}")]
     RateLimited(String),
     /// 403 with the stable code `registration_closed`: an admin already exists
-    /// and `SENTINEL_OPEN_REGISTRATION` isn't set (see docs/DEPLOY.md).
+    /// and `OST_OPEN_REGISTRATION` isn't set (see docs/DEPLOY.md).
     #[error("{0}")]
     RegistrationClosed(String),
     /// 428 with the stable code `step_up_required`: the session is valid but

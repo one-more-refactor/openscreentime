@@ -8,11 +8,11 @@ import { Button } from "./Button";
  */
 export function EnrollCommand({ token }: { token: string }) {
   const origin = window.location.origin;
-  const oneLiner = `curl -fsSL ${origin}/install.sh | sudo SENTINEL_TOKEN=${token} sh -s -- --server ${origin}`;
-  const manual = `sudo ./sentinel-agent enroll \\
+  const oneLiner = `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${token} sh -s -- --server ${origin}`;
+  const manual = `sudo ./openscreentime enroll \\
   --server ${origin} \\
   --token ${token}
-sudo ./sentinel-agent install-service`;
+sudo ./openscreentime install-service`;
 
   return (
     <div className="flex flex-col gap-3">

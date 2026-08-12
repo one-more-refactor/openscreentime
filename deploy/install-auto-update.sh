@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sentinel — install a systemd timer that runs deploy/update.sh once a day,
+# OpenScreenTime — install a systemd timer that runs deploy/update.sh once a day,
 # as the (rootless-podman) user that owns this checkout. update.sh already
 # polls /health and rolls back to the previous revision on failure, so an
 # unattended bad update self-heals.
@@ -8,7 +8,7 @@
 #   sudo deploy/install-auto-update.sh
 #
 # Undo:
-#   sudo systemctl disable --now sentinel-update.timer
+#   sudo systemctl disable --now openscreentime-update.timer
 set -euo pipefail
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -34,10 +34,10 @@ if [[ ! -f "${repo_root}/.env" ]]; then
     exit 1
 fi
 
-cat > /etc/systemd/system/sentinel-update.service <<EOF
-# Managed by sentinel deploy/install-auto-update.sh — do not edit.
+cat > /etc/systemd/system/openscreentime-update.service <<EOF
+# Managed by openscreentime deploy/install-auto-update.sh — do not edit.
 [Unit]
-Description=Sentinel server update (git pull, rebuild, health check, rollback on failure)
+Description=OpenScreenTime server update (git pull, rebuild, health check, rollback on failure)
 After=network-online.target
 Wants=network-online.target
 
@@ -50,10 +50,10 @@ ExecStart=${repo_root}/deploy/update.sh
 TimeoutStartSec=45min
 EOF
 
-cat > /etc/systemd/system/sentinel-update.timer <<EOF
-# Managed by sentinel deploy/install-auto-update.sh — do not edit.
+cat > /etc/systemd/system/openscreentime-update.timer <<EOF
+# Managed by openscreentime deploy/install-auto-update.sh — do not edit.
 [Unit]
-Description=Daily Sentinel server update
+Description=Daily OpenScreenTime server update
 
 [Timer]
 OnCalendar=daily
@@ -67,8 +67,8 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now sentinel-update.timer
+systemctl enable --now openscreentime-update.timer
 
 echo "==> installed. Next runs:"
-systemctl list-timers sentinel-update.timer --no-pager | head -3
-echo "==> logs after a run: journalctl -u sentinel-update.service"
+systemctl list-timers openscreentime-update.timer --no-pager | head -3
+echo "==> logs after a run: journalctl -u openscreentime-update.service"

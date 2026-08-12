@@ -2278,9 +2278,9 @@ dependencies = [
  "libc",
  "nix",
  "notify-rust",
+ "openscreentime-policy",
  "rand 0.8.6",
  "reqwest",
- "sentinel-policy",
  "serde",
  "serde_json",
  "sha2",
@@ -2292,6 +2292,13 @@ dependencies = [
  "tracing-subscriber",
  "users",
  "uuid",
+]
+
+[[package]]
+name = "openscreentime-policy"
+version = "0.3.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2837,13 +2844,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "sentinel-policy"
-version = "0.3.0"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "serde"

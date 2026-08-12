@@ -1,4 +1,4 @@
-//! HTTP + WebSocket transport to the Sentinel server (the `/agent/*` surface in
+//! HTTP + WebSocket transport to the OpenScreenTime server (the `/agent/*` surface in
 //! `docs/API.md`). Auth is a bearer `device_token` on every call except enrollment.
 
 use crate::protocol::{Command, CommandAck, Event};

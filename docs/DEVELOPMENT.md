@@ -21,14 +21,14 @@ cargo run                        # serves :8080
 ```
 
 Key env:
-- `DATABASE_URL=postgres://sentinel:sentinel@localhost:5432/sentinel`
+- `DATABASE_URL=postgres://openscreentime:openscreentime@localhost:5432/openscreentime`
 - `RP_ID=localhost` / `RP_ORIGIN=http://localhost:5173` (WebAuthn relying party)
 - `BIND_ADDR=0.0.0.0:8080`
-- `SENTINEL_PUBLIC_URL` — public base URL of the control center (OIDC redirect URI + post-login redirects); falls back to `RP_ORIGIN`.
-- `SENTINEL_INSECURE_COOKIES` — session cookies are Secure by default; set to `1` only for plain-http dev.
-- `SENTINEL_TRUST_PROXY` — set to `1` behind a reverse proxy so the rate limiter keys on the first `X-Forwarded-For` value instead of the peer address.
-- `SENTINEL_OIDC_ISSUER` / `SENTINEL_OIDC_CLIENT_ID` / `SENTINEL_OIDC_CLIENT_SECRET` / `SENTINEL_OIDC_NAME` — OIDC SSO (e.g. Authentik); off unless issuer/client id/secret are all set, endpoints are discovered at startup.
-- `RUST_LOG` — log filter, e.g. `sentinel_server=debug,tower_http=info,info`.
+- `OST_PUBLIC_URL` — public base URL of the control center (OIDC redirect URI + post-login redirects); falls back to `RP_ORIGIN`.
+- `OST_INSECURE_COOKIES` — session cookies are Secure by default; set to `1` only for plain-http dev.
+- `OST_TRUST_PROXY` — set to `1` behind a reverse proxy so the rate limiter keys on the first `X-Forwarded-For` value instead of the peer address.
+- `OST_OIDC_ISSUER` / `OST_OIDC_CLIENT_ID` / `OST_OIDC_CLIENT_SECRET` / `OST_OIDC_NAME` — OIDC SSO (e.g. Authentik); off unless issuer/client id/secret are all set, endpoints are discovered at startup.
+- `RUST_LOG` — log filter, e.g. `openscreentime_server=debug,tower_http=info,info`.
 
 ## Web
 ```bash

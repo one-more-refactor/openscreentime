@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sentinel — one-command update: pull latest, rebuild, restart, wait for
+# OpenScreenTime — one-command update: pull latest, rebuild, restart, wait for
 # health.
 #
 # Note: this only updates the SERVER. Already-enrolled agents self-update
 # from the new image's bundled binary automatically (daily, via
-# `auto_update = true` in /etc/sentinel/agent.toml) — no separate rollout
+# `auto_update = true` in /etc/openscreentime/agent.toml) — no separate rollout
 # step needed for devices.
 #
 # Usage:
@@ -55,8 +55,8 @@ echo "==> building images (server + web, see Containerfile)"
 echo "==> recreating the server container with the new image"
 "${compose_bin}" "${compose_args[@]}" -f compose.yaml up -d
 
-# SENTINEL_PORT lives in .env; default to 8080 if it's unset there.
-port="$(grep -E '^SENTINEL_PORT=' .env | tail -n1 | cut -d= -f2-)"
+# OST_PORT lives in .env; default to 8080 if it's unset there.
+port="$(grep -E '^OST_PORT=' .env | tail -n1 | cut -d= -f2-)"
 port="${port:-8080}"
 
 echo "==> waiting for the server to report healthy on 127.0.0.1:${port}"

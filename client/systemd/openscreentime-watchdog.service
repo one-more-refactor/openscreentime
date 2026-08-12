@@ -2,7 +2,7 @@
 # goes stale. Driven by openscreentime-watchdog.timer. This is the "second lightweight
 # unit" option; alternatively enable WatchdogSec in openscreentime-agent.service.
 [Unit]
-Description=Sentinel agent watchdog (restart on stale heartbeat)
+Description=OpenScreenTime agent watchdog (restart on stale heartbeat)
 After=openscreentime-agent.service
 
 [Service]

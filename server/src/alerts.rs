@@ -1,8 +1,8 @@
 //! One-way phone alerts via a chat bot.
 //!
-//! Deliberately NOT web push. The operator points Sentinel at a chat channel
+//! Deliberately NOT web push. The operator points OpenScreenTime at a chat channel
 //! they already have — a Discord/Slack incoming webhook, or a Telegram bot — and
-//! Sentinel *sends* short messages when something needs attention (a confirmed
+//! OpenScreenTime *sends* short messages when something needs attention (a confirmed
 //! tamper attempt, a device locking down, a new time request). It never reads
 //! anything back: no webhook server, no bot polling, nobody writes to the bot.
 //! Setup is a URL (or a token + chat id) in `.env`, and that's it.
@@ -30,9 +30,9 @@ pub struct AlertConfig {
 impl AlertConfig {
     pub fn from_env() -> Self {
         Self::build(
-            std::env::var("SENTINEL_ALERT_WEBHOOK").ok(),
-            std::env::var("SENTINEL_TELEGRAM_BOT_TOKEN").ok(),
-            std::env::var("SENTINEL_TELEGRAM_CHAT_ID").ok(),
+            std::env::var("OST_ALERT_WEBHOOK").ok(),
+            std::env::var("OST_TELEGRAM_BOT_TOKEN").ok(),
+            std::env::var("OST_TELEGRAM_CHAT_ID").ok(),
         )
     }
 
@@ -49,7 +49,7 @@ impl AlertConfig {
         let webhook = clean(webhook).filter(|u| match url::Url::parse(u) {
             Ok(p) => matches!(p.scheme(), "http" | "https"),
             Err(_) => {
-                tracing::warn!("ignoring SENTINEL_ALERT_WEBHOOK: not a valid http(s) URL");
+                tracing::warn!("ignoring OST_ALERT_WEBHOOK: not a valid http(s) URL");
                 false
             }
         });
@@ -97,7 +97,7 @@ impl AlertConfig {
 /// is not resent; the console/tray remain the durable record).
 pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
     if !cfg.enabled() {
-        tracing::info!("phone alerts: no channel configured (set SENTINEL_ALERT_WEBHOOK or SENTINEL_TELEGRAM_*)");
+        tracing::info!("phone alerts: no channel configured (set OST_ALERT_WEBHOOK or OST_TELEGRAM_*)");
         return;
     }
     tracing::info!(
@@ -186,7 +186,7 @@ async fn drain_events(
             .unwrap_or(etype.as_str());
         let msg = sanitize(raw_msg);
         let dev = sanitize(device.as_deref().unwrap_or("a device"));
-        cfg.send(client, &format!("⚠ Sentinel — {dev}: {msg}"))
+        cfg.send(client, &format!("⚠ OpenScreenTime — {dev}: {msg}"))
             .await;
     }
     high
@@ -227,7 +227,7 @@ async fn drain_earn(
         let label = sanitize(&task_label);
         cfg.send(
             client,
-            &format!("⏳ {who} is asking for +{minutes} min ({label}). Approve it in Sentinel."),
+            &format!("⏳ {who} is asking for +{minutes} min ({label}). Approve it in OpenScreenTime."),
         )
         .await;
     }

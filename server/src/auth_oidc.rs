@@ -1,5 +1,5 @@
 //! OIDC SSO (tested against Authentik). Enabled only when all of
-//! SENTINEL_OIDC_ISSUER / SENTINEL_OIDC_CLIENT_ID / SENTINEL_OIDC_CLIENT_SECRET
+//! OST_OIDC_ISSUER / OST_OIDC_CLIENT_ID / OST_OIDC_CLIENT_SECRET
 //! are set; provider endpoints are discovered at startup via
 //! `<issuer>/.well-known/openid-configuration`.
 //!
@@ -72,7 +72,7 @@ struct DiscoveryDoc {
     userinfo_endpoint: String,
 }
 
-/// Reads the SENTINEL_OIDC_* env vars; when all three are set, runs discovery
+/// Reads the OST_OIDC_* env vars; when all three are set, runs discovery
 /// and returns a live config. Returns None when the feature is off.
 pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
     // Empty counts as unset: compose files commonly pass `${VAR:-}` through,
@@ -80,13 +80,13 @@ pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>
     // against an empty issuer URL.
     let non_empty = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let (Some(issuer), Some(client_id), Some(client_secret)) = (
-        non_empty("SENTINEL_OIDC_ISSUER"),
-        non_empty("SENTINEL_OIDC_CLIENT_ID"),
-        non_empty("SENTINEL_OIDC_CLIENT_SECRET"),
+        non_empty("OST_OIDC_ISSUER"),
+        non_empty("OST_OIDC_CLIENT_ID"),
+        non_empty("OST_OIDC_CLIENT_SECRET"),
     ) else {
         return Ok(None);
     };
-    let name = non_empty("SENTINEL_OIDC_NAME").unwrap_or_else(|| "SSO".into());
+    let name = non_empty("OST_OIDC_NAME").unwrap_or_else(|| "SSO".into());
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))

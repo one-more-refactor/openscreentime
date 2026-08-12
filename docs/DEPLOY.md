@@ -1,14 +1,14 @@
-# Deploying Sentinel (production, rootless Podman)
+# Deploying OpenScreenTime (production, rootless Podman)
 
-This is the operator guide for running Sentinel on an internet-exposed VPS
+This is the operator guide for running OpenScreenTime on an internet-exposed VPS
 behind your own reverse proxy. It is not a dev setup guide — see
 `docs/DEVELOPMENT.md` for that.
 
 ## Quickstart
 
 ```sh
-git clone <this-repo-url> sentinel && cd sentinel
-deploy/setup.sh --domain sentinel.example.com
+git clone <this-repo-url> openscreentime && cd openscreentime
+deploy/setup.sh --domain ost.example.com
 ```
 
 That generates `.env` with fresh secrets, builds the images, brings the
@@ -16,7 +16,7 @@ stack up, and waits for it to report healthy. Then:
 
 1. Point your reverse proxy at `127.0.0.1:8080` (see below for
    Caddy/nginx snippets — `deploy/setup.sh` also prints them for your domain).
-2. Open `https://sentinel.example.com` and register the first admin passkey.
+2. Open `https://ost.example.com` and register the first admin passkey.
 3. Click **ADD DEVICE** in the console and paste the one-liner it gives you
    on the machine you want to enroll.
 
@@ -31,14 +31,14 @@ troubleshooting.
 ## Architecture
 
 - `compose.yaml` (repo root) runs two containers: `db` (Postgres 15) and
-  `server` (the Sentinel API + the built web UI, single image, built from
+  `server` (the OpenScreenTime API + the built web UI, single image, built from
   `Containerfile`).
 - The server binds `0.0.0.0:8080` **inside** its container, but the compose
-  file only publishes it to `127.0.0.1:${SENTINEL_PORT:-8080}` on the host.
+  file only publishes it to `127.0.0.1:${OST_PORT:-8080}` on the host.
   It is never reachable directly from the internet.
 - **You provide the reverse proxy** (Caddy, nginx, Traefik, whatever you
   already run on the VPS) that terminates TLS and forwards to
-  `127.0.0.1:8080`. Sentinel does not bundle one.
+  `127.0.0.1:8080`. OpenScreenTime does not bundle one.
 - The server serves the web UI itself (same origin as the API) — no CORS
   hop, no separate web server needed.
 
@@ -49,14 +49,14 @@ troubleshooting.
   fallback).
 - A reverse proxy already running on the host and terminating TLS for your
   domain (e.g. Caddy with automatic HTTPS, or nginx + certbot).
-- A DNS name pointing at the VPS (e.g. `sentinel.example.com`).
+- A DNS name pointing at the VPS (e.g. `ost.example.com`).
 - git access to this repository from the VPS.
 
 ## Reverse proxy requirements
 
 Your proxy MUST:
 
-1. Forward all traffic for the domain to `127.0.0.1:${SENTINEL_PORT:-8080}`
+1. Forward all traffic for the domain to `127.0.0.1:${OST_PORT:-8080}`
    (plain HTTP — TLS is terminated at the proxy).
 2. **Upgrade WebSocket connections** for `/agent/ws`. This is a long-lived
    bidirectional connection (the agent command channel) — if your proxy
@@ -71,7 +71,7 @@ Your proxy MUST:
 ### Example (Caddy)
 
 ```caddyfile
-sentinel.example.com {
+ost.example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -83,7 +83,7 @@ Caddy forwards WebSocket upgrades and sets `X-Forwarded-For` automatically.
 ```nginx
 server {
     listen 443 ssl;
-    server_name sentinel.example.com;
+    server_name ost.example.com;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -101,7 +101,7 @@ server {
 
 The [Quickstart](#quickstart) above covers the normal path:
 `deploy/setup.sh --domain <your-domain>`. It writes `.env` (generating
-`POSTGRES_PASSWORD` and deriving `RP_ID`/`RP_ORIGIN`/`SENTINEL_PUBLIC_URL`
+`POSTGRES_PASSWORD` and deriving `RP_ID`/`RP_ORIGIN`/`OST_PUBLIC_URL`
 from the domain you pass), builds the images, runs `up -d`, and waits for
 `/health`.
 
@@ -110,16 +110,16 @@ Postgres, or to review the generated values before they're used), skip
 `deploy/setup.sh` and instead:
 
 ```sh
-git clone <this-repo-url> sentinel && cd sentinel
+git clone <this-repo-url> openscreentime && cd openscreentime
 cp .env.example .env
-$EDITOR .env         # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, SENTINEL_PUBLIC_URL
+$EDITOR .env         # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
 deploy/build.sh       # builds the server+web image locally on the VPS
 podman-compose up -d  # or: podman compose up -d / docker compose up -d
 podman-compose logs -f server
 ```
 
-`RP_ID` is the bare domain (e.g. `sentinel.example.com`); `RP_ORIGIN` and
-`SENTINEL_PUBLIC_URL` are the full `https://` URL of the reverse proxy —
+`RP_ID` is the bare domain (e.g. `ost.example.com`); `RP_ORIGIN` and
+`OST_PUBLIC_URL` are the full `https://` URL of the reverse proxy —
 **not** an internal container address. WebAuthn/passkeys will fail to
 register if these don't match what the browser sees. See `.env.example`
 for the full list of variables (OIDC SSO, logging, etc.).
@@ -132,10 +132,10 @@ Database migrations run automatically on every server startup
 While the database has **zero admins**, the login page's FIRST ADMIN tab is open: register
 with any email + passkey and the tenant is bootstrapped around you. From the moment the
 first admin exists, the register endpoints refuse with `403 registration_closed` — a
-public Sentinel URL can't be hijacked by whoever finds it first thereafter.
+public OpenScreenTime URL can't be hijacked by whoever finds it first thereafter.
 
 To deliberately allow another *new* admin account to register, set
-`SENTINEL_OPEN_REGISTRATION=1` in the server environment, restart, let them register, then
+`OST_OPEN_REGISTRATION=1` in the server environment, restart, let them register, then
 remove it again. (Logged-in admins can always add more passkeys to their own account via
 Settings; OIDC SSO admin matching is unaffected.)
 
@@ -145,20 +145,20 @@ The image bundles the headless agent binary and serves an installer, so enrollin
 is one command (shown, pre-filled, in the web console's ADD DEVICE modal):
 
 ```sh
-curl -fsSL https://sentinel.example.com/install.sh | \
-  sudo SENTINEL_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://sentinel.example.com
+curl -fsSL https://ost.example.com/install.sh | \
+  sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://ost.example.com
 ```
 
 It downloads the sha256-verified binary to `/usr/local/bin/openscreentime`, enrolls, and
 installs the systemd service. Installed agents self-update from the server daily
-(`auto_update = true` in `/etc/openscreentime/agent.toml`; `SENTINEL_NO_SELF_UPDATE=1` disables;
+(`auto_update = true` in `/etc/openscreentime/agent.toml`; `OST_NO_SELF_UPDATE=1` disables;
 the previous binary is kept as `/usr/local/bin/openscreentime.bak` for manual rollback).
 Desktop builds with the gui/tray features are built from source — see docs/DEVELOPMENT.md.
 
 ## Updating
 
 ```sh
-cd sentinel
+cd openscreentime
 deploy/update.sh
 ```
 
@@ -167,12 +167,12 @@ container, and waits for `/health` before reporting success. Equivalent by
 hand:
 
 ```sh
-cd sentinel
+cd openscreentime
 deploy/build.sh --pull   # git pull --ff-only, then rebuild images
 podman-compose up -d     # recreates the server container with the new image
 ```
 
-`db` data lives in the named volume `sentinel_pgdata` and is untouched by
+`db` data lives in the named volume `ost_pgdata` and is untouched by
 rebuilds/updates. Already-enrolled agents self-update from the new image
 automatically (within a day) — updating the server is enough, no separate
 device rollout step.
@@ -188,16 +188,16 @@ the timer's journal) can see the update didn't stick.
 sudo deploy/install-auto-update.sh
 ```
 
-Installs `sentinel-update.timer`: runs `deploy/update.sh` daily (randomized
+Installs `openscreentime-update.timer`: runs `deploy/update.sh` daily (randomized
 by up to an hour, catch-up after downtime) as the deploy user. Combined with
 the rollback above, a bad release self-heals instead of leaving the server
 down overnight. Check what it did with `journalctl -u
-sentinel-update.service`; disable with `sudo systemctl disable --now
-sentinel-update.timer`.
+openscreentime-update.service`; disable with `sudo systemctl disable --now
+openscreentime-update.timer`.
 
 ## Rootless port note
 
-The compose file publishes the app on `127.0.0.1:${SENTINEL_PORT:-8080}`
+The compose file publishes the app on `127.0.0.1:${OST_PORT:-8080}`
 (default 8080), which is an unprivileged port — rootless Podman can bind it
 with no extra configuration. If you ever want the *container* itself to bind
 a port below 1024, rootless Podman needs
@@ -214,6 +214,6 @@ does not apply to the default setup here.
 - **Everything 429s**: `X-Forwarded-For` isn't set correctly by the proxy,
   so the rate limiter may be collapsing all clients onto one key (the
   proxy's own IP, or a spoofable client-supplied hop).
-- **Server logs `SENTINEL_WEB_DIR (...) not found`**: the web build didn't
+- **Server logs `OST_WEB_DIR (...) not found`**: the web build didn't
   make it into the image — rerun `deploy/build.sh`, and check the
   `web-builder` stage in `Containerfile` succeeded.

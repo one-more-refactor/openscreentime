@@ -110,7 +110,7 @@ the record that past sessions happened survives; only the capability is gone. No
 `ssh` events are written.
 
 ### `admin_sessions`
-DB-backed admin login sessions (cookie `sentinel_session`). Expired rows are deleted lazily.
+DB-backed admin login sessions (cookie `ost_session`). Expired rows are deleted lazily.
 | column      | type        | notes                                        |
 |-------------|-------------|----------------------------------------------|
 | id          | uuid pk     |                                              |

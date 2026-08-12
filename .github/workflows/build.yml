@@ -20,7 +20,7 @@ env:
 
 # ─────────────────────────────────────────────────────────────
 # Jobs:
-#   1. build-server   → sentinel-server binary (glibc, x86_64)
+#   1. build-server   → openscreentime-server binary (glibc, x86_64)
 #   2. build-agent    → openscreentime binary  (musl-static, x86_64)
 #   3. build-web      → dist/ + Playwright screenshots of the UI
 #   4. container      → multi-stage OCI image, pushed to GHCR
@@ -55,14 +55,14 @@ jobs:
         working-directory: server
         run: |
           cargo build --release 2>&1 | tee /tmp/server-build.txt
-          strip target/release/sentinel-server
-          ls -lh target/release/sentinel-server
+          strip target/release/openscreentime-server
+          ls -lh target/release/openscreentime-server
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: sentinel-server-${{ github.sha }}
-          path: server/target/release/sentinel-server
+          name: openscreentime-server-${{ github.sha }}
+          path: server/target/release/openscreentime-server
           retention-days: 30
 
       - name: "📋 Step summary"
@@ -71,8 +71,8 @@ jobs:
         run: |
           echo "## 🖥️ Server binary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f target/release/sentinel-server ]; then
-            SIZE=$(ls -lh target/release/sentinel-server | awk '{print $5}')
+          if [ -f target/release/openscreentime-server ]; then
+            SIZE=$(ls -lh target/release/openscreentime-server | awk '{print $5}')
             echo "| | |" >> $GITHUB_STEP_SUMMARY
             echo "|---|---|" >> $GITHUB_STEP_SUMMARY
             echo "| 📦 Binary size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
@@ -391,7 +391,7 @@ jobs:
       - name: Download server binary
         uses: actions/download-artifact@v4
         with:
-          name: sentinel-server-${{ github.sha }}
+          name: openscreentime-server-${{ github.sha }}
           path: release-assets/
 
       - name: Download agent artifacts
@@ -409,8 +409,8 @@ jobs:
       - name: Prepare checksums
         working-directory: release-assets
         run: |
-          chmod +x sentinel-server
-          sha256sum sentinel-server > SHA256SUMS
+          chmod +x openscreentime-server
+          sha256sum openscreentime-server > SHA256SUMS
           sha256sum agent/openscreentime-* >> SHA256SUMS
           cat SHA256SUMS
 
@@ -435,12 +435,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Sentinel ${{ github.ref_name }}"
+          name: "OpenScreenTime ${{ github.ref_name }}"
           body_path: /tmp/release-notes.txt
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            release-assets/sentinel-server
+            release-assets/openscreentime-server
             release-assets/agent/openscreentime-*
             release-assets/agent/manifest.json
             release-assets/SHA256SUMS
@@ -452,7 +452,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Asset | |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🖥️ \`sentinel-server\` | x86_64-linux-gnu |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖥️ \`openscreentime-server\` | x86_64-linux-gnu |" >> $GITHUB_STEP_SUMMARY
           echo "| 🤖 \`openscreentime-*-x86_64-musl\` | static, any Linux |" >> $GITHUB_STEP_SUMMARY
           echo "| 📋 \`manifest.json\` | agent update manifest |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔐 \`SHA256SUMS\` | checksums |" >> $GITHUB_STEP_SUMMARY
