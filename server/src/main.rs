@@ -65,9 +65,9 @@ async fn main() -> anyhow::Result<()> {
     let cookie_secure = std::env::var("OST_INSECURE_COOKIES").map(|v| v == "1") != Ok(true);
     // Public base URL (OIDC redirect URI + post-login redirects); falls back
     // to the WebAuthn RP origin.
-    let public_url = std::env::var("OST_PUBLIC_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty()) // "" from `${VAR:-}` in compose = unset
+    // Falling back to RP_ORIGIN beats minting OIDC redirect URIs out of a
+    // value compose never expanded — see `state::configured`.
+    let public_url = state::configured("OST_PUBLIC_URL")
         .unwrap_or_else(|| rp_origin_str.clone())
         .trim_end_matches('/')
         .to_string();
