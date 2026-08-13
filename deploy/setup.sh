@@ -133,10 +133,18 @@ RP_ID=${domain}
 RP_ORIGIN=https://${domain}
 OST_PUBLIC_URL=https://${domain}
 OST_PORT=${port}
+
+# The stack sits behind a reverse proxy, so the rate limiter must key clients
+# by the X-Forwarded-For hop that proxy appends. Without it every visitor
+# shares one bucket keyed by the proxy's own address — spurious 429 lockouts
+# for everyone. Set to 0 only if you publish the port with no proxy in front.
+OST_TRUST_PROXY=1
+
+RUST_LOG=openscreentime_server=info,tower_http=info,info
 EOF
 
-    # Only written when asked for: the default belongs to compose.yaml, so an
-    # unset value keeps following the default if it ever changes.
+    # Only written when asked for: compose.yaml owns the loopback default, and
+    # an absent value keeps following it if it ever changes.
     if [[ -n "$bind" ]]; then
         echo "OST_BIND_ADDR=${bind}" >> .env
     fi

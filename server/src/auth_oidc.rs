@@ -75,10 +75,10 @@ struct DiscoveryDoc {
 /// Reads the OST_OIDC_* env vars; when all three are set, runs discovery
 /// and returns a live config. Returns None when the feature is off.
 pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
-    // Empty counts as unset: compose files commonly pass `${VAR:-}` through,
-    // which arrives as "" — that must disable OIDC, not crash-loop discovery
-    // against an empty issuer URL.
-    let non_empty = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    // `configured` (state.rs) is what decides a variable was really set —
+    // empty strings and unexpanded compose placeholders both count as unset,
+    // which is what keeps a no-OIDC deploy from crash-looping on discovery.
+    let non_empty = crate::state::configured;
     let (Some(issuer), Some(client_id), Some(client_secret)) = (
         non_empty("OST_OIDC_ISSUER"),
         non_empty("OST_OIDC_CLIENT_ID"),
