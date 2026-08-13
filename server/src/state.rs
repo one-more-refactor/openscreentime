@@ -19,6 +19,88 @@ pub const SESSION_COOKIE: &str = "ost_session";
 pub const REG_COOKIE: &str = "reg_sid";
 pub const AUTH_COOKIE: &str = "auth_sid";
 
+/// An environment variable the operator actually configured, or `None`.
+///
+/// Every optional setting goes through this, because "the variable is present"
+/// is not the same question as "the operator set it":
+///
+/// * `""` — compose forwards `${VAR:-}` as an empty string, not as unset.
+/// * `"${VAR:-}"` — podman-compose does not expand a `:-` default when the
+///   variable is undefined, and forwards the literal instead. That string is
+///   not empty, so a naive check accepts it: a fresh no-OIDC deploy crash-looped
+///   running discovery against a URL made of shell syntax.
+/// * `"https://host}"` — a nested `${A:-${B}}` comes back with the trailing
+///   brace still attached.
+///
+/// No legitimate value contains `${` or `}`, and these failures are the
+/// expensive kind: the server boots, then dies citing a variable the operator
+/// never touched.
+pub fn configured(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.contains("${") && !v.contains('}'))
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::configured;
+
+    /// These tests share one process environment, so each cleans up after
+    /// itself rather than relying on ordering.
+    fn with_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
+        std::env::set_var(key, value);
+        let out = f();
+        std::env::remove_var(key);
+        out
+    }
+
+    #[test]
+    fn a_real_value_is_configured() {
+        with_var("OST_TEST_REAL", "https://auth.example.com/application/o/ost/", || {
+            assert_eq!(
+                configured("OST_TEST_REAL").as_deref(),
+                Some("https://auth.example.com/application/o/ost/")
+            );
+        });
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        with_var("OST_TEST_PAD", "  https://a.example  ", || {
+            assert_eq!(configured("OST_TEST_PAD").as_deref(), Some("https://a.example"));
+        });
+    }
+
+    #[test]
+    fn absent_and_empty_are_both_unset() {
+        assert_eq!(configured("OST_TEST_NEVER_SET"), None);
+        with_var("OST_TEST_EMPTY", "", || {
+            assert_eq!(configured("OST_TEST_EMPTY"), None);
+        });
+        with_var("OST_TEST_BLANK", "   ", || {
+            assert_eq!(configured("OST_TEST_BLANK"), None);
+        });
+    }
+
+    /// The regression this function exists for: podman-compose forwarding an
+    /// unexpanded `${VAR:-}` crash-looped the server on every startup.
+    #[test]
+    fn an_unexpanded_placeholder_is_unset() {
+        with_var("OST_TEST_LITERAL", "${OST_OIDC_ISSUER:-}", || {
+            assert_eq!(configured("OST_TEST_LITERAL"), None);
+        });
+    }
+
+    /// And the nested-default form, which arrives expanded but broken.
+    #[test]
+    fn a_leftover_brace_is_unset() {
+        with_var("OST_TEST_BRACE", "https://ost.example.com}", || {
+            assert_eq!(configured("OST_TEST_BRACE"), None);
+        });
+    }
+}
+
 /// How long an unconsumed WebAuthn challenge lives before it's swept. Abandoned
 /// register/login ceremonies would otherwise accumulate in memory forever.
 pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(600);

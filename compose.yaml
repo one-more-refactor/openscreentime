@@ -40,26 +40,26 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Everything the operator sets goes in via the file itself, NOT as
+    # `VAR: ${VAR:-}` passthrough lines.
+    #
+    # podman-compose does not expand `${VAR:-default}` when VAR is undefined —
+    # it forwards the literal string. A container then starts with
+    # OST_OIDC_ISSUER set to "${OST_OIDC_ISSUER:-}", which is not empty, so
+    # OIDC discovery runs against a nonsense URL and the server crash-loops on
+    # every fresh no-OIDC deploy. Nested defaults fare worse: `${A:-${B}}`
+    # came out as "https://host}", with the trailing brace.
+    #
+    # env_file has none of that: a variable absent from .env is absent from
+    # the container, which is exactly the "unset" the server already handles.
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-openscreentime}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-openscreentime}
-      RP_ID: ${RP_ID:?set RP_ID in .env}
-      RP_ORIGIN: ${RP_ORIGIN:?set RP_ORIGIN in .env}
-      OST_PUBLIC_URL: ${OST_PUBLIC_URL:-${RP_ORIGIN}}
+      # Composed here because it is derived, not configured.
+      DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # Always 0.0.0.0 INSIDE the container; what the host publishes is the
+      # `ports` mapping below.
       BIND_ADDR: 0.0.0.0:8080
-      # This stack only ever sits behind the host's reverse proxy (the app
-      # port is loopback-published below), so default to trusting the proxy's
-      # X-Forwarded-For: without it the rate limiter keys every visitor by
-      # the proxy's own IP — one shared bucket → spurious 429 lockouts.
-      # Set 0 only if you expose the port directly (not the supported layout).
-      OST_TRUST_PROXY: ${OST_TRUST_PROXY:-1}
-      # OST_INSECURE_COOKIES intentionally NOT set here — cookies stay
-      # Secure in prod. Only set it in .env for local plain-http testing.
-      OST_INSECURE_COOKIES: ${OST_INSECURE_COOKIES:-}
-      OST_OIDC_ISSUER: ${OST_OIDC_ISSUER:-}
-      OST_OIDC_CLIENT_ID: ${OST_OIDC_CLIENT_ID:-}
-      OST_OIDC_CLIENT_SECRET: ${OST_OIDC_CLIENT_SECRET:-}
-      OST_OIDC_NAME: ${OST_OIDC_NAME:-}
-      RUST_LOG: ${RUST_LOG:-openscreentime_server=info,tower_http=info,info}
     # Defaults to loopback: the app port is normally reached only via the host's
     # own reverse proxy (which terminates TLS and forwards to the port below).
     #
