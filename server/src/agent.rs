@@ -802,6 +802,32 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
                 .and_then(|d| d.as_str())
                 .map(|s| s.to_string());
             let payload = ev.get("payload").cloned().unwrap_or_else(|| json!({}));
+
+            // SECURITY: bound the WS path the same way the HTTP path is bound
+            // (see push_events). Without this, a rooted managed device — which
+            // already has a valid device_token (the threat model acknowledged
+            // at agent.rs:547-549) — can flood oversized/unbounded events or
+            // arbitrary severity strings through the WS, bypassing the
+            // MAX_EVENTS/MAX_PAYLOAD_BYTES/severity-whitelist checks the HTTP
+            // handler enforces. The DB CHECK on `severity` would silently
+            // reject invalid severities, but each invalid event still costs a
+            // Postgres roundtrip. Drop the frame early instead.
+            const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
+            if !matches!(severity, "info" | "warn" | "critical") {
+                tracing::warn!(agent_device_id = %agent.device_id, severity,
+                    "dropping WS event with invalid severity");
+                return;
+            }
+            if serde_json::to_string(&payload)
+                .map(|s| s.len())
+                .unwrap_or(usize::MAX)
+                > MAX_PAYLOAD_BYTES
+            {
+                tracing::warn!(agent_device_id = %agent.device_id,
+                    "dropping WS event with oversize payload");
+                return;
+            }
+
             if let Ok(device_user_id) =
                 resolve_device_user(&st.db, agent.device_id, device_user).await
             {
