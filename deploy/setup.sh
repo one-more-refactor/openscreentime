@@ -7,22 +7,28 @@
 # this again just rebuilds/restarts (handy after `git pull`).
 #
 # Usage:
-#   deploy/setup.sh --domain ost.example.com [--port 8080]
+#   deploy/setup.sh --domain ost.example.com [--port 8080] [--bind 127.0.0.1]
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: deploy/setup.sh --domain <domain> [--port <port>]
+Usage: deploy/setup.sh --domain <domain> [--port <port>] [--bind <address>]
 
   --domain   the public domain your reverse proxy serves OpenScreenTime on
              (e.g. ost.example.com). Required.
-  --port     host port to bind the server to on 127.0.0.1 (default: 8080).
+  --port     host port to publish the server on (default: 8080).
              Your reverse proxy forwards to this port.
+  --bind     host address to publish that port on (default: 127.0.0.1).
+             Only change this when the reverse proxy runs on a DIFFERENT
+             machine — then use the LAN/VPN address it can reach, e.g.
+             192.168.8.131. Never 0.0.0.0: the server trusts X-Forwarded-For,
+             so a directly reachable port is a rate-limiter bypass.
 EOF
 }
 
 domain=""
 port="8080"
+bind=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +48,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port=*)
             port="${1#--port=}"
+            shift
+            ;;
+        --bind)
+            bind="${2:-}"
+            [[ -n "$bind" ]] || { echo "error: --bind requires a value" >&2; usage >&2; exit 1; }
+            shift 2
+            ;;
+        --bind=*)
+            bind="${1#--bind=}"
             shift
             ;;
         -h|--help)
@@ -79,6 +94,17 @@ if ! [[ "$port" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# 0.0.0.0 is refused rather than warned about: the server trusts the
+# X-Forwarded-For its proxy appends, so anything that can reach the port
+# directly can also claim to be any client IP and walk past the rate limiter.
+if [[ "$bind" == "0.0.0.0" || "$bind" == "::" ]]; then
+    echo "error: --bind $bind would expose the app port on every interface." >&2
+    echo "       The server trusts X-Forwarded-For, so a directly reachable" >&2
+    echo "       port lets anyone forge their client IP past the rate limiter." >&2
+    echo "       Use the specific address your reverse proxy reaches instead." >&2
+    exit 1
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
@@ -108,6 +134,12 @@ RP_ORIGIN=https://${domain}
 OST_PUBLIC_URL=https://${domain}
 OST_PORT=${port}
 EOF
+
+    # Only written when asked for: the default belongs to compose.yaml, so an
+    # unset value keeps following the default if it ever changes.
+    if [[ -n "$bind" ]]; then
+        echo "OST_BIND_ADDR=${bind}" >> .env
+    fi
 
     # .env holds the DB password — keep it readable only by the owner.
     chmod 600 .env
@@ -140,9 +172,12 @@ echo "==> building images (server + web, see Containerfile)"
 echo "==> starting the stack"
 "${compose_bin}" "${compose_args[@]}" -f compose.yaml up -d
 
-echo "==> waiting for the server to report healthy on 127.0.0.1:${port}"
+# Poll wherever the port was actually published: with --bind set, nothing is
+# listening on loopback and a 127.0.0.1 poll would fail a healthy deploy.
+health_host="${bind:-127.0.0.1}"
+echo "==> waiting for the server to report healthy on ${health_host}:${port}"
 
-health_url="http://127.0.0.1:${port}/health"
+health_url="http://${health_host}:${port}/health"
 healthy=""
 for _ in $(seq 1 90); do
     if command -v curl >/dev/null 2>&1; then
@@ -172,18 +207,18 @@ fi
 
 cat <<EOF
 
-==> OpenScreenTime is up and healthy on 127.0.0.1:${port}.
+==> OpenScreenTime is up and healthy on ${health_host}:${port}.
 
 Next steps:
 
-1. Point a reverse proxy at 127.0.0.1:${port} for https://${domain}.
+1. Point a reverse proxy at ${health_host}:${port} for https://${domain}.
    The app itself does not terminate TLS — your proxy must. It also must
    forward WebSocket upgrades (used by the agent channel).
 
    Minimal Caddy example:
 
      ${domain} {
-         reverse_proxy 127.0.0.1:${port}
+         reverse_proxy ${health_host}:${port}
      }
 
    (Caddy forwards WebSocket upgrades automatically.)
@@ -195,7 +230,7 @@ Next steps:
          server_name ${domain};
 
          location / {
-             proxy_pass http://127.0.0.1:${port};
+             proxy_pass http://${health_host}:${port};
              proxy_http_version 1.1;
              proxy_set_header Upgrade \$http_upgrade;
              proxy_set_header Connection "upgrade";
