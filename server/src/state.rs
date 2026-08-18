@@ -57,18 +57,25 @@ mod env_tests {
 
     #[test]
     fn a_real_value_is_configured() {
-        with_var("OST_TEST_REAL", "https://auth.example.com/application/o/ost/", || {
-            assert_eq!(
-                configured("OST_TEST_REAL").as_deref(),
-                Some("https://auth.example.com/application/o/ost/")
-            );
-        });
+        with_var(
+            "OST_TEST_REAL",
+            "https://auth.example.com/application/o/ost/",
+            || {
+                assert_eq!(
+                    configured("OST_TEST_REAL").as_deref(),
+                    Some("https://auth.example.com/application/o/ost/")
+                );
+            },
+        );
     }
 
     #[test]
     fn surrounding_whitespace_is_trimmed() {
         with_var("OST_TEST_PAD", "  https://a.example  ", || {
-            assert_eq!(configured("OST_TEST_PAD").as_deref(), Some("https://a.example"));
+            assert_eq!(
+                configured("OST_TEST_PAD").as_deref(),
+                Some("https://a.example")
+            );
         });
     }
 

@@ -53,7 +53,9 @@ pub fn render_polkit_rule(level: u8) -> String {
     js.push_str("  ];\n");
     js.push_str("  if (power.indexOf(action.id) >= 0) { return polkit.Result.NO; }\n");
     if level >= 3 {
-        js.push_str("  // Level 3: block user-initiated stop/disable of the openscreentime units.\n");
+        js.push_str(
+            "  // Level 3: block user-initiated stop/disable of the openscreentime units.\n",
+        );
         js.push_str("  // The watchdog is the recovery net for a killed/stopped agent, so it\n");
         js.push_str(
             "  // must be protected too — masking it alone would silently disarm recovery.\n",
