@@ -69,7 +69,10 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     // legacy table goes too: an agent upgraded from the Sentinel name can have
     // left one loaded, and half a teardown is worse than none — the user would
     // still be firewalled by rules nothing on the box admits to owning.
-    for table in [enforce::firewall::NFT_TABLE, enforce::firewall::LEGACY_NFT_TABLE] {
+    for table in [
+        enforce::firewall::NFT_TABLE,
+        enforce::firewall::LEGACY_NFT_TABLE,
+    ] {
         if let Err(e) = exec.run("nft", &["delete", "table", "inet", table]) {
             tracing::debug!("nft table {table} delete (probably already absent): {e}");
         }

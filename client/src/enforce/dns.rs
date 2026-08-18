@@ -114,8 +114,7 @@ fn ensure_include(exec: &Exec) -> Option<DnsGap> {
     };
 
     let stub = format!("{dir}/{INCLUDE_STUB}");
-    let body =
-        format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n");
+    let body = format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n");
     if let Err(e) = exec.write_file(&stub, &body) {
         tracing::error!("could not write dnsmasq include stub {stub}: {e}");
         return Some(DnsGap::PolicyNotLoaded);

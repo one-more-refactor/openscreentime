@@ -44,7 +44,7 @@ fn mask_config(config: &str) -> String {
     for line in config.lines() {
         let trimmed = line.trim();
         if let Some(tag) = &in_secret_block {
-            if trimmed == format!("</{tag}>") {
+            if trimmed.eq_ignore_ascii_case(&format!("</{tag}>")) {
                 out.push(MASK.to_string());
                 out.push(line.to_string());
                 in_secret_block = None;
@@ -52,13 +52,13 @@ fn mask_config(config: &str) -> String {
             // secret block content: dropped (replaced by one MASK line at close)
             continue;
         }
-        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed == format!("<{}>", t)) {
+        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t))) {
             out.push(line.to_string());
             in_secret_block = Some(tag.to_string());
             continue;
         }
         if let Some((k, _)) = line.split_once('=') {
-            if SECRET_KEYS.iter().any(|s| k.trim() == *s) {
+            if SECRET_KEYS.iter().any(|s| k.trim().eq_ignore_ascii_case(s)) {
                 out.push(format!("{} = {MASK}", k.trim_end()));
                 continue;
             }
@@ -78,7 +78,7 @@ fn merge_config(edited: &str, stored: &str) -> String {
     for line in stored.lines() {
         let trimmed = line.trim();
         if let Some((tag, body)) = &mut block {
-            if trimmed == format!("</{tag}>") {
+            if trimmed.eq_ignore_ascii_case(&format!("</{tag}>")) {
                 stored_blocks.insert(tag.clone(), body.join("\n"));
                 block = None;
             } else {
@@ -86,12 +86,12 @@ fn merge_config(edited: &str, stored: &str) -> String {
             }
             continue;
         }
-        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed == format!("<{}>", t)) {
+        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t))) {
             block = Some((tag.to_string(), Vec::new()));
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            if SECRET_KEYS.iter().any(|s| k.trim() == *s) {
+            if SECRET_KEYS.iter().any(|s| k.trim().eq_ignore_ascii_case(s)) {
                 stored_kv.insert(k.trim().to_string(), v.trim().to_string());
             }
         }

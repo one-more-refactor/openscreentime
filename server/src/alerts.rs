@@ -97,7 +97,9 @@ impl AlertConfig {
 /// is not resent; the console/tray remain the durable record).
 pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
     if !cfg.enabled() {
-        tracing::info!("phone alerts: no channel configured (set OST_ALERT_WEBHOOK or OST_TELEGRAM_*)");
+        tracing::info!(
+            "phone alerts: no channel configured (set OST_ALERT_WEBHOOK or OST_TELEGRAM_*)"
+        );
         return;
     }
     tracing::info!(
@@ -227,7 +229,9 @@ async fn drain_earn(
         let label = sanitize(&task_label);
         cfg.send(
             client,
-            &format!("⏳ {who} is asking for +{minutes} min ({label}). Approve it in OpenScreenTime."),
+            &format!(
+                "⏳ {who} is asking for +{minutes} min ({label}). Approve it in OpenScreenTime."
+            ),
         )
         .await;
     }
