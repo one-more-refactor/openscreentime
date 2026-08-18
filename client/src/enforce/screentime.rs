@@ -404,7 +404,8 @@ mod tests {
     fn ledger_survives_a_restart() {
         // A round-trip through disk must preserve the day's usage, so a restart
         // (crash / self-update / watchdog kick) can't hand out a fresh budget.
-        let dir = std::env::temp_dir().join(format!("openscreentime-ledger-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("openscreentime-ledger-{}", std::process::id()));
         let path = dir.join("usage_ledger.json");
         let mut t = UsageTracker::new();
         t.add_active("kid", 40 * 60, 1);
