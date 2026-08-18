@@ -52,7 +52,10 @@ fn mask_config(config: &str) -> String {
             // secret block content: dropped (replaced by one MASK line at close)
             continue;
         }
-        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t))) {
+        if let Some(tag) = SECRET_BLOCKS
+            .iter()
+            .find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t)))
+        {
             out.push(line.to_string());
             in_secret_block = Some(tag.to_string());
             continue;
@@ -86,13 +89,16 @@ fn merge_config(edited: &str, stored: &str) -> String {
             }
             continue;
         }
-        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t))) {
+        if let Some(tag) = SECRET_BLOCKS
+            .iter()
+            .find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t)))
+        {
             block = Some((tag.to_string(), Vec::new()));
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
             if SECRET_KEYS.iter().any(|s| k.trim().eq_ignore_ascii_case(s)) {
-                stored_kv.insert(k.trim().to_string(), v.trim().to_string());
+                stored_kv.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
             }
         }
     }
@@ -103,7 +109,7 @@ fn merge_config(edited: &str, stored: &str) -> String {
     for line in edited.lines() {
         let trimmed = line.trim();
         if let Some(tag) = &in_block {
-            if trimmed == format!("</{tag}>") {
+            if trimmed.eq_ignore_ascii_case(&format!("</{tag}>")) {
                 let body = block_buf.join("\n");
                 let restored = if body.trim() == MASK {
                     stored_blocks.get(tag).cloned().unwrap_or(body)
@@ -119,14 +125,20 @@ fn merge_config(edited: &str, stored: &str) -> String {
             }
             continue;
         }
-        if let Some(tag) = SECRET_BLOCKS.iter().find(|t| trimmed == format!("<{}>", t)) {
+        if let Some(tag) = SECRET_BLOCKS
+            .iter()
+            .find(|t| trimmed.eq_ignore_ascii_case(&format!("<{}>", t)))
+        {
             out.push(line.to_string());
             in_block = Some(tag.to_string());
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            if SECRET_KEYS.iter().any(|s| k.trim() == *s) && v.trim() == MASK {
-                let stored_v = stored_kv.get(k.trim()).cloned().unwrap_or_default();
+            if SECRET_KEYS.iter().any(|s| k.trim().eq_ignore_ascii_case(s)) && v.trim() == MASK {
+                let stored_v = stored_kv
+                    .get(&k.trim().to_ascii_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 out.push(format!("{} = {}", k.trim_end(), stored_v));
                 continue;
             }
@@ -590,6 +602,27 @@ mod tests {
         assert!(masked.contains("CERT")); // ca cert is not a secret
         let merged = merge_config(&masked, ovpn);
         assert!(merged.contains("SECRET\nMATERIAL"));
+    }
+
+    #[test]
+    fn masks_lowercase_key_names_too() {
+        // wg-quick accepts `privatekey = ...`; a case-sensitive match let the
+        // raw key straight through into an admin response.
+        let wg = "[Interface]\nprivatekey = SECRETKEY123=\npresharedkey = PSK456=\n";
+        let masked = mask_config(wg);
+        assert!(!masked.contains("SECRETKEY123"), "{masked}");
+        assert!(!masked.contains("PSK456"), "{masked}");
+        let merged = merge_config(&masked, wg);
+        assert!(merged.contains("privatekey = SECRETKEY123="), "{merged}");
+    }
+
+    #[test]
+    fn masks_uppercase_openvpn_block_tags_too() {
+        let ovpn = "client\n<KEY>\nSECRET\n</KEY>\n";
+        let masked = mask_config(ovpn);
+        assert!(!masked.contains("SECRET"), "{masked}");
+        let merged = merge_config(&masked, ovpn);
+        assert!(merged.contains("SECRET"), "{merged}");
     }
 
     #[test]
