@@ -18,8 +18,34 @@ on **your** infrastructure — no cloud, no accounts, no telemetry.
 &nbsp;![Self-hosted](https://img.shields.io/badge/self--hosted-rootless%20Podman-0a0a0a?style=flat-square)
 &nbsp;![Auth](https://img.shields.io/badge/auth-passkey--only-0a0a0a?style=flat-square)
 &nbsp;![Default deny](https://img.shields.io/badge/default-deny-d71921?style=flat-square)
+&nbsp;![Status](https://img.shields.io/badge/status-alpha-d71921?style=flat-square)
 
 </div>
+
+---
+
+> ## ⚠️ Alpha — work in progress
+>
+> OpenScreenTime is early software under active development. It is public so it
+> can be read and picked apart, not because it is finished. **Every release is an
+> alpha pre-release**, and there is no stable version.
+>
+> What that means in practice:
+>
+> - **Breaking changes land without a migration path.** The product was called
+>   Sentinel until recently. That rename is in `main` but is not in any release
+>   yet, so the newest tag and this tree do not agree with each other.
+> - **Upgrading a device enrolled under the old name leaves things behind** — a
+>   stale VPN tunnel, a stale `dnsmasq` include that keeps serving the old
+>   allowlist, and a recovery account (`sentinel-admin`) that no longer has its
+>   polkit exemption. See [`CHANGELOG.md`](CHANGELOG.md).
+> - **Nobody has audited this but its author.** It enforces default-deny
+>   networking and tamper lockdowns on real machines; read
+>   [`docs/TAMPER.md`](docs/TAMPER.md) before raising the tamper level on a
+>   device you actually need.
+> - Interfaces, database schema and the agent/server protocol are all still moving.
+>
+> Run it on hardware you can physically recover, and keep a root shell you trust.
 
 ---
 
