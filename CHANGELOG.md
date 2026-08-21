@@ -13,6 +13,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning:
 patch bump means fixes only. The agent self-updates by comparing this version
 (`x.y.z`, from the crate metadata) against its server's bundled build.
 
+The project is **alpha**: every release is published as a pre-release and
+there is no stable version. See the notice at the top of `README.md`.
+
 ## [Unreleased]
 
 **Breaking: the product is now OpenScreenTime.** The agent was renamed in the

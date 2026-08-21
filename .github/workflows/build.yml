@@ -438,7 +438,10 @@ jobs:
           name: "OpenScreenTime ${{ github.ref_name }}"
           body_path: /tmp/release-notes.txt
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # The whole project is alpha: every release ships as a
+          # pre-release until it is fit to be called otherwise, whatever
+          # the tag looks like.
+          prerelease: true
           files: |
             release-assets/openscreentime-server
             release-assets/agent/openscreentime-*
