@@ -190,11 +190,16 @@ impl ServerClient {
     ///
     /// Returns the voucher and its lifetime in seconds. The voucher is a live
     /// credential for as long as it lasts, so it is never logged here.
-    pub async fn mint_voucher(&self) -> Result<(String, u64)> {
+    ///
+    /// `os_username` is the desktop user asking: the server binds the voucher
+    /// to the *account* that OS login belongs to, so a child's machine signs
+    /// the child in — never the parent.
+    pub async fn mint_voucher(&self, os_username: &str) -> Result<(String, u64)> {
         let res: Value = self
             .http
             .post(format!("{}/agent/voucher", self.base))
             .header("Authorization", self.bearer())
+            .json(&json!({ "os_username": os_username }))
             .send()
             .await
             .context("POST /agent/voucher")?
