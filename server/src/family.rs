@@ -133,7 +133,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     for r in &device_rows {
         let mut d = device_to_json(r);
         let p = pending.get(&r.0).cloned().unwrap_or_default();
-        d["online"] = json!(st.hub.is_online(r.0).await);
+        d["online"] = json!(d["status"] == "online");
         let lp = lock_pending(&p, r.14.as_ref());
         d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
@@ -270,6 +270,6 @@ pub async fn set_offline_window(
 
     let row = row.ok_or_else(|| crate::error::AppError::NotFound("device not found".into()))?;
     let mut d = device_to_json(&row);
-    d["online"] = json!(st.hub.is_online(id).await);
+    d["online"] = json!(d["status"] == "online");
     Ok(Json(json!({ "device": d })))
 }

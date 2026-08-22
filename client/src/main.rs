@@ -15,6 +15,7 @@ mod enroll;
 mod intro;
 mod lockout;
 mod login;
+mod loginbroker;
 mod pam;
 mod parent;
 mod parentcode;

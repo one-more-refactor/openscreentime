@@ -1808,6 +1808,14 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
         agent.exec.clone(),
     ));
 
+    // Answer `ost login` requests from desktop users (they can't read the
+    // device token; we mint the voucher for them — see loginbroker.rs).
+    tokio::spawn(crate::loginbroker::serve(
+        agent.cfg.clone(),
+        agent.client.clone(),
+        agent.exec.dry_run(),
+    ));
+
     // Reconnect with jittered exponential backoff (1 s → 60 s). A server that
     // answers HTTP but not WS keeps the backoff short: the poll round succeeded.
     let mut backoff_secs = BACKOFF_MIN_SECS;

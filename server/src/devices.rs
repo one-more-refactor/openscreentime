@@ -201,7 +201,7 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
     for r in &rows {
         let mut d = device_to_json(r);
         d["users"] = device_users_json(&st.db, r.0).await?;
-        d["online"] = json!(st.hub.is_online(r.0).await);
+        d["online"] = json!(d["status"] == "online");
         let pending = pending_command_types(&st.db, r.0).await?;
         d["lock_pending"] = json!(lock_pending(&pending, r.14.as_ref()));
         d["pending_commands"] = json!(pending);
@@ -220,7 +220,7 @@ pub async fn get_device(
     let recent = events::recent_for_device(&st.db, admin.tenant_id, id, 25).await?;
 
     let mut d = device_to_json(&row);
-    d["online"] = json!(st.hub.is_online(id).await);
+    d["online"] = json!(d["status"] == "online");
     let pending = pending_command_types(&st.db, id).await?;
     d["lock_pending"] = json!(lock_pending(&pending, row.14.as_ref()));
     d["pending_commands"] = json!(pending);
