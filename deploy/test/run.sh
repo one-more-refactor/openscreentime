@@ -11,6 +11,9 @@
 #   deploy/test/run.sh logs                     # journal of the agent unit
 #   deploy/test/run.sh down
 #
+# A local dev server can be reached from inside as http://ost.local:<port>
+# (the agent only accepts plain http for loopback/.local hosts).
+#
 # Agent binary: pass a path to `build`, or it is taken from
 # client/target/x86_64-unknown-linux-musl/release/openscreentime, or extracted
 # from the locally built server image (localhost/openscreentime_server:latest,
@@ -51,7 +54,7 @@ case "${1:-}" in
         # chattr +i on resolv.conf (SYS_ADMIN inside a rootless userns is not
         # host root — it is scoped to the namespace).
         podman run -d --name "$name" --hostname "$devname" \
-            --systemd=always --dns 1.1.1.1 \
+            --systemd=always --dns 1.1.1.1 --add-host ost.local:host-gateway \
             --cap-add NET_ADMIN,NET_RAW,SYS_ADMIN,LINUX_IMMUTABLE,AUDIT_WRITE \
             --security-opt unmask=/sys/fs/cgroup \
             -v "$bin_dir/openscreentime:/usr/local/bin/openscreentime:ro" \
@@ -65,19 +68,19 @@ case "${1:-}" in
         echo "==> installing the hardened unit (+ PAM/sudoers parent code)"
         podman exec "$name" openscreentime install-service || true
         sleep 3
-        podman exec "$name" systemctl is-active openscreentime || podman exec "$name" systemctl status openscreentime --no-pager | tail -20
+        podman exec "$name" systemctl is-active openscreentime-agent || podman exec "$name" systemctl status openscreentime-agent --no-pager | tail -20
         ;;
     sh) exec podman exec -it "$name" bash ;;
     exec) shift; exec podman exec "$name" "$@" ;;
     status)
         podman exec "$name" openscreentime status || true
-        podman exec "$name" systemctl is-active openscreentime dnsmasq
+        podman exec "$name" systemctl is-active openscreentime-agent dnsmasq
         podman exec "$name" sh -c 'nft list table inet openscreentime 2>/dev/null | head -40; echo; ls -la /etc/openscreentime /etc/openscreentime/dnsmasq.d 2>/dev/null; grep -c address= /etc/openscreentime/dnsmasq.d/*.conf 2>/dev/null'
         ;;
     dns) podman exec "$name" sh -c "getent hosts ${2:?domain} || echo 'NXDOMAIN / blocked'" ;;
     offline) podman exec "$name" sh -c 'nft add table inet osttest; nft add chain inet osttest out "{ type filter hook output priority -300; }"; nft add rule inet osttest out ip daddr != 127.0.0.0/8 drop'; echo "network cut" ;;
     online) podman exec "$name" sh -c 'nft delete table inet osttest' ; echo "network restored" ;;
-    logs) podman exec "$name" journalctl -u openscreentime --no-pager -n "${2:-80}" ;;
+    logs) podman exec "$name" journalctl -u openscreentime-agent --no-pager -n "${2:-80}" ;;
     down) podman rm -f "$name" ;;
     *) sed -n 2,14p "$0"; exit 2 ;;
 esac
