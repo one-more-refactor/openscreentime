@@ -15,7 +15,9 @@ mod enroll;
 mod intro;
 mod lockout;
 mod login;
+mod pam;
 mod parent;
+mod parentcode;
 mod paths;
 mod pin;
 mod policy;
@@ -121,18 +123,25 @@ enum Cmd {
     /// approves time requests. Runs as the desktop user (no root).
     #[cfg(feature = "tray")]
     Tray,
-    /// Parent-PIN recovery: verify the PIN and suspend enforcement for a while
-    /// (nft table + resolv.conf pin torn down, users un-frozen). Requires root.
+    /// Parent recovery: verify the parent code (from your authenticator app,
+    /// or the backup code) and suspend enforcement for a while (nft table +
+    /// resolv.conf pin torn down, users un-frozen). Works offline. Requires root.
     Unlock {
         /// Optional. Prefer omitting it: anything passed here is visible in
         /// /proc/<pid>/cmdline to every local user, including the person this
-        /// device constrains. Omit it and the PIN is read from the terminal.
+        /// device constrains. Omit it and the code is read from the terminal.
         #[arg(long)]
+        code: Option<String>,
+        /// Old name for --code.
+        #[arg(long, hide = true)]
         pin: Option<String>,
         /// How long to suspend enforcement for, in minutes.
         #[arg(long, default_value_t = 60)]
         minutes: u64,
     },
+    /// Remove the systemd units, the sudo/PAM parent-code hook and the
+    /// `ost-managed` group. Leaves the enrollment config in place. Requires root.
+    Uninstall,
 }
 
 fn init_tracing() {
@@ -145,12 +154,13 @@ fn init_tracing() {
         .init();
 }
 
-/// Read the PIN from the terminal without echoing it and without ever placing
-/// it on a command line. No new dependency: raw-mode toggling via `stty` is
-/// enough for a one-shot prompt, and falls back to a plain read if that fails.
+/// Read the parent code from the terminal without echoing it and without ever
+/// placing it on a command line. No new dependency: raw-mode toggling via
+/// `stty` is enough for a one-shot prompt, and falls back to a plain read if
+/// that fails.
 fn rpassword_prompt() -> anyhow::Result<String> {
     use std::io::{BufRead, Write};
-    eprint!("Recovery PIN: ");
+    eprint!("Parent code (authenticator app, or the backup code): ");
     std::io::stderr().flush().ok();
     let echo_off = std::process::Command::new("stty")
         .arg("-echo")
@@ -173,13 +183,25 @@ fn rpassword_prompt() -> anyhow::Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
+
+    // PAM helper (`pam_exec … openscreentime pam-auth`): runs inside sudo's
+    // PAM conversation, must stay quiet on stderr (it's the user's terminal)
+    // and must never parse the rest of argv like a normal subcommand.
+    if raw_args.get(1).map(String::as_str) == Some("pam-auth") {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
+            .with_target(false)
+            .init();
+        return pam::run().await;
+    }
+
     init_tracing();
 
     // Hidden internal helper spawned by `unlock` to auto-resume enforcement
     // after the suspend window elapses. Not a real subcommand (kept out of
     // --help / clap's Cmd enum) since it's an implementation detail, not
     // something an operator should invoke directly.
-    let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
         let secs: u64 = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3600);
         return unlock::resume_after(secs);
@@ -273,18 +295,19 @@ async fn main() -> Result<()> {
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
-        Cmd::Unlock { pin, minutes } => {
-            let pin = match pin {
+        Cmd::Unlock { code, pin, minutes } => {
+            let code = match code.or(pin) {
                 Some(p) => {
                     eprintln!(
-                        "warning: --pin on the command line is readable by any local user \
+                        "warning: --code on the command line is readable by any local user \
                          via /proc; next time omit it and type it when asked."
                     );
                     p
                 }
                 None => rpassword_prompt()?,
             };
-            unlock::run(&ctx, &pin, minutes)
+            unlock::run(&ctx, &code, minutes).await
         }
+        Cmd::Uninstall => service::uninstall(ctx),
     }
 }

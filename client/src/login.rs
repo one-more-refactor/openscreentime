@@ -49,6 +49,17 @@ fn open_browser(url: &str) -> bool {
     false
 }
 
+/// The person at the keyboard: the user who ran `ost login` — through sudo,
+/// the one who *called* sudo, not root.
+pub fn invoking_user() -> String {
+    std::env::var("SUDO_USER")
+        .ok()
+        .filter(|u| !u.is_empty() && u != "root")
+        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+        .or_else(|| users::get_current_username().map(|u| u.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
 /// Whether this looks like a session that can actually show a browser.
 fn has_display() -> bool {
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -60,10 +71,11 @@ pub async fn run(print_url: bool, as_json: bool) -> Result<()> {
     })?;
 
     let client = ServerClient::new(&cfg.server_url, &cfg.device_token)?;
+    let me = invoking_user();
     let (voucher, expires_in) = client
-        .mint_voucher()
+        .mint_voucher(&me)
         .await
-        .context("could not get a sign-in voucher from the server")?;
+        .context("could not get a sign-in voucher from the server (is this login linked to a person in the console?)")?;
 
     let url = console_url(&cfg.server_url, &voucher);
 

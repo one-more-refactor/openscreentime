@@ -50,7 +50,7 @@ ProtectSystem=strict
 # is not listed, so without these an upgraded device would silently start with
 # an empty usage ledger — i.e. every child's spent time back to zero. They can
 # be dropped once no device predates the rename.
-ReadWritePaths=/etc/openscreentime /var/lib/openscreentime /run/openscreentime /etc/resolv.conf -/etc/sentinel -/var/lib/sentinel -/run/sentinel -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin
+ReadWritePaths=/etc/openscreentime /var/lib/openscreentime /run/openscreentime /etc/resolv.conf -/etc/sentinel -/var/lib/sentinel -/run/sentinel -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin -/etc/sudoers.d
 RuntimeDirectory=openscreentime
 StateDirectory=openscreentime
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.

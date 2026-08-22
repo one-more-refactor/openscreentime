@@ -1,9 +1,10 @@
 //! `openscreentime unlock` — the full agent-unlock recovery path ("admin is
-//! physically here"). Verifies the parent PIN against the cached policy's
-//! `parent_pin_hash` (argon2, fully offline) and, on success, suspends network
-//! enforcement for a configurable window: tears down our nft table (and the legacy one),
-//! un-pins `/etc/resolv.conf`, and un-freezes every login user. Requires root
-//! (same check every other enforcing subcommand uses).
+//! physically here"). Verifies the parent code (authenticator TOTP from the
+//! cached bundle, or the backup code — fully offline, see `parentcode`) and,
+//! on success, suspends network enforcement for a configurable window: tears
+//! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`, and
+//! un-freezes every login user. Requires root (same check every other
+//! enforcing subcommand uses).
 //!
 //! Minimal-but-real auto-resume: spawns a detached copy of this binary running
 //! the hidden `__resume-enforcement` helper (see `main.rs`), which sleeps for
@@ -19,27 +20,42 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// `openscreentime unlock --pin <PIN> [--minutes <N>]`.
-pub fn run(ctx: &Arc<AgentCtx>, pin: &str, minutes: u64) -> Result<()> {
+/// `openscreentime unlock [--code <CODE>] [--minutes <N>]`.
+pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
     ctx.require_root_for_enforcement()?;
 
     let policy = policy::load_cache().context(
-        "cannot verify parent PIN: no cached policy on this device (has the agent ever run?)",
+        "cannot verify the parent code: no cached policy on this device (has the agent ever run?)",
     )?;
 
-    let Some(hash) = policy.parent_pin_hash.as_deref() else {
+    let verifier = crate::parentcode::Verifier::from_device();
+    if !verifier.configured() {
         anyhow::bail!(
-            "no parent PIN is configured on this device's policy — set one in the profile \
-             editor first (or use the server's admin lock/unlock instead)"
+            "no parent code is set up on this device — the server never sent an authenticator \
+             secret and no backup code is configured (use the console's lock/unlock instead)"
         );
-    };
-
-    if !crate::pin::verify_pin(pin, hash) {
-        anyhow::bail!("incorrect parent PIN");
+    }
+    let verdict = verifier.verify(code);
+    let who = crate::login::invoking_user();
+    let ev = crate::parentcode::event(&verdict, "unlock", &who);
+    // Audit, best-effort and bounded: this path exists for when the network
+    // is gone, so it must never wait on it.
+    if let Ok(cfg) = crate::config::AgentConfig::load() {
+        if let Ok(client) = crate::client::ServerClient::new(&cfg.server_url, &cfg.device_token) {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.post_events(std::slice::from_ref(&ev)),
+            )
+            .await;
+        }
+    }
+    if !verdict.accepted() {
+        anyhow::bail!("{}", verdict.message());
     }
 
     tracing::warn!(
-        "ADMIN RECOVERY: parent PIN verified — suspending enforcement for {minutes} minute(s)"
+        "ADMIN RECOVERY: {} — suspending enforcement for {minutes} minute(s)",
+        verdict.message()
     );
 
     let exec = Exec::new(ctx.clone());

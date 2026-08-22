@@ -377,7 +377,7 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
     match (prev.tamper_lockdown, next.tamper_lockdown) {
         (false, true) => notify(
             "TAMPERING DETECTED",
-            "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+            "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (PARENT CODE UNLOCKS)",
             true,
         ),
         (true, false) => notify("TAMPER LOCK LIFTED", "NORMAL USE HAS RESUMED", false),
