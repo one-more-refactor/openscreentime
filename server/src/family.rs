@@ -96,7 +96,9 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     if let Some(list) = profiles.as_array() {
         for p in list {
             if let (Some(id), Some(pol)) = (
-                p.get("id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()),
+                p.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|s| Uuid::parse_str(s).ok()),
                 p.get("policy").cloned(),
             ) {
                 if let Ok(parsed) = serde_json::from_value::<Policy>(pol) {

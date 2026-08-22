@@ -194,25 +194,6 @@ pub async fn ensure_presets(db: &PgPool, tenant_id: Uuid) -> Result<(), sqlx::Er
     Ok(())
 }
 
-/// The preset profile id for a bracket in a tenant (seeding it if missing).
-pub async fn preset_id(db: &PgPool, tenant_id: Uuid, bracket: AgeBracket) -> Result<Uuid, sqlx::Error> {
-    let find = || async {
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM profiles WHERE tenant_id = $1 AND kind = $2 AND is_preset
-             ORDER BY created_at LIMIT 1",
-        )
-        .bind(tenant_id)
-        .bind(bracket.id())
-        .fetch_optional(db)
-        .await
-    };
-    if let Some(id) = find().await? {
-        return Ok(id);
-    }
-    ensure_presets(db, tenant_id).await?;
-    find().await?.ok_or(sqlx::Error::RowNotFound)
-}
-
 /// Startup backfill: every existing tenant gets the bracket presets it lacks.
 pub async fn backfill_all_tenants(db: &PgPool) -> Result<(), sqlx::Error> {
     let tenants: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM tenants")
@@ -265,7 +246,10 @@ mod tests {
             assert_eq!(p["lockdown"]["offline_lockdown_days"], 0, "{b:?}");
             assert_eq!(p["lockdown"]["block_doh"], true, "{b:?}");
             assert_eq!(p["screen_time"]["enabled"], true, "{b:?}");
-            assert_eq!(p["gamification"]["lockout"]["unlock_challenge"], "parent_pin", "{b:?}");
+            assert_eq!(
+                p["gamification"]["lockout"]["unlock_challenge"], "parent_pin",
+                "{b:?}"
+            );
         }
     }
 
@@ -276,10 +260,18 @@ mod tests {
         for preset in all_presets() {
             let p: Policy = serde_json::from_value(preset.policy.clone()).unwrap();
             for a in &p.blocks.apps {
-                assert!(catalog::app(a).is_some(), "{}: unknown app {a}", preset.name);
+                assert!(
+                    catalog::app(a).is_some(),
+                    "{}: unknown app {a}",
+                    preset.name
+                );
             }
             for c in &p.blocks.categories {
-                assert!(catalog::category(c).is_some(), "{}: unknown category {c}", preset.name);
+                assert!(
+                    catalog::category(c).is_some(),
+                    "{}: unknown category {c}",
+                    preset.name
+                );
             }
         }
     }
@@ -289,7 +281,10 @@ mod tests {
         assert_eq!(adult_policy()["screen_time"]["enabled"], false);
         assert!(adult_policy().get("blocks").is_none());
         assert_eq!(older_teen_policy()["screen_time"]["enabled"], false);
-        assert_eq!(little_policy()["gamification"]["earn_time"]["enabled"], false);
+        assert_eq!(
+            little_policy()["gamification"]["earn_time"]["enabled"],
+            false
+        );
         assert_eq!(all_presets().len(), 5);
     }
 }

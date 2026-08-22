@@ -16,6 +16,7 @@ mod earn;
 mod error;
 mod events;
 mod family;
+mod members;
 mod parent;
 mod presets;
 mod profiles;
@@ -76,6 +77,12 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&database_url).await?;
     db::migrate(&pool).await?;
     tracing::info!("migrations applied");
+    // 0.4 backfills: every tenant gets the bracket presets it lacks, and every
+    // OS login that predates accounts gets a person. Both idempotent.
+    presets::backfill_all_tenants(&pool).await?;
+    if let Err(e) = members::backfill_links(&pool).await {
+        tracing::warn!(error = %e, "account backfill incomplete");
+    }
 
     // WebAuthn relying party.
     let rp_origin = Url::parse(&rp_origin_str)?;
@@ -98,18 +105,19 @@ async fn main() -> anyhow::Result<()> {
         hub: Arc::new(Hub::default()),
     };
 
-    // Offline sweeper: agents on the WS bus flip to offline on disconnect, but
-    // a dead poll-mode agent would stay "online" forever. Sweep anything whose
-    // last_seen went stale ('locked' and 'pending' are left untouched).
+    // Offline sweeper: agents on the WS bus flip to offline the moment the
+    // socket closes; a dead poll-mode agent (30 s heartbeats) would stay
+    // "online" forever without this. 90 s of silence = offline. `pending` is
+    // left untouched; `locked` is its own column and survives.
     {
         let db = state.db.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 tick.tick().await;
                 match sqlx::query(
                     "UPDATE devices SET status = 'offline'
-                     WHERE status = 'online' AND last_seen < now() - interval '3 minutes'",
+                     WHERE status = 'online' AND last_seen < now() - interval '90 seconds'",
                 )
                 .execute(&db)
                 .await
@@ -202,7 +210,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_attempts)
         .route("/api/auth/config", get(auth_oidc::auth_config))
         .route("/api/auth/logout", post(auth::logout))
-        .route("/api/me", get(auth::me))
+        .route("/api/me", get(members::me))
+        .route("/api/me/today", get(members::today))
+        .route("/api/me/ask", post(members::ask))
+        .route("/api/catalog", get(members::catalog_json))
         .route("/api/me/passkeys", get(auth::list_passkeys))
         .route("/api/me/passkeys/{id}", delete(auth::delete_passkey))
         // --- Step-up 2FA (docs/AUTH.md) -------------------------------------
@@ -222,6 +233,14 @@ async fn main() -> anyhow::Result<()> {
             get(devices::get_device)
                 .patch(devices::patch_device)
                 .delete(devices::delete_device),
+        )
+        .route(
+            "/api/devices/{id}/parent-code",
+            get(devices::get_parent_code),
+        )
+        .route(
+            "/api/devices/{id}/parent-code/rotate",
+            post(devices::rotate_parent_code),
         )
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
@@ -277,6 +296,15 @@ async fn main() -> anyhow::Result<()> {
                 .put(profiles::update_profile)
                 .delete(profiles::delete_profile),
         )
+        // --- Members (everyone has an account) ------------------------------
+        .route(
+            "/api/members",
+            get(members::list_members).post(members::create_member),
+        )
+        .route(
+            "/api/members/{id}",
+            axum::routing::patch(members::patch_member).delete(members::delete_member),
+        )
         // --- Family (the whole home screen in one request) -----------------
         .route("/api/family", get(family::get_family))
         // --- Events --------------------------------------------------------
@@ -298,6 +326,12 @@ async fn main() -> anyhow::Result<()> {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             stepup::require_step_up,
+        ))
+        // A member session (a child on their own page) is confined to a short
+        // allow-list; every other /api route is the hub's. Fails closed.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            members::guard_member,
         ))
         .with_state(state);
 
