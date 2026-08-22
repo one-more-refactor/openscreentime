@@ -377,3 +377,10 @@ linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
 the account fields plus `name, used_minutes, earned_minutes, limit_minutes,
 profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
 os_username}], pending_requests, locked, blocks, blocked_apps, can_ask, managed`.
+
+### `POST /api/device-users/{id}/assign-account` (0.4)
+
+Body `{ "account_id": "<uuid>" }`. Moves an OS login to another person in the
+household; the login takes that person's rules (`profile_id` follows) and the
+agent is told to re-pull. Step-up gated like every mutation. Use it when
+enrollment linked a second adult's login on a child's laptop to the child.
