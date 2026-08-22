@@ -165,3 +165,23 @@ predating the migration, additive with no backfill). `0008_remove_ssh.sql` drops
 `events.type = 'ssh'` stays in the CHECK constraint so historical rows remain readable.
 Seeding the three preset profiles happens in
 application code when a tenant is created (see `PROFILES.md`).
+
+
+## 0.4 (migration 0015)
+
+- `admins` += `role`, `age_bracket`, `birthdate`, `theme`, `self_managed`,
+  `profile_id` (→ profiles); `email` is nullable (members usually have none).
+  The admins table *is* the account table; "member" = a managed person or a
+  self-tracking adult, no passkey.
+- `device_users` += `account_id` (→ admins, ON DELETE SET NULL). Every OS login
+  is linked on enroll/heartbeat/startup (`members::link_os_user`).
+- `devices` += `parent_totp_secret` (base32 — the per-device parent code),
+  `owner_account_id`, `locked` (bool), `last_state` (jsonb). `status` CHECK is
+  now `pending|online|offline`; old `'locked'` rows became `offline`+`locked`.
+- `device_vouchers` += `account_id`.
+- `profiles.kind` CHECK accepts the five bracket ids (+ the legacy three and
+  `custom`). Five bracket presets per tenant; a member's rules are a non-preset
+  copy with `kind = <bracket>`.
+- `events.type` CHECK += `parent_code_ok`, `parent_code_failed`,
+  `parent_code_backup_used`, `app_blocked`, `member`, and restores
+  `enforcement_degraded` + `vpn_profile` (dropped by 0013 by mistake).

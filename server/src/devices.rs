@@ -17,7 +17,7 @@ use crate::state::{AppState, AuthAdmin};
 
 pub const DEVICE_COLS: &str = "id, tenant_id, name, hostname, os, agent_version, status, \
     tamper_level, public_ip::text, last_seen, created_at, vpn_updated_at, \
-    offline_allowed_until";
+    offline_allowed_until, locked, last_state, owner_account_id";
 
 pub type DeviceRow = (
     Uuid,
@@ -33,6 +33,9 @@ pub type DeviceRow = (
     DateTime<Utc>,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    bool,
+    Option<Value>,
+    Option<Uuid>,
 );
 
 pub fn device_to_json(r: &DeviceRow) -> Value {
@@ -43,6 +46,8 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
         "hostname": r.3,
         "os": r.4,
         "agent_version": r.5,
+        // pending | online | offline — presence only. Whether the screens are
+        // frozen is `locked`, below.
         "status": r.6,
         "tamper_level": r.7,
         "public_ip": r.8,
@@ -54,7 +59,95 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
         // Set by PUT /devices/:id/offline-window: a parent said this machine
         // may be away, so being offline is expected rather than trouble.
         "offline_allowed_until": r.12,
+        // What the agent last reported (state frame / lock ack) — the truth,
+        // never what a parent merely asked for. `lock_pending` is folded in by
+        // the list/detail/family handlers from the command queue.
+        "locked": r.13,
+        "last_state": r.14,
+        "owner_account_id": r.15,
     })
+}
+
+/// `lock_pending`: a lock or unlock is queued/sent and not yet confirmed.
+pub fn lock_pending(pending_types: &[String]) -> bool {
+    pending_types.iter().any(|t| t == "lock" || t == "unlock")
+}
+
+// --- Parent code (per-device TOTP) -----------------------------------------
+
+/// The device's parent authenticator secret, minting one if the device
+/// predates 0.4. Base32, 20 bytes.
+pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<String> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT parent_totp_secret FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_optional(db)
+            .await?;
+    let existing = existing.ok_or_else(|| AppError::NotFound("device not found".into()))?;
+    if let Some(s) = existing {
+        return Ok(s);
+    }
+    let fresh = crate::stepup::gen_totp_secret();
+    // Race-safe: whoever lands first wins, everybody reads the winner back.
+    let secret: String = sqlx::query_scalar(
+        "UPDATE devices SET parent_totp_secret = COALESCE(parent_totp_secret, $2)
+          WHERE id = $1 RETURNING parent_totp_secret",
+    )
+    .bind(device_id)
+    .bind(&fresh)
+    .fetch_one(db)
+    .await?;
+    Ok(secret)
+}
+
+fn parent_code_json(device_name: &str, secret: &str) -> Value {
+    json!({
+        "secret": secret,
+        "otpauth_uri": crate::stepup::otpauth_uri(device_name, secret),
+    })
+}
+
+/// `GET /api/devices/{id}/parent-code` — step-up gated (sensitive read).
+pub async fn get_parent_code(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let row = get_device_row(&st.db, id, admin.tenant_id).await?;
+    let secret = ensure_parent_code(&st.db, id).await?;
+    Ok(Json(
+        json!({ "parent_code": parent_code_json(&row.2, &secret) }),
+    ))
+}
+
+/// `POST /api/devices/{id}/parent-code/rotate` — a new secret; the old
+/// authenticator entry stops working once the agent pulls policy.
+pub async fn rotate_parent_code(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let row = get_device_row(&st.db, id, admin.tenant_id).await?;
+    let fresh = crate::stepup::gen_totp_secret();
+    sqlx::query("UPDATE devices SET parent_totp_secret = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&fresh)
+        .execute(&st.db)
+        .await?;
+    enqueue_command(&st, id, "apply_policy", json!({})).await?;
+    events::insert(
+        &st.db,
+        admin.tenant_id,
+        Some(id),
+        None,
+        "parent_code_ok",
+        "info",
+        json!({ "action": "rotated", "by": admin.admin_id }),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "parent_code": parent_code_json(&row.2, &fresh) }),
+    ))
 }
 
 /// Types of commands still pending (queued|sent) for a device — drives the
@@ -95,7 +188,9 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
         let mut d = device_to_json(r);
         d["users"] = device_users_json(&st.db, r.0).await?;
         d["online"] = json!(st.hub.is_online(r.0).await);
-        d["pending_commands"] = json!(pending_command_types(&st.db, r.0).await?);
+        let pending = pending_command_types(&st.db, r.0).await?;
+        d["lock_pending"] = json!(lock_pending(&pending));
+        d["pending_commands"] = json!(pending);
         out.push(d);
     }
     Ok(Json(json!({ "devices": out })))
@@ -112,7 +207,9 @@ pub async fn get_device(
 
     let mut d = device_to_json(&row);
     d["online"] = json!(st.hub.is_online(id).await);
-    d["pending_commands"] = json!(pending_command_types(&st.db, id).await?);
+    let pending = pending_command_types(&st.db, id).await?;
+    d["lock_pending"] = json!(lock_pending(&pending));
+    d["pending_commands"] = json!(pending);
     Ok(Json(json!({
         "device": d,
         "users": users,
@@ -123,6 +220,10 @@ pub async fn get_device(
 #[derive(Deserialize)]
 pub struct CreateDeviceReq {
     pub name: String,
+    /// "This is <person>'s computer": OS logins that enroll without a name
+    /// match link to this account instead of spawning a new member.
+    #[serde(default)]
+    pub account_id: Option<Uuid>,
 }
 
 pub async fn create_device(
@@ -133,14 +234,23 @@ pub async fn create_device(
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
+    if let Some(acct) = req.account_id {
+        crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+    }
     let enroll_token = gen_token();
+    // The parent code is born with the device so the QR can sit next to the
+    // install command; the agent receives the same secret on its first pull.
+    let secret = crate::stepup::gen_totp_secret();
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status)
-         VALUES ($1, $2, $3, now() + interval '24 hours', 'pending') RETURNING id",
+        "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status,
+                              parent_totp_secret, owner_account_id)
+         VALUES ($1, $2, $3, now() + interval '24 hours', 'pending', $4, $5) RETURNING id",
     )
     .bind(admin.tenant_id)
-    .bind(&req.name)
+    .bind(req.name.trim())
     .bind(&enroll_token)
+    .bind(&secret)
+    .bind(req.account_id)
     .fetch_one(&st.db)
     .await?;
 
@@ -148,6 +258,7 @@ pub async fn create_device(
     Ok(Json(json!({
         "device": device_to_json(&row),
         "enroll_token": enroll_token,
+        "parent_code": parent_code_json(&row.2, &secret),
     })))
 }
 
@@ -254,16 +365,9 @@ pub async fn lock_device(
     if pending_command(&st.db, id, "lock").await?.is_some() {
         return Err(AppError::Conflict("a lock is already pending".into()));
     }
-    // Truthful lock state: only flip status when the command actually reached
-    // a live agent. Otherwise it stays queued; the ack path in agent.rs flips
-    // the status once the device reconnects and applies the lock.
+    // Truthful lock state: the device shows `lock_pending` until the agent
+    // acks (or its next `state` frame says locked). Nothing is flipped here.
     let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "lock", json!({})).await?;
-    if delivered {
-        sqlx::query("UPDATE devices SET status = 'locked' WHERE id = $1")
-            .bind(id)
-            .execute(&st.db)
-            .await?;
-    }
     events::insert(
         &st.db,
         admin.tenant_id,
@@ -288,14 +392,8 @@ pub async fn unlock_device(
     if pending_command(&st.db, id, "unlock").await?.is_some() {
         return Err(AppError::Conflict("an unlock is already pending".into()));
     }
-    // Mirror of lock: status flips immediately only on live delivery, else on ack.
+    // Mirror of lock: pending until the agent confirms.
     let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "unlock", json!({})).await?;
-    if delivered {
-        sqlx::query("UPDATE devices SET status = 'online' WHERE id = $1")
-            .bind(id)
-            .execute(&st.db)
-            .await?;
-    }
     events::insert(
         &st.db,
         admin.tenant_id,
@@ -323,13 +421,14 @@ type DeviceUserRow = (
     String,
     i32,
     i32,
+    Option<Uuid>,
 );
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
     let rows: Vec<DeviceUserRow> = sqlx::query_as(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
                 p.name, p.kind, \
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0) \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
          LEFT JOIN screen_time_ledger l \
                 ON l.device_user_id = du.id AND l.day = CURRENT_DATE \
@@ -351,6 +450,7 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "profile_kind": r.6,
                 "used_minutes_today": r.7 / 60,
                 "earned_minutes_today": r.8 / 60,
+                "account_id": r.9,
             })
         })
         .collect();
