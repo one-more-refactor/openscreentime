@@ -84,16 +84,18 @@ Losing sight of the server never opens the network:
   device that hasn't reached the server for N *days* freezes all managed users like an admin
   lock. The clock survives reboots — last contact is persisted as a wall-clock timestamp in
   `/var/lib/openscreentime/last_contact` — so "keep it powered off for a week, then use it offline
-  forever" doesn't work. The parent PIN still unlocks.
+  forever" doesn't work. The parent code still unlocks.
 
 ## The escape hatches that always work
 
 Deterrence must never become a hostage situation. At every level:
 
-- **Parent PIN** (argon2 hash in the policy, never plaintext): typed into the lockout overlay
-  (grants 30 minutes), dropped via the root-only file `/run/openscreentime/unlock_pin.<user>`, or
-  used with the `ost unlock` CLI. Verification is against the hash and **fails
-  closed** — no PIN configured means no PIN unlock.
+- **Parent code** (a per-device authenticator secret — TOTP, verified offline, single-use,
+  with a wrong-attempt lockout; the old recovery PIN remains only as the *backup code*, argon2-
+  hashed and reported when used): typed into the lockout overlay (grants 30 minutes), dropped
+  via the root-only file `/run/openscreentime/unlock_pin.<user>`, used with the `ost unlock`
+  CLI, or typed at `sudo` on the managed machine (PAM). Verification **fails closed** — no secret
+  and no backup hash configured means no unlock. See `AGENT.md` → Parent code.
 - **`ost-admin`**: a local account by this name is exempt from every polkit denial
   (power controls, and the level-3 unit-stop mask).
 - Root can always stop the agent (`systemctl stop` at level 1; at level 3 root remains

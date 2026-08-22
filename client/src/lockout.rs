@@ -9,12 +9,42 @@
 //!     agent builds and runs with no display. This is what CI and the dev box use.
 //!   * `--features gui`: an `eframe/egui` fullscreen window (see `gui` module below).
 //!
-//! Challenge verification (math / wait / parent_pin) is pure logic in `challenge`
-//! so it's testable and shared by both presenters.
+//! Challenge verification (math / wait / parent code) is pure logic in `challenge`
+//! so it's testable and shared by both presenters. The parent code itself
+//! (authenticator TOTP, backup code) is verified by `parentcode`.
 
+use crate::parentcode::{self, Verifier};
 use crate::policy::Lockout;
 use crate::util::Exec;
 use serde::{Deserialize, Serialize};
+
+/// What a presenter needs to verify a parent at the keyboard, offline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ParentKeys {
+    /// Argon2 PHC hash of the backup code (the legacy recovery PIN).
+    #[serde(default)]
+    pub pin_hash: Option<String>,
+    /// Base32 TOTP secret for the authenticator app (the parent code).
+    #[serde(default)]
+    pub totp_secret: Option<String>,
+}
+
+impl ParentKeys {
+    pub fn verifier(&self) -> Verifier {
+        Verifier::new(self.totp_secret.clone(), self.pin_hash.clone())
+    }
+    /// Is there anything a parent could type?
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))] // the GUI presenter's input gate
+    pub fn configured(&self) -> bool {
+        self.totp_secret
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .pin_hash
+                .as_deref()
+                .is_some_and(|h| !h.trim().is_empty())
+    }
+}
 
 /// What the overlay should say + how to dismiss it.
 /// Serializable so the GUI presenter can run as a detached subprocess
@@ -32,11 +62,11 @@ pub struct LockSpec {
     /// `None` for immediate locks that have no grace. Defaults to `None`.
     #[serde(default)]
     pub countdown_secs: Option<u32>,
-    /// The user's `policy.parent_pin_hash` (argon2 PHC string), carried along so
-    /// a presenter can verify a typed PIN fully offline. `None` = no PIN
-    /// configured — the parent_pin path (both the `parent_pin` challenge and the
-    /// master escape) is simply unavailable.
-    pub parent_pin_hash: Option<String>,
+    /// The parent's keys (authenticator secret + backup-code hash), carried
+    /// along so a presenter can verify a typed parent code fully offline. The
+    /// spec is staged root-only (0600) precisely because of this field.
+    #[serde(default)]
+    pub parent: ParentKeys,
 }
 
 pub mod challenge {
@@ -49,7 +79,7 @@ pub mod challenge {
         Math { a: i64, b: i64, op: char },
         /// Wait out a cooldown before the dismiss button enables.
         Wait { seconds: u32 },
-        /// Enter the parent PIN.
+        /// Enter the parent code (authenticator app, or the backup code).
         ParentPin,
         /// No unlock challenge (nudge only).
         None,
@@ -76,7 +106,7 @@ pub mod challenge {
             match self {
                 Challenge::Math { a, b, op, .. } => format!("SOLVE  {a} {op} {b} = ?"),
                 Challenge::Wait { seconds } => format!("WAIT {seconds}s TO CONTINUE"),
-                Challenge::ParentPin => "ENTER PARENT PIN".into(),
+                Challenge::ParentPin => "ENTER PARENT CODE (AUTHENTICATOR APP)".into(),
                 Challenge::None => String::new(),
             }
         }
@@ -86,21 +116,21 @@ pub mod challenge {
         /// which is why this is *not* gated behind `--features gui` — the same
         /// logic must be exercised (and tested) in the default build too.
         ///
-        /// The parent PIN, when configured (`parent_pin_hash: Some`), is always
-        /// accepted as a master escape regardless of challenge type — a parent
-        /// physically present can always get in. If no PIN is configured, that
-        /// path is unavailable and behavior falls back to the challenge's own
-        /// rule (math answer / wait-only / etc.).
+        /// The parent code, when a verifier is given, is always accepted as a
+        /// master escape regardless of challenge type — a parent physically
+        /// present can always get in. With no verifier that path is
+        /// unavailable and behavior falls back to the challenge's own rule
+        /// (math answer / wait-only / etc.).
         ///
         /// This is the GUI presenter's typed-input gate: only the `gui` feature
         /// (and tests) exercise it. The headless override path does NOT route
-        /// through here — it verifies the PIN directly (see
-        /// `check_and_consume_pin_override`) so that `Challenge::None`'s
+        /// through here — it verifies the code directly (see
+        /// `check_and_consume_code_override`) so that `Challenge::None`'s
         /// "no gate" semantics can never turn into an unlock.
         #[cfg(any(feature = "gui", test))]
-        pub fn verify(&self, input: &str, parent_pin_hash: Option<&str>) -> bool {
-            if let Some(hash) = parent_pin_hash {
-                if crate::pin::verify_pin(input.trim(), hash) {
+        pub fn verify(&self, input: &str, parent: Option<&crate::parentcode::Verifier>) -> bool {
+            if let Some(v) = parent {
+                if v.verify(input).accepted() {
                     return true;
                 }
             }
@@ -118,7 +148,7 @@ pub mod challenge {
                         .map(|v| v == expected)
                         .unwrap_or(false)
                 }
-                // No hash matched above (or none configured): the ParentPin
+                // Nothing matched above (or no verifier): the parent-code
                 // challenge itself has no other way to verify.
                 Challenge::ParentPin => false,
                 Challenge::Wait { .. } => false, // dismissed by time, not input
@@ -130,6 +160,7 @@ pub mod challenge {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::parentcode::Verifier;
         use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
         use argon2::Argon2;
 
@@ -139,6 +170,14 @@ pub mod challenge {
                 .hash_password(pin.as_bytes(), &salt)
                 .expect("hash")
                 .to_string()
+        }
+
+        /// A backup-code-only verifier with its replay/lockout state in a
+        /// scratch file, so tests never touch /var/lib.
+        fn verifier(pin: &str) -> Verifier {
+            Verifier::new(None, Some(hash_of(pin))).with_state_path(std::env::temp_dir().join(
+                format!("ost-lockout-test-{}-{pin}.json", std::process::id()),
+            ))
         }
 
         #[test]
@@ -154,10 +193,10 @@ pub mod challenge {
 
         #[test]
         fn pin_verifies_parent_pin_challenge() {
-            let hash = hash_of("1234");
+            let v = verifier("1234");
             let c = Challenge::ParentPin;
-            assert!(c.verify("1234", Some(&hash)));
-            assert!(!c.verify("0000", Some(&hash)));
+            assert!(c.verify("1234", Some(&v)));
+            assert!(!c.verify("0000", Some(&v)));
         }
 
         #[test]
@@ -168,16 +207,16 @@ pub mod challenge {
 
         #[test]
         fn pin_is_a_master_escape_on_any_challenge() {
-            let hash = hash_of("9999");
+            let v = verifier("9999");
             let math = Challenge::Math {
                 a: 2,
                 b: 2,
                 op: '×',
             };
-            // Wrong math answer, but correct parent PIN still unlocks.
-            assert!(math.verify("9999", Some(&hash)));
+            // Wrong math answer, but correct parent code still unlocks.
+            assert!(math.verify("9999", Some(&v)));
             let wait = Challenge::Wait { seconds: 60 };
-            assert!(wait.verify("9999", Some(&hash)));
+            assert!(wait.verify("9999", Some(&v)));
         }
     }
 }
@@ -188,7 +227,7 @@ impl LockSpec {
         headline: &str,
         detail: &str,
         user: &str,
-        parent_pin_hash: Option<String>,
+        parent: ParentKeys,
     ) -> LockSpec {
         let challenge = if cfg.enabled {
             challenge::Challenge::from_kind(&cfg.unlock_challenge)
@@ -202,7 +241,7 @@ impl LockSpec {
             action: "TAP TO CONTINUE".to_string(),
             challenge,
             for_user: user.to_string(),
-            parent_pin_hash,
+            parent,
             countdown_secs: None,
         }
     }
@@ -237,33 +276,31 @@ pub fn render_ascii(spec: &LockSpec) -> String {
     s
 }
 
-/// Headless/no-GUI parent-PIN override: with no display to type into, an
-/// attempt is dropped as plaintext at `/run/openscreentime/unlock_pin.<user>` (e.g.
-/// by a companion tool acting on the parent's behalf) and consumed here —
-/// read once, deleted regardless of outcome (single-use). Returns `true` only
-/// if a parent PIN is configured AND the attempt matches it.
+/// Headless/no-GUI parent-code override: with no display to type into, an
+/// attempt is dropped as plaintext at `/run/openscreentime/unlock_pin.<user>`
+/// (e.g. by a companion tool acting on the parent's behalf) and consumed here
+/// — read once, deleted regardless of outcome (single-use). Returns the
+/// verdict, or `None` if no attempt was waiting.
 ///
-/// This MUST fail closed: it verifies the attempt directly against
-/// `parent_pin_hash` rather than delegating to `Challenge::verify`, because the
+/// This MUST fail closed: it verifies the attempt directly through the parent
+/// verifier rather than delegating to `Challenge::verify`, because the
 /// whole-device admin lock (and any non-gamified lockout) carries
 /// `Challenge::None`, for which `Challenge::verify` returns `true`
 /// unconditionally. Routing an *override* through that would let any dropped
-/// file bypass an admin lock even when no PIN is set — so the direct
-/// hash check is the security boundary here, not the challenge type.
-pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
+/// file bypass an admin lock even when no code is set — so the direct check
+/// is the security boundary here, not the challenge type.
+pub fn check_and_consume_code_override(
+    exec: &Exec,
+    spec: &LockSpec,
+) -> Option<parentcode::Verdict> {
     let path = crate::paths::run_str(&format!("unlock_pin.{}", spec.for_user));
-    let Ok(attempt) = std::fs::read_to_string(&path) else {
-        return false;
-    };
+    let attempt = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path); // single-use, win or lose
     if exec.dry_run() {
-        tracing::info!(target: "dry_run", "WOULD VERIFY dropped parent-PIN override for {}", spec.for_user);
+        tracing::info!(target: "dry_run", "WOULD VERIFY dropped parent-code override for {}", spec.for_user);
     }
-    // No configured PIN → no override, ever.
-    let Some(hash) = spec.parent_pin_hash.as_deref() else {
-        return false;
-    };
-    crate::pin::verify_pin(attempt.trim(), hash)
+    // Nothing configured → no override, ever (NotConfigured is not accepted).
+    Some(spec.parent.verifier().verify(attempt.trim()))
 }
 
 /// An unlock the overlay has ALREADY verified (parent PIN typed into the GUI,
@@ -275,10 +312,11 @@ pub fn check_and_consume_pin_override(exec: &Exec, spec: &LockSpec) -> bool {
 /// grant is trusted at face value — which is safe only because `/run/openscreentime`
 /// is root-owned (0755): no managed user can write there. The verification
 /// already happened in the presenter, against the same argon2 hash.
-/// `kind` is `"pin"` (parent PIN — a parent present, never rate-limited) or
-/// `"challenge"` (a solved self-serve challenge — the runner caps how many of
-/// these it honors per day so the trivial math can't be re-solved to defeat the
-/// limit). The grant file is `"<kind>:<minutes>"`.
+/// `kind` is `"pin"` (parent code — a parent present, never rate-limited),
+/// `"backup"` (the backup code was used — same grant, but the runner reports
+/// it) or `"challenge"` (a solved self-serve challenge — the runner caps how
+/// many of these it honors per day so the trivial math can't be re-solved to
+/// defeat the limit). The grant file is `"<kind>:<minutes>"`.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))] // written by the gui presenter only
 pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
     let dir = std::path::Path::new(crate::paths::RUN_DIR);
@@ -294,9 +332,10 @@ pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
 /// frozen ones — so a parent standing at the machine can always get in
 /// (the old code only consulted the override on the freeze-transition tick,
 /// which stranded frozen users).
-/// Returns `(minutes, kind)`. `kind` is `"pin"` or `"challenge"`; legacy/plain
-/// numeric content is read as `"pin"` (uncapped) so a real grant is never
-/// wrongly dropped — the safe direction for an unlock is to let the user in.
+/// Returns `(minutes, kind)`. `kind` is `"pin"`, `"backup"` or `"challenge"`;
+/// legacy/plain numeric content is read as `"pin"` (uncapped) so a real grant
+/// is never wrongly dropped — the safe direction for an unlock is to let the
+/// user in.
 pub fn take_unlock_grant(user: &str) -> Option<(u32, String)> {
     let path = crate::paths::run_str(&format!("unlock_grant.{user}"));
     let content = std::fs::read_to_string(&path).ok()?;
@@ -384,11 +423,10 @@ pub mod gui {
     /// (`openscreentime __lockout <spec-file>`). Returns false if it could not
     /// be spawned (caller falls back to the headless broadcast).
     ///
-    /// The spec carries `parent_pin_hash` (the argon2 PHC of the master-unlock
-    /// PIN), so it MUST NOT travel on argv — `/proc/<pid>/cmdline` is
-    /// world-readable, which would hand the hash to any local user (e.g. the
-    /// locked-out managed user on a second VT) for offline brute-force of the
-    /// low-entropy PIN. Instead the spec is staged in a root-only (0600) file
+    /// The spec carries the parent keys (the authenticator secret and the
+    /// backup-code hash), so it MUST NOT travel on argv — `/proc/<pid>/cmdline`
+    /// is world-readable, which would hand them to any local user (e.g. the
+    /// locked-out managed user on a second VT). Instead the spec is staged in a root-only (0600) file
     /// under root-owned `/run/openscreentime` and only its *path* — not a secret — is
     /// passed on argv; the child reads it once and unlinks it.
     /// The display environment a root-owned process needs in order to draw on a
@@ -504,7 +542,7 @@ pub mod gui {
 
     /// Stage the base64 lock spec in a private, root-only file and return its
     /// path. 0600 in the root-owned `/run/openscreentime` means no managed user can
-    /// read the `parent_pin_hash` the spec contains.
+    /// read the parent keys the spec contains.
     fn stage_spec_file(user: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -560,6 +598,7 @@ pub mod gui {
                     spec: spec.clone(),
                     input: String::new(),
                     pin: String::new(),
+                    pin_msg: None,
                     deadline,
                 }))
             }),
@@ -573,13 +612,12 @@ pub mod gui {
         /// Typed response to the *challenge* — a maths answer. Shown as typed:
         /// a child working out 7 × 8 has to be able to see what they entered.
         input: String,
-        /// The parent PIN, kept separate and masked.
-        ///
-        /// These used to be one field, which meant a parent typed the recovery
-        /// PIN in cleartext on a full-screen overlay, in front of the child it
-        /// exists to constrain — and that PIN is not a one-time code. It opens
-        /// this device for an hour, offline, whenever they like.
+        /// The parent code, kept separate and masked. (A TOTP is single-use,
+        /// but the backup code is not — and a child watching over a shoulder
+        /// should see neither.)
         pin: String,
+        /// Feedback after a wrong / locked-out code ("wrong code", "try again in 60s").
+        pin_msg: Option<String>,
         /// When the save-your-work grace ends (drives the live countdown line).
         deadline: Option<std::time::Instant>,
     }
@@ -638,11 +676,11 @@ pub mod gui {
                     // dismisses (Wait's cooldown isn't separately timed here —
                     // the tick loop re-freezes if dismissed early and still
                     // out of policy).
-                    // A parent-PIN input box is also offered on non-ParentPin
-                    // challenges when a PIN is configured, since it's always a
+                    // A parent-code input box is also offered on non-ParentPin
+                    // challenges when a code is configured, since it's always a
                     // valid master escape (a parent physically present can
                     // always get in).
-                    // The maths answer is visible; the PIN never is.
+                    // The maths answer is visible; the code never is.
                     if matches!(self.spec.challenge, Challenge::Math { .. }) {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.input)
@@ -651,18 +689,25 @@ pub mod gui {
                         );
                         ui.add_space(16.0);
                     }
-                    if self.spec.parent_pin_hash.is_some() {
+                    if self.spec.parent.configured() {
                         ui.label(
-                            egui::RichText::new("Parent PIN")
+                            egui::RichText::new("Parent code (from your authenticator app)")
                                 .size(12.0)
                                 .color(egui::Color32::from_rgb(FAINT.0, FAINT.1, FAINT.2)),
                         );
                         ui.add(
                             egui::TextEdit::singleline(&mut self.pin)
                                 .password(true)
-                                .hint_text("••••••••")
+                                .hint_text("123 456")
                                 .font(egui::TextStyle::Monospace),
                         );
+                        if let Some(msg) = &self.pin_msg {
+                            ui.label(
+                                egui::RichText::new(msg)
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2)),
+                            );
+                        }
                         ui.add_space(16.0);
                     }
                     ui.add_space(24.0);
@@ -682,18 +727,22 @@ pub mod gui {
                         // (Closing the window alone changes nothing — the tick
                         // loop re-freezes — which made the challenge feel
                         // rigged. Never again.)
-                        let pin_ok = self
-                            .spec
-                            .parent_pin_hash
-                            .as_deref()
-                            .map(|h| crate::pin::verify_pin(self.pin.trim(), h))
-                            .unwrap_or(false);
+                        let verdict =
+                            if self.spec.parent.configured() && !self.pin.trim().is_empty() {
+                                Some(self.spec.parent.verifier().verify(self.pin.trim()))
+                            } else {
+                                None
+                            };
                         let challenge_ok = self.spec.challenge.verify(&self.input, None);
-                        if pin_ok {
+                        if let Some(v) = verdict.as_ref().filter(|v| v.accepted()) {
                             super::write_unlock_grant(
                                 &self.spec.for_user,
                                 GRANT_PARENT_PIN_MIN,
-                                "pin",
+                                if *v == crate::parentcode::Verdict::Backup {
+                                    "backup"
+                                } else {
+                                    "pin"
+                                },
                             );
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if challenge_ok {
@@ -716,6 +765,7 @@ pub mod gui {
                             // dismisses, granting nothing.
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else {
+                            self.pin_msg = verdict.map(|v| v.message());
                             self.input.clear();
                             self.pin.clear();
                         }
