@@ -18,6 +18,48 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+**Headline: it works end to end now.** This release is the one where a
+family can actually use it: everyone in the house is an *account* with an age
+bracket, the parent's code is an authenticator app instead of a PIN, blocking
+is "tap YouTube" instead of typing domains, the console tells the truth about
+whether a screen is paused, and a child who opens the console on their own
+laptop sees their own page.
+
+- **Everyone has an account.** Children are *members* with a role, an age
+  bracket (Little 0–6, Kid 6–12, Younger teen 12–16, Older teen 16–18, Adult)
+  and a birthdate the bracket is derived from. Every OS login on a device is
+  linked to a person. `GET /api/family` is built from people, not device
+  users. Adults (including the parent) can self-track privately.
+- **Five bracket presets** replace `kids/teen/default` (the old rows stay
+  valid). Each bracket ships with sensible one-click blocks.
+- **Parent code = per-device TOTP.** Adding a device shows a QR to scan into
+  your authenticator app; the agent verifies codes **offline** (RFC 6238, ±1
+  step, single-use, lockout after five misses). Used by the lockout overlay,
+  `ost unlock`, the tray, and `sudo` (below). The old recovery PIN survives
+  only as the *backup code*.
+- **Parent sudo over PAM.** On a managed machine, `sudo` asks for the parent's
+  authenticator code (`/etc/pam.d/openscreentime-parent` + a sudoers drop-in
+  for the `ost-managed` group). A child can't escalate; a parent can administer
+  the laptop without a local password.
+- **Block by app and category, one click.** A built-in catalog of apps
+  (YouTube, TikTok, Discord, Roblox, Steam, …) and categories (social, adult,
+  gambling, games, AI chatbots, VPNs/proxies, …) lives in the policy crate and
+  is served at `GET /api/catalog`; the agent expands it into DNS sinkholes and,
+  for native clients, process denial. Your AdGuard/Pi-hole is just the DNS
+  upstream.
+- **Presence is WebSocket-first and lock state is honest.** The agent holds a
+  permanent connection (30 s heartbeats, jittered reconnect, HTTP fallback);
+  the server marks a device offline the moment the socket closes; `locked` is
+  a separate field reported from the kernel's freeze state, and the console
+  shows "pausing…" until the device confirms.
+- **The child's own page (`/me`)** with three looks — playful (little/kid),
+  calm (teens), plain (adults) — picked by bracket, overridable per person.
+  Device-voucher autologin now logs in *as the person using that OS account*,
+  never as the parent.
+- **Ops:** `deploy/push-image.sh` builds the image on a dev box and loads it
+  on the host; `deploy/test/` is a systemd container that acts as a managed
+  laptop for end-to-end tests; the netavark stale-DNAT trap is documented.
+
 **Breaking: the product is now OpenScreenTime.** The agent was renamed in the
 previous release; this one finishes the job across the server, the deployment
 and the docs. There are no compatibility shims for the server side — an

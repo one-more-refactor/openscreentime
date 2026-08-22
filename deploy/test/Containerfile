@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd -m -s /bin/bash -c "Parent Tester" parent \
     && echo "kid:kid" | chpasswd && echo "parent:parent" | chpasswd \
     && usermod -aG sudo parent \
-    # a plain static resolv.conf the agent can pin (no systemd-resolved here)
-    && rm -f /etc/resolv.conf && printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf \
+    # (/etc/resolv.conf is managed by podman at run time — run.sh passes --dns;
+    #  the agent rewrites + pins it inside the container like on a real laptop)
     # dnsmasq: listen on loopback only, read the agent's drop-in dir
     && printf 'listen-address=127.0.0.1\nbind-interfaces\nno-resolv\nserver=1.1.1.1\nconf-dir=/etc/dnsmasq.d/,*.conf\n' > /etc/dnsmasq.conf
 # the agent binary is bind-mounted at /usr/local/bin/openscreentime by run.sh

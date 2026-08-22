@@ -51,7 +51,7 @@ case "${1:-}" in
         # chattr +i on resolv.conf (SYS_ADMIN inside a rootless userns is not
         # host root — it is scoped to the namespace).
         podman run -d --name "$name" --hostname "$devname" \
-            --systemd=always \
+            --systemd=always --dns 1.1.1.1 \
             --cap-add NET_ADMIN,NET_RAW,SYS_ADMIN,LINUX_IMMUTABLE,AUDIT_WRITE \
             --security-opt unmask=/sys/fs/cgroup \
             -v "$bin_dir/openscreentime:/usr/local/bin/openscreentime:ro" \
