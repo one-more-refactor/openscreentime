@@ -104,6 +104,10 @@ fn exempt(path: &str) -> bool {
         || path == "/api/auth/stepup/email/start"
         || path == "/api/me/2fa/totp/start"
         || path == "/api/me/2fa/totp/confirm"
+        // A child asking for more time is not a takeover surface: it only
+        // creates a request the parent still has to answer, and a member
+        // usually has no second factor to give.
+        || path == "/api/me/ask"
 }
 
 /// The one exception to "reading is free": inventories that are themselves
@@ -724,6 +728,7 @@ mod tests {
         assert!(exempt("/api/auth/login/finish"));
         assert!(exempt("/api/me/2fa/totp/confirm"));
         assert!(exempt("/api/auth/voucher"));
+        assert!(exempt("/api/me/ask"));
     }
 
     #[test]

@@ -317,3 +317,63 @@ This is the single most important shared type. Server stores it, web edits it, a
 
 Every component MUST treat unknown fields leniently (forward-compat). The Rust side models this
 with `#[serde(default)]` on optional sub-objects.
+
+
+## 0.4 additions (docs/CONTRACT-0.4.md)
+
+**Accounts.** `admins` rows carry `role` (`owner|parent|member`), `age_bracket`
+(`little|kid|younger_teen|older_teen|adult`), `birthdate`, `theme`
+(`playful|calm|plain`, null = auto by bracket), `self_managed`, `profile_id`.
+
+- `GET /api/me` → `{ account: {id, household_id, display_name, email, role,
+  age_bracket, birthdate, theme, effective_theme, self_managed, profile_id,
+  created_at}, household: {id, name, created_at}, admin, tenant }` (the last two
+  are deprecated aliases).
+- `GET /api/members` (hub) → `{ members: [account…] }`
+- `POST /api/members {display_name, birthdate?, age_bracket?, theme?, email?}`
+  → `{ member }` — rules cloned from the bracket preset into a profile owned by
+  the person. Bracket is derived from `birthdate` when given; default `kid`.
+- `PATCH /api/members/{id} {display_name?, birthdate?, age_bracket?, theme?,
+  profile_id?}` → `{ member }`. `profile_id` re-points all of the person's
+  `device_users` and queues `apply_policy` on their devices.
+- `DELETE /api/members/{id}` (members only).
+- `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
+  left_minutes|null, locked, devices:[{id,name,status,locked}], blocks,
+  blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
+  windows, display_name }`.
+- `POST /api/me/ask {minutes, reason?}` → `{ request }` (an `earn_request`
+  with `task_id: "ask"`, one open per day; not step-up guarded).
+- `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],
+  apps:[{id,name,category,has_native_client}] }`.
+- **Member sessions** may reach only `/api/me`, `/api/me/today`, `/api/me/ask`,
+  `/api/catalog`, `/api/me/2fa*`, `/api/auth/*`. Anything else under `/api/` →
+  `403 forbidden_for_member` (a layer; fails closed for new routes).
+
+**Parent code (per-device TOTP).**
+- `POST /api/devices {name, account_id?}` → `{ device, enroll_token,
+  parent_code: {secret, otpauth_uri} }`. `account_id` = "this is <person>'s
+  computer": OS logins without a name match link to that person on enroll.
+- `GET /api/devices/{id}/parent-code` (sensitive read → 428 without a step-up
+  grant) → `{ parent_code }`; `POST /api/devices/{id}/parent-code/rotate`
+  → `{ parent_code }` and queues `apply_policy`.
+- Agent pull `GET /agent/policy` adds top-level `parent_code: { totp_secret }`.
+  `parent_pin_hash` in each user policy is still served as the **backup code**.
+
+**Presence.** Device JSON everywhere: `status` is presence only
+(`pending|online|offline`); `locked` (bool) is what the agent last reported;
+`lock_pending` (bool) = a `lock`/`unlock` command is queued or sent;
+`last_state` = the agent's last `state` frame; `owner_account_id`. Lock/unlock
+no longer flip any status — the agent's ack or `state` frame does.
+- WS `{ type:"state", locked, frozen_users, enforcing, gaps, agent_version,
+  active_users }` (also accepted nested under `state`, and as `state` inside
+  an HTTP/WS `heartbeat`). WS open → online; WS close → offline immediately;
+  sweep: `online` + `last_seen` older than 90 s → offline.
+
+**Voucher.** `POST /agent/voucher {os_username}` → voucher bound to the account
+linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
+{voucher}` → session for that account, `{ ok, via, account_id, role }`.
+
+**Family.** `GET /api/family` children are **members** (key = account id) with
+the account fields plus `name, used_minutes, earned_minutes, limit_minutes,
+profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
+os_username}], pending_requests, locked, blocks, blocked_apps, can_ask, managed`.
