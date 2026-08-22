@@ -22,8 +22,6 @@ export function statusTone(status: DeviceStatus): LedTone {
   switch (status) {
     case "online":
       return "ok";
-    case "locked":
-      return "crit";
     case "pending":
       return "pending";
     case "offline":

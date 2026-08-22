@@ -52,7 +52,10 @@ function offlineAllowed(d: Device): boolean {
 
 /** The card's one-word state, in human words. */
 function stateOf(d: Device): { word: string; tone: "ok" | "crit" | "warn" | "idle" } {
-  if (d.status === "locked") return { word: "blocked", tone: "crit" };
+  // A pause is only "paused" once the agent has said so. Until then it is a
+  // wish in flight, and the card says exactly that.
+  if (d.lock_pending) return { word: d.locked ? "resuming…" : "pausing…", tone: "warn" };
+  if (d.locked) return { word: "paused", tone: "crit" };
   if (d.status === "pending") return { word: "waiting to join", tone: "idle" };
   if (d.status === "offline")
     return offlineAllowed(d)
@@ -63,7 +66,7 @@ function stateOf(d: Device): { word: string; tone: "ok" | "crit" | "warn" | "idl
 
 /** The ring: color = state, arc = connection freshness, dashed = allowed away. */
 function ringOf(d: Device): { arc: number; tone: RingTone; dashed: boolean } {
-  if (d.status === "locked") return { arc: 1, tone: "crit", dashed: false };
+  if (d.locked) return { arc: 1, tone: "crit", dashed: false };
   if (d.status === "pending") return { arc: 0.25, tone: "idle", dashed: false };
   if (d.status === "offline" && offlineAllowed(d)) return { arc: 1, tone: "idle", dashed: true };
   const m = minsSince(d.last_seen);
@@ -106,7 +109,7 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
   const d = device;
   const state = stateOf(d);
   const steady = steadiness(d);
-  const blocked = d.status === "locked";
+  const blocked = d.locked;
   const away = offlineAllowed(d);
   const who = (d.users ?? [])
     .map((u) => u.display_name?.trim() || u.os_username)
@@ -190,18 +193,18 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
             {blocked ? (
               <button
                 className="ch-btn"
-                disabled={busy}
-                onClick={() => void run("Unblocked.", () => api.unlockDevice(d.id))}
+                disabled={busy || d.lock_pending}
+                onClick={() => void run("Resuming — the device confirms in a moment.", () => api.unlockDevice(d.id))}
               >
-                Unblock
+                {d.lock_pending ? "Resuming…" : "Resume"}
               </button>
             ) : (
               <button
                 className="ch-btn"
-                disabled={busy}
-                onClick={() => void run("Blocked. It takes effect within a minute.", () => api.lockDevice(d.id))}
+                disabled={busy || d.lock_pending}
+                onClick={() => void run("Pausing — it shows as paused once the device confirms.", () => api.lockDevice(d.id))}
               >
-                Block now
+                {d.lock_pending ? "Pausing…" : "Pause now"}
               </button>
             )}
 
@@ -278,11 +281,11 @@ export function Devices() {
       </div>
     );
 
-  const blocked = devices.filter((d) => d.status === "locked");
+  const blocked = devices.filter((d) => d.locked);
   const dark = devices.filter((d) => d.status === "offline" && !offlineAllowed(d));
   const verdict =
     blocked.length > 0
-      ? `${blocked[0].name}${blocked.length > 1 ? ` and ${blocked.length - 1} more` : ""} is blocked.`
+      ? `${blocked[0].name}${blocked.length > 1 ? ` and ${blocked.length - 1} more` : ""} is paused.`
       : dark.length > 0
         ? `${dark[0].name} hasn't called home in a while.`
         : "Every device is doing what it should.";
