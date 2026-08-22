@@ -81,7 +81,7 @@ fn now_counter() -> u64 {
 }
 
 /// A fresh 160-bit secret, base32 as the apps expect it.
-fn gen_totp_secret() -> String {
+pub(crate) fn gen_totp_secret() -> String {
     let bytes: [u8; 20] = rand::thread_rng().gen();
     base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &bytes)
 }
@@ -104,6 +104,10 @@ fn exempt(path: &str) -> bool {
         || path == "/api/auth/stepup/email/start"
         || path == "/api/me/2fa/totp/start"
         || path == "/api/me/2fa/totp/confirm"
+        // A child asking for more time is not a takeover surface: it only
+        // creates a request the parent still has to answer, and a member
+        // usually has no second factor to give.
+        || path == "/api/me/ask"
 }
 
 /// The one exception to "reading is free": inventories that are themselves
@@ -112,7 +116,9 @@ fn exempt(path: &str) -> bool {
 /// (`GET /api/me/2fa` stays free — the step-up dialog needs it to know which
 /// factors to offer BEFORE any grant exists.)
 fn sensitive_read(path: &str) -> bool {
-    path == "/api/me/passkeys" || path == "/api/parent-tokens"
+    path == "/api/me/passkeys"
+        || path == "/api/parent-tokens"
+        || (path.starts_with("/api/devices/") && path.ends_with("/parent-code"))
 }
 
 /// Layer over the `/api` router: any mutating request needs a live grant.
@@ -284,7 +290,7 @@ pub async fn status(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<J
 /// authenticator is a removal followed by an enrolment, and removal is itself a
 /// guarded mutation.
 pub async fn totp_start(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
-    let row: Option<(Option<DateTime<Utc>>, String)> =
+    let row: Option<(Option<DateTime<Utc>>, Option<String>)> =
         sqlx::query_as("SELECT totp_confirmed_at, email FROM admins WHERE id = $1")
             .bind(admin.admin_id)
             .fetch_optional(&st.db)
@@ -303,13 +309,19 @@ pub async fn totp_start(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .execute(&st.db)
         .await?;
 
-    let label = urlencoding_min(&format!("OpenScreenTime:{email}"));
+    let label = email.unwrap_or_else(|| "account".into());
     Ok(Json(json!({
         "secret": secret,
-        "otpauth_uri": format!(
-            "otpauth://totp/{label}?secret={secret}&issuer=OpenScreenTime&period={TOTP_STEP}&digits={TOTP_DIGITS}"
-        ),
+        "otpauth_uri": otpauth_uri(&label, &secret),
     })))
+}
+
+/// The `otpauth://` URI an authenticator app scans for `label`.
+pub(crate) fn otpauth_uri(label: &str, secret: &str) -> String {
+    let label = urlencoding_min(&format!("OpenScreenTime:{label}"));
+    format!(
+        "otpauth://totp/{label}?secret={secret}&issuer=OpenScreenTime&period={TOTP_STEP}&digits={TOTP_DIGITS}"
+    )
 }
 
 /// Percent-encode only what an `otpauth:` label actually breaks on. Pulling in
@@ -408,10 +420,15 @@ pub async fn email_start(State(st): State<AppState>, admin: AuthAdmin) -> AppRes
     .execute(&st.db)
     .await?;
 
-    let email: String = sqlx::query_scalar("SELECT email FROM admins WHERE id = $1")
+    let email: Option<String> = sqlx::query_scalar("SELECT email FROM admins WHERE id = $1")
         .bind(admin.admin_id)
         .fetch_one(&st.db)
         .await?;
+    let Some(email) = email else {
+        return Err(AppError::BadRequest(
+            "this account has no email — use an authenticator app".into(),
+        ));
+    };
 
     if let Ok(hook) = std::env::var("OST_STEPUP_WEBHOOK") {
         // Fire-and-forget: a slow or broken notifier must not hold the request
@@ -542,23 +559,57 @@ async fn verify_email(st: &AppState, admin_id: Uuid, code: &str) -> AppResult<bo
 
 // ── device-voucher autologin ────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+pub struct MintVoucherReq {
+    /// The OS login on the device that wants to open the console. The session
+    /// is issued for the person that login is linked to — a child's laptop
+    /// opens the child's page, never the parent's.
+    #[serde(default)]
+    pub os_username: String,
+}
+
 /// `POST /agent/voucher` — the enrolled client mints a one-time voucher for a
 /// local surface on its own machine (the browser, the notch) to exchange.
 ///
 /// The device is authenticated by its bearer token, so a voucher is only ever
 /// as good as possession of the machine — which is why the session it buys
 /// starts with no grant. Possession of a laptop is not possession of the phone.
+///
+/// The voucher is bound to the **account** behind `os_username`
+/// (`device_users.account_id`). An OS login nobody is linked to gets
+/// `404 no_account`, not the founding parent's session.
 pub async fn mint_voucher(
     State(st): State<AppState>,
     agent: crate::state::AgentAuth,
+    body: Option<Json<MintVoucherReq>>,
 ) -> AppResult<Json<Value>> {
+    let os_username = body
+        .map(|Json(b)| b.os_username.trim().to_string())
+        .unwrap_or_default();
+    if os_username.is_empty() {
+        return Err(AppError::BadRequest("os_username required".into()));
+    }
+    let account_id: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT account_id FROM device_users WHERE device_id = $1 AND os_username = $2",
+    )
+    .bind(agent.device_id)
+    .bind(&os_username)
+    .fetch_optional(&st.db)
+    .await?;
+    let Some(account_id) = account_id.flatten() else {
+        return Err(AppError::NoAccount(format!(
+            "{os_username} on this computer isn't linked to anyone on the household yet"
+        )));
+    };
+
     let voucher = gen_token();
     sqlx::query(
-        "INSERT INTO device_vouchers (device_id, tenant_id, voucher_hash, expires_at)
-         VALUES ($1, $2, $3, now() + interval '2 minutes')",
+        "INSERT INTO device_vouchers (device_id, tenant_id, account_id, voucher_hash, expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '2 minutes')",
     )
     .bind(agent.device_id)
     .bind(agent.tenant_id)
+    .bind(account_id)
     .bind(hash_token(&voucher))
     .execute(&st.db)
     .await?;
@@ -569,7 +620,9 @@ pub async fn mint_voucher(
         .execute(&st.db)
         .await;
 
-    Ok(Json(json!({ "voucher": voucher, "expires_in_secs": 120 })))
+    Ok(Json(
+        json!({ "voucher": voucher, "expires_in_secs": 120, "account_id": account_id }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -580,25 +633,24 @@ pub struct VoucherReq {
 
 /// `POST /api/auth/voucher` — voucher in, session out, server-verified.
 ///
-/// In 2a there is exactly one class of account per tenant, so the session is
-/// issued for the tenant's founding admin. 2b links `device_users` to accounts
-/// and this picks the right person instead; the wire contract does not change.
+/// The session is issued for the account the voucher was minted for (the
+/// person behind the OS login that asked). It never starts stepped up.
 pub async fn redeem_voucher(
     State(st): State<AppState>,
     jar: CookieJar,
     Json(req): Json<VoucherReq>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
     let hash = hash_token(&req.voucher);
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
         "UPDATE device_vouchers SET consumed_at = now()
           WHERE voucher_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-        RETURNING device_id, tenant_id",
+        RETURNING device_id, tenant_id, account_id",
     )
     .bind(&hash)
     .fetch_optional(&st.db)
     .await?;
 
-    let (device_id, tenant_id) =
+    let (device_id, tenant_id, account_id) =
         row.ok_or_else(|| AppError::Unauthorized("voucher not valid".into()))?;
 
     // The device must still be enrolled in that tenant — a de-enrolled machine
@@ -613,13 +665,16 @@ pub async fn redeem_voucher(
         return Err(AppError::Unauthorized("device is not enrolled".into()));
     }
 
-    let admin_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM admins WHERE tenant_id = $1 ORDER BY created_at LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&st.db)
-    .await?
-    .ok_or_else(|| AppError::Unauthorized("no account on this household".into()))?;
+    // And the person must still exist in that household.
+    let account_id =
+        account_id.ok_or_else(|| AppError::Unauthorized("voucher not valid".into()))?;
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM admins WHERE id = $1 AND tenant_id = $2")
+            .bind(account_id)
+            .bind(tenant_id)
+            .fetch_optional(&st.db)
+            .await?;
+    let role = role.ok_or_else(|| AppError::Unauthorized("no account on this household".into()))?;
 
     let token = gen_token();
     sqlx::query(
@@ -627,14 +682,16 @@ pub async fn redeem_voucher(
          VALUES ($1, $2, $3, now() + interval '7 days', true)",
     )
     .bind(hash_token(&token))
-    .bind(admin_id)
+    .bind(account_id)
     .bind(tenant_id)
     .execute(&st.db)
     .await?;
 
     Ok((
         jar.add(session_cookie(token, st.cookie_secure)),
-        Json(json!({ "ok": true, "via": "device_voucher" })),
+        Json(json!({
+            "ok": true, "via": "device_voucher", "account_id": account_id, "role": role
+        })),
     ))
 }
 
@@ -671,12 +728,15 @@ mod tests {
         assert!(exempt("/api/auth/login/finish"));
         assert!(exempt("/api/me/2fa/totp/confirm"));
         assert!(exempt("/api/auth/voucher"));
+        assert!(exempt("/api/me/ask"));
     }
 
     #[test]
     fn sensitive_inventories_are_guarded_reads() {
         assert!(sensitive_read("/api/me/passkeys"));
         assert!(sensitive_read("/api/parent-tokens"));
+        // The per-device parent code is the key to the child's machine.
+        assert!(sensitive_read("/api/devices/abc/parent-code"));
         // The status the step-up dialog itself needs must stay free, or you
         // would need a grant to find out how to get a grant.
         assert!(!sensitive_read("/api/me/2fa"));
