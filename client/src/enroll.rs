@@ -69,28 +69,33 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
     cfg.save()?;
     tracing::info!("wrote {} (0600)", crate::config::CONFIG_PATH);
     println!("Enrolled. Config written to {}", crate::config::CONFIG_PATH);
-    // Loud on purpose. This is the only time the PIN is ever shown, and it is
-    // the only way back into this machine if it locks itself out with no
-    // network — at which point nobody can look it up anywhere.
+    // The parent code for this computer lives in the parent's authenticator
+    // app (scanned from the console when the device was added). This PIN is
+    // the BACKUP code: the one way in if the phone is gone too. Shown once.
     if let Some(pin) = resp.recovery_pin.as_deref() {
         println!();
+        println!("  Parent code: scan the QR shown in the console (Add device → Parent code)");
+        println!("  into your authenticator app. It unlocks this computer offline.");
+        println!();
         println!("  ┌──────────────────────────────────────────────┐");
-        println!("  │  RECOVERY PIN   {pin}                     │");
+        println!("  │  BACKUP CODE    {pin}                     │");
         println!("  └──────────────────────────────────────────────┘");
         println!("  Write this down NOW — it is shown once and stored only as a hash.");
-        println!("  If this device ever locks you out with no network:");
+        println!("  If this device ever locks you out and the authenticator is lost:");
         // NOT `--pin {pin}`: arguments land in /proc/<pid>/cmdline, which is
         // world-readable, so any local user — including the child this is meant
         // to constrain — can capture the plaintext PIN with a five-line loop
         // the first time a parent uses the documented recovery path. The same
         // reasoning already governs the PIN *hash* elsewhere in this codebase.
-        println!("      sudo openscreentime unlock --minutes 60      (it will ask for the PIN)");
+        println!(
+            "      sudo ost unlock --minutes 60      (it will ask for the parent or backup code)"
+        );
         println!();
     } else {
         // An older server that does not mint one. Say so rather than leaving
         // the operator assuming a recovery path exists.
         println!();
-        println!("  WARNING: this server did not issue a recovery PIN.");
+        println!("  WARNING: this server did not issue a backup code.");
         println!("  If this device locks itself out, there is NO offline way back in");
         println!("  short of masking the systemd unit from the boot loader.");
         println!();

@@ -2,6 +2,7 @@
 //! primitives (Linux)"). Each submodule shells out through `util::Exec`, so every
 //! action honors `--dry-run` and refuses to run as non-root outside dry-run.
 
+pub mod apps;
 pub mod dns;
 pub mod firewall;
 pub mod screentime;
@@ -68,10 +69,14 @@ pub fn apply_network_policy(
     policy: &Policy,
     vpn_state: &vpn::VpnState,
 ) -> Result<(Vec<Gap>, Option<vpn::VpnReport>)> {
-    let mut gaps: Vec<Gap> = dns::apply(exec, &policy.dns, &policy.lockdown, server_host)?
-        .into_iter()
-        .map(Gap::Dns)
-        .collect();
+    // App/category blocks → DNS sinkholes (the catalog is the single source;
+    // `policy.blocks` on the effective policy is the union over every user).
+    let sinkhole = openscreentime_policy::catalog::expand(&policy.blocks).domains;
+    let mut gaps: Vec<Gap> =
+        dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?
+            .into_iter()
+            .map(Gap::Dns)
+            .collect();
     // Firewall first (with the tunnel's accepts in place), THEN the tunnel —
     // bringing a wg/ovpn unit up before its endpoint accept exists would fail
     // its handshake against our own default-deny.

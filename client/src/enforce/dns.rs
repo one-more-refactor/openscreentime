@@ -128,11 +128,15 @@ fn local_resolver_running(exec: &Exec) -> bool {
     exec.probe("systemctl", &["is-active", "dnsmasq"]).trim() == "active"
 }
 
-/// Build the dnsmasq ruleset that realizes the policy.
+/// Build the dnsmasq ruleset that realizes the policy. `sinkhole` is the
+/// expanded app/category block list (subdomains included by dnsmasq's
+/// `address=/d/` semantics): each name answers 0.0.0.0 / :: — an app that
+/// cannot resolve its servers is an app that does not work.
 pub fn render_dnsmasq(
     dns: &DnsPolicy,
     lockdown: &NetworkLockdown,
     server_host: Option<&str>,
+    sinkhole: &[String],
 ) -> String {
     let mut out = String::new();
     out.push_str("# Managed by openscreentime — do not edit.\n");
@@ -191,6 +195,22 @@ pub fn render_dnsmasq(
         }
     }
 
+    if !sinkhole.is_empty() {
+        out.push_str("# app & category blocks (catalog)\n");
+        for d in sinkhole {
+            // Defensive: the catalog already cleaned these, but this string is
+            // interpolated into a resolver config — never let a stray char through.
+            if d.is_empty()
+                || !d
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+            {
+                continue;
+            }
+            out.push_str(&format!("address=/{d}/0.0.0.0\naddress=/{d}/::\n"));
+        }
+    }
+
     if lockdown.block_tor {
         // block_tor: NXDOMAIN .onion and the Tor Project bootstrap domains, so a
         // managed user can't reach hidden services or download a Tor client.
@@ -224,9 +244,10 @@ pub fn apply(
     dns: &DnsPolicy,
     lockdown: &NetworkLockdown,
     server_host: Option<&str>,
+    sinkhole: &[String],
 ) -> Result<Vec<DnsGap>> {
     let mut gaps = Vec::new();
-    let conf = render_dnsmasq(dns, lockdown, server_host);
+    let conf = render_dnsmasq(dns, lockdown, server_host, sinkhole);
     exec.write_file(DNSMASQ_CONF, &conf)?;
 
     // Writing the ruleset does not make dnsmasq read it. Drop the include stub
@@ -276,8 +297,9 @@ pub fn apply(
         tracing::error!("DNS enforcement gap [{}]: {}", gap.kind(), gap.explain());
     }
     tracing::info!(
-        "DNS applied: {} allowlist entries, upstream {}, {} gap(s)",
+        "DNS applied: {} allowlist entries, {} sinkholed app domains, upstream {}, {} gap(s)",
         dns.allowlist.len(),
+        sinkhole.len(),
         dns.upstream,
         gaps.len()
     );
@@ -336,7 +358,7 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None);
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
         assert!(conf.contains("server=/wikipedia.org/1.1.1.2"));
         assert!(conf.contains("server=/edu/1.1.1.2"));
         assert!(conf.contains("address=/#/"));
@@ -352,9 +374,37 @@ mod tests {
             safe_search: false,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None);
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
         assert!(conf.contains("server=1.1.1.2"));
         assert!(!conf.contains("address=/#/"));
+    }
+
+    /// App/category blocks become v4 + v6 sinkholes, and nothing that is not a
+    /// hostname ever reaches the resolver config.
+    #[test]
+    fn blocks_are_sinkholed_for_v4_and_v6() {
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: false,
+            upstream: "1.1.1.3".into(),
+        };
+        let blocks = crate::policy::AppBlocks {
+            apps: vec!["youtube".into()],
+            categories: vec!["adult".into()],
+            custom_domains: vec!["example.org".into()],
+        };
+        let sinkhole = openscreentime_policy::catalog::expand(&blocks).domains;
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &sinkhole);
+        assert!(conf.contains("address=/youtube.com/0.0.0.0\naddress=/youtube.com/::\n"));
+        assert!(conf.contains("address=/googlevideo.com/0.0.0.0"));
+        assert!(conf.contains("address=/pornhub.com/::"));
+        assert!(conf.contains("address=/example.org/0.0.0.0"));
+        // a hostile "domain" never lands in the config
+        let bad = vec!["evil.com\nserver=9.9.9.9".to_string()];
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &bad);
+        assert!(!conf.contains("9.9.9.9"));
     }
 
     #[test]
@@ -370,7 +420,7 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let conf = render_dnsmasq(&dns, &lockdown, None);
+        let conf = render_dnsmasq(&dns, &lockdown, None, &[]);
         assert!(conf.contains("address=/onion/0.0.0.0"));
         assert!(conf.contains("address=/torproject.org/0.0.0.0"));
     }
