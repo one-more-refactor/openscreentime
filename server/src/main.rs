@@ -265,6 +265,10 @@ async fn main() -> anyhow::Result<()> {
             post(devices::assign_profile),
         )
         .route(
+            "/api/device-users/{id}/assign-account",
+            post(devices::assign_account),
+        )
+        .route(
             "/api/device-users/{id}/credit-time",
             post(earn::credit_time),
         )
