@@ -1,6 +1,15 @@
 # Preset Profiles
 
-Every new tenant is seeded with three `is_preset=true` profiles. They are fully editable (an
+**Since 0.4 every household is seeded with five bracket presets** — `little`
+(0–6), `kid` (6–12), `younger_teen` (12–16), `older_teen` (16–18), `adult` —
+whose exact values live in `server/src/presets.rs` (table in
+`docs/CONTRACT-0.4.md` §3). Each carries one-click `blocks` from the built-in
+catalog (`policy/src/catalog.rs`). A person's bracket picks their preset; the
+parent edits from there. The three older presets below (`kids`/`teen`/`default`)
+are **legacy**: existing rows stay valid and editable, but new households don't
+get them.
+
+Every new tenant used to be seeded with three `is_preset=true` profiles. They are fully editable (an
 edit clones the policy in place — the preset row stays but its `policy` is mutated). Presets can
 also be duplicated into `custom` profiles.
 
@@ -43,7 +52,18 @@ is at that default, the entire `lockdown` object is omitted from the stored/seri
 (`NetworkLockdown::is_default` + `skip_serializing_if`) — a profile with no lockdown configured
 has no `lockdown` key at all, which is why the `default` preset below doesn't show one.
 
-### `parent_pin_hash` — parent PIN
+### Parent code (per-device TOTP) — and `parent_pin_hash`, the backup code
+
+Since 0.4 the parent's key to a managed device is a **per-device authenticator
+code**: `POST /api/devices` mints a TOTP secret, the console shows it as a QR to
+scan into an authenticator app, the agent receives it on every policy pull
+(`parent_code.totp_secret`) and verifies codes **offline** (RFC 6238, ±1 step,
+single-use, lockout after five misses). The lockout overlay, `ost unlock`, and
+`sudo` on a managed machine (PAM) all ask for it. The device's 8-digit
+recovery PIN — shown once at enrollment — lives on as the **backup code**: it
+still unlocks, and its use is logged as `parent_code_backup_used`.
+
+#### `parent_pin_hash` (backup code, profile-level override)
 
 The Argon2 hash of the household's parent/master PIN. It's never written directly into policy
 JSON; it's derived from the API's `parent_pin` field on profile create/update requests
