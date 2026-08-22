@@ -291,3 +291,51 @@ Finally, **delete the device in the console** (device detail page, or
 until you tell it — until then it sits there, eventually swept `offline`
 and, after 7 days, flagged gone-dark. Deleting it removes it from the fleet
 outright; nothing server-side keeps pointing at that device afterward.
+
+## Port 8080 answers nothing although the container is "Up" (netavark stale rules)
+
+Seen 2026-08-22 on the production LXC: `podman ps` showed the server healthy
+and listening, `/health` from the host timed out, and Caddy served 502 for days.
+Cause: every `podman-compose down`/`up` cycle created a new compose network
+(`podman1`…`podman10`) and, because netavark could not find the previous
+network namespace (`failed to Statfs /run/user/0/netns/…`), it never removed
+the old port-forward rules. The first matching DNAT rule in
+`inet netavark NETAVARK-HOSTPORT-DNAT` still pointed at a container IP that no
+longer existed → "No route to host".
+
+Diagnose:
+
+```bash
+nft list ruleset | grep -c 'dport 8080'     # healthy = a handful, not 16+
+curl -v http://<OST_BIND_ADDR>:8080/health  # "No route to host" = stale DNAT
+```
+
+Fix (takes ~20 s, no data touched):
+
+```bash
+cd /opt/openscreentime
+podman-compose down
+nft delete table inet netavark    # netavark rebuilds it for live containers only
+podman-compose up -d
+```
+
+Avoid: prefer `podman stop/rm openscreentime-server && podman-compose up -d`
+over `down` for routine restarts (`deploy/push-image.sh` does this), so the
+network — and its rules — stay put.
+
+## Building elsewhere: `deploy/push-image.sh`
+
+The in-place `deploy/update.sh` compiles two Rust crates on the server. On a
+small host that is 40+ minutes of 100 % CPU and disk. `deploy/push-image.sh`
+builds the identical Containerfile on the dev box and streams the image over
+SSH (optionally through `pct exec` for an LXC without reachable sshd), then
+recreates the container and waits for `/health`. Same image, same tags; the
+host's git checkout is fast-forwarded so `compose.yaml`/`.env.example` match.
+
+## Login options on the hosted instance
+
+Passkey registration is open only while the instance has zero admins; after
+that, sign in with a passkey or with the configured OIDC provider
+(`OST_OIDC_*`). On cr3do the provider is Authentik (`login.cr3do.net`,
+application `ost`, bound to the `authentik Admins` group) — the first OIDC
+login on an empty instance creates the household and its owner.
