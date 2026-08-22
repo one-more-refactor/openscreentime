@@ -31,7 +31,7 @@ pick_binary() {
     if [[ -x "$musl" ]]; then cp -f "$musl" "$bin_dir/openscreentime"; return; fi
     echo "==> extracting the musl agent from localhost/openscreentime_server:latest"
     local cid; cid="$(podman create localhost/openscreentime_server:latest)"
-    local f; f="$(podman run --rm localhost/openscreentime_server:latest sh -c 'ls /app/agent | grep musl | head -1')"
+    local f; f="$(podman run --rm --entrypoint sh localhost/openscreentime_server:latest -c 'ls /app/agent | grep musl | head -1')"
     podman cp "$cid:/app/agent/$f" "$bin_dir/openscreentime"
     podman rm "$cid" >/dev/null
     chmod +x "$bin_dir/openscreentime"
