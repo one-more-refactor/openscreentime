@@ -105,8 +105,11 @@ wins for auth.
   * **Confirming an authenticator is itself a step-up.** You just proved the
     factor; making you wait out the 30-second window before your first change
     would be friction with no security in it.
-- **2b — Everyone has an account.** Role + age bracket + birthdate; per-person
-  login; adults' private self-tracking; link `device_users` ↔ accounts.
+- **2b — Everyone has an account. BUILT (0.4).** Role + age bracket + birthdate
+  on `admins`; members (children) are accounts without passkeys; every
+  `device_users` row links to an account; device vouchers bind to the OS user's
+  account; member sessions are confined to `/api/me*` by a layer; the child's
+  page is `/me`. See `docs/CONTRACT-0.4.md` §2/§6 and `server/src/members.rs`.
 - **2c — Identifier rename + hardening.** `openscreentime` → `openscreentime-agent`,
   `OST_TOKEN` → `OST_TOKEN` (with back-compat); hash `enroll_token` at rest
   (open red-team item); move WebAuthn challenge state out of memory.
