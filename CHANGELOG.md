@@ -18,6 +18,8 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-22
+
 **Headline: it works end to end now.** This release is the one where a
 family can actually use it: everyone in the house is an *account* with an age
 bracket, the parent's code is an authenticator app instead of a PIN, blocking
@@ -58,7 +60,19 @@ laptop sees their own page.
   never as the parent.
 - **Ops:** `deploy/push-image.sh` builds the image on a dev box and loads it
   on the host; `deploy/test/` is a systemd container that acts as a managed
-  laptop for end-to-end tests; the netavark stale-DNAT trap is documented.
+  laptop for end-to-end tests; the netavark stale-DNAT trap is documented; the
+  server drains on SIGTERM instead of being SIGKILLed at every restart.
+- Verified end to end against a real Postgres and a real (containerised)
+  managed laptop: enroll → WebSocket presence → catalog sinkhole → pause
+  (pending → confirmed) → PAM parent-code sudo (wrong / right / replay) →
+  member autologin voucher confined to `/me` → offline/online.
+
+Known limitation: on enrollment every OS login that matches no person by name
+is linked to the device's owner (the person you picked in "Add child"). A
+second adult account on a child's laptop therefore gets the child's rules
+until it is relinked: `POST /api/device-users/{id}/assign-account
+{account_id}` moves a login to another person (API only in 0.4; the console
+picker comes next).
 
 **Breaking: the product is now OpenScreenTime.** The agent was renamed in the
 previous release; this one finishes the job across the server, the deployment
