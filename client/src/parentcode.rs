@@ -219,10 +219,6 @@ impl Verifier {
         self
     }
 
-    pub fn has_totp(&self) -> bool {
-        self.secret.is_some()
-    }
-
     pub fn configured(&self) -> bool {
         self.secret.is_some() || self.backup_hash.is_some()
     }
@@ -232,12 +228,7 @@ impl Verifier {
         self.verify_at(code, now_counter(), chrono::Utc::now())
     }
 
-    fn verify_at(
-        &self,
-        code: &str,
-        counter: u64,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Verdict {
+    fn verify_at(&self, code: &str, counter: u64, now: chrono::DateTime<chrono::Utc>) -> Verdict {
         if !self.configured() {
             return Verdict::NotConfigured;
         }
@@ -306,7 +297,11 @@ pub fn event(verdict: &Verdict, via: &str, user: &str) -> Event {
             "backup code accepted — the authenticator was not used",
         ),
         Verdict::Wrong => (EV_PARENT_CODE_FAILED, SEV_WARN, "wrong code"),
-        Verdict::LockedOut(_) => (EV_PARENT_CODE_FAILED, SEV_WARN, "locked out after repeated wrong codes"),
+        Verdict::LockedOut(_) => (
+            EV_PARENT_CODE_FAILED,
+            SEV_WARN,
+            "locked out after repeated wrong codes",
+        ),
         Verdict::NotConfigured => (EV_PARENT_CODE_FAILED, SEV_WARN, "no parent code configured"),
     };
     let mut ev = Event::new(
@@ -363,7 +358,8 @@ mod tests {
     #[test]
     fn accepts_window_and_rejects_replay() {
         let key = base32_decode(RFC_SECRET_B32).unwrap();
-        let v = Verifier::new(Some(RFC_SECRET_B32.into()), None).with_state_path(tmp("replay.json"));
+        let v =
+            Verifier::new(Some(RFC_SECRET_B32.into()), None).with_state_path(tmp("replay.json"));
         let now = chrono::Utc::now();
         let c = 1000u64;
         // previous step is fine
@@ -376,7 +372,11 @@ mod tests {
         assert_eq!(v.verify_at(&totp_at(&key, c + 1), c, now), Verdict::Ok);
         assert_eq!(v.verify_at(&totp_at(&key, c + 3), c, now), Verdict::Wrong);
         // "123 456" style input is tolerated
-        let with_space = format!("{} {}", &totp_at(&key, c + 2)[..3], &totp_at(&key, c + 2)[3..]);
+        let with_space = format!(
+            "{} {}",
+            &totp_at(&key, c + 2)[..3],
+            &totp_at(&key, c + 2)[3..]
+        );
         assert_eq!(v.verify_at(&with_space, c + 1, now), Verdict::Ok);
     }
 
@@ -390,7 +390,10 @@ mod tests {
         assert_eq!(v.verify_at("000000", 5, now), Verdict::LockedOut(60));
         // while locked, even a right code is refused
         let key = base32_decode(RFC_SECRET_B32).unwrap();
-        assert!(matches!(v.verify_at(&totp_at(&key, 5), 5, now), Verdict::LockedOut(_)));
+        assert!(matches!(
+            v.verify_at(&totp_at(&key, 5), 5, now),
+            Verdict::LockedOut(_)
+        ));
         // after the lockout, one more wrong doubles it
         let later = now + chrono::Duration::seconds(61);
         assert_eq!(v.verify_at("000000", 5, later), Verdict::LockedOut(120));
@@ -415,11 +418,15 @@ mod tests {
             .hash_password(b"12345678", &salt)
             .unwrap()
             .to_string();
-        let v = Verifier::new(Some(RFC_SECRET_B32.into()), Some(hash)).with_state_path(tmp("backup.json"));
+        let v = Verifier::new(Some(RFC_SECRET_B32.into()), Some(hash))
+            .with_state_path(tmp("backup.json"));
         let now = chrono::Utc::now();
         assert_eq!(v.verify_at("12345678", 9, now), Verdict::Backup);
         assert_eq!(v.verify_at("87654321", 9, now), Verdict::Wrong);
-        assert_eq!(event(&Verdict::Backup, "unlock", "kid").ev_type, EV_PARENT_CODE_BACKUP_USED);
+        assert_eq!(
+            event(&Verdict::Backup, "unlock", "kid").ev_type,
+            EV_PARENT_CODE_BACKUP_USED
+        );
         assert_eq!(event(&Verdict::Ok, "pam", "kid").ev_type, EV_PARENT_CODE_OK);
         assert_eq!(event(&Verdict::Wrong, "overlay", "kid").severity, SEV_WARN);
     }
@@ -427,7 +434,10 @@ mod tests {
     #[test]
     fn nothing_configured_never_opens() {
         let v = Verifier::new(None, Some("   ".into())).with_state_path(tmp("none.json"));
-        assert_eq!(v.verify_at("123456", 1, chrono::Utc::now()), Verdict::NotConfigured);
+        assert_eq!(
+            v.verify_at("123456", 1, chrono::Utc::now()),
+            Verdict::NotConfigured
+        );
         assert!(!v.configured());
     }
 }

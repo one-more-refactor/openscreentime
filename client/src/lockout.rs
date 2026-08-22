@@ -34,9 +34,15 @@ impl ParentKeys {
         Verifier::new(self.totp_secret.clone(), self.pin_hash.clone())
     }
     /// Is there anything a parent could type?
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))] // the GUI presenter's input gate
     pub fn configured(&self) -> bool {
-        self.totp_secret.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || self.pin_hash.as_deref().is_some_and(|h| !h.trim().is_empty())
+        self.totp_secret
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .pin_hash
+                .as_deref()
+                .is_some_and(|h| !h.trim().is_empty())
     }
 }
 
@@ -169,9 +175,9 @@ pub mod challenge {
         /// A backup-code-only verifier with its replay/lockout state in a
         /// scratch file, so tests never touch /var/lib.
         fn verifier(pin: &str) -> Verifier {
-            Verifier::new(None, Some(hash_of(pin))).with_state_path(
-                std::env::temp_dir().join(format!("ost-lockout-test-{}-{pin}.json", std::process::id())),
-            )
+            Verifier::new(None, Some(hash_of(pin))).with_state_path(std::env::temp_dir().join(
+                format!("ost-lockout-test-{}-{pin}.json", std::process::id()),
+            ))
         }
 
         #[test]
@@ -283,7 +289,10 @@ pub fn render_ascii(spec: &LockSpec) -> String {
 /// unconditionally. Routing an *override* through that would let any dropped
 /// file bypass an admin lock even when no code is set — so the direct check
 /// is the security boundary here, not the challenge type.
-pub fn check_and_consume_code_override(exec: &Exec, spec: &LockSpec) -> Option<parentcode::Verdict> {
+pub fn check_and_consume_code_override(
+    exec: &Exec,
+    spec: &LockSpec,
+) -> Option<parentcode::Verdict> {
     let path = crate::paths::run_str(&format!("unlock_pin.{}", spec.for_user));
     let attempt = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path); // single-use, win or lose
@@ -718,17 +727,22 @@ pub mod gui {
                         // (Closing the window alone changes nothing — the tick
                         // loop re-freezes — which made the challenge feel
                         // rigged. Never again.)
-                        let verdict = if self.spec.parent.configured() && !self.pin.trim().is_empty() {
-                            Some(self.spec.parent.verifier().verify(self.pin.trim()))
-                        } else {
-                            None
-                        };
+                        let verdict =
+                            if self.spec.parent.configured() && !self.pin.trim().is_empty() {
+                                Some(self.spec.parent.verifier().verify(self.pin.trim()))
+                            } else {
+                                None
+                            };
                         let challenge_ok = self.spec.challenge.verify(&self.input, None);
                         if let Some(v) = verdict.as_ref().filter(|v| v.accepted()) {
                             super::write_unlock_grant(
                                 &self.spec.for_user,
                                 GRANT_PARENT_PIN_MIN,
-                                if *v == crate::parentcode::Verdict::Backup { "backup" } else { "pin" },
+                                if *v == crate::parentcode::Verdict::Backup {
+                                    "backup"
+                                } else {
+                                    "pin"
+                                },
                             );
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if challenge_ok {

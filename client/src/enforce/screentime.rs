@@ -279,6 +279,16 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
     users
 }
 
+/// What the kernel says about a user's freezer right now: `Some(true)` if
+/// `cgroup.freeze` reads back 1, `Some(false)` if 0, `None` if the slice does
+/// not exist (user not logged in) or cannot be read. This — never the agent's
+/// intention — is what gets reported as the device's lock state.
+pub fn is_frozen(username: &str) -> Option<bool> {
+    let uid = sysusers::uid_of(username)?;
+    let path = format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/cgroup.freeze");
+    std::fs::read_to_string(path).ok().map(|s| s.trim() == "1")
+}
+
 /// Freeze all processes of a user via the cgroup v2 freezer. Reversible.
 ///
 /// `hard` controls the fallback when the freezer is unavailable: an admin

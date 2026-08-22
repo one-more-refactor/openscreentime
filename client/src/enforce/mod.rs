@@ -72,10 +72,11 @@ pub fn apply_network_policy(
     // App/category blocks → DNS sinkholes (the catalog is the single source;
     // `policy.blocks` on the effective policy is the union over every user).
     let sinkhole = openscreentime_policy::catalog::expand(&policy.blocks).domains;
-    let mut gaps: Vec<Gap> = dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?
-        .into_iter()
-        .map(Gap::Dns)
-        .collect();
+    let mut gaps: Vec<Gap> =
+        dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?
+            .into_iter()
+            .map(Gap::Dns)
+            .collect();
     // Firewall first (with the tunnel's accepts in place), THEN the tunnel —
     // bringing a wg/ovpn unit up before its endpoint accept exists would fail
     // its handshake against our own default-deny.
