@@ -1,0 +1,266 @@
+/* ============================================================================
+   ME — the person's own page, in three looks. Scoped to `.me.theme-*` so the
+   console proper never inherits any of this.
+
+   playful  warm sun palette, Nunito 800/900, one huge ring with round caps.
+            The ring IS the page; everything else sits quietly under it.
+   calm     the console's own tokens, a thin ring, a mono stats row.
+   plain    the console's own tokens, no ring — a compact private dashboard.
+
+   Motion: the ring draws itself on arrival (stroke-dashoffset, 900ms), the
+   number counts up to meet it. Nothing bounces.
+   ========================================================================== */
+
+.me {
+  --me-bg: var(--bg);
+  --me-surface: var(--surface);
+  --me-line: var(--line);
+  --me-ink: var(--fg-display);
+  --me-ink-2: var(--fg-dim);
+  --me-ink-3: var(--fg-faint);
+  --me-track: var(--surface-2);
+  --me-fill: var(--fg-display);
+  --me-stop: var(--accent);
+  --me-go: var(--fg-display);
+  --me-go-ink: var(--bg);
+  --me-font: var(--font-sans);
+  --me-radius: var(--radius);
+
+  min-height: 100vh;
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+  background: transparent;
+  color: var(--me-ink);
+  font-family: var(--me-font);
+}
+
+/* ---- playful: the sun palette -------------------------------------------- */
+.me.theme-playful {
+  --me-bg: #fff7e8;
+  --me-surface: #ffffff;
+  --me-line: #f1e2c6;
+  --me-ink: #2b1d12;
+  --me-ink-2: #7a6147;
+  --me-ink-3: #b39b7d;
+  --me-track: #ffe6b8;
+  --me-fill: #ffb020;
+  --me-stop: #ff5a5f;
+  --me-go: #58cc02;
+  --me-go-ink: #ffffff;
+  --me-night: #30326b;
+  --me-night-ink: #eef0ff;
+  --me-font: "Nunito Variable", "Nunito", "Varela Round", "Avenir Next Rounded", system-ui, sans-serif;
+  --me-radius: 22px;
+  font-weight: 700;
+}
+.me.theme-playful[data-mode="dark"] {
+  --me-bg: #1e1710;
+  --me-surface: #2a2118;
+  --me-line: #3a2f22;
+  --me-ink: #fbf3e6;
+  --me-ink-2: #c9b59a;
+  --me-ink-3: #8d7a62;
+  --me-track: #3a2e20;
+  --me-fill: #ffb020;
+  --me-night: #23254d;
+  --me-night-ink: #dfe2ff;
+}
+/* The page owns the viewport when it is the only thing on screen (members);
+   inside the parent's shell it paints a soft panel instead. */
+.shell-member .me.theme-playful,
+.shell-member .me.theme-calm,
+.shell-member .me.theme-plain { min-height: 100vh; }
+.shell-member { background: var(--me-bg); }
+.shell-member:has(.theme-playful) { background: #fff7e8; }
+.shell-member:has(.theme-playful[data-mode="dark"]) { background: #1e1710; }
+.shell-main .me.theme-playful {
+  background: var(--me-bg); border-radius: 28px; margin: 2rem auto; min-height: 0;
+  border: 1px solid var(--me-line);
+}
+
+/* ---- head -------------------------------------------------------------------- */
+.me-head { text-align: center; margin-bottom: 1.75rem; }
+.me-hi {
+  margin: 0; font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.2rem);
+  font-weight: 500; letter-spacing: -0.02em; color: var(--me-ink);
+}
+.theme-playful .me-hi { font-weight: 900; font-size: clamp(1.9rem, 1.3rem + 2.4vw, 2.6rem); letter-spacing: -0.01em; }
+.theme-plain .me-hi { font-size: 1.5rem; }
+.me-sub {
+  margin: 0.3rem 0 0; color: var(--me-ink-3);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+
+/* ---- the ring ---------------------------------------------------------------- */
+.me-hero { display: grid; justify-items: center; gap: 1rem; margin-bottom: 2.25rem; }
+.me-ring { position: relative; display: grid; place-items: center; }
+.me-ring svg { position: absolute; inset: 0; }
+.me-ring-track { stroke: var(--me-track); }
+.me-ring-fill {
+  stroke: var(--me-fill);
+  transition: stroke-dashoffset 900ms var(--ease), stroke 400ms var(--ease);
+}
+.me-ring[data-spent="true"] .me-ring-fill { stroke: var(--me-stop); }
+.me-ring-inner {
+  position: relative; display: grid; justify-items: center; text-align: center;
+  padding: 0 1.5rem;
+}
+.me-big {
+  font-size: clamp(3rem, 2rem + 6vw, 4.5rem); font-weight: 300; line-height: 1;
+  letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--me-ink);
+}
+.theme-playful .me-big { font-weight: 900; font-size: clamp(3.6rem, 2.4rem + 7vw, 5.4rem); letter-spacing: -0.02em; }
+.me-big-stop { color: var(--me-stop); font-size: clamp(2.4rem, 1.8rem + 4vw, 3.4rem); }
+.theme-playful .me-big-stop { font-weight: 900; }
+.me-unit {
+  margin-top: 0.35rem; color: var(--me-ink-2);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.theme-playful .me-unit { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.95rem; font-weight: 800; }
+.me-under { margin: 0; color: var(--me-ink-3); font-size: 0.875rem; }
+.theme-playful .me-under { font-weight: 700; color: var(--me-ink-2); }
+.me-stopline { margin: 0; text-align: center; color: var(--me-ink); font-size: 1rem; max-width: 22rem; }
+.theme-playful .me-stopline { font-weight: 800; font-size: 1.1rem; }
+
+/* calm: the mono stats row */
+.me-stats {
+  display: flex; gap: 2rem; margin: 0.25rem 0 0; padding: 0.75rem 0 0;
+  border-top: 1px solid var(--me-line);
+}
+.me-stats div { display: grid; gap: 0.1rem; text-align: center; }
+.me-stats dt {
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--me-ink-3);
+}
+.me-stats dd { margin: 0; font-size: 1rem; color: var(--me-ink); font-variant-numeric: tabular-nums; }
+
+/* ---- asking ------------------------------------------------------------------ */
+.me-ask { display: grid; justify-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+.me-ask-big {
+  padding: 1rem 2rem; border: none; border-radius: 999px;
+  background: var(--me-go); color: var(--me-go-ink);
+  font-family: var(--me-font); font-weight: 900; font-size: 1.15rem; cursor: pointer;
+  box-shadow: 0 4px 0 color-mix(in srgb, var(--me-go) 70%, #000);
+  transition: transform 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.me-ask-big:hover:not(:disabled) { transform: translateY(-1px); }
+.me-ask-big:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 1px 0 color-mix(in srgb, var(--me-go) 70%, #000); }
+.me-ask-big:disabled { opacity: 0.6; cursor: default; }
+.me-ask-label {
+  margin: 0; color: var(--me-ink-3);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.me-ask-row { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
+.me-ask-pill {
+  padding: 0.5rem 1rem; border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--me-ink); font-family: var(--me-font); font-size: 0.9rem; cursor: pointer;
+  transition: background var(--dur-tick) var(--ease), transform var(--dur-tick) var(--ease);
+}
+.me-ask-pill:hover:not(:disabled) { background: var(--surface-2); }
+.me-ask-pill:active:not(:disabled) { transform: scale(0.96); }
+.me-asked { margin: 0.25rem 0 0; text-align: center; color: var(--me-ink-2); font-size: 0.95rem; }
+.theme-playful .me-asked { font-weight: 800; }
+.me-err { margin: 0.25rem 0 0; color: var(--me-stop); font-size: 0.875rem; text-align: center; }
+
+/* ---- sections ------------------------------------------------------------------ */
+.me-section { margin-bottom: 1.75rem; }
+.me-h2 {
+  margin: 0 0 0.6rem; font-weight: 400;
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--me-ink-3);
+}
+.theme-playful .me-h2 { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 1rem; font-weight: 900; color: var(--me-ink); }
+
+/* when: bedtime / allowed hours cards */
+.me-when { display: grid; gap: 0.6rem; grid-template-columns: 1fr 1fr; }
+@media (max-width: 480px) { .me-when { grid-template-columns: 1fr; } }
+.me-card {
+  display: flex; align-items: center; gap: 0.8rem;
+  padding: 0.9rem 1rem; border: 1px solid var(--me-line); border-radius: var(--me-radius);
+  background: var(--me-surface); color: var(--me-ink);
+}
+.me-card-title {
+  margin: 0; color: var(--me-ink-3);
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.theme-playful .me-card-title { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.8rem; font-weight: 800; color: var(--me-ink-2); }
+.me-card-value { margin: 0.1rem 0 0; font-size: 1rem; font-variant-numeric: tabular-nums; }
+.theme-playful .me-card-value { font-weight: 900; font-size: 1.1rem; }
+.me-moon, .me-sun { flex: none; display: grid; place-items: center; width: 2.4rem; height: 2.4rem; border-radius: 50%; }
+.me-moon { color: var(--me-ink-2); }
+.me-sun { color: var(--me-ink-2); }
+.theme-playful .me-card-night { background: var(--me-night); color: var(--me-night-ink); border-color: transparent; }
+.theme-playful .me-card-night .me-card-title { color: color-mix(in srgb, var(--me-night-ink) 70%, transparent); }
+.theme-playful .me-moon { background: rgba(255,255,255,0.12); color: #ffd978; }
+.theme-playful .me-sun { background: var(--me-track); color: var(--me-fill); }
+
+/* blocked */
+.me-blocked { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.me-blocked-item {
+  padding: 0.35rem 0.75rem; border-radius: 999px;
+  border: 1px solid var(--me-line); background: var(--me-surface);
+  font-family: var(--font-mono); font-size: 0.75rem; color: var(--me-ink);
+}
+.me-blocked-item[data-kind="cat"] { border-color: var(--me-ink-3); }
+.theme-playful .me-blocked-item {
+  font-family: var(--me-font); font-size: 0.9rem; font-weight: 800;
+  padding: 0.55rem 0.95rem; border-radius: 16px; border-color: var(--me-line);
+  text-decoration: line-through; text-decoration-color: var(--me-stop); text-decoration-thickness: 2px;
+}
+
+/* devices */
+.me-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.me-device {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.6rem 0; border-bottom: 1px solid var(--me-line); font-size: 0.95rem;
+}
+.me-device:last-child { border-bottom: none; }
+.me-device-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--idle); flex: none; }
+.me-device-dot[data-state="online"] { background: var(--ok); }
+.theme-playful .me-device-dot[data-state="online"] { background: var(--me-go); }
+.me-device-name { flex: 1; color: var(--me-ink); }
+.me-device-state {
+  color: var(--me-ink-3); font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.theme-playful .me-device-state { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.85rem; font-weight: 800; color: var(--me-ink-2); }
+
+/* ---- plain: compact dashboard top ------------------------------------------- */
+.me-plain-top { margin-bottom: 1.75rem; padding: 1.25rem 0; border-bottom: 1px solid var(--me-line); }
+.me-plain-big {
+  margin: 0; font-size: 3rem; font-weight: 300; line-height: 1; letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums; color: var(--me-ink);
+}
+.me-plain-big[data-spent="true"] { color: var(--me-stop); }
+.me-plain-unit {
+  margin: 0.4rem 0 0; color: var(--me-ink-3);
+  font-family: var(--font-mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+
+/* ---- foot ------------------------------------------------------------------------- */
+.me-wait { text-align: center; color: var(--me-ink-3); }
+.me-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--me-line);
+}
+.me-foot-note { margin: 0; color: var(--me-ink-3); font-size: 0.8rem; }
+.me-link {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--me-ink-2); font-family: var(--me-font); font-size: 0.875rem; text-decoration: underline;
+}
+.me-link:hover { color: var(--me-ink); }
+
+/* ---- member shell: no rail, no nav, the page is the whole screen ------------- */
+.shell-member { min-height: 100vh; }
+.shell-member .shell-main { padding: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .me-ring-fill { transition: none; }
+  .me-ask-big { transition: none; }
+}
