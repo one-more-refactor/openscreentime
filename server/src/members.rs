@@ -680,7 +680,9 @@ pub async fn ask(
         ));
     }
     if req.minutes <= 0 || req.minutes > 240 {
-        return Err(AppError::BadRequest("minutes must be between 1 and 240".into()));
+        return Err(AppError::BadRequest(
+            "minutes must be between 1 and 240".into(),
+        ));
     }
     // The device to file it against: an online one if there is one.
     let target: Option<(Uuid, Uuid)> = sqlx::query_as(
@@ -820,8 +822,14 @@ mod tests {
     #[test]
     fn effective_theme_is_pick_else_bracket_default() {
         assert_eq!(effective_theme(AgeBracket::Kid, None), Theme::Playful);
-        assert_eq!(effective_theme(AgeBracket::Kid, Some("plain")), Theme::Plain);
-        assert_eq!(effective_theme(AgeBracket::Adult, Some("bogus")), Theme::Plain);
+        assert_eq!(
+            effective_theme(AgeBracket::Kid, Some("plain")),
+            Theme::Plain
+        );
+        assert_eq!(
+            effective_theme(AgeBracket::Adult, Some("bogus")),
+            Theme::Plain
+        );
         assert_eq!(effective_theme(AgeBracket::YoungerTeen, None), Theme::Calm);
     }
 
