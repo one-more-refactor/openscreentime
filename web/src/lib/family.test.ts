@@ -11,8 +11,13 @@ import type { FamilyChild, FamilyResponse } from "../types";
 
 function child(over: Partial<FamilyChild> = {}): FamilyChild {
   return {
-    key: "mia",
+    key: "acc-mia",
+    account_id: "acc-mia",
     name: "Mia",
+    age_bracket: "kid",
+    theme: null,
+    effective_theme: "playful",
+    locked: false,
     used_minutes: 30,
     earned_minutes: 0,
     limit_minutes: 60,

@@ -84,3 +84,23 @@ The Duolingo-style lockout/nudge screen rendered by the **agent** must share thi
 black background, dot grid, one big dot-numeral countdown or streak flame drawn in monochrome,
 a single accent-red action, mono uppercase copy ("TIME'S UP", "EARN 15 MIN — READ FOR 20").
 Keep it calm and game-like, not punitive.
+
+## The person's own page (`/me`) — three looks (0.4)
+
+A member session (a child, or an adult who only self-tracks) has exactly one page: their own.
+It is also what a parent sees under "My screen time". The console's monochrome system is the
+base; the page is scoped by `.me.theme-*` (see `web/src/me.css`) so nothing leaks outward:
+
+| look | for | what it is |
+|---|---|---|
+| `playful` | little / kid | **One huge ring** (24px stroke, round caps) with the minutes left inside, Nunito 800/900, a warm sun palette (`#FFF7E8` paper, `#FFB020` ring, `#58CC02` "ask" button, `#30326B` bedtime card). Duolingo energy, no mascot, no confetti. The stop is a red ring and the word **Stop**. |
+| `calm` | teens | The console's own tokens, a thin ring, a mono stats row (used / limit / earned), blocked as a list, ask as pills. |
+| `plain` | adults | No ring. A compact private dashboard: minutes today, allowed hours, what they've blocked, devices. |
+
+Motion in all three is the living-data rule only: the ring draws itself on arrival (900 ms,
+`stroke-dashoffset`), the number counts up to meet it. `prefers-reduced-motion` turns both off.
+The parent picks the look per child (auto by bracket, or an explicit override) on the child's page.
+
+Enforcement copy is the same plain words everywhere: "Stop — time's up for today", "paused by a
+parent". The parent code (authenticator app) replaces the PIN in all copy; the old recovery PIN
+is the **backup code**.

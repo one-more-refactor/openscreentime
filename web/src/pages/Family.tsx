@@ -132,13 +132,25 @@ function Trouble({ devices }: { devices: Device[] }) {
   );
 }
 
+const BRACKET_LABEL: Record<FamilyChild["age_bracket"], string> = {
+  little: "Little",
+  kid: "Kid",
+  younger_teen: "Younger teen",
+  older_teen: "Older teen",
+  adult: "Adult",
+};
+
 function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
-  const paused = child.devices.some((d) => d.status === "locked");
+  // `locked` is what the devices actually report; a pause in flight is shown
+  // as exactly that, never as already done.
+  const paused = child.locked && child.devices.length > 0;
+  const pending = child.devices.some((d) => d.lock_pending);
   return (
     <Link
       to={`/child/${encodeURIComponent(child.key)}`}
       className="fam-card"
       data-paused={paused}
+      data-pending={pending}
       // Staggered so the freeze sweeps across the family left-to-right
       // instead of every card blinking at once.
       style={{ "--i": index } as CSSProperties}
@@ -147,7 +159,8 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
       <div className="fam-card-body">
         <p className="fam-name">{child.name}</p>
         <p className="fam-meta">
-          {child.profile_name ?? "No profile"}
+          {BRACKET_LABEL[child.age_bracket] ?? child.age_bracket}
+          {child.profile_name && ` · ${child.profile_name}`}
           {child.devices.length > 1 && ` · ${child.devices.length} devices`}
         </p>
         <TimeBar child={child} />
@@ -159,11 +172,15 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
           </p>
         )}
       </div>
-      {paused && (
+      {paused ? (
         <span className="fam-card-paused" aria-label="Paused">
           Paused
         </span>
-      )}
+      ) : pending ? (
+        <span className="fam-card-paused fam-card-pending" aria-label="Pausing">
+          Pausing…
+        </span>
+      ) : null}
     </Link>
   );
 }
@@ -202,7 +219,7 @@ export function Family() {
 
   // Every device that could be paused. Pending devices have no agent yet.
   const pausable = (devices ?? []).filter((d) => d.status !== "pending");
-  const allPaused = pausable.length > 0 && pausable.every((d) => d.status === "locked");
+  const allPaused = pausable.length > 0 && pausable.every((d) => d.locked);
 
   return (
     <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>

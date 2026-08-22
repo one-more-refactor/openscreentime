@@ -1,0 +1,168 @@
+/* ============================================================================
+   0.4 additions to the console — apps & categories, the honest lock state,
+   age bracket / look pickers, the add-a-child two-column step, parent-code
+   rows. Same grammar as theme.css (monochrome, hairlines, one accent); kept
+   in its own file so the base system stays diffable.
+   ========================================================================== */
+
+/* A stacked rule row is a column flexbox that inherited `flex-wrap: wrap`
+   from .rl-row. Column + wrap is meaningless for its content, and in Chromium
+   it hands every grid child a stretched definite height — the app tiles came
+   out 235px tall. Wrapping off, the grid sizes to its content. */
+.rl-row-stack { flex-wrap: nowrap; }
+
+/* ---- apps & categories --------------------------------------------------- */
+.apps-cats {
+  display: flex; flex-wrap: wrap; gap: 0.45rem;
+  margin-top: 0.25rem;
+}
+.apps-cat {
+  display: inline-flex; align-items: baseline; gap: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--fg);
+  font-family: var(--font-sans); font-size: 0.9rem; cursor: pointer;
+  transition: transform var(--dur-tick) var(--ease), background var(--dur-tick) var(--ease),
+    color var(--dur-tick) var(--ease), border-color var(--dur-tick) var(--ease);
+}
+.apps-cat:hover:not(:disabled) { background: var(--surface-2); }
+.apps-cat:active:not(:disabled) { transform: scale(0.96); }
+.apps-cat:disabled { opacity: 0.5; cursor: default; }
+.apps-cat[data-on="true"] {
+  background: var(--fg-display); color: var(--bg); border-color: var(--fg-display);
+}
+.apps-cat-n {
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7;
+}
+
+.apps-grid {
+  display: grid; gap: 0.5rem; margin-top: 0.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+}
+.apps-tile {
+  display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto;
+  column-gap: 0.65rem; align-items: center; text-align: left;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg);
+  font-family: var(--font-sans); cursor: pointer;
+  transition: transform var(--dur-tick) var(--ease), border-color var(--dur-tick) var(--ease),
+    background var(--dur-tick) var(--ease);
+}
+.apps-tile:hover:not(:disabled) { border-color: var(--line-2); }
+.apps-tile:active:not(:disabled) { transform: scale(0.97); }
+.apps-tile:disabled { cursor: default; }
+.apps-tile[data-on="true"] { border-color: var(--fg-display); }
+.apps-tile[data-on="true"] .apps-mono { filter: grayscale(1); opacity: 0.75; }
+.apps-tile[data-covered="true"] { opacity: 0.6; border-style: dashed; }
+.apps-mono {
+  grid-row: 1 / span 2;
+  width: 2rem; height: 2rem; border-radius: 8px;
+  display: grid; place-items: center;
+  font-weight: 600; font-size: 0.75rem; letter-spacing: 0.02em;
+}
+.apps-tile-name { font-size: 0.875rem; line-height: 1.2; color: var(--fg-display); }
+.apps-tile-state {
+  font-family: var(--font-mono); font-size: 0.5625rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint);
+}
+.apps-tile[data-on="true"] .apps-tile-state { color: var(--accent); }
+.apps-more { margin-top: 0.75rem; }
+.apps-more summary {
+  cursor: pointer; font-size: 0.875rem; color: var(--fg-dim); list-style: none;
+}
+.apps-more summary::before { content: "+ "; color: var(--fg-faint); }
+.apps-more[open] summary::before { content: "− "; }
+
+/* ---- age bracket + look, in the child header ----------------------------- */
+.ch-ident { margin-top: 0.5rem; }
+.ch-ident-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.25rem 0; border: none; background: none; cursor: pointer;
+  color: var(--fg-dim); font-family: var(--font-sans); font-size: 0.875rem;
+}
+.ch-ident-btn:hover { color: var(--fg); }
+.ch-ident-sep { color: var(--fg-faint); }
+.ch-ident-caret { color: var(--fg-faint); font-size: 0.75rem; }
+.ch-ident-panel {
+  margin-top: 0.6rem; padding: 0.9rem 1rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  animation: rise 300ms var(--ease) backwards;
+}
+.pill-range { opacity: 0.6; font-size: 0.75rem; margin-left: 0.2rem; }
+
+/* ---- where they use it: connection dot + honest lock state -------------- */
+.ch-device-name { display: inline-flex; align-items: center; gap: 0.6rem; }
+.ch-device-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--idle); }
+.ch-device-dot[data-state="online"] { background: var(--ok); }
+.ch-device-dot[data-state="offline"] { background: var(--warn); }
+.ch-device-right { display: inline-flex; align-items: center; gap: 0.75rem; }
+.ch-device-state[data-state="pending"] { color: var(--warn); animation: pulse-soft 1.2s var(--ease) infinite; }
+.ch-device-state[data-state="offline"] { color: var(--fg-faint); }
+@keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* The pause button while the device hasn't confirmed yet. */
+.ch-btn-pause[data-pending="true"] { animation: pulse-soft 1.2s var(--ease) infinite; }
+.fam-card-pending { color: var(--warn) !important; animation: pulse-soft 1.2s var(--ease) infinite; }
+
+/* ---- add a child: bracket picker, two-column device step ----------------- */
+.add-form-wide { max-width: 34rem; }
+.add-optional {
+  margin-left: 0.5rem; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.add-brackets {
+  display: grid; gap: 0.4rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+@media (max-width: 520px) { .add-brackets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.add-bracket {
+  display: flex; flex-direction: column; align-items: center; gap: 0.1rem;
+  padding: 0.55rem 0.3rem;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  background: transparent; color: var(--fg-dim); cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background var(--dur-tick) var(--ease), color var(--dur-tick) var(--ease),
+    transform var(--dur-tick) var(--ease);
+}
+.add-bracket:active { transform: scale(0.96); }
+.add-bracket[data-on="true"] { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
+.add-bracket-label { font-size: 0.8rem; line-height: 1.1; text-align: center; }
+.add-bracket-range { font-family: var(--font-mono); font-size: 0.625rem; letter-spacing: 0.06em; opacity: 0.7; }
+.add-bracket-blurb { margin: 0.2rem 0 0; font-size: 0.875rem; color: var(--fg-dim); min-height: 2.6em; }
+.add-more { margin-top: 0.4rem; }
+.add-more summary { cursor: pointer; font-size: 0.875rem; color: var(--fg-dim); }
+
+.add-two {
+  display: grid; gap: 2rem; margin-bottom: 1rem;
+  grid-template-columns: 1fr 1fr;
+}
+@media (max-width: 720px) { .add-two { grid-template-columns: 1fr; } }
+.add-col { min-width: 0; }
+.add-step-text { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--fg-dim); }
+.add-step-text strong, .add-step-text code { color: var(--fg); }
+.add-qr { display: grid; gap: 0.9rem; justify-items: start; }
+.add-qr-text { display: grid; gap: 0.4rem; justify-items: start; }
+.add-secret-label {
+  margin: 0; color: var(--fg-faint);
+  font-family: var(--font-mono); font-size: 0.625rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.add-secret {
+  font-family: var(--font-mono); font-size: 0.8rem; letter-spacing: 0.08em;
+  word-break: break-all; color: var(--fg);
+}
+
+/* The QR: white quiet zone in both modes, since scanners want contrast, not
+   taste; a hairline keeps it from floating on the light theme. */
+.qr {
+  display: inline-block; border-radius: var(--radius-sm); overflow: hidden;
+  background: #fff; border: 1px solid var(--line); padding: 4px; box-sizing: content-box;
+}
+.qr svg { display: block; width: 100%; height: 100%; }
+
+/* ---- settings: parent codes per device ----------------------------------- */
+.pc-modal { display: grid; gap: 1rem; justify-items: center; text-align: center; }
+.pc-modal .add-secret { text-align: center; }

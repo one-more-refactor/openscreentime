@@ -42,7 +42,7 @@ export function LockOverlay({
   const challengeCopy: Record<UnlockChallenge, string> = {
     math: "SOLVE A PROBLEM TO CONTINUE",
     wait: "COOL-DOWN IN PROGRESS",
-    parent_pin: "ASK A PARENT FOR THE PIN",
+    parent_pin: "ASK A PARENT FOR THEIR CODE",
   };
 
   return (
