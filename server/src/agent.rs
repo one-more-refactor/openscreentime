@@ -117,17 +117,6 @@ pub async fn enqueue_command(
     Ok(id)
 }
 
-async fn default_profile_id(db: &sqlx::PgPool, tenant_id: Uuid) -> AppResult<Uuid> {
-    let id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM profiles WHERE tenant_id = $1 AND kind = 'default' AND is_preset
-         ORDER BY created_at LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_one(db)
-    .await?;
-    Ok(id)
-}
-
 /// Derive a stable policy version string from the max `updated_at` across the
 /// profiles assigned to a device's users — and the device's VPN profile, so a
 /// set/removed VPN config also bumps the version and poll-mode agents re-pull.
@@ -147,26 +136,26 @@ async fn policy_version(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<String>
     })
 }
 
+/// Every OS login becomes a `device_users` row linked to a person
+/// (`members::link_os_user`): name-match, else the device's owner, else a new
+/// member. Nothing stays unlinked.
 async fn upsert_os_users(
     db: &sqlx::PgPool,
+    tenant_id: Uuid,
     device_id: Uuid,
-    default_profile: Uuid,
     users: &[OsUser],
 ) -> AppResult<()> {
     for u in users {
         if u.username.trim().is_empty() {
             continue;
         }
-        sqlx::query(
-            "INSERT INTO device_users (device_id, os_username, display_name, profile_id)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (device_id, os_username) DO NOTHING",
+        crate::members::link_os_user(
+            db,
+            tenant_id,
+            device_id,
+            &u.username,
+            u.display_name.as_deref(),
         )
-        .bind(device_id)
-        .bind(&u.username)
-        .bind(&u.display_name)
-        .bind(default_profile)
-        .execute(db)
         .await?;
     }
     Ok(())
@@ -253,8 +242,7 @@ pub async fn enroll(
     .execute(&st.db)
     .await?;
 
-    let default_profile = default_profile_id(&st.db, tenant_id).await?;
-    upsert_os_users(&st.db, device_id, default_profile, &req.os_users).await?;
+    upsert_os_users(&st.db, tenant_id, device_id, &req.os_users).await?;
 
     events::insert(
         &st.db,
@@ -379,6 +367,53 @@ pub struct HeartbeatReq {
     pub usage: Vec<UsageEntry>,
     #[serde(default)]
     pub os_users: Vec<OsUser>,
+    /// Optional `state` (same shape as the WS frame) for poll-mode agents.
+    #[serde(default)]
+    pub state: Option<Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Presence: the agent's `state` frame
+// ---------------------------------------------------------------------------
+
+/// Apply an agent `state` frame — what the device *is*, read back from the
+/// kernel, not what we asked for: `{ locked, frozen_users, enforcing, gaps,
+/// agent_version, active_users }`. Best-effort; a malformed frame is ignored.
+async fn apply_state(db: &sqlx::PgPool, device_id: Uuid, state: &Value) {
+    let Some(locked) = state.get("locked").and_then(Value::as_bool) else {
+        tracing::warn!(%device_id, "state frame without a boolean `locked`; ignored");
+        return;
+    };
+    // Bound what we persist; the agent is a semi-trusted origin.
+    let mut stored = state.clone();
+    if let Some(o) = stored.as_object_mut() {
+        o.remove("type");
+        o.remove("kind");
+    }
+    if serde_json::to_string(&stored)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+        > 8 * 1024
+    {
+        tracing::warn!(%device_id, "oversize state frame; ignored");
+        return;
+    }
+    let version = state
+        .get("agent_version")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty() && v.len() < 64)
+        .map(str::to_string);
+    let _ = sqlx::query(
+        "UPDATE devices SET locked = $2, last_state = $3, last_seen = now(), status = 'online',
+                agent_version = COALESCE($4, agent_version)
+          WHERE id = $1",
+    )
+    .bind(device_id)
+    .bind(locked)
+    .bind(&stored)
+    .bind(version)
+    .execute(db)
+    .await;
 }
 
 pub async fn heartbeat(
@@ -386,23 +421,25 @@ pub async fn heartbeat(
     agent: AgentAuth,
     Json(req): Json<HeartbeatReq>,
 ) -> AppResult<Json<Value>> {
-    // Never clobber a `locked` status from a heartbeat.
-    let reported = req.status.unwrap_or_else(|| "online".into());
+    // A heartbeat is life: the device is online. `locked` is its own column
+    // and is only ever written from the agent's `state` frame or a lock ack.
+    let _ = req.status;
     sqlx::query(
         "UPDATE devices SET last_seen = now(),
              public_ip = COALESCE($2::inet, public_ip),
-             status = CASE WHEN status = 'locked' THEN status ELSE $3 END
+             status = 'online'
          WHERE id = $1",
     )
     .bind(agent.device_id)
     .bind(req.public_ip)
-    .bind(reported)
     .execute(&st.db)
     .await?;
 
     if !req.os_users.is_empty() {
-        let default_profile = default_profile_id(&st.db, agent.tenant_id).await?;
-        upsert_os_users(&st.db, agent.device_id, default_profile, &req.os_users).await?;
+        upsert_os_users(&st.db, agent.tenant_id, agent.device_id, &req.os_users).await?;
+    }
+    if let Some(state) = &req.state {
+        apply_state(&st.db, agent.device_id, state).await;
     }
 
     // Persist today's per-user usage into the screen-time ledger.
@@ -498,10 +535,14 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
         .collect();
 
     let version = policy_version(&st.db, agent.device_id).await?;
+    let totp_secret = crate::devices::ensure_parent_code(&st.db, agent.device_id).await?;
     Ok(Json(json!({
         "policy_version": version,
         "device_tamper_level": tamper_level,
         "users": users,
+        // The per-device parent code (docs/CONTRACT-0.4.md §4): verified
+        // offline by the agent, shown to the parent as a QR in the console.
+        "parent_code": { "totp_secret": totp_secret },
         // The device's ACTIVE named VPN profile (raw config, private keys and
         // all) — only served here, on the authenticated agent pull. A
         // status of "testing" asks the agent to verify-then-report.
@@ -613,9 +654,9 @@ pub struct AckReq {
 /// Any status other than "failed" is normalized to "acked". Returns whether a
 /// matching command row was updated.
 ///
-/// Truthful lock state: `devices.status` only flips to `locked`/`online` when
-/// the agent confirms a `lock`/`unlock` — this is where a lock that was merely
-/// queued (device offline at click time) becomes real once applied.
+/// Truthful lock state: `devices.locked` only flips when the agent confirms a
+/// `lock`/`unlock` (or reports it in a `state` frame) — this is where a lock
+/// that was merely queued (device offline at click time) becomes real.
 async fn apply_command_ack(
     db: &sqlx::PgPool,
     device_id: Uuid,
@@ -644,15 +685,17 @@ async fn apply_command_ack(
     .await?;
 
     if status == "acked" {
+        // The agent confirmed it applied the lock/unlock: that is the truth
+        // until its next `state` frame says otherwise.
         match ctype.as_deref() {
             Some("lock") => {
-                sqlx::query("UPDATE devices SET status = 'locked' WHERE id = $1")
+                sqlx::query("UPDATE devices SET locked = true WHERE id = $1")
                     .bind(device_id)
                     .execute(db)
                     .await?;
             }
             Some("unlock") => {
-                sqlx::query("UPDATE devices SET status = 'online' WHERE id = $1")
+                sqlx::query("UPDATE devices SET locked = false WHERE id = $1")
                     .bind(device_id)
                     .execute(db)
                     .await?;
@@ -703,14 +746,11 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     st.hub.register_agent(device_id, tx).await;
 
-    // Mark online.
-    let _ = sqlx::query(
-        "UPDATE devices SET status = CASE WHEN status='locked' THEN status ELSE 'online' END, \
-         last_seen = now() WHERE id = $1",
-    )
-    .bind(device_id)
-    .execute(&st.db)
-    .await;
+    // Mark online. `locked` is a separate column now, so nothing to preserve.
+    let _ = sqlx::query("UPDATE devices SET status = 'online', last_seen = now() WHERE id = $1")
+        .bind(device_id)
+        .execute(&st.db)
+        .await;
 
     // Writer task: forward hub frames to the socket.
     let mut writer = tokio::spawn(async move {
@@ -756,13 +796,14 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
 
     writer.abort();
     st.hub.unregister_agent(device_id).await;
-    let _ = sqlx::query(
-        "UPDATE devices SET status = CASE WHEN status='locked' THEN status ELSE 'offline' END \
-         WHERE id = $1",
-    )
-    .bind(device_id)
-    .execute(&st.db)
-    .await;
+    // The socket is gone: offline, immediately. Only if nothing else has
+    // re-registered this device in the meantime (a reconnect that raced us).
+    if !st.hub.is_online(device_id).await {
+        let _ = sqlx::query("UPDATE devices SET status = 'offline' WHERE id = $1")
+            .bind(device_id)
+            .execute(&st.db)
+            .await;
+    }
 }
 
 /// Handle one inbound WS frame from an agent. The envelope is tagged with
@@ -773,7 +814,9 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
 ///   - `{ type:"event", event:{ type, severity?, device_user?, payload } }`
 ///     (fields at the top level also accepted)
 ///   - `{ type:"ack", ack:{ command_id, status, result? } }` (idem)
-///   - `{ type:"heartbeat" }` / `{ type:"pong" }`
+///   - `{ type:"state", locked, frozen_users, enforcing, gaps, agent_version, active_users }`
+///     (also accepted nested under "state")
+///   - `{ type:"heartbeat", usage?, state? }` / `{ type:"pong" }`
 async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
     let kind = v
         .get("kind")
@@ -856,11 +899,20 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
                     .await;
             }
         }
+        Some("state") => {
+            let frame = v.get("state").unwrap_or(&v);
+            apply_state(&st.db, agent.device_id, frame).await;
+        }
         Some("heartbeat") => {
-            let _ = sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
-                .bind(agent.device_id)
-                .execute(&st.db)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE devices SET last_seen = now(), status = 'online' WHERE id = $1",
+            )
+            .bind(agent.device_id)
+            .execute(&st.db)
+            .await;
+            if let Some(state) = v.get("state") {
+                apply_state(&st.db, agent.device_id, state).await;
+            }
             // A WS-connected agent has no HTTP heartbeat; persist its usage here so
             // the ledger stays current in the normal (non-poll) path.
             if let Some(usage) = v.get("usage") {

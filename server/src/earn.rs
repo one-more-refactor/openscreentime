@@ -71,6 +71,11 @@ async fn fetch_request(db: &sqlx::PgPool, id: Uuid, tenant_id: Uuid) -> AppResul
     row.ok_or_else(|| AppError::NotFound("earn request not found".into()))
 }
 
+/// One request as JSON, scoped to a tenant (shared with `members::ask`).
+pub(crate) async fn request_json(db: &sqlx::PgPool, id: Uuid, tenant_id: Uuid) -> AppResult<Value> {
+    Ok(request_to_json(fetch_request(db, id, tenant_id).await?))
+}
+
 // ---------------------------------------------------------------------------
 // Agent side
 // ---------------------------------------------------------------------------
