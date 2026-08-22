@@ -57,10 +57,7 @@ fn proc_identity(pid: u32) -> Option<(u32, String)> {
 
 /// Pure matching, for tests: which of `procs` (pid, uid, comm) belong to a
 /// user whose policy blocks that comm.
-pub fn matches(
-    procs: &[(u32, u32, String)],
-    users: &[(String, u32, &Policy)],
-) -> Vec<Hit> {
+pub fn matches(procs: &[(u32, u32, String)], users: &[(String, u32, &Policy)]) -> Vec<Hit> {
     let by_uid: HashMap<u32, (&str, HashMap<String, String>)> = users
         .iter()
         .map(|(name, uid, p)| (*uid, (name.as_str(), comm_index(p))))
@@ -175,11 +172,11 @@ mod tests {
             ("dad".to_string(), 1000u32, &adult),
         ];
         let procs = vec![
-            (10, 1001, "Discord".to_string()),   // kid runs Discord → hit
-            (11, 1002, "Discord".to_string()),   // teen: discord not blocked for them
-            (12, 1002, "steam".to_string()),     // teen: games category → steam → hit
-            (13, 1000, "steam".to_string()),     // dad: nothing blocked
-            (14, 0, "Discord".to_string()),      // root is never touched
+            (10, 1001, "Discord".to_string()),        // kid runs Discord → hit
+            (11, 1002, "Discord".to_string()),        // teen: discord not blocked for them
+            (12, 1002, "steam".to_string()),          // teen: games category → steam → hit
+            (13, 1000, "steam".to_string()),          // dad: nothing blocked
+            (14, 0, "Discord".to_string()),           // root is never touched
             (15, 1001, "discord-helper".to_string()), // not an exact comm match
         ];
         let hits = matches(&procs, &users);
@@ -194,7 +191,10 @@ mod tests {
     fn comm_index_comes_from_the_catalog() {
         let p = blocking(&["telegram"], &[]);
         let idx = comm_index(&p);
-        assert_eq!(idx.get("telegram-desktop").map(String::as_str), Some("telegram"));
-        assert!(idx.get("java").is_none());
+        assert_eq!(
+            idx.get("telegram-desktop").map(String::as_str),
+            Some("telegram")
+        );
+        assert!(!idx.contains_key("java"));
     }
 }

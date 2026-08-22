@@ -63,7 +63,10 @@ pub async fn run() -> Result<()> {
         tracing::info!("pam-auth: {} for {user} via {service}", verdict.message());
         Ok(())
     } else {
-        tracing::info!("pam-auth refused for {user} via {service}: {}", verdict.message());
+        tracing::info!(
+            "pam-auth refused for {user} via {service}: {}",
+            verdict.message()
+        );
         std::process::exit(1);
     }
 }

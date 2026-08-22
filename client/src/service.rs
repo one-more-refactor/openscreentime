@@ -27,6 +27,13 @@ const WATCHDOG_TIMER_PATH: &str = "/etc/systemd/system/openscreentime-watchdog.t
 const TRAY_UNIT_PATH: &str = "/etc/systemd/user/openscreentime-tray.service";
 
 pub const BIN_TARGET: &str = "/usr/local/bin/openscreentime";
+/// Short alias, symlinked next to the binary. `ost time` is what a person (or
+/// a plugin shelling out) actually types.
+pub const BIN_ALIAS: &str = "/usr/local/bin/ost";
+/// The name the binary had when the product was called Sentinel. Kept as a
+/// symlink so anything already invoking it — a cron entry, a script, muscle
+/// memory — keeps working.
+pub const LEGACY_BIN: &str = "/usr/local/bin/sentinel-agent";
 
 /// PAM service that makes `sudo` on a managed machine ask for the parent code
 /// (docs/CONTRACT-0.4.md §8). `pam_exec` runs our `pam-auth` helper with the
@@ -64,8 +71,7 @@ pub fn sudoers_body(managed_users: &[String]) -> String {
         .filter(|u| {
             !u.is_empty()
                 && u.len() <= 32
-                && u
-                    .chars()
+                && u.chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
                 && !u.starts_with('-')
         })
@@ -98,7 +104,7 @@ fn write_sudoers(exec: &Exec, body: &str) -> Result<()> {
         tracing::info!(target: "dry_run", "WOULD WRITE {SUDOERS_PATH}:\n{body}");
         return Ok(());
     }
-    if std::fs::read_to_string(SUDOERS_PATH).as_deref() == Ok(body) {
+    if std::fs::read_to_string(SUDOERS_PATH).ok().as_deref() == Some(body) {
         return Ok(()); // unchanged
     }
     {
@@ -116,7 +122,10 @@ fn write_sudoers(exec: &Exec, body: &str) -> Result<()> {
         Some(out) if out.contains("parsed OK") => {}
         Some(out) => {
             let _ = std::fs::remove_file(SUDOERS_TMP);
-            anyhow::bail!("sudoers drop-in did not validate, not installed: {}", out.trim());
+            anyhow::bail!(
+                "sudoers drop-in did not validate, not installed: {}",
+                out.trim()
+            );
         }
         // No visudo on this box: the body is static and unit-tested; install it.
         None => tracing::warn!("visudo not found — sudoers drop-in installed unvalidated"),
@@ -294,14 +303,22 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
     let _ = exec.run("systemctl", &["disable", "--now", AGENT_UNIT]);
     let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
     if !exec.dry_run() {
-        for p in [UNIT_PATH, WATCHDOG_SVC_PATH, WATCHDOG_TIMER_PATH, TRAY_UNIT_PATH] {
+        for p in [
+            UNIT_PATH,
+            WATCHDOG_SVC_PATH,
+            WATCHDOG_TIMER_PATH,
+            TRAY_UNIT_PATH,
+        ] {
             let _ = std::fs::remove_file(p);
         }
     }
     remove_parent_sudo(&exec);
     let _ = exec.run("systemctl", &["daemon-reload"]);
     println!("Removed the OpenScreenTime units and the parent-code sudo hook.");
-    println!("Enrollment config ({}) and state were kept.", crate::config::CONFIG_PATH);
+    println!(
+        "Enrollment config ({}) and state were kept.",
+        crate::config::CONFIG_PATH
+    );
     Ok(())
 }
 
@@ -367,8 +384,16 @@ mod tests {
     /// shape so a stray edit cannot ship a file visudo would reject.
     #[test]
     fn sudoers_and_pam_bodies_are_what_we_mean() {
-        let s = sudoers_body(&["vali".into(), "kid".into(), "vali".into(), "bad name".into(), "-x".into()]);
-        assert!(s.contains("Defaults:kid,vali pam_service=openscreentime-parent, timestamp_timeout=0"));
+        let s = sudoers_body(&[
+            "vali".into(),
+            "kid".into(),
+            "vali".into(),
+            "bad name".into(),
+            "-x".into(),
+        ]);
+        assert!(
+            s.contains("Defaults:kid,vali pam_service=openscreentime-parent, timestamp_timeout=0")
+        );
         assert!(s.contains("kid,vali ALL=(ALL:ALL) ALL"));
         assert!(!s.contains("bad name") && !s.contains("-x"));
         assert!(s.lines().all(|l| !l.ends_with(' ')));
@@ -384,7 +409,15 @@ mod tests {
     fn adults_are_not_managed_everyone_else_is() {
         assert!(!kind_is_managed("adult"));
         assert!(!kind_is_managed("default"));
-        for k in ["little", "kid", "younger_teen", "older_teen", "kids", "teen", "custom"] {
+        for k in [
+            "little",
+            "kid",
+            "younger_teen",
+            "older_teen",
+            "kids",
+            "teen",
+            "custom",
+        ] {
             assert!(kind_is_managed(k), "{k}");
         }
     }
