@@ -5,13 +5,14 @@
 use crate::client::ServerClient;
 use crate::config::{AgentConfig, AgentCtx};
 use crate::enforce::{self, screentime};
-use crate::lockout::{self, LockSpec};
+use crate::lockout::{self, LockSpec, ParentKeys};
 use crate::policy::Policy;
 use crate::protocol::*;
 use crate::util::Exec;
-use crate::{earn, tamper};
+use crate::{earn, parentcode, tamper};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
+use openscreentime_policy::AgeBracket;
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -27,9 +28,18 @@ const TICK: Duration = Duration::from_secs(10);
 /// and can eat unsaved work — never again. Admin locks stay immediate.
 const FREEZE_GRACE: Duration = Duration::from_secs(60);
 
-/// Minutes granted when a parent PIN arrives via the headless file-drop
-/// override (`/run/openscreentime/unlock_pin.<user>`), matching the GUI's PIN grant.
+/// Minutes granted when a parent code arrives via the headless file-drop
+/// override (`/run/openscreentime/unlock_pin.<user>`), matching the GUI's grant.
 const PIN_OVERRIDE_GRANT_MIN: u32 = 30;
+/// WS heartbeat (usage push) cadence and the at-least cadence of the `state`
+/// frame (CONTRACT-0.4 §5). The enforcement tick itself stays at `TICK`.
+const WS_HEARTBEAT: Duration = Duration::from_secs(30);
+const STATE_AT_LEAST: Duration = Duration::from_secs(60);
+/// How long the HTTP poll fallback runs before trying the WS bus again.
+const POLL_ROUND: Duration = Duration::from_secs(60);
+/// Reconnect backoff bounds (jittered).
+const BACKOFF_MIN_SECS: u64 = 1;
+const BACKOFF_MAX_SECS: u64 = 60;
 /// Max self-serve challenge (math) unlock grants honored per user per day, so
 /// the trivial challenge can't be re-solved indefinitely to defeat screen time.
 const CHALLENGE_GRANTS_PER_DAY: u32 = 3;
@@ -219,6 +229,21 @@ pub struct Agent {
     exec: Exec,
     /// Effective per-user policies (os_username → Policy).
     policies: HashMap<String, Policy>,
+    /// os_username → profile kind (the age bracket id, or a legacy preset
+    /// name). Drives overlay wording and the managed-sudo list.
+    kinds: HashMap<String, String>,
+    /// The device's parent authenticator secret from the last bundle.
+    parent_totp_secret: Option<String>,
+    /// (user, app) → date an `app_blocked` event was already emitted.
+    app_reported: HashMap<(String, String), chrono::NaiveDate>,
+    /// Standing enforcement gap kinds from the last network apply.
+    standing_gaps: Vec<String>,
+    /// Active seat users as of the last tick.
+    active_users: Vec<String>,
+    /// The last `state` frame sent, and when — to send on change / at least
+    /// every `STATE_AT_LEAST`.
+    last_state: Option<DeviceState>,
+    last_state_sent: Instant,
     /// Device-level VPN profile from the last policy bundle (None = no tunnel).
     vpn: Option<crate::policy::VpnProfile>,
     tracker: screentime::UsageTracker,
@@ -425,6 +450,13 @@ impl Agent {
             client,
             exec,
             policies: HashMap::new(),
+            kinds: HashMap::new(),
+            parent_totp_secret: None,
+            app_reported: HashMap::new(),
+            standing_gaps: Vec::new(),
+            active_users: Vec::new(),
+            last_state: None,
+            last_state_sent: Instant::now(),
             vpn: None,
             // Reboot-surviving: reload the day's usage so a restart can't reset it.
             tracker: screentime::UsageTracker::load(),
@@ -469,6 +501,77 @@ impl Agent {
             self.notifications.pop_front();
         }
         lockout::notify(&self.exec, "notification", &format!("{title} — {body}"));
+    }
+
+    /// What a presenter needs to verify a parent at this machine: the device's
+    /// authenticator secret plus this user's backup-code hash.
+    fn parent_keys(&self, policy: &Policy) -> ParentKeys {
+        ParentKeys {
+            pin_hash: policy.parent_pin_hash.clone(),
+            totp_secret: self.parent_totp_secret.clone(),
+        }
+    }
+
+    /// The age bracket a user's profile kind maps to (legacy presets: `kids`
+    /// → Kid, `teen` → YoungerTeen, `default`/unknown → Adult-ish handling
+    /// falls to Kid for overlay wording, since only managed users see one).
+    fn bracket_of(&self, user: &str) -> AgeBracket {
+        match self.kinds.get(user).map(String::as_str) {
+            Some("kids") => AgeBracket::Kid,
+            Some("teen") => AgeBracket::YoungerTeen,
+            Some("adult") | Some("default") => AgeBracket::Adult,
+            Some(k) => AgeBracket::parse(k).unwrap_or(AgeBracket::Kid),
+            None => AgeBracket::Kid,
+        }
+    }
+
+    /// The honest device state (CONTRACT-0.4 §5). `locked` is derived from the
+    /// kernel freezer, never from what we meant to do.
+    fn device_state(&self) -> DeviceState {
+        let lock_intent = self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
+        let mut frozen_users: Vec<String> = if self.exec.dry_run() {
+            self.frozen.iter().cloned().collect()
+        } else {
+            self.policies
+                .keys()
+                .filter(|u| screentime::is_frozen(u) == Some(true))
+                .cloned()
+                .collect()
+        };
+        frozen_users.sort();
+        // Locked = the lock is meant AND every managed user who is actually
+        // here is frozen (nobody here at all also counts: whoever logs in is
+        // frozen on their first tick).
+        let present: Vec<&String> = self
+            .active_users
+            .iter()
+            .filter(|u| self.policies.contains_key(*u))
+            .collect();
+        let locked =
+            lock_intent && (present.is_empty() || present.iter().all(|u| frozen_users.contains(u)));
+        DeviceState {
+            locked,
+            lock_intent,
+            frozen_users,
+            enforcing: !self.policies.is_empty() && self.standing_gaps.is_empty(),
+            gaps: self.standing_gaps.clone(),
+            agent_version: crate::client::AGENT_VERSION.to_string(),
+            active_users: self.active_users.clone(),
+        }
+    }
+
+    /// The `state` frame to send now, if it changed or is due. Records it as sent.
+    fn state_frame_due(&mut self, force: bool) -> Option<AgentFrame> {
+        let st = self.device_state();
+        let due = force
+            || self.last_state.as_ref() != Some(&st)
+            || self.last_state_sent.elapsed() >= STATE_AT_LEAST;
+        if !due {
+            return None;
+        }
+        self.last_state = Some(st.clone());
+        self.last_state_sent = Instant::now();
+        Some(AgentFrame::State { state: st })
     }
 
     /// Deliver `fresh` events plus any earlier failures. On error the batch is
@@ -690,10 +793,23 @@ impl Agent {
             self.tamper_level = bundle.device_tamper_level.min(3);
         }
         self.policies.clear();
+        self.kinds.clear();
         for up in bundle.users {
+            self.kinds.insert(up.os_username.clone(), up.profile_kind);
             self.policies.insert(up.os_username, up.policy);
         }
         self.vpn = bundle.vpn;
+        self.parent_totp_secret = bundle
+            .parent_code
+            .map(|p| p.totp_secret)
+            .filter(|s| !s.is_empty());
+        // sudo on this machine: managed users authenticate with the parent code.
+        let users_by_kind: Vec<(String, String)> = self
+            .kinds
+            .iter()
+            .map(|(u, k)| (u.clone(), k.clone()))
+            .collect();
+        crate::service::sync_managed_sudoers(&self.exec, &users_by_kind);
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
@@ -717,6 +833,7 @@ impl Agent {
             self.policy_version,
             self.policies.len()
         );
+        self.standing_gaps = gaps.iter().map(|g| g.kind().to_string()).collect();
         // "Applied" is reported alongside, not instead of, the gaps: the policy
         // really was written, it just isn't all being enforced.
         let mut events = vec![Event::new(
@@ -740,7 +857,8 @@ impl Agent {
     fn effective_network_policy(&self) -> Policy {
         // Prefer a non-wildcard, screen-time-enabled (i.e. "managed") policy so the
         // host DNS/firewall reflect the strictest present. Fall back to default.
-        self.policies
+        let mut effective = self
+            .policies
             .values()
             .min_by_key(|p| {
                 let allow_all = p.dns.allows_everything();
@@ -748,7 +866,29 @@ impl Agent {
                 (allow_all as usize, ports)
             })
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // App/category blocks are DNS-level and therefore host-global too: the
+        // union over every user (most restrictive wins, like the rest).
+        let mut blocks = crate::policy::AppBlocks::default();
+        for p in self.policies.values() {
+            blocks.apps.extend(p.blocks.apps.iter().cloned());
+            blocks
+                .categories
+                .extend(p.blocks.categories.iter().cloned());
+            blocks
+                .custom_domains
+                .extend(p.blocks.custom_domains.iter().cloned());
+        }
+        for v in [
+            &mut blocks.apps,
+            &mut blocks.categories,
+            &mut blocks.custom_domains,
+        ] {
+            v.sort();
+            v.dedup();
+        }
+        effective.blocks = blocks;
+        effective
     }
 
     /// The periodic enforcement tick: screen-time accounting + lockout + tamper
@@ -845,10 +985,17 @@ impl Agent {
 
         // Screen-time: account active seat users, evaluate, freeze/unfreeze.
         let active = screentime::active_seat_users(&self.exec);
+        self.active_users = active.clone();
         for user in &active {
             self.tracker
                 .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
         }
+        // Blocked apps with a native client: deny their processes (CONTRACT-0.4 §7).
+        events.extend(enforce::apps::deny(
+            &self.exec,
+            &self.policies,
+            &mut self.app_reported,
+        ));
         // Persist the ledger every tick so a restart resumes today's usage
         // instead of granting a fresh budget (best-effort; skipped in dry-run).
         if !self.exec.dry_run() {
@@ -871,7 +1018,7 @@ impl Agent {
                 if let Some((mins, kind)) = lockout::take_unlock_grant(&user) {
                     // A self-serve challenge (math) grant is capped per day so it
                     // can't be re-solved indefinitely to defeat screen time; a
-                    // parent-PIN grant is never capped.
+                    // parent-code grant is never capped.
                     if kind == "challenge"
                         && !allow_daily(
                             &mut self.challenge_grants,
@@ -883,6 +1030,21 @@ impl Agent {
                         tracing::info!("challenge unlock for {user} ignored — daily cap reached");
                         None
                     } else {
+                        // The overlay already verified the parent; this is the
+                        // audit trail of *how* (authenticator vs backup code).
+                        match kind.as_str() {
+                            "pin" => events.push(parentcode::event(
+                                &parentcode::Verdict::Ok,
+                                "overlay",
+                                &user,
+                            )),
+                            "backup" => events.push(parentcode::event(
+                                &parentcode::Verdict::Backup,
+                                "overlay",
+                                &user,
+                            )),
+                            _ => {}
+                        }
                         Some((mins, "lockout-screen unlock"))
                     }
                 } else {
@@ -891,22 +1053,29 @@ impl Agent {
                         "",
                         "",
                         &user,
-                        policy.parent_pin_hash.clone(),
+                        self.parent_keys(&policy),
                     );
-                    lockout::check_and_consume_pin_override(&self.exec, &spec)
-                        .then_some((PIN_OVERRIDE_GRANT_MIN, "parent PIN"))
+                    match lockout::check_and_consume_code_override(&self.exec, &spec) {
+                        Some(verdict) => {
+                            events.push(parentcode::event(&verdict, "overlay", &user));
+                            verdict
+                                .accepted()
+                                .then_some((PIN_OVERRIDE_GRANT_MIN, "parent code"))
+                        }
+                        None => None,
+                    }
                 };
             if let Some((mins, source)) = granted {
                 self.unlock_until.insert(
                     user.clone(),
                     Instant::now() + Duration::from_secs(u64::from(mins) * 60),
                 );
-                // A parent standing at the machine with the PIN has handled the
+                // A parent standing at the machine with the code has handled the
                 // situation — clear a confirmed-evasion lockdown so the device
                 // isn't stuck locked after they've dealt with it.
                 if self.tamper_lockdown {
                     self.tamper_lockdown = false;
-                    tracing::info!("tamper lockdown cleared by parent PIN at the device");
+                    tracing::info!("tamper lockdown cleared by parent code at the device");
                 }
                 self.pending_freeze.remove(&user);
                 if currently_frozen {
@@ -981,16 +1150,16 @@ impl Agent {
                         // may hard-fall-back to session termination — it's an
                         // explicit parent action / tamper response).
                         let (headline, detail) = if self.device_locked {
-                            ("LOCKED", "THIS DEVICE IS LOCKED BY AN ADMIN")
+                            ("Paused", "A parent paused this computer.")
                         } else if self.tamper_lockdown {
                             (
-                                "TAMPERING DETECTED",
-                                "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (PIN UNLOCKS)",
+                                "Stopped",
+                                "OpenScreenTime was tampered with. Ask a parent — their code unlocks.",
                             )
                         } else {
                             (
-                                "OFFLINE TOO LONG",
-                                "NO SERVER CONTACT FOR DAYS — ASK A PARENT (PIN UNLOCKS)",
+                                "Stopped",
+                                "No contact with the family server for days. Ask a parent — their code unlocks.",
                             )
                         };
                         let spec = LockSpec::from_lockout(
@@ -998,7 +1167,7 @@ impl Agent {
                             headline,
                             detail,
                             &user,
-                            policy.parent_pin_hash.clone(),
+                            self.parent_keys(&policy),
                         );
                         lockout::present(&self.exec, &spec);
                         if let Err(e) = screentime::freeze_user(&self.exec, &user, true, true) {
@@ -1065,15 +1234,20 @@ impl Agent {
         reason: &screentime::LockReason,
         events: &mut Vec<Event>,
     ) {
+        let bracket = self.bracket_of(user);
+        // Save-your-work grace for everyone; teens get the contract's longer
+        // wind-down countdown before the hard stop. Little/kid: plain and short.
+        let grace = FREEZE_GRACE.max(Duration::from_secs(u64::from(bracket.wind_down_secs())));
+        let (headline, detail) = lock_copy(bracket, reason, grace.as_secs());
         match self.pending_freeze.get(user) {
             None => {
                 // Arm the countdown + present everything ONCE.
                 let mut spec = LockSpec::from_lockout(
                     &policy.gamification.lockout,
-                    &reason.headline(),
-                    &reason.detail(),
+                    &headline,
+                    &detail,
                     user,
-                    policy.parent_pin_hash.clone(),
+                    self.parent_keys(policy),
                 );
                 // Offer an earn-time task as the primary action when the user
                 // ran out of daily minutes (Duolingo-style: earn your way
@@ -1093,7 +1267,7 @@ impl Agent {
                 }
                 // The full-screen overlay now shows a live save-your-work
                 // countdown itself (no more static "PAUSES IN 60 SECONDS" text).
-                spec.countdown_secs = Some(FREEZE_GRACE.as_secs() as u32);
+                spec.countdown_secs = Some(grace.as_secs() as u32);
                 lockout::present(&self.exec, &spec);
                 let sev = if matches!(reason, screentime::LockReason::Bedtime) {
                     SEV_WARN
@@ -1107,13 +1281,14 @@ impl Agent {
                         json!({
                             "reason": reason.headline(),
                             "detail": reason.detail(),
-                            "freeze_grace_secs": FREEZE_GRACE.as_secs(),
+                            "freeze_grace_secs": grace.as_secs(),
+                            "bracket": bracket.id(),
                         }),
                     )
                     .for_user(user),
                 );
                 self.pending_freeze
-                    .insert(user.to_string(), Instant::now() + FREEZE_GRACE);
+                    .insert(user.to_string(), Instant::now() + grace);
             }
             Some(deadline) if *deadline <= Instant::now() => {
                 self.pending_freeze.remove(user);
@@ -1126,10 +1301,10 @@ impl Agent {
                 if self.resumed_frozen.remove(user) {
                     let spec = LockSpec::from_lockout(
                         &policy.gamification.lockout,
-                        &reason.headline(),
-                        &reason.detail(),
+                        &headline,
+                        &detail,
                         user,
-                        policy.parent_pin_hash.clone(),
+                        self.parent_keys(policy),
                     );
                     lockout::present(&self.exec, &spec);
                 }
@@ -1349,16 +1524,17 @@ impl Agent {
                 self.device_locked = true;
                 save_device_locked(true);
                 for user in self.policies.keys().cloned().collect::<Vec<_>>() {
-                    let pin_hash = self
+                    let keys = self
                         .policies
                         .get(&user)
-                        .and_then(|p| p.parent_pin_hash.clone());
+                        .map(|p| self.parent_keys(p))
+                        .unwrap_or_default();
                     let spec = LockSpec::from_lockout(
                         &Default::default(),
-                        "LOCKED",
-                        "THIS DEVICE IS LOCKED BY AN ADMIN",
+                        "Paused",
+                        "A parent paused this computer.",
                         &user,
-                        pin_hash,
+                        keys,
                     );
                     lockout::present(&self.exec, &spec);
                     let _ = screentime::freeze_user(&self.exec, &user, true, true);
@@ -1514,6 +1690,45 @@ impl Agent {
     }
 }
 
+/// Plain words for the stop, by age bracket (docs/OPENSCREENTIME.md: a hard
+/// stop, stated plainly, no euphemism). Little/kid: very short. Teens: the
+/// same fact plus the wind-down.
+fn lock_copy(
+    bracket: AgeBracket,
+    reason: &screentime::LockReason,
+    grace_secs: u64,
+) -> (String, String) {
+    use screentime::LockReason::*;
+    let (head, fact) = match reason {
+        DailyLimit {
+            used_min,
+            limit_min,
+        } => (
+            "Time's up",
+            format!("You've used {used_min} of {limit_min} minutes today."),
+        ),
+        OutsideWindow => (
+            "Not now",
+            "Screens are off at this time of day.".to_string(),
+        ),
+        Bedtime => ("Bedtime", "Screens are off until morning.".to_string()),
+    };
+    match bracket {
+        AgeBracket::Little | AgeBracket::Kid => (head.to_string(), fact),
+        _ => (
+            head.to_string(),
+            format!(
+                "{fact} The screen stops in {} — save your work.",
+                if grace_secs >= 120 {
+                    format!("{} min", grace_secs / 60)
+                } else {
+                    format!("{grace_secs} s")
+                }
+            ),
+        ),
+    }
+}
+
 /// What to do to a user's frozen state this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FreezeAction {
@@ -1593,23 +1808,29 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
         agent.exec.clone(),
     ));
 
+    // Reconnect with jittered exponential backoff (1 s → 60 s). A server that
+    // answers HTTP but not WS keeps the backoff short: the poll round succeeded.
+    let mut backoff_secs = BACKOFF_MIN_SECS;
     loop {
         match agent.client.connect_ws().await {
             Ok(stream) => {
                 tracing::info!("WS bus connected");
+                backoff_secs = BACKOFF_MIN_SECS;
                 if let Err(e) = run_ws(&mut agent, stream).await {
                     tracing::warn!("WS loop ended: {e}");
                 }
             }
             Err(e) => {
                 tracing::warn!("WS unavailable ({e}); falling back to heartbeat polling");
-                if let Err(e) = run_poll(&mut agent).await {
-                    tracing::warn!("poll loop ended: {e}");
+                match run_poll(&mut agent).await {
+                    Ok(()) => backoff_secs = BACKOFF_MIN_SECS,
+                    Err(e) => tracing::warn!("poll loop ended: {e}"),
                 }
             }
         }
-        // Reconnect/backoff.
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=backoff_secs / 2 + 1);
+        tokio::time::sleep(Duration::from_secs(backoff_secs + jitter)).await;
+        backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
     }
 }
 
@@ -1632,6 +1853,18 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
         }
     });
 
+    // First thing on a fresh connection: tell the server what is actually true
+    // here (lock state, frozen users, gaps) and push the usage we may have
+    // accumulated while disconnected.
+    if let Some(frame) = agent.state_frame_due(true) {
+        let _ = out_tx.send(frame).await;
+    }
+    let usage = agent.usage_snapshot();
+    if !usage.is_empty() {
+        let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
+    }
+    let mut last_hb = Instant::now();
+
     let mut ticker = tokio::time::interval(TICK);
     loop {
         tokio::select! {
@@ -1642,11 +1875,19 @@ async fn run_ws(agent: &mut Agent, stream: crate::client::WsStream) -> Result<()
                 // same guarantee in both WS and poll mode.
                 let events = agent.enforcement_tick().await;
                 agent.flush_events(events).await;
-                // The WS bus has no HTTP heartbeat, so push usage here — otherwise
-                // screen_time_ledger only ever updates in the degraded poll path.
-                let usage = agent.usage_snapshot();
-                if !usage.is_empty() {
-                    let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
+                // Honest state: on change, and at least every STATE_AT_LEAST.
+                if let Some(frame) = agent.state_frame_due(false) {
+                    let _ = out_tx.send(frame).await;
+                }
+                // The WS bus has no HTTP heartbeat, so push usage here every
+                // WS_HEARTBEAT — otherwise screen_time_ledger only ever updates
+                // in the degraded poll path.
+                if last_hb.elapsed() >= WS_HEARTBEAT {
+                    last_hb = Instant::now();
+                    let usage = agent.usage_snapshot();
+                    if !usage.is_empty() {
+                        let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
+                    }
                 }
             }
             msg = read.next() => {
@@ -1692,12 +1933,17 @@ async fn handle_server_text(
 }
 
 /// Heartbeat polling fallback (no WS); commands flow via the heartbeat
-/// command queue.
+/// command queue. Runs one `POLL_ROUND`, then returns `Ok` so the caller
+/// retries the WS bus; returns `Err` as soon as a heartbeat fails.
 async fn run_poll(agent: &mut Agent) -> Result<()> {
-    let interval = Duration::from_secs(agent.cfg.poll_interval_secs.max(5));
+    let interval = Duration::from_secs(agent.cfg.poll_interval_secs.clamp(5, 30));
     let mut ticker = tokio::time::interval(TICK);
     let mut hb = tokio::time::interval(interval);
+    let round_end = Instant::now() + POLL_ROUND;
     loop {
+        if Instant::now() >= round_end {
+            return Ok(());
+        }
         tokio::select! {
             _ = ticker.tick() => {
                 let events = agent.enforcement_tick().await;
@@ -1811,6 +2057,27 @@ mod tests {
             tomorrow,
             CHALLENGE_GRANTS_PER_DAY
         ));
+    }
+
+    #[test]
+    fn lock_copy_is_plain_and_bracket_aware() {
+        let r = LockReason::DailyLimit {
+            used_min: 60,
+            limit_min: 60,
+        };
+        let (h, d) = lock_copy(AgeBracket::Kid, &r, 60);
+        assert_eq!(h, "Time's up");
+        assert_eq!(d, "You've used 60 of 60 minutes today.");
+        assert!(!d.contains("stops in"), "little/kid get the short form");
+        let (_, d) = lock_copy(AgeBracket::YoungerTeen, &r, 120);
+        assert!(d.contains("stops in 2 min"));
+        let (h, d) = lock_copy(AgeBracket::Little, &LockReason::Bedtime, 60);
+        assert_eq!(h, "Bedtime");
+        assert_eq!(d, "Screens are off until morning.");
+        // no shouting anywhere
+        for s in [h, d] {
+            assert_ne!(s, s.to_uppercase());
+        }
     }
 
     #[test]
