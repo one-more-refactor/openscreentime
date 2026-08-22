@@ -157,8 +157,7 @@ fn sanitize_blocks(b: &mut openscreentime_policy::AppBlocks) -> AppResult<()> {
         }
         let ok = d.len() <= 253
             && d.contains('.')
-            && d
-                .chars()
+            && d.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_');
         if !ok {
             return Err(AppError::BadRequest(format!(
@@ -406,13 +405,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(v["blocks"]["apps"], json!(["youtube", "tiktok"]));
-        assert_eq!(v["blocks"]["custom_domains"], json!(["example.org", "foo.bar"]));
+        assert_eq!(
+            v["blocks"]["custom_domains"],
+            json!(["example.org", "foo.bar"])
+        );
 
         let err = normalize_policy(json!({ "blocks": { "custom_domains": ["evil.com/x y"] } }))
             .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
-        let err = normalize_policy(json!({ "blocks": { "custom_domains": ["nodot"] } }))
-            .unwrap_err();
+        let err =
+            normalize_policy(json!({ "blocks": { "custom_domains": ["nodot"] } })).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
         // Empty blocks vanish from the stored document.
         let v = normalize_policy(json!({ "blocks": { "apps": [] } })).unwrap();
