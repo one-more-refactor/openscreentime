@@ -181,10 +181,21 @@ pub struct AppState {
 /// Extractor: an authenticated admin. Carries tenant_id so every downstream
 /// query can scope by it. Sessions live in Postgres (`admin_sessions`), the
 /// cookie value is sha256-hashed at rest like device tokens.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AuthAdmin {
     pub admin_id: Uuid,
     pub tenant_id: Uuid,
+    /// `owner` | `parent` | `member` (docs/CONTRACT-0.4.md §2). The member
+    /// layer (`members::guard_member`) uses it; handlers that care about the
+    /// hub-vs-person distinction read `is_hub()`.
+    pub role: String,
+}
+
+impl AuthAdmin {
+    /// Owners and parents are the hub — they see and change everyone.
+    pub fn is_hub(&self) -> bool {
+        self.role != "member"
+    }
 }
 
 impl FromRequestParts<AppState> for AuthAdmin {
@@ -204,20 +215,22 @@ impl FromRequestParts<AppState> for AuthAdmin {
         // The step-up flow rotates this token (docs/AUTH.md); the superseded
         // hash stays valid for a short grace so a request already in flight
         // with the old cookie — or a second tab — does not get thrown out.
-        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT admin_id, tenant_id FROM admin_sessions
-             WHERE (token_hash = $1
-                    OR (prev_token_hash = $1 AND prev_valid_until > now()))
-               AND expires_at > now()",
+        let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+            "SELECT s.admin_id, s.tenant_id, a.role FROM admin_sessions s
+             JOIN admins a ON a.id = s.admin_id
+             WHERE (s.token_hash = $1
+                    OR (s.prev_token_hash = $1 AND s.prev_valid_until > now()))
+               AND s.expires_at > now()",
         )
         .bind(&hash)
         .fetch_optional(&state.db)
         .await?;
 
         match row {
-            Some((admin_id, tenant_id)) => Ok(AuthAdmin {
+            Some((admin_id, tenant_id, role)) => Ok(AuthAdmin {
                 admin_id,
                 tenant_id,
+                role,
             }),
             None => {
                 // Opportunistic lazy cleanup of expired sessions.

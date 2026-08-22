@@ -1,205 +1,233 @@
-//! Preset profiles, mirrored verbatim from `docs/PROFILES.md`.
+//! Preset profiles — one per age bracket (docs/CONTRACT-0.4.md §3).
 //!
-//! Every new tenant is seeded with three `is_preset = true` rows: kids, teen,
-//! default. Keep this file and `docs/PROFILES.md` in sync — the policies below
-//! are copied exactly from that document.
+//! Every tenant owns five `is_preset = true` rows: little, kid, younger_teen,
+//! older_teen, adult. A new member's rules start as a copy of their bracket's
+//! preset. The older `kids`/`teen`/`default` presets are no longer seeded;
+//! existing rows stay valid and editable.
+//!
+//! Design carried over from the old `kids` preset, because every line of it
+//! was a real failure once: filtering happens at the resolver (allow_all
+//! through a family upstream + the catalog's blocks), never via a hand-kept
+//! allowlist that breaks apt and Minecraft; inbound 22 stays open so a
+//! self-inflicted lockout has a way in; `block_vpn` stays off so a managed
+//! tunnel is not killed by its own firewall; `offline_lockdown_days` stays 0 so
+//! a device that cannot reach the server does not brick itself.
 
 use serde_json::{json, Value};
+use sqlx::PgPool;
+use uuid::Uuid;
 
-/// A preset to be seeded into `profiles` on tenant creation.
+use openscreentime_policy::AgeBracket;
+
+/// A preset to be seeded into `profiles`.
 pub struct Preset {
     pub name: &'static str,
     pub kind: &'static str,
     pub policy: Value,
 }
 
-/// The `kids` preset — filtered, not walled off.
-///
-/// Deliberately NOT a zero-trust allowlist. The previous version permitted five
-/// domains and denied the rest, which meant a 9-year-old's laptop could not
-/// reach Minecraft, Steam, a school portal, or `deb.debian.org` — so `apt`
-/// failed too. Every real-world use ended with an adult widening the allowlist
-/// or switching enforcement off, which is worse than filtering properly.
-///
-/// The model here: forward everything to a resolver that already filters by
-/// category (Cloudflare 1.1.1.3 = malware + adult), block the specific things
-/// that slip past it or exist to bypass it, and keep the firewall permissive
-/// while still dropping the DNS-bypass paths (DoH/DoT/Tor). Strict where it
-/// counts, invisible everywhere else.
-pub fn kids_policy() -> Value {
+fn family_dns() -> Value {
+    json!({ "mode": "allow_all", "allowlist": ["*"], "blocklist": [],
+            "safe_search": true, "upstream": "1.1.1.3" })
+}
+
+fn open_dns(safe_search: bool) -> Value {
+    json!({ "mode": "allow_all", "allowlist": ["*"], "blocklist": [],
+            "safe_search": safe_search, "upstream": "1.1.1.2" })
+}
+
+/// Permissive so games, printers, school software and apt simply work; the
+/// lockdown flags still emit targeted drops on top.
+fn open_firewall() -> Value {
+    json!({ "mode": "allow_all", "allow_outbound_ports": [], "allow_inbound_ports": [22] })
+}
+
+fn lockdown(force_dns: bool, block_doh: bool, block_dot: bool, block_tor: bool) -> Value {
+    json!({ "force_dns": force_dns, "block_doh": block_doh, "block_dot": block_dot,
+            "block_tor": block_tor, "block_vpn": false, "offline_lockdown_days": 0 })
+}
+
+fn no_screen_time() -> Value {
+    json!({ "enabled": false, "daily_limit_minutes": 0, "schedule": [], "bedtime": null })
+}
+
+fn no_gamification() -> Value {
+    json!({ "earn_time": { "enabled": false, "tasks": [] },
+            "lockout": { "enabled": false, "unlock_challenge": "wait" } })
+}
+
+/// 0–6: curated, parent does everything. Hard daily limit, hard stop, no
+/// request UI and no earning — the overlay just says it stopped.
+pub fn little_policy() -> Value {
     json!({
         "version": 1,
-        // allow_all + a filtering upstream. `force_dns` below pins every query
-        // to that upstream, and `block_doh`/`block_dot` close the encrypted
-        // bypasses, so "allow_all" is not "unfiltered".
-        "dns": { "mode": "allow_all",
-            "allowlist": ["*"],
-            "blocklist": [
-                // Web proxies and bypass services — the actual way a kid gets
-                // around a category filter, and not something 1.1.1.3 blocks.
-                "croxyproxy.com","proxysite.com","kproxy.com","hidester.com",
-                "4everproxy.com","whoer.net","hide.me","vpnbook.com",
-                // Torrent indexes.
-                "thepiratebay.org","1337x.to","torrentz2.eu","rarbg.to",
-                // Adult — belt and braces over the upstream's category filter.
-                "pornhub.com","xvideos.com","xnxx.com","onlyfans.com",
-                // Gambling.
-                "stake.com","bet365.com","roobet.com",
-                // Anonymous stranger-chat.
-                "omegle.com","chatroulette.com"
-            ],
-            "safe_search": true,
-            // 1.1.1.3 = Cloudflare for Families: malware AND adult content.
-            // 1.1.1.2 (the old value) blocks malware only.
-            "upstream": "1.1.1.3" },
-        // Permissive by default so games, printers, school software and apt
-        // simply work. The lockdown flags below still emit targeted drops —
-        // chain policy and lockdown rules are independent.
-        "firewall": { "mode": "allow_all", "allow_outbound_ports": [], "allow_inbound_ports": [22] },
+        "dns": family_dns(),
+        "firewall": open_firewall(),
+        "screen_time": { "enabled": true, "daily_limit_minutes": 45,
+            "schedule": [ {"days":[0,1,2,3,4,5,6],"start":"08:00","end":"19:00"} ],
+            "bedtime": { "start":"19:00","end":"07:00" } },
+        "gamification": {
+            "earn_time": { "enabled": false, "tasks": [] },
+            "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
+        "lockdown": lockdown(true, true, true, true),
+        "blocks": {
+            "apps": ["youtube"],
+            "categories": ["social","video_streaming","games","messaging","adult",
+                           "gambling","dating","ai_chat","proxies"],
+            "custom_domains": [] }
+    })
+}
+
+/// 6–12: hard limit, hard stop, can ask for time and earn it.
+pub fn kid_policy() -> Value {
+    json!({
+        "version": 1,
+        "dns": family_dns(),
+        "firewall": open_firewall(),
         "screen_time": { "enabled": true, "daily_limit_minutes": 60,
             "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"20:00"},
                           {"days":[0,6],"start":"09:00","end":"20:00"} ],
             "bedtime": { "start":"20:00","end":"07:00" } },
-        // block_vpn stays OFF: a parent-managed WireGuard profile is a supported
-        // feature, and turning both on means the agent applies a tunnel its own
-        // firewall then kills — which is exactly how a laptop lost its network.
-        // offline_lockdown_days 0: a device that cannot reach the server must
-        // not brick itself. Screen time still applies from the cached policy.
-        "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"reading","label":"Read for 20 min","reward_minutes":15},
                 {"id":"chores","label":"Finish chores","reward_minutes":15} ] },
-            "lockout": { "enabled": true, "unlock_challenge": "math" } }
+            "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
+        "lockdown": lockdown(true, true, true, true),
+        "blocks": {
+            "apps": ["tiktok","snapchat","instagram","discord","twitch","omegle"],
+            "categories": ["social","adult","gambling","dating","proxies"],
+            "custom_domains": [] }
     })
 }
 
-/// The `teen` preset — trusted-but-guarded.
-pub fn teen_policy() -> Value {
+/// 12–16: goals + limit, hard stop after a short wind-down.
+pub fn younger_teen_policy() -> Value {
     json!({
         "version": 1,
-        "dns": { "mode": "default_deny",
-            "allowlist": ["*.wikipedia.org","github.com","google.com","youtube.com","duolingo.com","*.edu"],
-            "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
-        "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443,123], "allow_inbound_ports": [] },
-        "screen_time": { "enabled": true, "daily_limit_minutes": 180,
+        "dns": family_dns(),
+        "firewall": open_firewall(),
+        "screen_time": { "enabled": true, "daily_limit_minutes": 150,
             "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"21:00"},
-                          {"days":[0,6],"start":"08:00","end":"22:00"} ],
-            "bedtime": { "start":"22:30","end":"06:30" } },
-        "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
+                          {"days":[0,6],"start":"09:00","end":"22:00"} ],
+            "bedtime": { "start":"22:00","end":"06:30" } },
         "gamification": {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
-            "lockout": { "enabled": true, "unlock_challenge": "wait" } }
+            "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
+        "lockdown": lockdown(false, true, true, true),
+        "blocks": {
+            "apps": ["tiktok"],
+            "categories": ["adult","gambling","dating","proxies"],
+            "custom_domains": [] }
     })
 }
 
-/// The `default` preset — baseline for every newly-enrolled user.
-pub fn default_policy() -> Value {
+/// 16–18: mostly self-set; the parent can still cap. No limit out of the box.
+pub fn older_teen_policy() -> Value {
     json!({
         "version": 1,
-        "dns": { "mode": "default_deny",
-            "allowlist": ["*"], "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
-        "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443,123], "allow_inbound_ports": [] },
-        "screen_time": { "enabled": false, "daily_limit_minutes": 0, "schedule": [], "bedtime": null },
-        "gamification": {
-            "earn_time": { "enabled": false, "tasks": [] },
-            "lockout": { "enabled": false, "unlock_challenge": "wait" } }
+        "dns": open_dns(false),
+        "firewall": open_firewall(),
+        "screen_time": no_screen_time(),
+        "gamification": no_gamification(),
+        "lockdown": lockdown(false, true, true, true),
+        "blocks": {
+            "apps": [],
+            "categories": ["adult","gambling","proxies"],
+            "custom_domains": [] }
     })
 }
 
-/// The three presets seeded verbatim into every new tenant.
+/// 18+: private self-tracking, nothing enforced by anyone else.
+pub fn adult_policy() -> Value {
+    json!({
+        "version": 1,
+        "dns": open_dns(false),
+        "firewall": open_firewall(),
+        "screen_time": no_screen_time(),
+        "gamification": no_gamification()
+    })
+}
+
+/// The preset policy for a bracket.
+pub fn policy_for(bracket: AgeBracket) -> Value {
+    match bracket {
+        AgeBracket::Little => little_policy(),
+        AgeBracket::Kid => kid_policy(),
+        AgeBracket::YoungerTeen => younger_teen_policy(),
+        AgeBracket::OlderTeen => older_teen_policy(),
+        AgeBracket::Adult => adult_policy(),
+    }
+}
+
+/// The five presets seeded into every tenant, in bracket order.
 pub fn all_presets() -> Vec<Preset> {
-    vec![
-        Preset {
-            name: "Kids",
-            kind: "kids",
-            policy: kids_policy(),
-        },
-        Preset {
-            name: "Teen",
-            kind: "teen",
-            policy: teen_policy(),
-        },
-        Preset {
-            name: "Default",
-            kind: "default",
-            policy: default_policy(),
-        },
-    ]
+    AgeBracket::ALL
+        .into_iter()
+        .map(|b| Preset {
+            name: b.label(),
+            kind: b.id(),
+            policy: policy_for(b),
+        })
+        .collect()
+}
+
+/// Make sure a tenant has every bracket preset, inserting the missing ones.
+/// Idempotent; called at tenant creation, at startup for every existing
+/// tenant, and lazily wherever a preset id is needed.
+pub async fn ensure_presets(db: &PgPool, tenant_id: Uuid) -> Result<(), sqlx::Error> {
+    for p in all_presets() {
+        sqlx::query(
+            "INSERT INTO profiles (tenant_id, name, kind, is_preset, policy)
+             SELECT $1, $2, $3, true, $4
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM profiles WHERE tenant_id = $1 AND kind = $3 AND is_preset)",
+        )
+        .bind(tenant_id)
+        .bind(p.name)
+        .bind(p.kind)
+        .bind(&p.policy)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// The preset profile id for a bracket in a tenant (seeding it if missing).
+pub async fn preset_id(db: &PgPool, tenant_id: Uuid, bracket: AgeBracket) -> Result<Uuid, sqlx::Error> {
+    let find = || async {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM profiles WHERE tenant_id = $1 AND kind = $2 AND is_preset
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(bracket.id())
+        .fetch_optional(db)
+        .await
+    };
+    if let Some(id) = find().await? {
+        return Ok(id);
+    }
+    ensure_presets(db, tenant_id).await?;
+    find().await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Startup backfill: every existing tenant gets the bracket presets it lacks.
+pub async fn backfill_all_tenants(db: &PgPool) -> Result<(), sqlx::Error> {
+    let tenants: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM tenants")
+        .fetch_all(db)
+        .await?;
+    for t in tenants {
+        ensure_presets(db, t).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    /// The kids profile must stay usable. Each of these was a real failure:
-    /// a five-domain allowlist that broke apt and Minecraft, no inbound port
-    /// so SSH recovery was impossible, block_vpn fighting a managed tunnel,
-    /// and an offline lockdown that bricked a device it could not reach.
-    #[test]
-    fn kids_preset_cannot_brick_a_device() {
-        let p = kids_policy();
-
-        // Filtering happens at the resolver, not via a hand-maintained allowlist.
-        assert_eq!(p["dns"]["mode"], "allow_all");
-        assert_eq!(
-            p["dns"]["upstream"], "1.1.1.3",
-            "must be Cloudflare for Families (malware AND adult); 1.1.1.2 is malware only"
-        );
-        assert_eq!(p["dns"]["safe_search"], true);
-        assert!(
-            p["dns"]["blocklist"].as_array().unwrap().len() >= 10,
-            "the blocklist is what catches proxies and bypass services the upstream misses"
-        );
-
-        // A device must always be reachable for recovery.
-        assert!(
-            p["firewall"]["allow_inbound_ports"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!(22)),
-            "no inbound SSH means a self-inflicted lockout needs physical access"
-        );
-
-        // The two settings that turned lockouts into bricks.
-        assert_eq!(
-            p["lockdown"]["block_vpn"], false,
-            "block_vpn + a managed VPN profile makes the agent kill its own tunnel"
-        );
-        assert_eq!(
-            p["lockdown"]["offline_lockdown_days"], 0,
-            "a device that cannot reach the server must not lock itself permanently"
-        );
-
-        // Bypass paths stay shut — permissive is not unfiltered.
-        for flag in ["force_dns", "block_doh", "block_dot", "block_tor"] {
-            assert_eq!(p["lockdown"][flag], true, "{flag} must stay on");
-        }
-    }
-
-    /// Screen time should govern *when* and *how much*, not lock a child out of
-    /// a machine they need for school at 08:00.
-    #[test]
-    fn kids_windows_cover_a_normal_day() {
-        let p = kids_policy();
-        let sched = p["screen_time"]["schedule"].as_array().unwrap();
-        let weekday = sched
-            .iter()
-            .find(|w| {
-                w["days"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&serde_json::json!(1))
-            })
-            .expect("a weekday window");
-        assert_eq!(
-            weekday["start"], "07:00",
-            "mornings must not read as bedtime"
-        );
-        assert_eq!(p["screen_time"]["daily_limit_minutes"], 60);
-    }
-
     use super::*;
-    use openscreentime_policy::Policy;
+    use openscreentime_policy::{catalog, Policy};
 
     /// Drift guard: every preset must parse into the shared `Policy` type and
     /// re-serialize to exactly its normalized form. If a preset ever carries a
@@ -213,19 +241,55 @@ mod tests {
             let normalized = serde_json::to_value(&parsed).unwrap();
             assert_eq!(
                 normalized, preset.policy,
-                "preset '{}' drifts from openscreentime_policy::Policy \
-                 (a field is being dropped or defaulted during normalization)",
+                "preset '{}' drifts from openscreentime_policy::Policy",
                 preset.name
             );
-
-            // And normalization itself must be a fixpoint.
             let reparsed: Policy = serde_json::from_value(normalized.clone()).unwrap();
-            assert_eq!(
-                serde_json::to_value(&reparsed).unwrap(),
-                normalized,
-                "preset '{}' is not stable under repeated normalization",
-                preset.name
-            );
+            assert_eq!(serde_json::to_value(&reparsed).unwrap(), normalized);
         }
+    }
+
+    /// Each of these was a real failure once (see module docs).
+    #[test]
+    fn managed_presets_cannot_brick_a_device() {
+        for b in [AgeBracket::Little, AgeBracket::Kid, AgeBracket::YoungerTeen] {
+            let p = policy_for(b);
+            assert_eq!(p["dns"]["mode"], "allow_all", "{b:?}");
+            assert_eq!(p["dns"]["upstream"], "1.1.1.3", "{b:?}");
+            assert_eq!(p["dns"]["safe_search"], true, "{b:?}");
+            assert!(p["firewall"]["allow_inbound_ports"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(22)));
+            assert_eq!(p["lockdown"]["block_vpn"], false, "{b:?}");
+            assert_eq!(p["lockdown"]["offline_lockdown_days"], 0, "{b:?}");
+            assert_eq!(p["lockdown"]["block_doh"], true, "{b:?}");
+            assert_eq!(p["screen_time"]["enabled"], true, "{b:?}");
+            assert_eq!(p["gamification"]["lockout"]["unlock_challenge"], "parent_pin", "{b:?}");
+        }
+    }
+
+    /// Every block id a preset names must exist in the catalog, or the
+    /// one-click it represents silently does nothing on the device.
+    #[test]
+    fn preset_blocks_are_real_catalog_ids() {
+        for preset in all_presets() {
+            let p: Policy = serde_json::from_value(preset.policy.clone()).unwrap();
+            for a in &p.blocks.apps {
+                assert!(catalog::app(a).is_some(), "{}: unknown app {a}", preset.name);
+            }
+            for c in &p.blocks.categories {
+                assert!(catalog::category(c).is_some(), "{}: unknown category {c}", preset.name);
+            }
+        }
+    }
+
+    #[test]
+    fn adults_and_older_teens_are_not_limited_and_little_cannot_ask() {
+        assert_eq!(adult_policy()["screen_time"]["enabled"], false);
+        assert!(adult_policy().get("blocks").is_none());
+        assert_eq!(older_teen_policy()["screen_time"]["enabled"], false);
+        assert_eq!(little_policy()["gamification"]["earn_time"]["enabled"], false);
+        assert_eq!(all_presets().len(), 5);
     }
 }

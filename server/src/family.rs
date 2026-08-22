@@ -1,17 +1,13 @@
 //! `GET /api/family` — the entire home screen in one request.
 //!
-//! The console used to assemble this in the browser: list devices, list
-//! profiles, then one `GET /api/devices/{id}/users` **per device**, then the
-//! pending earn requests. A three-device family cost about a dozen round trips,
-//! and because both the navigation rail and the page mounted the same hook
-//! independently, it paid that bill twice on every navigation.
+//! A "child" here is a **person** (a member account), not an OS row: the same
+//! person on two machines is one child whose day is the sum of both. Since 0.4
+//! every OS login is linked to an account (`members::link_os_user`), so the
+//! grouping is by `device_users.account_id` and the key is the account id.
+//! Members with no device yet still appear — a child you just added is part of
+//! the family before their laptop is.
 //!
-//! This endpoint answers the same question in a fixed five queries, no matter
-//! how many devices a family has, and does the grouping server-side so the rail
-//! and the page cannot disagree about who is over their limit.
-//!
-//! A "child" here is a person, not a row: the same OS username on two machines
-//! is one person whose day is the sum of both.
+//! Fixed number of queries no matter how many devices a family has.
 
 use axum::{extract::State, Json};
 use chrono::{DateTime, Utc};
@@ -19,51 +15,30 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::devices::{device_to_json, DeviceRow, DEVICE_COLS};
+use crate::devices::{device_to_json, lock_pending, DeviceRow, DEVICE_COLS};
 use crate::error::AppResult;
+use crate::members::{self, AccountRow, ACCOUNT_COLS};
 use crate::state::{AppState, AuthAdmin};
+use openscreentime_policy::{catalog, Policy};
 
-/// One device_user joined to its profile and today's ledger row.
+/// One device_user joined to today's ledger row.
 type FamilyUserRow = (
-    Uuid,           // du.id
-    Uuid,           // du.device_id
-    String,         // du.os_username
-    Option<String>, // du.display_name
-    Option<Uuid>,   // du.profile_id
-    Option<String>, // p.name
-    Option<String>, // p.kind
-    Option<Value>,  // p.policy
-    i32,            // used_seconds today  (ledger columns are int4)
-    i32,            // earned_seconds today
+    Uuid,         // du.id
+    Uuid,         // du.device_id
+    String,       // du.os_username
+    Option<Uuid>, // du.account_id
+    Option<Uuid>, // du.profile_id
+    i32,          // used_seconds today (ledger columns are int4)
+    i32,          // earned_seconds today
 );
 
-/// A person, assembled across every device they use.
 struct Child {
-    key: String,
-    name: String,
+    account: AccountRow,
     used_minutes: i64,
     earned_minutes: i64,
-    limit_minutes: Option<i64>,
-    profile_id: Option<Uuid>,
-    profile_name: Option<String>,
     devices: Vec<Value>,
     pending_requests: usize,
-}
-
-/// The daily limit that actually applies, or None for "no limit".
-///
-/// A disabled or zero limit is *no limit*, never "0 left of 0" — the console
-/// renders that difference and getting it wrong tells a parent their child is
-/// out of time when no limit was ever set.
-fn limit_from_policy(policy: Option<&Value>) -> Option<i64> {
-    let st = policy?.get("screen_time")?;
-    if st.get("enabled")?.as_bool() != Some(true) {
-        return None;
-    }
-    match st.get("daily_limit_minutes").and_then(Value::as_i64) {
-        Some(m) if m > 0 => Some(m),
-        _ => None,
-    }
+    locked: bool,
 }
 
 pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -75,15 +50,21 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     .fetch_all(&st.db)
     .await?;
 
-    // 2. Every device_user in the tenant, with its profile and today's usage.
-    //    The old code issued this once per device.
+    // 2. Members (the children, plus adults who only self-track).
+    let member_rows: Vec<AccountRow> = sqlx::query_as(&format!(
+        "SELECT {ACCOUNT_COLS} FROM admins WHERE tenant_id = $1 AND role = 'member'
+          ORDER BY created_at"
+    ))
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?;
+
+    // 3. Every device_user in the tenant with today's usage.
     let user_rows: Vec<FamilyUserRow> = sqlx::query_as(
-        "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id,
-                p.name, p.kind, p.policy,
+        "SELECT du.id, du.device_id, du.os_username, du.account_id, du.profile_id,
                 COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
-           LEFT JOIN profiles p ON p.id = du.profile_id
            LEFT JOIN screen_time_ledger l
                   ON l.device_user_id = du.id AND l.day = CURRENT_DATE
           WHERE d.tenant_id = $1
@@ -93,7 +74,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     .fetch_all(&st.db)
     .await?;
 
-    // 3. Pending commands for the whole tenant, grouped per device.
+    // 4. Pending commands for the whole tenant, grouped per device.
     let cmd_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT c.device_id, c.type FROM commands c
            JOIN devices d ON d.id = c.device_id
@@ -108,114 +89,135 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         pending.entry(device_id).or_default().push(ctype);
     }
 
-    // 4. Profiles (the rules editor needs the full list).
+    // 5. Profiles (the rules editor needs the full list), as JSON and as a
+    //    policy map for limits/blocks.
     let profiles = crate::profiles::list_for_tenant(&st.db, admin.tenant_id).await?;
+    let mut policies: HashMap<Uuid, Policy> = HashMap::new();
+    if let Some(list) = profiles.as_array() {
+        for p in list {
+            if let (Some(id), Some(pol)) = (
+                p.get("id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()),
+                p.get("policy").cloned(),
+            ) {
+                if let Ok(parsed) = serde_json::from_value::<Policy>(pol) {
+                    policies.insert(id, parsed);
+                }
+            }
+        }
+    }
 
-    // 5. Earn requests still waiting on a parent.
+    // 6. Earn requests still waiting on a parent.
     let requests = crate::earn::list_for_tenant(&st.db, admin.tenant_id, Some("pending".into()))
         .await?
         .get("requests")
         .cloned()
         .unwrap_or_else(|| json!([]));
-    let mut asks_by_user: HashMap<String, usize> = HashMap::new();
+    let mut asks_by_du: HashMap<Uuid, usize> = HashMap::new();
     if let Some(list) = requests.as_array() {
         for r in list {
-            if let Some(u) = r.get("os_username").and_then(Value::as_str) {
-                *asks_by_user.entry(u.to_string()).or_default() += 1;
+            if let Some(du) = r
+                .get("device_user_id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+            {
+                *asks_by_du.entry(du).or_default() += 1;
             }
         }
     }
 
     // Devices, with liveness and pending chips folded in.
     let mut devices_json = Vec::with_capacity(device_rows.len());
-    let mut device_meta: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
     for r in &device_rows {
         let mut d = device_to_json(r);
+        let p = pending.get(&r.0).cloned().unwrap_or_default();
         d["online"] = json!(st.hub.is_online(r.0).await);
-        d["pending_commands"] = json!(pending.get(&r.0).cloned().unwrap_or_default());
-        device_meta.insert(r.0, (r.2.clone(), r.6.clone()));
+        d["lock_pending"] = json!(lock_pending(&p));
+        d["pending_commands"] = json!(p);
+        device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lock_pending(&p)));
         devices_json.push(d);
     }
 
-    // Group users into people. Insertion order follows the query's ORDER BY,
-    // so the result is already sorted by username; display name only reorders
-    // it at the end.
-    let mut by_key: Vec<Child> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
-    for u in user_rows {
-        let (
-            id,
-            device_id,
-            os_username,
-            display_name,
-            profile_id,
-            pname,
-            _pkind,
-            policy,
-            used,
-            earned,
-        ) = u;
-        let name = display_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&os_username)
-            .to_string();
-        let (dev_name, dev_status) = device_meta
+    // People. Members first (even with no device); OS logins linked to parents
+    // are not "children" and stay out of this list.
+    let mut children: Vec<Child> = member_rows
+        .into_iter()
+        .map(|account| Child {
+            account,
+            used_minutes: 0,
+            earned_minutes: 0,
+            devices: Vec::new(),
+            pending_requests: 0,
+            locked: false,
+        })
+        .collect();
+    let index: HashMap<Uuid, usize> = children
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.account.0, i))
+        .collect();
+
+    for (du_id, device_id, os_username, account_id, _profile_id, used, earned) in user_rows {
+        let Some(i) = account_id.and_then(|a| index.get(&a).copied()) else {
+            continue;
+        };
+        let (dev_name, dev_status, dev_locked, dev_lock_pending) = device_meta
             .get(&device_id)
             .cloned()
-            .unwrap_or_else(|| ("unknown".into(), "offline".into()));
-        let entry = json!({
-            "device_user_id": id,
+            .unwrap_or_else(|| ("unknown".into(), "offline".into(), false, false));
+        let c = &mut children[i];
+        c.used_minutes += i64::from(used) / 60;
+        c.earned_minutes += i64::from(earned) / 60;
+        c.pending_requests += asks_by_du.get(&du_id).copied().unwrap_or(0);
+        c.locked |= dev_locked;
+        c.devices.push(json!({
+            "device_user_id": du_id,
             "id": device_id,
             "name": dev_name,
             "status": dev_status,
-        });
-
-        match index.get(&os_username) {
-            // Same person, second machine: their day is the sum of both.
-            Some(&i) => {
-                let c = &mut by_key[i];
-                c.used_minutes += i64::from(used) / 60;
-                c.earned_minutes += i64::from(earned) / 60;
-                c.devices.push(entry);
-                // A limit set on any of their profiles wins over none at all.
-                if c.limit_minutes.is_none() {
-                    c.limit_minutes = limit_from_policy(policy.as_ref());
-                }
-            }
-            None => {
-                index.insert(os_username.clone(), by_key.len());
-                by_key.push(Child {
-                    pending_requests: asks_by_user.get(&os_username).copied().unwrap_or(0),
-                    key: os_username,
-                    name,
-                    used_minutes: i64::from(used) / 60,
-                    earned_minutes: i64::from(earned) / 60,
-                    limit_minutes: limit_from_policy(policy.as_ref()),
-                    profile_id,
-                    profile_name: pname,
-                    devices: vec![entry],
-                });
-            }
-        }
+            "locked": dev_locked,
+            "lock_pending": dev_lock_pending,
+            "os_username": os_username,
+        }));
     }
 
-    by_key.sort_by_key(|c| c.name.to_lowercase());
-    let children: Vec<Value> = by_key
+    children.sort_by_key(|c| c.account.2.to_lowercase());
+    let children: Vec<Value> = children
         .into_iter()
         .map(|c| {
-            json!({
-                "key": c.key,
-                "name": c.name,
-                "used_minutes": c.used_minutes,
-                "earned_minutes": c.earned_minutes,
-                "limit_minutes": c.limit_minutes,
-                "profile_id": c.profile_id,
-                "profile_name": c.profile_name,
-                "devices": c.devices,
-                "pending_requests": c.pending_requests,
-            })
+            let bracket = members::bracket_of(&c.account);
+            let policy = c.account.9.and_then(|p| policies.get(&p));
+            let limit = policy.and_then(members::limit_minutes);
+            let profile_name = c
+                .account
+                .9
+                .and_then(|pid| {
+                    profiles.as_array().and_then(|l| {
+                        l.iter().find(|p| {
+                            p.get("id").and_then(Value::as_str) == Some(pid.to_string().as_str())
+                        })
+                    })
+                })
+                .and_then(|p| p.get("name").cloned())
+                .unwrap_or(Value::Null);
+            let blocked_apps = policy
+                .map(|p| catalog::expand(&p.blocks).apps)
+                .unwrap_or_default();
+            let mut v = members::account_json(&c.account);
+            v["key"] = json!(c.account.0);
+            v["name"] = json!(c.account.2);
+            v["used_minutes"] = json!(c.used_minutes);
+            v["earned_minutes"] = json!(c.earned_minutes);
+            v["limit_minutes"] = json!(limit);
+            v["profile_name"] = profile_name;
+            v["devices"] = json!(c.devices);
+            v["pending_requests"] = json!(c.pending_requests);
+            v["locked"] = json!(c.locked);
+            v["blocks"] = json!(policy.map(|p| p.blocks.clone()).unwrap_or_default());
+            v["blocked_apps"] = json!(blocked_apps);
+            v["can_ask"] = json!(bracket.can_request_time());
+            v["managed"] = json!(bracket.is_managed());
+            v
         })
         .collect();
 
@@ -267,26 +269,4 @@ pub async fn set_offline_window(
     let mut d = device_to_json(&row);
     d["online"] = json!(st.hub.is_online(id).await);
     Ok(Json(json!({ "device": d })))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_disabled_or_zero_limit_is_no_limit_not_zero_left() {
-        // The distinction the console renders: "no limit set" vs "time is up".
-        let off = json!({ "screen_time": { "enabled": false, "daily_limit_minutes": 60 } });
-        assert_eq!(limit_from_policy(Some(&off)), None);
-
-        let zero = json!({ "screen_time": { "enabled": true, "daily_limit_minutes": 0 } });
-        assert_eq!(limit_from_policy(Some(&zero)), None);
-
-        let real = json!({ "screen_time": { "enabled": true, "daily_limit_minutes": 60 } });
-        assert_eq!(limit_from_policy(Some(&real)), Some(60));
-
-        // A user with no profile at all must not panic or invent a limit.
-        assert_eq!(limit_from_policy(None), None);
-        assert_eq!(limit_from_policy(Some(&json!({}))), None);
-    }
 }
