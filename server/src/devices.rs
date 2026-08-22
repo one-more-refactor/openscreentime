@@ -526,6 +526,58 @@ pub async fn assign_profile(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct AssignAccountReq {
+    pub account_id: Uuid,
+}
+
+/// `POST /api/device-users/{id}/assign-account` — relink an OS login to a
+/// different person in the household. Enrollment links unmatched logins to the
+/// device's owner; a second account on a child's laptop (a parent's, say) ends
+/// up with the child's rules until it is moved here. The login takes the new
+/// person's rules immediately (profile_id follows the account) and the agent
+/// re-pulls.
+pub async fn assign_account(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(device_user_id): Path<Uuid>,
+    Json(req): Json<AssignAccountReq>,
+) -> AppResult<Json<Value>> {
+    let owner: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT d.id FROM device_users du JOIN devices d ON d.id = du.device_id \
+         WHERE du.id = $1 AND d.tenant_id = $2",
+    )
+    .bind(device_user_id)
+    .bind(admin.tenant_id)
+    .fetch_optional(&st.db)
+    .await?;
+    let device_id = owner
+        .ok_or_else(|| AppError::NotFound("device user not found".into()))?
+        .0;
+
+    let acct: Option<(Option<Uuid>,)> =
+        sqlx::query_as("SELECT profile_id FROM admins WHERE id = $1 AND tenant_id = $2")
+            .bind(req.account_id)
+            .bind(admin.tenant_id)
+            .fetch_optional(&st.db)
+            .await?;
+    let profile_id = acct
+        .ok_or_else(|| AppError::NotFound("person not found".into()))?
+        .0;
+
+    sqlx::query(
+        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id) WHERE id = $3",
+    )
+    .bind(req.account_id)
+    .bind(profile_id)
+    .bind(device_user_id)
+    .execute(&st.db)
+    .await?;
+
+    enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 // --- Screen-time history -----------------------------------------------------
 
 #[derive(Deserialize)]
