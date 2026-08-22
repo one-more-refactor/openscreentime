@@ -222,7 +222,7 @@ export function PolicyEditor({
             const { offline_lockdown_days: _drop, ...flags } = lockdown;
             setLockdown(days > 0 ? { ...flags, offline_lockdown_days: days } : flags);
           }}
-          hint="0 = never. If the device can't reach this server for N days it locks itself; the parent PIN always unlocks."
+          hint="0 = never. If the device can't reach this server for N days it locks itself; the parent code (authenticator app) or the backup code always unlocks."
         />
       </Section>
 
@@ -432,7 +432,7 @@ export function PolicyEditor({
             >
               <option value="math">MATH</option>
               <option value="wait">WAIT</option>
-              <option value="parent_pin">PARENT PIN</option>
+              <option value="parent_pin">PARENT CODE</option>
             </Select>
           </div>
 
@@ -441,27 +441,28 @@ export function PolicyEditor({
 
       {/* Parent PIN */}
       <Section
-        title="PARENT PIN"
+        title="BACKUP CODE"
         aside={
           <span
             className="label"
             style={{ color: pinIsSet ? "var(--fg)" : "var(--fg-faint)" }}
           >
-            {pinIsSet ? "PIN IS SET" : "NO PIN SET"}
+            {pinIsSet ? "BACKUP CODE IS SET" : "NO BACKUP CODE"}
           </span>
         }
       >
         <p className="text-[0.625rem] leading-relaxed" style={{ color: "var(--fg-faint)" }}>
-          Used on the device to override a lockout or unlock enforcement when it can't reach the
-          server. Enter a new PIN to set or replace it — the current PIN is never shown here.
+          The spare key: overrides a lockout on the device when the parent code (authenticator
+          app) is out of reach. Enter a new backup code to set or replace it — the current one is
+          never shown here.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <TextInput
-            label={pinIsSet ? "NEW PIN" : "SET PIN"}
+            label={pinIsSet ? "NEW BACKUP CODE" : "SET BACKUP CODE"}
             type="password"
             autoComplete="new-password"
             className="max-w-[12rem]"
-            placeholder={clearingPin ? "PIN WILL BE CLEARED" : "••••"}
+            placeholder={clearingPin ? "BACKUP CODE WILL BE CLEARED" : "••••"}
             value={clearingPin ? "" : parentPin ?? ""}
             disabled={readOnly || clearingPin}
             onChange={(e) => onParentPinChange?.(e.target.value || undefined)}
@@ -477,7 +478,7 @@ export function PolicyEditor({
               variant="ghost"
               onClick={() => onParentPinChange?.(clearingPin ? undefined : "")}
             >
-              {clearingPin ? "UNDO CLEAR" : "CLEAR PIN"}
+              {clearingPin ? "UNDO CLEAR" : "CLEAR BACKUP CODE"}
             </Button>
           )}
         </div>

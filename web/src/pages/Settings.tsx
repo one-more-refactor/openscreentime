@@ -19,21 +19,27 @@ import {
   confirmTotpEnrollment,
   deletePasskey,
   getAuthConfig,
+  getParentCode,
   getTwoFactorStatus,
+  listDevices,
   listParentTokens,
   listPasskeys,
   mintParentToken,
   revokeParentToken,
+  rotateParentCode,
   startTotpEnrollment,
 } from "../api";
 import type {
   AuthConfig,
+  Device,
   MintedParentToken,
+  ParentCode,
   ParentToken,
   Passkey,
   TotpEnrollment,
   TwoFactorStatus,
 } from "../types";
+import { QrCode } from "../components/QrCode";
 import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
@@ -180,8 +186,136 @@ function SecurityPanels() {
   return (
     <div className="rl">
       <TwoFactor />
+      <ParentCodes />
       <Passkeys />
       <ParentAccess />
+    </div>
+  );
+}
+
+/**
+ * The parent code of each computer — the authenticator secret that device
+ * verifies offline. Showing it again is a sensitive read (the server answers
+ * 428 without a live grant, which is why this panel only mounts after one);
+ * rotating it re-mints the secret and the old one dies on the next policy
+ * pull.
+ */
+function ParentCodes() {
+  const devices = useAsync<Device[]>(listDevices, []);
+  const [showing, setShowing] = useState<{ device: Device; code: ParentCode; fresh: boolean } | null>(null);
+  const [confirmRotate, setConfirmRotate] = useState<Device | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function show(d: Device) {
+    setBusy(true);
+    setStatus(null);
+    try {
+      setShowing({ device: d, code: await getParentCode(d.id), fresh: false });
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't load the parent code.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotate() {
+    if (!confirmRotate) return;
+    const d = confirmRotate;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const code = await rotateParentCode(d.id);
+      setConfirmRotate(null);
+      setShowing({ device: d, code, fresh: true });
+      setStatus(`New parent code for ${d.name}. The old one stops working once the device checks in.`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't replace the parent code.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const list = (devices.data ?? []).filter((d) => d.status !== "pending" || true);
+
+  return (
+    <div className="rl-row rl-row-stack">
+      <div className="rl-what">
+        <p className="rl-name">Parent codes</p>
+        <p className="rl-value">
+          One authenticator entry per computer. The 6-digit code unlocks the screen, reopens time
+          and allows <code>sudo</code> there — verified on the device, with no internet needed.
+          {devices.error ? ` · couldn't load: ${devices.error}` : ""}
+        </p>
+        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
+      </div>
+      {list.map((d) => (
+        <div className="rl-app" key={d.id}>
+          <span className="rl-app-name">{d.name}</span>
+          <span className="rl-app-mins">
+            {d.status === "pending" ? "not set up yet" : `last heard ${relTime(d.last_seen)}`}
+          </span>
+          <span className="rl-controls">
+            <button className="ch-btn" disabled={busy} onClick={() => void show(d)}>
+              Show QR
+            </button>
+            <button className="ch-btn" disabled={busy} onClick={() => setConfirmRotate(d)}>
+              Replace
+            </button>
+          </span>
+        </div>
+      ))}
+      {!devices.loading && list.length === 0 && (
+        <p className="fam-quiet">No computers yet — a parent code is made when you set one up.</p>
+      )}
+
+      <Modal
+        open={!!showing}
+        onClose={() => setShowing(null)}
+        title={showing?.fresh ? "NEW PARENT CODE" : "PARENT CODE"}
+        footer={<Button onClick={() => setShowing(null)}>DONE</Button>}
+      >
+        {showing && (
+          <div className="pc-modal">
+            <p className="text-sm" style={{ color: "var(--fg-dim)", margin: 0 }}>
+              Scan into your authenticator app as{" "}
+              <span style={{ color: "var(--fg)" }}>OpenScreenTime · {showing.device.name}</span>.
+              {showing.fresh && " Delete the old entry for this computer."}
+            </p>
+            <QrCode value={showing.code.otpauth_uri} size={200} label={`Parent code for ${showing.device.name}`} />
+            <div className="add-qr-text" style={{ justifyItems: "center" }}>
+              <p className="add-secret-label">Or type the secret</p>
+              <code className="add-secret">{showing.code.secret}</code>
+              <Button size="sm" variant="ghost" onClick={() => navigator.clipboard?.writeText(showing.code.secret)}>
+                COPY
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!confirmRotate}
+        onClose={() => setConfirmRotate(null)}
+        title="REPLACE PARENT CODE"
+        danger
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmRotate(null)} disabled={busy}>
+              CANCEL
+            </Button>
+            <Button variant="danger" disabled={busy} onClick={() => void rotate()}>
+              {busy ? "REPLACING…" : "REPLACE"}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
+          Make a new parent code for <span className="dot text-fg">{confirmRotate?.name}</span>? The
+          current authenticator entry stops working as soon as that computer next checks in, so
+          scan the new one straight away. The backup code printed at install is unaffected.
+        </p>
+      </Modal>
     </div>
   );
 }
