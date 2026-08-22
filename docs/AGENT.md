@@ -177,6 +177,15 @@ What a voucher session can and cannot do:
 
 ## Files on disk
 
+`/run/openscreentime/login/` — the **login broker** drop-box (sticky
+`1733`, like /tmp). `ost login` run by an ordinary desktop user writes
+`<user>.req`; the root agent checks the file is owned by that user's uid, mints
+a device voucher bound to the person behind that OS login, and answers with
+`<user>.url` (`0600`, owned by the user). The CLI reads it, deletes it and
+opens the console already signed in — as *that person*, never as the parent.
+Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
+
+
 | Path | Owner : mode | Written by | Purpose |
 |---|---|---|---|
 | `/usr/local/bin/openscreentime` | root : 0755 | `install.sh` / `install-service` / self-update | The managed binary. `ExecStart` target for the systemd unit. |
