@@ -29,6 +29,15 @@ pub enum AppError {
     /// its own status and not a 403.
     #[error("{0}")]
     StepUpRequired(String),
+    /// 403 with the stable code `forbidden_for_member`: a member session
+    /// (a child, or a self-tracking adult) asked for something only the hub
+    /// (owner/parent) may do. The member layer in `members.rs` fails closed.
+    #[error("{0}")]
+    ForbiddenForMember(String),
+    /// 404 with the stable code `no_account`: the OS login that asked for a
+    /// device voucher is not linked to any person on this household.
+    #[error("{0}")]
+    NoAccount(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -43,6 +52,8 @@ impl AppError {
             AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::RegistrationClosed(_) => (StatusCode::FORBIDDEN, "registration_closed"),
             AppError::StepUpRequired(_) => (StatusCode::PRECONDITION_REQUIRED, "step_up_required"),
+            AppError::ForbiddenForMember(_) => (StatusCode::FORBIDDEN, "forbidden_for_member"),
+            AppError::NoAccount(_) => (StatusCode::NOT_FOUND, "no_account"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

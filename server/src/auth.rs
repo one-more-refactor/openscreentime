@@ -98,8 +98,8 @@ fn temp_cookie(name: &'static str, value: String, secure: bool) -> Cookie<'stati
 /// "registration closes after the first admin" invariant).
 const ADMIN_BOOTSTRAP_LOCK: i64 = 0x5E17_0001;
 
-/// Creates a tenant, seeds the three preset profiles verbatim, and creates the
-/// first admin. Returns (tenant_id, admin_id).
+/// Creates a tenant, seeds the five bracket presets verbatim, and creates the
+/// first admin (role `owner`). Returns (tenant_id, admin_id).
 ///
 /// `require_first` enforces the single-org bootstrap invariant: when set, the
 /// call refuses (under a serializing advisory lock) if any admin already exists.
@@ -154,7 +154,8 @@ pub async fn create_tenant_with_admin(
     }
 
     let admin_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO admins (tenant_id, email, display_name) VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO admins (tenant_id, email, display_name, role, age_bracket)
+         VALUES ($1, $2, $3, 'owner', 'adult') RETURNING id",
     )
     .bind(tenant_id)
     .bind(email)
@@ -485,18 +486,6 @@ pub async fn logout(
     Ok((jar, Json(json!({ "ok": true }))))
 }
 
-pub async fn me(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
-    let a = admin_json(&st.db, admin.admin_id).await?;
-    let tenant: (Uuid, String) = sqlx::query_as("SELECT id, name FROM tenants WHERE id = $1")
-        .bind(admin.tenant_id)
-        .fetch_one(&st.db)
-        .await?;
-    Ok(Json(json!({
-        "admin": a,
-        "tenant": { "id": tenant.0, "name": tenant.1 }
-    })))
-}
-
 /// The admin's registered passkeys (metadata only — never the credential itself).
 pub async fn list_passkeys(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     type PasskeyRow = (Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>);
@@ -560,16 +549,19 @@ pub async fn delete_passkey(
 // ---------------------------------------------------------------------------
 
 async fn admin_json(db: &sqlx::PgPool, admin_id: Uuid) -> AppResult<Value> {
-    let row: (Uuid, Uuid, String, String) =
-        sqlx::query_as("SELECT id, tenant_id, email, display_name FROM admins WHERE id = $1")
-            .bind(admin_id)
-            .fetch_one(db)
-            .await?;
+    let row: (Uuid, Uuid, Option<String>, String, String, String) = sqlx::query_as(
+        "SELECT id, tenant_id, email, display_name, role, age_bracket FROM admins WHERE id = $1",
+    )
+    .bind(admin_id)
+    .fetch_one(db)
+    .await?;
     Ok(json!({
         "id": row.0,
         "tenant_id": row.1,
         "email": row.2,
         "display_name": row.3,
+        "role": row.4,
+        "age_bracket": row.5,
     }))
 }
 
