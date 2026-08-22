@@ -11,15 +11,17 @@ import { apiCalls, apiImpl, toasts, stepUp, StepUpCancelled, resetApiMock, reset
 
 const { PauseEverything } = await import("./PauseEverything");
 
-function device(id: string, status: Device["status"] = "online"): Device {
+function device(id: string, status: Device["status"] = "online", locked = false): Device {
   return {
     id,
     tenant_id: "t",
     name: id,
     hostname: id,
     os: "linux",
-    agent_version: "0.3.0",
+    agent_version: "0.4.0",
     status,
+    locked,
+    lock_pending: false,
     tamper_level: 1,
     public_ip: null,
     last_seen: new Date().toISOString(),
@@ -76,7 +78,7 @@ describe("pause everything", () => {
   });
 
   test("resuming is a plain tap — undoing a pause needs no ceremony", async () => {
-    const { button } = setup([device("a", "locked")], true);
+    const { button } = setup([device("a", "online", true)], true);
 
     fireEvent.pointerDown(button);
 

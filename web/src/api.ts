@@ -15,6 +15,12 @@ import {
 } from "@simplewebauthn/browser";
 
 import type {
+  Account,
+  Catalog,
+  MemberPatch,
+  MeToday,
+  NewMember,
+  ParentCode,
   CommandRow,
   VpnProfile,
   UsageHistoryResponse,
@@ -46,7 +52,11 @@ import type {
 } from "./types";
 
 import {
+  mockAskForTime,
+  mockCatalog,
+  mockCreateMember,
   mockCreditTime,
+  mockDeleteMember,
   mockDeviceDetail,
   mockDevices,
   mockRegenEnrollToken,
@@ -55,9 +65,13 @@ import {
   mockEvents,
   mockFamily,
   mockMe,
+  mockMeToday,
+  mockParentCode,
   mockPasskeys,
   mockProfiles,
+  mockRotateParentCode,
   mockTwoFactor,
+  mockUpdateMember,
   MOCK_STEPUP_CODE,
 } from "./mock";
 
@@ -290,11 +304,20 @@ export async function getDevice(id: string): Promise<DeviceDetail> {
   return { ...res.device, users: res.users, recent_events: res.recent_events };
 }
 
-export async function createDevice(name: string): Promise<EnrollTokenResponse> {
-  if (usingMock) return mockCreateDevice(name);
+/**
+ * Create a device (pending until the agent enrolls). The response carries the
+ * one-time enroll token AND the device's parent code (authenticator secret),
+ * both shown once. `member_id` is the enroll intent: the person this machine
+ * is being set up for, so the server links its OS users to that account.
+ */
+export async function createDevice(
+  name: string,
+  member_id?: string,
+): Promise<EnrollTokenResponse> {
+  if (usingMock) return mockCreateDevice(name, member_id);
   return request<EnrollTokenResponse>("/api/devices", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(member_id ? { name, member_id } : { name }),
   });
 }
 
@@ -309,11 +332,21 @@ export async function updateDevice(
   return res.device;
 }
 
+/** Ask the device to freeze. The server only queues the command; `locked`
+ * flips once the agent's own state frame confirms — until then the device
+ * shows `lock_pending`. */
 export async function lockDevice(id: string): Promise<LockResponse> {
   if (usingMock) {
     const d = mockDevices.find((d) => d.id === id);
-    if (d) d.status = "locked";
-    return { command_id: "mock-cmd", queued: true, delivered: true };
+    if (d) {
+      // The mock plays the agent too: pending for a beat, then confirmed.
+      d.lock_pending = true;
+      setTimeout(() => {
+        d.lock_pending = false;
+        d.locked = true;
+      }, 1200);
+    }
+    return { command_id: "mock-cmd", queued: true, delivered: d?.status === "online" };
   }
   return request<LockResponse>(`/api/devices/${id}/lock`, { method: "POST" });
 }
@@ -321,8 +354,14 @@ export async function lockDevice(id: string): Promise<LockResponse> {
 export async function unlockDevice(id: string): Promise<LockResponse> {
   if (usingMock) {
     const d = mockDevices.find((d) => d.id === id);
-    if (d) d.status = "online";
-    return { command_id: "mock-cmd", queued: true, delivered: true };
+    if (d) {
+      d.lock_pending = true;
+      setTimeout(() => {
+        d.lock_pending = false;
+        d.locked = false;
+      }, 900);
+    }
+    return { command_id: "mock-cmd", queued: true, delivered: d?.status === "online" };
   }
   return request<LockResponse>(`/api/devices/${id}/unlock`, { method: "POST" });
 }
@@ -607,4 +646,76 @@ export async function getUsageHistory(
   days: number,
 ): Promise<UsageHistoryResponse> {
   return request<UsageHistoryResponse>(`/api/device-users/${deviceUserId}/usage?days=${days}`);
+}
+
+// ---- Catalog (apps & categories) --------------------------------------------
+
+/** GET /api/catalog — the built-in "block YouTube with one click" list. Names
+ * only; the device holds the domain lists. Any session may read it. */
+export async function getCatalog(): Promise<Catalog> {
+  return read<Catalog>("/api/catalog", () => mockCatalog);
+}
+
+// ---- Members (children and self-tracking adults) -----------------------------
+
+export async function createMember(m: NewMember): Promise<Account> {
+  if (usingMock) return mockCreateMember(m);
+  const res = await request<{ member: Account }>("/api/members", {
+    method: "POST",
+    body: JSON.stringify(m),
+  });
+  return res.member;
+}
+
+export async function updateMember(id: string, patch: MemberPatch): Promise<Account> {
+  if (usingMock) return mockUpdateMember(id, patch);
+  const res = await request<{ member: Account }>(`/api/members/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+  return res.member;
+}
+
+export async function deleteMember(id: string): Promise<void> {
+  if (usingMock) return mockDeleteMember(id);
+  await request<unknown>(`/api/members/${id}`, { method: "DELETE" });
+}
+
+// ---- The person's own page ---------------------------------------------------
+
+/** GET /api/me/today — the signed-in person's own day. Reading is free, and
+ * this is the one read a member session can make besides /api/me. */
+export async function getMeToday(): Promise<MeToday> {
+  return read<MeToday>("/api/me/today", () => mockMeToday());
+}
+
+/** POST /api/me/ask — "can I have more time?" to the parent. Not available
+ * in the little bracket (no request UI) or to adults (no one to ask). */
+export async function askForTime(minutes: number, reason?: string): Promise<void> {
+  if (usingMock) {
+    mockAskForTime(minutes);
+    return;
+  }
+  await request<unknown>("/api/me/ask", {
+    method: "POST",
+    body: JSON.stringify(reason ? { minutes, reason } : { minutes }),
+  });
+}
+
+// ---- Parent code (per-device authenticator secret) ---------------------------
+
+/** Sensitive read: the server answers 428 without a live step-up grant. */
+export async function getParentCode(deviceId: string): Promise<ParentCode> {
+  if (usingMock) return mockParentCode(deviceId);
+  return request<ParentCode>(`/api/devices/${deviceId}/parent-code`);
+}
+
+/** Re-mint the device's parent code; the old one stops working once the
+ * agent pulls the new policy bundle. */
+export async function rotateParentCode(deviceId: string): Promise<ParentCode> {
+  if (usingMock) return mockRotateParentCode(deviceId);
+  return request<ParentCode>(`/api/devices/${deviceId}/parent-code/rotate`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }

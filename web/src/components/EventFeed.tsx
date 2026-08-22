@@ -20,6 +20,10 @@ const typeLabel: Record<Event["type"], string> = {
   evasion: "Clock tampering",
   enforcement_degraded: "Not enforced",
   vpn_profile: "VPN profile",
+  parent_code_ok: "Parent code accepted",
+  parent_code_failed: "Wrong parent code",
+  parent_code_backup_used: "Backup code used",
+  app_blocked: "App stopped",
 };
 
 // Never render a blank row: an unmapped (e.g. future) type shows its raw name
