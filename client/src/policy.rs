@@ -93,6 +93,19 @@ pub struct PolicyBundle {
     /// not "leave it alone" (the bundle is declarative).
     #[serde(default)]
     pub vpn: Option<VpnProfile>,
+    /// The device's parent code: a TOTP secret the parent holds in their
+    /// authenticator app, verified offline by `parentcode`. `None` on a server
+    /// that predates 0.4 — the backup code (`parent_pin_hash`) still works.
+    #[serde(default)]
+    pub parent_code: Option<ParentCode>,
+}
+
+/// Per-device parent authenticator secret (base32). Transported only over the
+/// authenticated agent channel; cached root-only with the bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParentCode {
+    #[serde(default)]
+    pub totp_secret: String,
 }
 
 /// An admin-uploaded VPN client config for this device. The `config` body
@@ -150,6 +163,9 @@ mod tests {
                 config: "[Interface]".into(),
                 status: Some("testing".into()),
             }),
+            parent_code: Some(ParentCode {
+                totp_secret: "GEZDGNBVGY3TQOJQ".into(),
+            }),
         };
 
         save_bundle_cache_to(&bundle, &path).expect("write");
@@ -165,6 +181,10 @@ mod tests {
         assert_eq!(
             back.vpn.as_ref().map(|v| v.kind.as_str()),
             Some("wireguard")
+        );
+        assert_eq!(
+            back.parent_code.as_ref().map(|p| p.totp_secret.as_str()),
+            Some("GEZDGNBVGY3TQOJQ")
         );
 
         let _ = std::fs::remove_file(&path);

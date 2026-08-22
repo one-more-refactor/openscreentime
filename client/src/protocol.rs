@@ -31,6 +31,9 @@ pub const EV_SCREEN_TIME_EXCEEDED: &str = "screen_time_exceeded";
 pub const EV_SCREEN_TIME_EARNED: &str = "screen_time_earned";
 /// Policy was accepted but the host cannot actually enforce part of it.
 pub const EV_ENFORCEMENT_DEGRADED: &str = "enforcement_degraded";
+/// A blocked app's process was denied (killed) for a managed user. Once per
+/// user/app/day.
+pub const EV_APP_BLOCKED: &str = "app_blocked";
 
 /// Severities (DATA_MODEL.md → `events.severity`).
 pub const SEV_INFO: &str = "info";
@@ -124,5 +127,33 @@ pub enum AgentFrame {
     Heartbeat {
         usage: Vec<UsageReport>,
     },
+    /// Honest device state (CONTRACT-0.4 §5): sent on connect, whenever it
+    /// changes, and at least every 60 s. `locked` is what the kernel freezer
+    /// says, never what the agent intended.
+    State {
+        state: DeviceState,
+    },
     Pong,
+}
+
+/// The agent's view of itself, as reported in the `state` frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceState {
+    /// A whole-device lock is in force: the lock is intended AND the kernel
+    /// freezer confirms every present managed user is frozen (or nobody is
+    /// logged in to freeze).
+    pub locked: bool,
+    /// The lock is intended (admin `lock`, tamper lockdown or offline hard
+    /// lockdown) — may differ from `locked` while a freeze is still landing
+    /// or is failing.
+    pub lock_intent: bool,
+    /// Users whose cgroup `cgroup.freeze` reads back as 1 right now.
+    pub frozen_users: Vec<String>,
+    /// DNS/firewall enforcement applied with no standing gaps.
+    pub enforcing: bool,
+    /// Standing enforcement gap kinds (empty when healthy).
+    pub gaps: Vec<String>,
+    pub agent_version: String,
+    /// Local, active seat users right now.
+    pub active_users: Vec<String>,
 }
