@@ -68,9 +68,23 @@ pub fn device_to_json(r: &DeviceRow) -> Value {
     })
 }
 
-/// `lock_pending`: a lock or unlock is queued/sent and not yet confirmed.
-pub fn lock_pending(pending_types: &[String]) -> bool {
-    pending_types.iter().any(|t| t == "lock" || t == "unlock")
+/// `lock_pending`: a lock or unlock is queued/sent and not yet confirmed, OR
+/// the agent's own intent (`last_state.lock_intent`) disagrees with what the
+/// kernel says (`last_state.locked`) — it is mid-way through applying.
+pub fn lock_pending(pending_types: &[String], last_state: Option<&Value>) -> bool {
+    if pending_types.iter().any(|t| t == "lock" || t == "unlock") {
+        return true;
+    }
+    match last_state {
+        Some(st) => match (
+            st.get("lock_intent").and_then(Value::as_bool),
+            st.get("locked").and_then(Value::as_bool),
+        ) {
+            (Some(intent), Some(locked)) => intent != locked,
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 // --- Parent code (per-device TOTP) -----------------------------------------
@@ -189,7 +203,7 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
         d["users"] = device_users_json(&st.db, r.0).await?;
         d["online"] = json!(st.hub.is_online(r.0).await);
         let pending = pending_command_types(&st.db, r.0).await?;
-        d["lock_pending"] = json!(lock_pending(&pending));
+        d["lock_pending"] = json!(lock_pending(&pending, r.14.as_ref()));
         d["pending_commands"] = json!(pending);
         out.push(d);
     }
@@ -208,7 +222,7 @@ pub async fn get_device(
     let mut d = device_to_json(&row);
     d["online"] = json!(st.hub.is_online(id).await);
     let pending = pending_command_types(&st.db, id).await?;
-    d["lock_pending"] = json!(lock_pending(&pending));
+    d["lock_pending"] = json!(lock_pending(&pending, row.14.as_ref()));
     d["pending_commands"] = json!(pending);
     Ok(Json(json!({
         "device": d,
@@ -587,4 +601,24 @@ pub async fn usage_history(
         })
         .collect();
     Ok(Json(json!({ "days": out, "streak_days": streak })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_pending_is_queue_or_intent_mismatch() {
+        let none: Vec<String> = vec![];
+        assert!(lock_pending(&["lock".to_string()], None));
+        assert!(lock_pending(&["unlock".to_string()], None));
+        assert!(!lock_pending(&["apply_policy".to_string()], None));
+        assert!(!lock_pending(&none, None));
+        let settled = json!({ "lock_intent": true, "locked": true });
+        assert!(!lock_pending(&none, Some(&settled)));
+        let applying = json!({ "lock_intent": true, "locked": false });
+        assert!(lock_pending(&none, Some(&applying)));
+        let old_agent = json!({ "locked": false });
+        assert!(!lock_pending(&none, Some(&old_agent)));
+    }
 }

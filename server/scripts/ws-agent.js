@@ -13,14 +13,19 @@ if (!url || !token) {
   process.exit(2);
 }
 
+// The real agent nests the object under "state" and reports both its intent
+// and what the kernel actually says.
 const state = (locked) => ({
   type: "state",
-  locked,
-  frozen_users: locked ? ["mia"] : [],
-  enforcing: true,
-  gaps: [],
-  agent_version: "0.4.0-smoke",
-  active_users: ["mia"],
+  state: {
+    locked,
+    lock_intent: locked,
+    frozen_users: locked ? ["mia"] : [],
+    enforcing: true,
+    gaps: [],
+    agent_version: "0.4.0-smoke",
+    active_users: ["mia"],
+  },
 });
 
 const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });

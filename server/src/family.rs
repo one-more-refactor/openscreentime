@@ -134,9 +134,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         let mut d = device_to_json(r);
         let p = pending.get(&r.0).cloned().unwrap_or_default();
         d["online"] = json!(st.hub.is_online(r.0).await);
-        d["lock_pending"] = json!(lock_pending(&p));
+        let lp = lock_pending(&p, r.14.as_ref());
+        d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
-        device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lock_pending(&p)));
+        device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lp));
         devices_json.push(d);
     }
 
