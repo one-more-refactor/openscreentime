@@ -96,11 +96,53 @@ export interface Policy {
    * plaintext PIN — the editor writes a new PIN via a separate `parent_pin`
    * field on the save request, not through this property. */
   parent_pin_hash?: string | null;
+  /** One-click app / category blocks from the built-in catalog. Absent =
+   * nothing blocked. */
+  blocks?: AppBlocks;
+}
+
+/** Catalog-driven blocks (policy crate `AppBlocks`). Ids refer to
+ * `GET /api/catalog`; the device expands them into DNS sinkholes + process
+ * names. `custom_domains` are the ones a parent typed by hand. */
+export interface AppBlocks {
+  apps: string[];
+  categories: string[];
+  custom_domains: string[];
+}
+
+export const EMPTY_BLOCKS: AppBlocks = { apps: [], categories: [], custom_domains: [] };
+
+/** GET /api/catalog — names only; the device holds the domain lists. */
+export interface CatalogCategory {
+  id: string;
+  name: string;
+  blurb: string;
+  app_ids: string[];
+}
+export interface CatalogApp {
+  id: string;
+  name: string;
+  category: string;
+  has_native_client: boolean;
+}
+export interface Catalog {
+  categories: CatalogCategory[];
+  apps: CatalogApp[];
 }
 
 // ---- Entities --------------------------------------------------------------
 
-export type ProfileKind = "kids" | "teen" | "default" | "custom";
+export type ProfileKind =
+  | "little"
+  | "kid"
+  | "younger_teen"
+  | "older_teen"
+  | "adult"
+  | "custom"
+  // pre-0.4 presets, still valid rows
+  | "kids"
+  | "teen"
+  | "default";
 
 export interface Profile {
   id: string;
@@ -113,7 +155,20 @@ export interface Profile {
   updated_at: string;
 }
 
-export type DeviceStatus = "pending" | "online" | "offline" | "locked";
+/** Connection state only. Since 0.4 "locked" is its own flag (`Device.locked`),
+ * never a status value — a paused laptop is still online. */
+export type DeviceStatus = "pending" | "online" | "offline";
+
+/** The agent's last `state` frame — what the kernel actually says. */
+export interface DeviceLastState {
+  locked: boolean;
+  frozen_users: string[];
+  enforcing: boolean;
+  gaps: string[];
+  agent_version?: string;
+  active_users?: string[];
+  [k: string]: unknown;
+}
 export type TamperLevel = 1 | 3;
 
 export interface DeviceUser {
@@ -152,6 +207,11 @@ export interface Device {
   os: string;
   agent_version: string;
   status: DeviceStatus;
+  /** The truth: the agent reported its screens frozen. */
+  locked: boolean;
+  /** A lock/unlock command is queued or sent and not yet confirmed. */
+  lock_pending: boolean;
+  last_state?: DeviceLastState | null;
   tamper_level: TamperLevel;
   public_ip: string | null;
   last_seen: string | null;
@@ -174,6 +234,8 @@ export interface ChildDevice {
   id: string;
   name: string;
   status: DeviceStatus;
+  locked: boolean;
+  lock_pending: boolean;
   /** this person's row on that device — what per-user actions address */
   device_user_id: string;
 }
@@ -183,9 +245,17 @@ export interface ChildDevice {
  * username on two devices is one child whose day is the sum of both.
  */
 export interface FamilyChild {
-  /** os_username — stable identity across devices, and the URL segment */
+  /** the member's account id — stable identity across devices, and the URL segment */
   key: string;
+  account_id: string;
   name: string;
+  age_bracket: AgeBracket;
+  /** the parent's explicit pick, or null for "auto by bracket" */
+  theme: Theme | null;
+  /** what the person's own page actually renders */
+  effective_theme: Theme;
+  /** every device they use reports frozen */
+  locked: boolean;
   used_minutes: number;
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
@@ -239,7 +309,11 @@ export type EventType =
   | "earn_request"
   | "evasion"
   | "enforcement_degraded"
-  | "vpn_profile";
+  | "vpn_profile"
+  | "parent_code_ok"
+  | "parent_code_failed"
+  | "parent_code_backup_used"
+  | "app_blocked";
 
 export type Severity = "info" | "warn" | "critical";
 
@@ -334,7 +408,84 @@ export interface Account {
   birthdate: string | null;
   /** Older teens & adults track privately; the hub sees less of them. */
   self_managed: boolean;
+  /** The parent's explicit theme pick, or null = auto by bracket. */
+  theme: Theme | null;
+  /** The theme the person's own page renders. */
+  effective_theme: Theme;
+  /** The person's rules (a profile), for members. */
+  profile_id: string | null;
   created_at: string;
+}
+
+/** How a person's own page looks — playful for small children, calm for
+ * teens, plain for adults. Null on an account means "auto by bracket". */
+export type Theme = "playful" | "calm" | "plain";
+
+export const THEMES: { key: Theme; label: string; blurb: string }[] = [
+  { key: "playful", label: "Playful", blurb: "Big friendly ring, bright colours — for little ones" },
+  { key: "calm", label: "Calm", blurb: "Quieter stats and goals — for teens" },
+  { key: "plain", label: "Plain", blurb: "A compact private dashboard — for adults" },
+];
+
+export function defaultThemeFor(b: AgeBracket): Theme {
+  return b === "little" || b === "kid" ? "playful" : b === "adult" ? "plain" : "calm";
+}
+
+/** Age from a YYYY-MM-DD birthdate, bracketed the way the server does it:
+ * the day you turn 6 you are a kid, 12 a younger teen, 16 an older teen,
+ * 18 an adult. */
+export function bracketForBirthdate(ymd: string, today = new Date()): AgeBracket | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return null;
+  const by = Number(m[1]), bm = Number(m[2]), bd = Number(m[3]);
+  let age = today.getFullYear() - by;
+  const had = today.getMonth() + 1 > bm || (today.getMonth() + 1 === bm && today.getDate() >= bd);
+  if (!had) age -= 1;
+  if (age < 0) return null;
+  if (age < 6) return "little";
+  if (age < 12) return "kid";
+  if (age < 16) return "younger_teen";
+  if (age < 18) return "older_teen";
+  return "adult";
+}
+
+/** POST /api/members — a child (or self-tracking adult) the hub manages. */
+export interface NewMember {
+  display_name: string;
+  birthdate?: string | null;
+  age_bracket?: AgeBracket;
+  theme?: Theme | null;
+}
+
+export type MemberPatch = Partial<{
+  display_name: string;
+  birthdate: string | null;
+  age_bracket: AgeBracket;
+  theme: Theme | null;
+  profile_id: string;
+}>;
+
+/** GET /api/me/today — the person's own day, for their own page. */
+export interface MeToday {
+  used_minutes: number;
+  earned_minutes: number;
+  limit_minutes: number | null;
+  left_minutes: number | null;
+  locked: boolean;
+  devices: { name: string; status: DeviceStatus; locked: boolean }[];
+  blocks: AppBlocks;
+  bracket: AgeBracket;
+  theme: Theme;
+  pending_request: boolean;
+  bedtime: Bedtime | null;
+  windows: TimeWindow[];
+}
+
+/** The per-device parent code: an authenticator-app secret, verified offline
+ * by the device. Shown as a QR; the secret is the text fallback. */
+export interface ParentCode {
+  secret: string;
+  otpauth_uri: string;
 }
 
 export interface Me {
@@ -380,6 +531,9 @@ export interface StepUpGrant {
 export interface EnrollTokenResponse {
   device: Device;
   enroll_token: string;
+  /** Present when the device was just created — the parent code for it,
+   * returned exactly once here (again only via the step-up gated read). */
+  parent_code?: ParentCode | null;
 }
 
 /** POST /api/devices/:id/lock | /unlock. `delivered: false` means the command

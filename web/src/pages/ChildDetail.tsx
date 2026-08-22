@@ -1,17 +1,31 @@
 // ============================================================================
 // CHILD — everything about one person, and nothing about infrastructure.
 //
-// This replaces the device detail page as the place you actually spend time.
 // The ordering is deliberate and reflects what a parent came here to do:
 //   1. how much time is left today          (the question they opened this for)
 //   2. anything waiting on them             (a request they must answer)
-//   3. protection level                     (the thing they came to change)
-//   4. where they use it                    (machinery, smallest and last)
+//   3. the controls: pause, more time        (the thing they came to change)
+//   4. the rules, the protection level
+//   5. where they use it                    (machinery, smallest and last)
+//
+// Since 0.4 a child is a member account (key = account id) and everything
+// here comes from the family store — one fetch shared with the rail — plus
+// the audit feed for their devices. Lock state is honest: `locked` is what
+// the devices report, `lock_pending` a pause still on its way.
 // ============================================================================
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useParams } from "react-router-dom";
 import * as api from "../api";
-import type { Device, DeviceUser, EarnRequest, Event, Policy, Profile } from "../types";
+import {
+  AGE_BRACKETS,
+  THEMES,
+  defaultThemeFor,
+  type AgeBracket,
+  type EarnRequest,
+  type Event,
+  type Policy,
+  type Theme,
+} from "../types";
 import {
   LEVELS,
   SecuritySlider,
@@ -20,7 +34,7 @@ import {
 } from "../components/SecuritySlider";
 import { EventFeed } from "../components/EventFeed";
 import { useStepUp, StepUpCancelled } from "../lib/stepup";
-import { familyChanged } from "../lib/family";
+import { useFamily, familyChanged } from "../lib/family";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
 
@@ -33,6 +47,17 @@ function initials(name: string): string {
   const p = name.trim().split(/\s+/).filter(Boolean);
   if (!p.length) return "?";
   return (p.length === 1 ? p[0].slice(0, 2) : p[0][0] + p[p.length - 1][0]).toUpperCase();
+}
+
+function since(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 /** Today's time, as the one big number this page exists to answer. */
@@ -74,82 +99,129 @@ function Today({ used, limit, earned }: { used: number; limit: number; earned: n
   );
 }
 
+/** Age bracket + look, in the header. Both are one tap, both step up. */
+function Identity({
+  bracket,
+  theme,
+  busy,
+  onBracket,
+  onTheme,
+}: {
+  bracket: AgeBracket;
+  theme: Theme | null;
+  busy: boolean;
+  onBracket: (b: AgeBracket) => void;
+  onTheme: (t: Theme | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const auto = defaultThemeFor(bracket);
+  const b = AGE_BRACKETS.find((x) => x.key === bracket);
+  return (
+    <div className="ch-ident">
+      <button className="ch-ident-btn no-code" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        {b ? `${b.label} · ${b.range}` : bracket}
+        <span className="ch-ident-sep">·</span>
+        {theme ? `${THEMES.find((t) => t.key === theme)?.label ?? theme} look` : `${THEMES.find((t) => t.key === auto)?.label ?? auto} look (auto)`}
+        <span className="ch-ident-caret" aria-hidden="true">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div className="ch-ident-panel">
+          <p className="rl-name">Age</p>
+          <p className="rl-value">How much they decide for themselves, and how hard the stops are.</p>
+          <div className="pills" style={{ marginTop: "0.5rem" }}>
+            {AGE_BRACKETS.map((x) => (
+              <button
+                key={x.key}
+                className="pill"
+                data-on={x.key === bracket}
+                disabled={busy}
+                onClick={() => x.key !== bracket && onBracket(x.key)}
+              >
+                {x.label} <span className="pill-range">{x.range}</span>
+              </button>
+            ))}
+          </div>
+          <p className="rl-name" style={{ marginTop: "1rem" }}>Their page</p>
+          <p className="rl-value">How OpenScreenTime looks when they open it on their own computer.</p>
+          <div className="pills" style={{ marginTop: "0.5rem" }}>
+            <button className="pill" data-on={theme === null} disabled={busy} onClick={() => theme !== null && onTheme(null)}>
+              Auto
+            </button>
+            {THEMES.map((t) => (
+              <button
+                key={t.key}
+                className="pill"
+                data-on={theme === t.key}
+                disabled={busy}
+                title={t.blurb}
+                onClick={() => theme !== t.key && onTheme(t.key)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChildDetail() {
   const { key = "" } = useParams();
   const { guard } = useStepUp();
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [users, setUsers] = useState<(DeviceUser & { deviceName: string })[]>([]);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [requests, setRequests] = useState<EarnRequest[]>([]);
+  const fam = useFamily();
   const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const [ds, ps] = await Promise.all([api.listDevices(), api.listProfiles()]);
-      setDevices(ds);
-      setProfiles(ps);
-      const found: (DeviceUser & { deviceName: string })[] = [];
-      for (const d of ds) {
-        try {
-          for (const u of await api.listDeviceUsers(d.id)) {
-            if (u.os_username === key) found.push({ ...u, deviceName: d.name });
-          }
-        } catch {
-          /* a single unreachable device must not blank the whole page */
-        }
-      }
-      setUsers(found);
-      setLoading(false);
-      try {
-        setRequests((await api.listEarnRequests("pending")).filter((r) => r.os_username === key));
-      } catch {
-        setRequests([]);
-      }
-      // The audit trail for this child's devices. Without it, a tamper event the
-      // server recorded is never seen — the "never silent" promise depends on
-      // this being on screen.
-      try {
-        const deviceIds = [...new Set(found.map((u) => u.device_id))];
-        const perDevice = await Promise.all(
-          deviceIds.map((id) => api.listEvents({ device_id: id, limit: 50 }).catch(() => [])),
-        );
-        const merged = perDevice
+  const child = useMemo(() => fam.children.find((c) => c.key === key) ?? null, [fam.children, key]);
+  const profile = useMemo(
+    () => (child?.profile_id ? fam.profiles.find((p) => p.id === child.profile_id) ?? null : null),
+    [fam.profiles, child],
+  );
+  const childDevices = useMemo(
+    () =>
+      (child?.devices ?? []).map((d) => ({
+        ...d,
+        full: fam.devices?.find((x) => x.id === d.id) ?? null,
+      })),
+    [child, fam.devices],
+  );
+  const deviceUserIds = useMemo(() => new Set((child?.devices ?? []).map((d) => d.device_user_id)), [child]);
+  const requests = useMemo(
+    () => fam.requests.filter((r) => deviceUserIds.has(r.device_user_id)),
+    [fam.requests, deviceUserIds],
+  );
+
+  // The audit trail for this child's devices. Without it, a tamper event the
+  // server recorded is never seen — the "never silent" promise depends on
+  // this being on screen.
+  const deviceIdsKey = (child?.devices ?? []).map((d) => d.id).sort().join(",");
+  useEffect(() => {
+    if (!deviceIdsKey) {
+      setEvents([]);
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      const perDevice = await Promise.all(
+        deviceIdsKey.split(",").map((id) => api.listEvents({ device_id: id, limit: 50 }).catch(() => [])),
+      );
+      if (!alive) return;
+      setEvents(
+        perDevice
           .flat()
           .sort((a, b) => b.created_at.localeCompare(a.created_at))
-          .slice(0, 50);
-        setEvents(merged);
-      } catch {
-        setEvents([]);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load this child");
-      setLoading(false);
-    }
-  }, [key]);
+          .slice(0, 50),
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [deviceIdsKey, fam.children]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const name = users[0]?.display_name?.trim() || key;
-  const used = users.reduce((n, u) => n + (u.used_minutes_today ?? 0), 0);
-  const earned = users.reduce((n, u) => n + (u.earned_minutes_today ?? 0), 0);
-
-  const profile = useMemo(
-    () => profiles.find((p) => p.id === users[0]?.profile_id) ?? null,
-    [profiles, users],
-  );
-  // A disabled schedule means no limit, whatever number the policy carries.
-  const limit = profile?.policy.screen_time?.enabled
-    ? (profile.policy.screen_time.daily_limit_minutes ?? 0)
-    : 0;
-  const level = profile ? levelForPolicy(profile.policy) : 2;
-
-  if (loading)
+  if (fam.loading && !child)
     return (
       <div className="ch-wrap">
         <Link to="/" className="ch-back">← Family</Link>
@@ -157,115 +229,105 @@ export function ChildDetail() {
       </div>
     );
 
-
-  async function setLevel(next: number) {
-    if (!profile) return;
-    setBusy(true);
-    setNote(null);
-    try {
-      await guard(() => api.updateProfile(profile.id, policyForLevel(next, profile.policy)));
-      setNote(`Protection set to ${LEVELS[next].name}. It reaches the device within a minute.`);
-      await load();
-      familyChanged();
-    } catch (e) {
-      if (e instanceof StepUpCancelled) return;
-      setError(e instanceof Error ? e.message : "Could not change protection");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function grant(minutes: number) {
-    const u = users[0];
-    if (!u) return;
-    setBusy(true);
-    try {
-      await guard(() => api.creditTime(u.id, minutes));
-      setNote(`Gave ${name} ${minutes} more minutes.`);
-      await load();
-      familyChanged();
-    } catch (e) {
-      if (e instanceof StepUpCancelled) return;
-      setError(e instanceof Error ? e.message : "Could not grant time");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** Every rule edit funnels through here: step-up, save, reload. */
-  async function saveRules(next: Policy, doneNote: string) {
-    if (!profile) return;
-    setBusy(true);
-    setNote(null);
-    try {
-      await guard(() => api.updateProfile(profile.id, next));
-      setNote(doneNote);
-      await load();
-      familyChanged();
-    } catch (e) {
-      if (e instanceof StepUpCancelled) return;
-      setError(e instanceof Error ? e.message : "Could not change the rules");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** The hard stop: pause (lock) every device this child uses. */
-  const childDevices = devices.filter((d) => users.some((u) => u.device_id === d.id));
-  const allPaused = childDevices.length > 0 && childDevices.every((d) => d.status === "locked");
-
-  async function pause(resume: boolean) {
-    setBusy(true);
-    setNote(null);
-    try {
-      await guard(async () => {
-        for (const d of childDevices) {
-          if (resume) await api.unlockDevice(d.id);
-          else if (d.status !== "locked") await api.lockDevice(d.id);
-        }
-      });
-      setNote(
-        resume
-          ? `${name} can use their devices again.`
-          : `Paused. Every device ${name} uses stops within a minute.`,
-      );
-      await load();
-      familyChanged();
-    } catch (e) {
-      if (e instanceof StepUpCancelled) return;
-      setError(e instanceof Error ? e.message : "Could not change the devices");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function answer(r: EarnRequest, approve: boolean) {
-    setBusy(true);
-    try {
-      await guard(() =>
-        approve ? api.approveEarnRequest(r.id) : api.denyEarnRequest(r.id),
-      );
-      await load();
-      familyChanged();
-    } catch (e) {
-      if (e instanceof StepUpCancelled) return;
-      setError(e instanceof Error ? e.message : "Could not answer the request");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (error)
+  if (!child)
     return (
       <div className="ch-wrap">
-        {/* An error must never be a dead end with no way back. */}
         <Link to="/" className="ch-back">← Family</Link>
-        <p className="fam-error">{error}</p>
-        <button className="ch-btn no-code" onClick={() => { setError(null); void load(); }}>
+        <p className="fam-error">{fam.error ?? "There's no one with that name in your family."}</p>
+        <button className="ch-btn no-code" onClick={() => void fam.reload()}>
           Try again
         </button>
       </div>
     );
+
+  const name = child.name;
+  const used = child.used_minutes;
+  const earned = child.earned_minutes;
+  // A disabled schedule means no limit, whatever number the policy carries.
+  const limit = child.limit_minutes ?? 0;
+  const level = profile ? levelForPolicy(profile.policy) : 2;
+
+  /** Every change funnels through here: step-up, do it, refetch the family. */
+  async function change(doneNote: string, fn: () => Promise<unknown>, failNote: string) {
+    setBusy(true);
+    setNote(null);
+    setError(null);
+    try {
+      await guard(fn);
+      setNote(doneNote);
+      await fam.reload();
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setError(e instanceof Error ? e.message : failNote);
+    } finally {
+      setBusy(false);
+      familyChanged();
+    }
+  }
+
+  function setLevel(next: number) {
+    if (!profile) return;
+    void change(
+      `Protection set to ${LEVELS[next].name}. It reaches the device within a minute.`,
+      () => api.updateProfile(profile.id, policyForLevel(next, profile.policy)),
+      "Could not change protection",
+    );
+  }
+
+  function grant(minutes: number) {
+    const du = child?.devices[0]?.device_user_id;
+    if (!du) return;
+    void change(`Gave ${name} ${minutes} more minutes.`, () => api.creditTime(du, minutes), "Could not grant time");
+  }
+
+  function saveRules(next: Policy, doneNote: string) {
+    if (!profile) return;
+    void change(doneNote, () => api.updateProfile(profile.id, next), "Could not change the rules");
+  }
+
+  function setBracket(b: AgeBracket) {
+    const label = AGE_BRACKETS.find((x) => x.key === b)?.label ?? b;
+    void change(
+      `${name} is now in the ${label.toLowerCase()} bracket.`,
+      () => api.updateMember(child!.account_id, { age_bracket: b }),
+      "Could not change the age bracket",
+    );
+  }
+
+  function setTheme(t: Theme | null) {
+    void change(
+      t ? `${name}'s page now uses the ${t} look.` : `${name}'s page follows their age bracket again.`,
+      () => api.updateMember(child!.account_id, { theme: t }),
+      "Could not change the look",
+    );
+  }
+
+  /** The hard stop: pause (lock) every device this child uses. */
+  const allPaused = childDevices.length > 0 && childDevices.every((d) => d.locked);
+  const anyPending = childDevices.some((d) => d.lock_pending);
+
+  function pause(resume: boolean) {
+    void change(
+      resume
+        ? `Resuming. ${name}'s devices confirm in a moment.`
+        : `Pausing. It shows as paused once each device confirms.`,
+      async () => {
+        for (const d of childDevices) {
+          if (resume) await api.unlockDevice(d.id);
+          else if (!d.locked) await api.lockDevice(d.id);
+        }
+      },
+      "Could not change the devices",
+    );
+  }
+
+  function answer(r: EarnRequest, approve: boolean) {
+    void change(
+      approve ? `Allowed ${r.minutes} more minutes.` : "Said no.",
+      () => (approve ? api.approveEarnRequest(r.id) : api.denyEarnRequest(r.id)),
+      "Could not answer the request",
+    );
+  }
 
   return (
     <div className="ch-wrap">
@@ -283,16 +345,25 @@ export function ChildDetail() {
         >
           {initials(name)}
         </span>
-        <div>
+        <div style={{ minWidth: 0, flex: 1 }}>
           <h1 className="ch-name">{name}</h1>
           <p className="ch-meta">
-            {profile?.name ?? "No profile"}
-            {users.length > 1 && ` · ${users.length} devices`}
+            {profile?.name ?? "No rules yet"}
+            {childDevices.length > 1 && ` · ${childDevices.length} devices`}
+            {allPaused && " · paused"}
           </p>
+          <Identity
+            bracket={child.age_bracket}
+            theme={child.theme}
+            busy={busy}
+            onBracket={setBracket}
+            onTheme={setTheme}
+          />
         </div>
       </header>
 
       {note && <p className="ch-note">{note}</p>}
+      {error && <p className="fam-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
       <Today used={used} limit={limit} earned={earned} />
 
@@ -307,10 +378,10 @@ export function ChildDetail() {
                   {r.task_label && ` for ${r.task_label}`}
                 </span>
                 <span className="ch-req-btns">
-                  <button className="ch-btn ch-btn-yes" disabled={busy} onClick={() => void answer(r, true)}>
+                  <button className="ch-btn ch-btn-yes" disabled={busy} onClick={() => answer(r, true)}>
                     Allow
                   </button>
-                  <button className="ch-btn" disabled={busy} onClick={() => void answer(r, false)}>
+                  <button className="ch-btn" disabled={busy} onClick={() => answer(r, false)}>
                     No
                   </button>
                 </span>
@@ -319,22 +390,34 @@ export function ChildDetail() {
           </ul>
         </section>
       )}
+
       {/* The controls a parent came for, first: the hard stop, then more time. */}
       <div className="ch-actions">
         {childDevices.length > 0 &&
           (allPaused ? (
-            <button className="ch-btn ch-btn-pause" data-paused="true" disabled={busy} onClick={() => void pause(true)}>
-              Resume their devices
+            <button
+              className="ch-btn ch-btn-pause"
+              data-paused="true"
+              data-pending={anyPending}
+              disabled={busy || anyPending}
+              onClick={() => pause(true)}
+            >
+              {anyPending ? "Resuming…" : "Resume their devices"}
             </button>
           ) : (
-            <button className="ch-btn ch-btn-pause" disabled={busy} onClick={() => void pause(false)}>
-              Pause their devices
+            <button
+              className="ch-btn ch-btn-pause"
+              data-pending={anyPending}
+              disabled={busy || anyPending}
+              onClick={() => pause(false)}
+            >
+              {anyPending ? "Pausing…" : "Pause their devices"}
             </button>
           ))}
-        <button className="ch-btn" disabled={busy || !users.length} onClick={() => void grant(15)}>
+        <button className="ch-btn" disabled={busy || !childDevices.length} onClick={() => grant(15)}>
           +15 min today
         </button>
-        <button className="ch-btn" disabled={busy || !users.length} onClick={() => void grant(30)}>
+        <button className="ch-btn" disabled={busy || !childDevices.length} onClick={() => grant(30)}>
           +30 min today
         </button>
       </div>
@@ -342,34 +425,52 @@ export function ChildDetail() {
       {profile && (
         <section className="ch-section">
           <h2 className="ch-h2">The rules</h2>
-          <Rules profile={profile} busy={busy} onSave={(p, note) => void saveRules(p, note)} />
+          <Rules profile={profile} busy={busy} onSave={saveRules} />
         </section>
       )}
 
       <section className="ch-section">
         {profile ? (
-          <SecuritySlider value={level} busy={busy} onChange={(l) => void setLevel(l)} />
+          <SecuritySlider value={level} busy={busy} onChange={setLevel} />
         ) : (
-          <p className="fam-quiet">No profile assigned, so there is nothing to protect yet.</p>
+          <p className="fam-quiet">No rules assigned, so there is nothing to protect yet.</p>
         )}
       </section>
 
       <section className="ch-section">
         <h2 className="ch-h2">Where {name} uses it</h2>
         <ul className="ch-devices">
-          {users.map((u) => (
-            <li key={u.id} className="ch-device">
-              <span>{u.deviceName}</span>
-              <span className="ch-device-state" data-state={devices.find((d) => d.id === u.device_id)?.status}>
-                {devices.find((d) => d.id === u.device_id)?.status ?? "unknown"}
+          {childDevices.map((d) => (
+            <li key={d.id} className="ch-device">
+              <span className="ch-device-name">
+                <span className="ch-device-dot" data-state={d.status} aria-hidden="true" />
+                {d.name}
+              </span>
+              <span className="ch-device-right">
+                {d.lock_pending ? (
+                  <span className="ch-device-state" data-state="pending">{d.locked ? "resuming…" : "pausing…"}</span>
+                ) : d.locked ? (
+                  <span className="ch-device-state" data-state="locked">paused</span>
+                ) : null}
+                <span className="ch-device-state" data-state={d.status}>
+                  {d.status === "online"
+                    ? "online"
+                    : d.status === "pending"
+                      ? "not set up yet"
+                      : `offline · ${since(d.full?.last_seen)}`}
+                </span>
               </span>
             </li>
           ))}
-          {users.length === 0 && <li className="fam-quiet">No devices yet.</li>}
+          {childDevices.length === 0 && (
+            <li className="fam-quiet">
+              No devices yet. <Link to="/add" style={{ color: "var(--fg)" }}>Set one up</Link>.
+            </li>
+          )}
         </ul>
       </section>
 
-      {users.length > 0 && (
+      {childDevices.length > 0 && (
         <section className="ch-section">
           <h2 className="ch-h2">Recent activity</h2>
           <EventFeed events={events} emptyLabel="NOTHING RECORDED YET" />
