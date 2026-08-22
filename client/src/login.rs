@@ -66,19 +66,21 @@ fn has_display() -> bool {
 }
 
 pub async fn run(print_url: bool, as_json: bool) -> Result<()> {
-    let cfg = AgentConfig::load().map_err(|e| {
-        anyhow::anyhow!("this computer isn't set up yet: {e}\nRun `ost enroll` first.")
-    })?;
-
-    let client = ServerClient::new(&cfg.server_url, &cfg.device_token)?;
     let me = invoking_user();
-    let (voucher, expires_in) = client
-        .mint_voucher(&me)
-        .await
-        .context("could not get a sign-in voucher from the server (is this login linked to a person in the console?)")?;
-
-    let url = console_url(&cfg.server_url, &voucher);
-
+    let (url, expires_in) = if crate::config::is_root() {
+        let cfg = AgentConfig::load().map_err(|e| {
+            anyhow::anyhow!("this computer isn't set up yet: {e}\nRun `ost enroll` first.")
+        })?;
+        let client = ServerClient::new(&cfg.server_url, &cfg.device_token)?;
+        let (voucher, expires_in) = client
+            .mint_voucher(&me)
+            .await
+            .context("could not get a sign-in voucher from the server")?;
+        (console_url(&cfg.server_url, &voucher), expires_in)
+    } else {
+        // Not root: the running agent mints it for us (loginbroker.rs).
+        (crate::loginbroker::request_url(&me).await?, 120)
+    };
     if as_json {
         // The URL carries a live credential; a caller asking for JSON is
         // explicitly asking to handle it, so it is theirs to protect.
