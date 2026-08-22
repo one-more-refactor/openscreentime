@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod catalog;
+
 fn default_version() -> u32 {
     1
 }
@@ -44,6 +46,11 @@ pub struct Policy {
     /// locally (works with no server connection). Never the plaintext PIN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_pin_hash: Option<String>,
+    /// One-click app / category blocks from the built-in catalog (see
+    /// `catalog`). Absent = nothing blocked; skipped on serialize when empty
+    /// so older presets stay byte-identical.
+    #[serde(default, skip_serializing_if = "AppBlocks::is_default")]
+    pub blocks: AppBlocks,
 }
 
 impl Default for Policy {
@@ -56,6 +63,171 @@ impl Default for Policy {
             gamification: Gamification::default(),
             lockdown: NetworkLockdown::default(),
             parent_pin_hash: None,
+            blocks: AppBlocks::default(),
+        }
+    }
+}
+
+/// One-click app / category blocks. Ids refer to the built-in catalog
+/// (`catalog::apps()` / `catalog::categories()`); unknown ids are kept as-is
+/// (forward-compat with a newer catalog) and simply expand to nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppBlocks {
+    /// Catalog app ids, e.g. `"youtube"`, `"tiktok"`.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    /// Catalog category ids, e.g. `"social"`, `"adult"`.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Extra domains the parent typed by hand (subdomains included).
+    #[serde(default)]
+    pub custom_domains: Vec<String>,
+}
+
+impl AppBlocks {
+    pub fn is_default(&self) -> bool {
+        self.apps.is_empty() && self.categories.is_empty() && self.custom_domains.is_empty()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.is_default()
+    }
+}
+
+/// Age bracket — autonomy scales with age (docs/OPENSCREENTIME.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgeBracket {
+    /// 0–6: curated allowlist, parent does everything, no request UI.
+    Little,
+    /// 6–12: hard limits, can request / earn time.
+    Kid,
+    /// 12–16: goals + limits, wind-down before a hard stop.
+    YoungerTeen,
+    /// 16–18: mostly self-set, parent can still cap.
+    OlderTeen,
+    /// 18+: private self-tracking, self-imposed limits only.
+    Adult,
+}
+
+impl AgeBracket {
+    pub const ALL: [AgeBracket; 5] = [
+        AgeBracket::Little,
+        AgeBracket::Kid,
+        AgeBracket::YoungerTeen,
+        AgeBracket::OlderTeen,
+        AgeBracket::Adult,
+    ];
+
+    /// The wire / DB id (`"younger_teen"`).
+    pub fn id(&self) -> &'static str {
+        match self {
+            AgeBracket::Little => "little",
+            AgeBracket::Kid => "kid",
+            AgeBracket::YoungerTeen => "younger_teen",
+            AgeBracket::OlderTeen => "older_teen",
+            AgeBracket::Adult => "adult",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.id() == s)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgeBracket::Little => "Little",
+            AgeBracket::Kid => "Kid",
+            AgeBracket::YoungerTeen => "Younger teen",
+            AgeBracket::OlderTeen => "Older teen",
+            AgeBracket::Adult => "Adult",
+        }
+    }
+
+    /// Human range, e.g. `"6–12"`.
+    pub fn range(&self) -> &'static str {
+        match self {
+            AgeBracket::Little => "0–6",
+            AgeBracket::Kid => "6–12",
+            AgeBracket::YoungerTeen => "12–16",
+            AgeBracket::OlderTeen => "16–18",
+            AgeBracket::Adult => "18+",
+        }
+    }
+
+    /// Bracket from a birthdate, on a given day. Boundaries: the day you turn
+    /// 6 you are a Kid, 12 a YoungerTeen, 16 an OlderTeen, 18 an Adult.
+    pub fn from_birthdate(birth: chrono::NaiveDate, today: chrono::NaiveDate) -> Self {
+        let years = chrono::Datelike::year(&today) - chrono::Datelike::year(&birth);
+        let had_birthday = (
+            chrono::Datelike::month(&today),
+            chrono::Datelike::day(&today),
+        ) >= (
+            chrono::Datelike::month(&birth),
+            chrono::Datelike::day(&birth),
+        );
+        let age = if had_birthday { years } else { years - 1 };
+        match age {
+            i32::MIN..=5 => AgeBracket::Little,
+            6..=11 => AgeBracket::Kid,
+            12..=15 => AgeBracket::YoungerTeen,
+            16..=17 => AgeBracket::OlderTeen,
+            _ => AgeBracket::Adult,
+        }
+    }
+
+    /// The console theme a bracket gets when the parent hasn't picked one.
+    pub fn default_theme(&self) -> Theme {
+        match self {
+            AgeBracket::Little | AgeBracket::Kid => Theme::Playful,
+            AgeBracket::YoungerTeen | AgeBracket::OlderTeen => Theme::Calm,
+            AgeBracket::Adult => Theme::Plain,
+        }
+    }
+
+    /// Whether a person in this bracket can ask the parent for more time.
+    pub fn can_request_time(&self) -> bool {
+        !matches!(self, AgeBracket::Little | AgeBracket::Adult)
+    }
+
+    /// Whether the hub enforces anything on this person at all.
+    pub fn is_managed(&self) -> bool {
+        !matches!(self, AgeBracket::Adult)
+    }
+
+    /// Seconds of wind-down countdown before a hard stop (0 = stop at once).
+    pub fn wind_down_secs(&self) -> u32 {
+        match self {
+            AgeBracket::YoungerTeen | AgeBracket::OlderTeen => 120,
+            _ => 0,
+        }
+    }
+}
+
+/// How a person's own page looks. `Playful` is the Duolingo-energy one for
+/// small children, `Calm` the quieter teen stats page, `Plain` the compact
+/// private dashboard for adults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Playful,
+    Calm,
+    Plain,
+}
+
+impl Theme {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Theme::Playful => "playful",
+            Theme::Calm => "calm",
+            Theme::Plain => "plain",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "playful" => Some(Theme::Playful),
+            "calm" => Some(Theme::Calm),
+            "plain" => Some(Theme::Plain),
+            _ => None,
         }
     }
 }
@@ -296,6 +468,44 @@ mod tests {
         assert!(!p.lockdown.block_vpn);
         assert!(p.lockdown.any());
         assert_eq!(p.parent_pin_hash.as_deref(), Some("argon2$abc"));
+    }
+
+    #[test]
+    fn blocks_absent_by_default_and_round_trip() {
+        let p: Policy = serde_json::from_str("{}").unwrap();
+        assert!(p.blocks.is_empty());
+        assert!(!serde_json::to_string(&p).unwrap().contains("blocks"));
+        let raw = r#"{ "blocks": { "apps": ["youtube"], "categories": ["adult"], "custom_domains": ["example.org"] } }"#;
+        let p: Policy = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.blocks.apps, vec!["youtube"]);
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"blocks\""));
+    }
+
+    #[test]
+    fn brackets_from_birthdate() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 8, 22).unwrap();
+        let b =
+            |y, m, d| AgeBracket::from_birthdate(NaiveDate::from_ymd_opt(y, m, d).unwrap(), today);
+        assert_eq!(b(2022, 1, 1), AgeBracket::Little);
+        assert_eq!(b(2020, 8, 22), AgeBracket::Kid); // turns 6 today
+        assert_eq!(b(2020, 8, 23), AgeBracket::Little); // turns 6 tomorrow
+        assert_eq!(b(2012, 1, 1), AgeBracket::YoungerTeen);
+        assert_eq!(b(2009, 1, 1), AgeBracket::OlderTeen);
+        assert_eq!(b(2000, 1, 1), AgeBracket::Adult);
+        assert_eq!(
+            AgeBracket::parse("younger_teen"),
+            Some(AgeBracket::YoungerTeen)
+        );
+        assert_eq!(
+            serde_json::to_string(&AgeBracket::YoungerTeen).unwrap(),
+            "\"younger_teen\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Theme::Playful).unwrap(),
+            "\"playful\""
+        );
     }
 
     #[test]
