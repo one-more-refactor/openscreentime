@@ -5,6 +5,12 @@
    in its own file so the base system stays diffable.
    ========================================================================== */
 
+/* A stacked rule row is a column flexbox that inherited `flex-wrap: wrap`
+   from .rl-row. Column + wrap is meaningless for its content, and in Chromium
+   it hands every grid child a stretched definite height — the app tiles came
+   out 235px tall. Wrapping off, the grid sizes to its content. */
+.rl-row-stack { flex-wrap: nowrap; }
+
 /* ---- apps & categories --------------------------------------------------- */
 .apps-cats {
   display: flex; flex-wrap: wrap; gap: 0.45rem;
