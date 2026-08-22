@@ -124,7 +124,53 @@ fn normalize_policy(v: Value) -> AppResult<Value> {
             p.dns.upstream
         )));
     }
+    let mut p = p;
+    sanitize_blocks(&mut p.blocks)?;
     Ok(serde_json::to_value(p).unwrap())
+}
+
+/// `blocks` hygiene: ids de-duplicated (unknown ones tolerated — a newer
+/// console may know apps this server's catalog does not yet), custom domains
+/// lower-cased, trimmed, de-duplicated, and **rejected** if they carry anything
+/// but hostname characters — like `dns.upstream`, they end up verbatim in the
+/// device's resolver config.
+fn sanitize_blocks(b: &mut openscreentime_policy::AppBlocks) -> AppResult<()> {
+    fn dedupe(v: &mut Vec<String>) {
+        let mut seen = std::collections::BTreeSet::new();
+        v.retain(|s| !s.trim().is_empty() && seen.insert(s.trim().to_string()));
+        for s in v.iter_mut() {
+            *s = s.trim().to_string();
+        }
+    }
+    dedupe(&mut b.apps);
+    dedupe(&mut b.categories);
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in &b.custom_domains {
+        let d = raw
+            .trim()
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if d.is_empty() {
+            continue;
+        }
+        let ok = d.len() <= 253
+            && d.contains('.')
+            && d
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_');
+        if !ok {
+            return Err(AppError::BadRequest(format!(
+                "blocks.custom_domains: {raw:?} is not a domain name"
+            )));
+        }
+        if seen.insert(d.clone()) {
+            out.push(d);
+        }
+    }
+    b.custom_domains = out;
+    Ok(())
 }
 
 /// Every profile in a tenant, as JSON. Shared with the family view so both
@@ -350,6 +396,28 @@ mod tests {
     use super::*;
     use argon2::password_hash::PasswordVerifier;
     use argon2::PasswordHash;
+
+    #[test]
+    fn blocks_are_cleaned_and_bad_domains_rejected() {
+        let v = normalize_policy(json!({
+            "blocks": { "apps": ["youtube", "youtube", " tiktok "],
+                        "categories": ["adult"],
+                        "custom_domains": [" .Example.ORG. ", "example.org", "foo.bar"] }
+        }))
+        .unwrap();
+        assert_eq!(v["blocks"]["apps"], json!(["youtube", "tiktok"]));
+        assert_eq!(v["blocks"]["custom_domains"], json!(["example.org", "foo.bar"]));
+
+        let err = normalize_policy(json!({ "blocks": { "custom_domains": ["evil.com/x y"] } }))
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let err = normalize_policy(json!({ "blocks": { "custom_domains": ["nodot"] } }))
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        // Empty blocks vanish from the stored document.
+        let v = normalize_policy(json!({ "blocks": { "apps": [] } })).unwrap();
+        assert!(v.get("blocks").is_none());
+    }
 
     #[tokio::test]
     async fn hash_pin_roundtrips_through_argon2_verify() {
