@@ -14,9 +14,11 @@
 //
 // Every commit goes through the caller's onSave → step-up → whole policy.
 // ============================================================================
-import { useEffect, useState } from "react";
-import type { Policy, Profile, TimeWindow, UnlockChallenge } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import { EMPTY_BLOCKS, type AppBlocks, type Catalog, type Policy, type Profile, type TimeWindow, type UnlockChallenge } from "../types";
 import { FluentSlider } from "../components/FluentSlider";
+import { getCatalog } from "../api";
+import { useAsync } from "../lib/useAsync";
 
 export function fmtMin(m: number): string {
   if (m < 60) return `${m} min`;
@@ -57,6 +59,7 @@ export function Rules({ profile, busy, onSave }: RulesProps) {
 
   return (
     <div className="rl">
+      <AppsAndCategories pol={pol} busy={busy} onSave={onSave} />
       <DailyLimit limit={limit} busy={busy} onSave={(m) =>
         onSave(
           withScreenTime({ daily_limit_minutes: m }),
@@ -69,6 +72,165 @@ export function Rules({ profile, busy, onSave }: RulesProps) {
       <SafeSearch pol={pol} busy={busy} onSave={onSave} />
       <EarnTime pol={pol} busy={busy} onSave={onSave} />
       <TimesUp pol={pol} busy={busy} onSave={onSave} />
+    </div>
+  );
+}
+
+// ---- apps & categories -----------------------------------------------------
+// The one-click blocks. A category is one decision ("no social media"); an
+// app is the exception a parent actually argues about ("…but YouTube is
+// fine"). Apps already covered by a blocked category are shown as covered and
+// can't be toggled on their own — the category is the rule, the grid is the
+// picture of it. Every tap is one save (one step-up), like the rest of the
+// rules. Names come from the server's catalog; the device holds the domains.
+
+/** A recognisable tile without shipping a logo pack: two letters, a hue. */
+function Monogram({ id, name }: { id: string; name: string }) {
+  let h = 0;
+  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  const parts = name.replace(/[()]/g, "").split(/[\s/]+/).filter(Boolean);
+  const mono = (parts.length >= 2 ? parts[0][0] + parts[1][0] : name.slice(0, 2)).toUpperCase();
+  return (
+    <span
+      className="apps-mono"
+      style={{ background: `hsl(${h} 45% 88%)`, color: `hsl(${h} 55% 26%)` }}
+      aria-hidden="true"
+    >
+      {mono}
+    </span>
+  );
+}
+
+function AppsAndCategories({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (p: Policy, note: string) => void }) {
+  const catalog = useAsync<Catalog>(getCatalog, []);
+  const blocks: AppBlocks = pol.blocks ?? EMPTY_BLOCKS;
+  const [showAll, setShowAll] = useState(false);
+
+  const cats = catalog.data?.categories ?? [];
+  const apps = catalog.data?.apps ?? [];
+  const blockedCats = useMemo(() => new Set(blocks.categories), [blocks.categories]);
+  const blockedApps = useMemo(() => new Set(blocks.apps), [blocks.apps]);
+
+  function save(next: Partial<AppBlocks>, note: string) {
+    onSave({ ...pol, blocks: { ...blocks, ...next } }, note);
+  }
+
+  function toggleCategory(id: string, name: string) {
+    const on = blockedCats.has(id);
+    save(
+      { categories: on ? blocks.categories.filter((c) => c !== id) : [...blocks.categories, id] },
+      on ? `${name} is allowed again.` : `${name} is blocked.`,
+    );
+  }
+  function toggleApp(id: string, name: string) {
+    const on = blockedApps.has(id);
+    save(
+      { apps: on ? blocks.apps.filter((a) => a !== id) : [...blocks.apps, id] },
+      on ? `${name} is allowed again.` : `${name} is blocked.`,
+    );
+  }
+
+  // The grid: blocked and covered apps first, then the rest; beyond twelve
+  // the list folds unless something inside is blocked or the parent opens it.
+  const covered = (a: { id: string; category: string }) => blockedCats.has(a.category);
+  const sorted = [...apps].sort((a, b) => {
+    const ra = blockedApps.has(a.id) || covered(a) ? 0 : 1;
+    const rb = blockedApps.has(b.id) || covered(b) ? 0 : 1;
+    return ra - rb;
+  });
+  const FOLD = 12;
+  const visible = showAll ? sorted : sorted.slice(0, FOLD);
+  const blockedCount = blockedCats.size + blocks.apps.filter((a) => !covered({ id: a, category: apps.find((x) => x.id === a)?.category ?? "" })).length;
+
+  return (
+    <div className="rl-row rl-row-stack">
+      <div className="rl-what">
+        <p className="rl-name">Apps &amp; categories</p>
+        <p className="rl-value">
+          {catalog.loading
+            ? "Loading the list…"
+            : blockedCount === 0
+              ? "Nothing blocked — tap a category or an app to block it, one tap to allow it again"
+              : `${blockedCats.size} ${blockedCats.size === 1 ? "category" : "categories"} and ${blocks.apps.length} ${blocks.apps.length === 1 ? "app" : "apps"} blocked on every device they use`}
+        </p>
+        {catalog.error && <p className="fam-error">Couldn't load the list: {catalog.error}</p>}
+      </div>
+
+      {cats.length > 0 && (
+        <div className="apps-cats" role="group" aria-label="Categories">
+          {cats.map((c) => {
+            const on = blockedCats.has(c.id);
+            return (
+              <button
+                key={c.id}
+                className="apps-cat"
+                data-on={on}
+                disabled={busy}
+                title={c.blurb}
+                aria-pressed={on}
+                onClick={() => toggleCategory(c.id, c.name)}
+              >
+                <span className="apps-cat-name">{c.name}</span>
+                <span className="apps-cat-n">
+                  {on ? "blocked" : c.app_ids.length > 0 ? `${c.app_ids.length} apps` : "sites"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {apps.length > 0 && (
+        <>
+          <div className="apps-grid" role="group" aria-label="Apps">
+            {visible.map((a) => {
+              const viaCat = covered(a);
+              const on = viaCat || blockedApps.has(a.id);
+              const catName = cats.find((c) => c.id === a.category)?.name ?? a.category;
+              return (
+                <button
+                  key={a.id}
+                  className="apps-tile"
+                  data-on={on}
+                  data-covered={viaCat}
+                  disabled={busy || viaCat}
+                  aria-pressed={on}
+                  title={viaCat ? `Blocked with ${catName}` : on ? `Allow ${a.name}` : `Block ${a.name}`}
+                  onClick={() => !viaCat && toggleApp(a.id, a.name)}
+                >
+                  <Monogram id={a.id} name={a.name} />
+                  <span className="apps-tile-name">{a.name}</span>
+                  <span className="apps-tile-state">{viaCat ? `via ${catName}` : on ? "blocked" : "allowed"}</span>
+                </button>
+              );
+            })}
+          </div>
+          {sorted.length > FOLD && (
+            <button className="ch-btn no-code" style={{ justifySelf: "start" }} onClick={() => setShowAll((s) => !s)}>
+              {showAll ? "Show fewer" : `All ${sorted.length} apps`}
+            </button>
+          )}
+        </>
+      )}
+
+      <details className="apps-more">
+        <summary>More — block a site by name</summary>
+        <div className="rl-app">
+          <ChipList
+            items={blocks.custom_domains}
+            busy={busy}
+            placeholder="+ site, e.g. example.com"
+            onAdd={(v) =>
+              blocks.custom_domains.includes(v)
+                ? undefined
+                : save({ custom_domains: [...blocks.custom_domains, v] }, `${v} is blocked.`)
+            }
+            onRemove={(v) =>
+              save({ custom_domains: blocks.custom_domains.filter((s) => s !== v) }, `${v} is allowed again.`)
+            }
+          />
+        </div>
+      </details>
     </div>
   );
 }
@@ -496,7 +658,7 @@ function EarnTime({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (
 const CHALLENGES: { key: UnlockChallenge; label: string; hint: string }[] = [
   { key: "wait", label: "Just wait", hint: "the screen stays off until tomorrow" },
   { key: "math", label: "Math problem", hint: "solving one earns a short extension" },
-  { key: "parent_pin", label: "Parent PIN", hint: "only you can reopen the screen" },
+  { key: "parent_pin", label: "Parent code", hint: "only you can reopen the screen, with the code from your authenticator app" },
 ];
 
 function TimesUp({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (p: Policy, note: string) => void }) {

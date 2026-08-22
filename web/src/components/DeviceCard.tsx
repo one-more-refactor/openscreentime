@@ -32,7 +32,7 @@ export function DeviceCard({
 }: Props) {
   const tone = statusTone(device.status);
   const users = device.users ?? [];
-  const isLocked = device.status === "locked";
+  const isLocked = device.locked;
   const isPending = device.status === "pending";
   // Tamper signal: offline for 7+ days = the agent has probably been silenced.
   const darkDays = goneDarkDays(device.status, device.last_seen);
