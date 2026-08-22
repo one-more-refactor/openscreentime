@@ -236,7 +236,7 @@ pub struct CreateDeviceReq {
     pub name: String,
     /// "This is <person>'s computer": OS logins that enroll without a name
     /// match link to this account instead of spawning a new member.
-    #[serde(default)]
+    #[serde(default, alias = "member_id")]
     pub account_id: Option<Uuid>,
 }
 
