@@ -24,6 +24,7 @@ interface NavEntry {
 const NAV: NavEntry[] = [
   { to: "/", label: "Family" },
   { to: "/devices", label: "Devices" },
+  { to: "/me", label: "My screen time" },
   { to: "/settings", label: "Settings" },
 ];
 
@@ -187,12 +188,26 @@ function RailFooter() {
 export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const { pathname } = useLocation();
+  const { me } = useSession();
 
   // Close the mobile drawer on navigation — leaving it open over the new page
   // is the classic drawer bug.
   useEffect(() => {
     setMenuOpen(false);
   }, [pathname]);
+
+  // A member has one page and no navigation to anywhere else: no rail, no
+  // drawer, no family list of siblings (members never see each other). The
+  // page itself carries the wordmark and the sign-out.
+  if (me?.account?.role === "member") {
+    return (
+      <div className="shell shell-member">
+        <main className="shell-main">
+          <Outlet />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="shell">
