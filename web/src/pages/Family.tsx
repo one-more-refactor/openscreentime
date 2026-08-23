@@ -18,6 +18,7 @@ import type { Device } from "../types";
 import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
+import { PageHead } from "../layout/PageHead";
 
 /** Deterministic warm hue per child, so an avatar is recognisable at a glance. */
 export function hueFor(key: string): number {
@@ -223,19 +224,22 @@ export function Family() {
 
   return (
     <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>
-      <header className="fam-head">
-        <h1 className="fam-greet">{greeting}</h1>
-        <Link to="/add" className="fam-add">
-          + Add a child
-        </Link>
-        <p className="fam-sub">
-          {loading && children.length === 0
-            ? " "
+      <PageHead
+        eyebrow="Family"
+        title={greeting}
+        sub={
+          loading && children.length === 0
+            ? "\u00a0"
             : children.length === 0
               ? "No children set up yet."
-              : `${children.length} ${children.length === 1 ? "child" : "children"} today`}
-        </p>
-      </header>
+              : `${children.length} ${children.length === 1 ? "child" : "children"} today`
+        }
+        actions={
+          <Link to="/add" className="focusable ph-action">
+            + Add a child
+          </Link>
+        }
+      />
 
       {error && <p className="fam-error">{error}</p>}
 

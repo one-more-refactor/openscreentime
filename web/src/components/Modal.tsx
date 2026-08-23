@@ -95,7 +95,7 @@ export function Modal({
         className={`modal-pop relative w-full bg-surface hairline rounded flex flex-col ${
           size === "full" ? "max-w-5xl h-[min(80vh,44rem)]" : "max-w-lg max-h-[85vh]"
         }`}
-        style={{ borderColor: danger ? "var(--accent)" : "var(--line-2)" }}
+        style={{ borderColor: danger ? "var(--accent)" : "var(--line-2)", boxShadow: "var(--elev-2)" }}
       >
         <span className="tick tick-tl" />
         <span className="tick tick-tr" />

@@ -6,9 +6,9 @@
 // and the bracket picks the starting rules; a parent can override the bracket
 // — a mature eleven-year-old, a late bloomer — without lying about the date.
 //
-// Step 2 is their computer: the one-line install, and next to it the parent
-// code for that machine — an authenticator-app secret the device verifies
-// offline. Scan it now; it is the key to that computer from here on.
+// Step 2 is their computer: the one-line install, and next to it the unlock
+// code for that machine — read live from here whenever it is needed, never
+// scanned into anything. OpenScreenTime itself is the authenticator.
 // ============================================================================
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -23,7 +23,9 @@ import {
   type EnrollTokenResponse,
   type Theme,
 } from "../types";
-import { QrCode } from "../components/QrCode";
+import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { PageHead } from "../layout/PageHead";
 import { familyChanged } from "../lib/family";
 
 const BRACKET_BLURB: Record<AgeBracket, string> = {
@@ -35,6 +37,7 @@ const BRACKET_BLURB: Record<AgeBracket, string> = {
 };
 
 export function AddChild() {
+  const { guard } = useChangeMode();
   const [name, setName] = useState("");
   const [birthdate, setBirthdate] = useState("");
   const [override, setOverride] = useState<AgeBracket | null>(null);
@@ -43,6 +46,7 @@ export function AddChild() {
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
 
   const derived = useMemo(() => (birthdate ? bracketForBirthdate(birthdate) : null), [birthdate]);
@@ -63,16 +67,22 @@ export function AddChild() {
       // The person first — with their bracket's starting rules — then the
       // computer, carrying their name so a parent can find it later, and
       // linked to them so whoever logs in on it lands on their own page.
-      const m = await api.createMember({
-        display_name: name.trim(),
-        birthdate: birthdate || null,
-        age_bracket: bracket,
-        theme,
+      // Both are changes, so both sit behind change mode.
+      const { m, dev } = await guard(async () => {
+        const m = await api.createMember({
+          display_name: name.trim(),
+          birthdate: birthdate || null,
+          age_bracket: bracket,
+          theme,
+        });
+        const dev = await api.createDevice(`${name.trim()}'s computer`, m.id);
+        return { m, dev };
       });
       setMember(m);
-      setEnroll(await api.createDevice(`${name.trim()}'s computer`, m.id));
+      setEnroll(dev);
       familyChanged();
     } catch (err) {
+      if (err instanceof StepUpCancelled) return;
       setError(err instanceof Error ? err.message : "Could not set that up");
     } finally {
       setBusy(false);
@@ -83,19 +93,22 @@ export function AddChild() {
     navigate(member ? `/child/${encodeURIComponent(member.id)}` : "/");
   }
 
+  function copy() {
+    void navigator.clipboard?.writeText(oneLiner);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  }
+
   return (
     <div className="ch-wrap">
-      <Link to="/" className="ch-back">← Family</Link>
-
       {!enroll ? (
         <>
-          <header className="ch-head-simple">
-            <h1 className="ch-name">Add a child</h1>
-            <p className="ch-meta">
-              You'll set up their computer next. This works on Linux computers only —
-              Windows, Mac, phones and tablets are not supported yet.
-            </p>
-          </header>
+          <PageHead
+            back={{ to: "/", label: "Family" }}
+            eyebrow="Add a child"
+            title="Who is this for?"
+            sub="You'll set up their computer next. Linux computers only for now — Windows, Mac, phones and tablets are not supported yet."
+          />
 
           <form onSubmit={create} className="add-form add-form-wide">
             <label className="add-label" htmlFor="child-name">
@@ -138,7 +151,7 @@ export function AddChild() {
                   type="button"
                   role="radio"
                   aria-checked={b.key === bracket}
-                  className="add-bracket"
+                  className="add-bracket no-code"
                   data-on={b.key === bracket}
                   onClick={() => setOverride(b.key === derived ? null : b.key)}
                 >
@@ -182,70 +195,58 @@ export function AddChild() {
         </>
       ) : (
         <>
-          <header className="ch-head-simple">
-            <h1 className="ch-name">Set up {name}'s computer</h1>
-            <p className="ch-meta">Two things, both on this screen only once.</p>
-          </header>
+          <PageHead
+            back={{ to: "/", label: "Family" }}
+            eyebrow="Add a child"
+            title={`Set up ${name}'s computer`}
+            sub="Two things. The command works once; the code you can always come back for."
+          />
 
           <div className="add-two">
-            <section className="add-col">
+            <section className="add-col card">
               <h2 className="ch-h2">1 · Install it</h2>
               <p className="add-step-text">
                 Open a Terminal on their computer, paste this in, and press Enter.
               </p>
               <pre className="add-code">{oneLiner}</pre>
-              <button className="ch-btn no-code" onClick={() => void navigator.clipboard?.writeText(oneLiner)}>
-                Copy command
+              <button className="ch-btn no-code" onClick={copy}>
+                {copied ? "Copied" : "Copy command"}
               </button>
               <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
                 This command works for 24 hours and only once.
               </p>
             </section>
 
-            <section className="add-col">
-              <h2 className="ch-h2">2 · Scan the parent code</h2>
+            <section className="add-col card">
+              <h2 className="ch-h2">2 · Your unlock code</h2>
               <p className="add-step-text">
-                Scan this into your authenticator app (Google Authenticator, Aegis, 1Password …).
-                It's the parent key for <strong>this computer</strong>: the 6-digit code it shows
-                unlocks the screen, reopens time, and lets you use <code>sudo</code> there — even
-                with no internet.
+                On {name}'s computer this code unlocks the screen, reopens time and allows{" "}
+                <code>sudo</code>. Read it here, on your phone, whenever you need it — it changes
+                every 30 seconds and works on the computer even with no internet. No authenticator
+                app to set up.
               </p>
-              {enroll.parent_code ? (
-                <div className="add-qr">
-                  <QrCode value={enroll.parent_code.otpauth_uri} label="Parent code QR" />
-                  <div className="add-qr-text">
-                    <p className="add-secret-label">Can't scan? Type this secret instead</p>
-                    <code className="add-secret">{enroll.parent_code.secret}</code>
-                    <button
-                      className="ch-btn no-code"
-                      onClick={() => void navigator.clipboard?.writeText(enroll.parent_code?.secret ?? "")}
-                    >
-                      Copy secret
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <p className="fam-quiet">
-                  This server didn't hand out a parent code yet — you can show it later from Settings →
-                  Security &amp; access.
-                </p>
-              )}
+              <UnlockCodePanel device={enroll.device} autoShow variant="step" />
             </section>
           </div>
 
           <div className="add-note">
             <p>
-              <strong>The install also prints an 8-digit backup code on screen.</strong> Write it
-              down — it appears once, and it is the spare key if your phone is ever out of reach.
+              <strong>Make recovery codes now, while you think of it.</strong> They are the spare
+              key for when your phone is out of reach — eight one-time codes, shown once, typed on
+              the computer itself.
             </p>
             <p className="ch-meta">
-              You can show the parent code again, or replace it, under Settings → Security &amp; access.
+              The unlock code and the recovery codes live under Settings → Unlock codes from here on.
             </p>
           </div>
 
-          <button className="ch-btn ch-btn-yes add-submit" onClick={done}>
+          <button className="ch-btn ch-btn-yes add-submit no-code" onClick={done}>
             Done
           </button>
+          <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
+            <Link to="/" className="ph-link">Back to the family</Link> without finishing — the computer
+            stays set up and waiting.
+          </p>
         </>
       )}
     </div>

@@ -224,6 +224,8 @@ export interface Device {
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
   pending_commands?: string[];
+  /** one-time recovery codes not yet used (0 when none were generated) */
+  recovery_codes_unused?: number;
 }
 
 // ---- Family (GET /api/family) ----------------------------------------------
@@ -481,11 +483,39 @@ export interface MeToday {
   windows: TimeWindow[];
 }
 
-/** The per-device parent code: an authenticator-app secret, verified offline
- * by the device. Shown as a QR; the secret is the text fallback. */
-export interface ParentCode {
-  secret: string;
-  otpauth_uri: string;
+// ---- Unlock codes (per device, owned by the server) ---------------------------
+// The 6-digit code a parent types on a child's computer — to unlock the
+// screen, reopen time, or `sudo` — is verified offline by the device, but the
+// secret never leaves the server and the agent. The console shows the CURRENT
+// code (a sensitive read: step-up gated), never the secret, never a QR.
+
+/** GET /api/devices/:id/unlock-code */
+export interface UnlockCode {
+  code: string;
+  /** until this code rolls over (the period is 30 s) */
+  seconds_left: number;
+  period: number;
+  device_name: string;
+}
+
+/** POST /api/devices/:id/unlock-code/rotate — a new secret; the recovery
+ * codes were keyed by the old one and are gone. */
+export interface UnlockCodeRotated extends UnlockCode {
+  recovery_codes_cleared: boolean;
+}
+
+/** POST /api/devices/:id/recovery-codes — eight one-time 8-digit codes,
+ * returned exactly once, "1234 5678" formatted. */
+export interface RecoveryCodes {
+  codes: string[];
+  generated_at: string;
+}
+
+/** GET /api/devices/:id/recovery-codes — how many are left, never which. */
+export interface RecoveryCodesStatus {
+  unused: number;
+  total: number;
+  generated_at: string | null;
 }
 
 export interface Me {
@@ -520,10 +550,18 @@ export interface TotpEnrollment {
   otpauth_uri: string;
 }
 
-/** A successful step-up: the grant is valid until `expires_at`. */
+/** A successful step-up: change mode is on until `expires_at`. */
 export interface StepUpGrant {
   method: SecondFactorMethod;
   expires_at: string;
+  /** the one allowed extension has been used */
+  extended: boolean;
+}
+
+/** GET /api/auth/stepup — is change mode on for this session, and until when. */
+export interface ChangeModeStatus {
+  armed_until: string | null;
+  extended: boolean;
 }
 
 // ---- Command / action responses --------------------------------------------
@@ -531,9 +569,6 @@ export interface StepUpGrant {
 export interface EnrollTokenResponse {
   device: Device;
   enroll_token: string;
-  /** Present when the device was just created — the parent code for it,
-   * returned exactly once here (again only via the step-up gated read). */
-  parent_code?: ParentCode | null;
 }
 
 /** POST /api/devices/:id/lock | /unlock. `delivered: false` means the command

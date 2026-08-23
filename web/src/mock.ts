@@ -10,7 +10,11 @@ import type {
   MemberPatch,
   MeToday,
   NewMember,
-  ParentCode,
+  ChangeModeStatus,
+  RecoveryCodes,
+  RecoveryCodesStatus,
+  UnlockCode,
+  UnlockCodeRotated,
   FamilyChild,
   FamilyResponse,
   Account,
@@ -240,6 +244,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: ago(2),
     created_at: "2026-06-10T08:00:00Z",
+    recovery_codes_unused: 6,
     users: [
       du("u-mia", "d-livingroom", "mia", "Mia", "p-kids", 48, 15),
       du("u-leo", "d-livingroom", "leo", "Leo", "p-teen", 96, 0),
@@ -261,6 +266,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: ago(18),
     created_at: "2026-06-12T18:20:00Z",
+    recovery_codes_unused: 8,
     users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen", 120, 20)],
   },
   {
@@ -279,6 +285,8 @@ export const mockDevices: Device[] = [
     created_at: "2026-06-14T09:00:00Z",
     // Ada took the desktop to a school project day — offline is allowed.
     offline_allowed_until: ago(-3 * 60),
+    // Nobody made recovery codes for this one yet — the card says so.
+    recovery_codes_unused: 0,
     users: [du("u-ada", "d-loft", "ada", "Ada", "p-default")],
   },
   {
@@ -580,7 +588,7 @@ export function mockCreditTime(deviceUserId: string, minutes: number): void {
 }
 
 /** Mock for POST /api/devices — creates a pending device + one-time token +
- * the device's parent code (authenticator secret), all shown once. */
+ * nothing else — the unlock code is read from the device later, on demand. */
 export function mockCreateDevice(name: string, member_id?: string): EnrollTokenResponse {
   const id = `mock-dev-${mockDevices.length + 1}`;
   const dev: Device = {
@@ -604,7 +612,6 @@ export function mockCreateDevice(name: string, member_id?: string): EnrollTokenR
   return {
     device: dev,
     enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
-    parent_code: mockParentCode(id),
   };
 }
 
@@ -783,30 +790,115 @@ export function mockDeleteMember(id: string): void {
   if (i >= 0) mockHouseholdAccounts.splice(i, 1);
 }
 
-// ---- Parent code ----------------------------------------------------------------
+// ---- Unlock codes -------------------------------------------------------------
+// A rotating 6-digit code per device that the console shows on demand, and a
+// set of one-time recovery codes. The mock keeps a secret per device and
+// derives the code from (secret, 30 s step) so it ticks over like the real one.
 
-const mockSecrets = new Map<string, string>();
-const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-function b32(n: number): string {
-  let out = "";
-  for (let i = 0; i < n; i++) out += B32[Math.floor(Math.random() * 32)];
-  return out;
-}
-export function mockParentCode(deviceId: string): ParentCode {
-  let secret = mockSecrets.get(deviceId);
-  if (!secret) {
-    secret = b32(32);
-    mockSecrets.set(deviceId, secret);
+const PERIOD = 30;
+const mockSecrets = new Map<string, number>();
+function mockSecret(deviceId: string): number {
+  let s = mockSecrets.get(deviceId);
+  if (s === undefined) {
+    s = Math.floor(Math.random() * 2 ** 31);
+    mockSecrets.set(deviceId, s);
   }
+  return s;
+}
+function sixDigits(secret: number, counter: number): string {
+  // A tiny integer hash — not TOTP, just stable and well spread.
+  let h = (secret ^ counter) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return String(h % 1_000_000).padStart(6, "0");
+}
+export function mockUnlockCode(deviceId: string): UnlockCode {
+  const now = Math.floor(Date.now() / 1000);
   const name = mockDevices.find((d) => d.id === deviceId)?.name ?? "device";
   return {
-    secret,
-    otpauth_uri: `otpauth://totp/OpenScreenTime:${encodeURIComponent(name)}?secret=${secret}&issuer=OpenScreenTime&digits=6&period=30`,
+    code: sixDigits(mockSecret(deviceId), Math.floor(now / PERIOD)),
+    seconds_left: PERIOD - (now % PERIOD),
+    period: PERIOD,
+    device_name: name,
   };
 }
-export function mockRotateParentCode(deviceId: string): ParentCode {
+export function mockRotateUnlockCode(deviceId: string): UnlockCodeRotated {
   mockSecrets.delete(deviceId);
-  return mockParentCode(deviceId);
+  mockRecovery.delete(deviceId);
+  const dev = mockDevices.find((d) => d.id === deviceId);
+  if (dev) dev.recovery_codes_unused = 0;
+  return { ...mockUnlockCode(deviceId), recovery_codes_cleared: true };
+}
+
+const mockRecovery = new Map<string, { codes: string[]; generated_at: string }>();
+export function mockGenerateRecoveryCodes(deviceId: string): RecoveryCodes {
+  const codes = Array.from({ length: 8 }, () => {
+    const n = String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
+    return `${n.slice(0, 4)} ${n.slice(4)}`;
+  });
+  const set = { codes, generated_at: new Date().toISOString() };
+  mockRecovery.set(deviceId, set);
+  const dev = mockDevices.find((d) => d.id === deviceId);
+  if (dev) dev.recovery_codes_unused = 8;
+  return set;
+}
+export function mockRecoveryCodesStatus(deviceId: string): RecoveryCodesStatus {
+  const set = mockRecovery.get(deviceId);
+  const dev = mockDevices.find((d) => d.id === deviceId);
+  const unused = set ? 8 : (dev?.recovery_codes_unused ?? 0);
+  return {
+    unused,
+    total: 8,
+    generated_at: set?.generated_at ?? (unused > 0 ? ago(9 * 24 * 60) : null),
+  };
+}
+
+// ---- Change mode ---------------------------------------------------------------
+// Mirrors the server's step-up grant: 15 minutes, one extension, lock anytime.
+
+const GRANT_MS = 15 * 60_000;
+let mockArmedUntil: number | null = null;
+let mockExtended = false;
+export const mockChangeMode = {
+  status(): ChangeModeStatus {
+    if (mockArmedUntil !== null && mockArmedUntil <= Date.now()) mockArmedUntil = null;
+    return {
+      armed_until: mockArmedUntil === null ? null : new Date(mockArmedUntil).toISOString(),
+      extended: mockExtended,
+    };
+  },
+  enter(): { expires_at: string; extended: boolean } {
+    mockArmedUntil = Date.now() + GRANT_MS;
+    mockExtended = false;
+    return { expires_at: new Date(mockArmedUntil).toISOString(), extended: false };
+  },
+  lock(): ChangeModeStatus {
+    mockArmedUntil = null;
+    mockExtended = false;
+    return { armed_until: null, extended: false };
+  },
+  extend(): ChangeModeStatus {
+    if (mockArmedUntil === null || mockArmedUntil <= Date.now()) {
+      throw new MockError("step_up_required", "Change mode is off.", 428);
+    }
+    if (mockExtended) throw new MockError("already_extended", "Already extended once.", 409);
+    mockArmedUntil = Date.now() + GRANT_MS;
+    mockExtended = true;
+    return this.status();
+  },
+};
+
+/** The shape api.ts's ApiError has, without importing api.ts (a cycle). */
+class MockError extends Error {
+  code: string;
+  status: number;
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.name = "ApiError";
+  }
 }
 
 // ---- The person's own page --------------------------------------------------------

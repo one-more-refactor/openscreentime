@@ -248,7 +248,8 @@ export function SecuritySlider({
         </ul>
         <p className="sec-invariant">
           Whatever you choose, this computer can never lock you out of it — you
-          can always get back in with your parent code (authenticator app) or the backup code, even with no internet.
+          can always get back in with its unlock code (Settings → Unlock codes) or a
+          recovery code, even with no internet.
         </p>
       </details>
 

@@ -4,7 +4,7 @@ import { useSession } from "../lib/session";
 import { useTheme } from "../lib/theme";
 import { useFamily, minutesLeft } from "../lib/family";
 import type { FamilyChild } from "../types";
-import { useStepUp } from "../lib/stepup";
+import { useChangeMode } from "../lib/changemode";
 import { Wordmark } from "../components/Wordmark";
 
 // The shell is one column of chrome and one column of content — no more.
@@ -28,21 +28,105 @@ const NAV: NavEntry[] = [
   { to: "/settings", label: "Settings" },
 ];
 
-/** While a step-up grant is live, say so — and how long it has left. */
-function ArmedChip() {
-  const { armed, armedUntil } = useStepUp();
+/** A small lock, open or shut. The shackle swings on a CSS transition. */
+export function LockGlyph({ open, size = 14 }: { open: boolean; size?: number }) {
+  return (
+    <svg
+      className="lockglyph"
+      data-open={open}
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path className="lockglyph-shackle" d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </svg>
+  );
+}
+
+function mmss(until: string): string {
+  const s = Math.max(0, Math.round((new Date(until).getTime() - Date.now()) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/**
+ * The console's one security control. Locked: a shut lock and "Make changes".
+ * On: an open lock, the minutes left, "Extend" (once) and "Lock". Sits in the
+ * rail footer on desktop and in the drawer on a phone — the same component.
+ */
+function ChangeModeControl() {
+  const { armed, armedUntil, extended, enter, lock, extend } = useChangeMode();
+  const [busy, setBusy] = useState(false);
   const [, tick] = useState(0);
   useEffect(() => {
     if (!armed) return;
     const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, [armed]);
-  if (!armed || !armedUntil) return null;
-  const s = Math.max(0, Math.round((new Date(armedUntil).getTime() - Date.now()) / 1000));
+
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    try {
+      await fn();
+    } catch {
+      /* the control re-renders from the provider's truth either way */
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="armed-chip" title="Changes need no code until this runs out">
-      <span className="armed-chip-dot" aria-hidden="true" />
-      Unlocked · {Math.floor(s / 60)}:{String(s % 60).padStart(2, "0")}
+    <div className="cm-rail" data-on={armed}>
+      <div className="cm-rail-state" role="status" aria-live="polite">
+        <LockGlyph open={armed} />
+        {armed && armedUntil ? (
+          <span className="cm-rail-text">
+            Change mode <span className="cm-rail-time">{mmss(armedUntil)}</span>
+          </span>
+        ) : (
+          <span className="cm-rail-text">Locked</span>
+        )}
+      </div>
+      <div className="cm-rail-actions">
+        {armed ? (
+          <>
+            {!extended && (
+              <button
+                type="button"
+                className="focusable cm-rail-btn no-code"
+                disabled={busy}
+                onClick={() => void run(extend)}
+                title="Another 15 minutes from now"
+              >
+                Extend
+              </button>
+            )}
+            <button
+              type="button"
+              className="focusable cm-rail-btn cm-rail-btn-lock no-code"
+              disabled={busy}
+              onClick={() => void run(lock)}
+            >
+              Lock
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="focusable cm-rail-btn cm-rail-btn-go no-code"
+            disabled={busy}
+            onClick={() => void run(enter)}
+          >
+            Make changes
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -165,7 +249,7 @@ function RailFooter() {
 
   return (
     <div className="rail-foot">
-      <ArmedChip />
+      <ChangeModeControl />
       {mock && <p className="rail-mock">Sample data</p>}
       <p className="rail-who">{me?.account?.display_name ?? me?.admin.display_name ?? "Parent"}</p>
       <div className="rail-foot-row">
@@ -189,6 +273,7 @@ export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const { pathname } = useLocation();
   const { me } = useSession();
+  const { armed } = useChangeMode();
 
   // Close the mobile drawer on navigation — leaving it open over the new page
   // is the classic drawer bug.
@@ -217,11 +302,13 @@ export function Shell() {
         <RailFooter />
       </aside>
 
-      {/* Mobile: a single floating trigger instead of a full bar. */}
+      {/* Mobile: a single floating trigger instead of a full bar. The dot says
+          change mode is on even with the drawer closed. */}
       <button
         className="focusable shell-menu-btn"
+        data-armed={armed}
         onClick={() => setMenuOpen(true)}
-        aria-label="Open navigation"
+        aria-label={armed ? "Open navigation (change mode is on)" : "Open navigation"}
         aria-expanded={menuOpen}
         type="button"
       >
@@ -247,25 +334,5 @@ export function Shell() {
         <Outlet />
       </main>
     </div>
-  );
-}
-
-interface HeaderProps {
-  title: string;
-  stat?: React.ReactNode;
-  actions?: React.ReactNode;
-}
-
-export function PageHeader({ title, stat, actions }: HeaderProps) {
-  return (
-    <header className="flex items-end justify-between gap-4 mb-8 flex-wrap">
-      <div className="flex items-end gap-6 flex-wrap">
-        <h1 className="text-xl" style={{ color: "var(--fg-display)", fontWeight: 500 }}>
-          {title}
-        </h1>
-        {stat}
-      </div>
-      {actions && <div className="flex items-center gap-2 flex-wrap">{actions}</div>}
-    </header>
   );
 }
