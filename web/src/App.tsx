@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { SessionProvider, useSession } from "./lib/session";
 import { ToastProvider } from "./lib/toast";
-import { StepUpProvider } from "./lib/stepup";
+import { ChangeModeProvider } from "./lib/changemode";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
 import { Family } from "./pages/Family";
@@ -51,11 +51,11 @@ export function App() {
         <Route
           element={
             <RequireAuth>
-              <StepUpProvider>
+              <ChangeModeProvider>
                 <MemberGate>
                   <Shell />
                 </MemberGate>
-              </StepUpProvider>
+              </ChangeModeProvider>
             </RequireAuth>
           }
         >

@@ -1,7 +1,6 @@
 /* ============================================================================
    0.4 additions to the console — apps & categories, the honest lock state,
-   age bracket / look pickers, the add-a-child two-column step, parent-code
-   rows. Same grammar as theme.css (monochrome, hairlines, one accent); kept
+   age bracket / look pickers, the add-a-child two-column step. Same grammar as theme.css (monochrome, hairlines, one accent); kept
    in its own file so the base system stays diffable.
    ========================================================================== */
 
@@ -143,26 +142,21 @@
 .add-col { min-width: 0; }
 .add-step-text { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--fg-dim); }
 .add-step-text strong, .add-step-text code { color: var(--fg); }
-.add-qr { display: grid; gap: 0.9rem; justify-items: start; }
-.add-qr-text { display: grid; gap: 0.4rem; justify-items: start; }
 .add-secret-label {
   margin: 0; color: var(--fg-faint);
   font-family: var(--font-mono); font-size: 0.625rem;
   text-transform: uppercase; letter-spacing: 0.08em;
 }
-.add-secret {
-  font-family: var(--font-mono); font-size: 0.8rem; letter-spacing: 0.08em;
-  word-break: break-all; color: var(--fg);
-}
-
-/* The QR: white quiet zone in both modes, since scanners want contrast, not
-   taste; a hairline keeps it from floating on the light theme. */
+/* The QR (the parent's own authenticator enrolment): white quiet zone in both
+   modes, since scanners want contrast, not taste; a hairline keeps it from
+   floating on the light theme. */
 .qr {
   display: inline-block; border-radius: var(--radius-sm); overflow: hidden;
   background: #fff; border: 1px solid var(--line); padding: 4px; box-sizing: content-box;
 }
 .qr svg { display: block; width: 100%; height: 100%; }
 
-/* ---- settings: parent codes per device ----------------------------------- */
-.pc-modal { display: grid; gap: 1rem; justify-items: center; text-align: center; }
-.pc-modal .add-secret { text-align: center; }
+/* ---- settings: the parent's authenticator enrolment ----------------------- */
+.tf-enrol { display: grid; gap: 1rem; grid-template-columns: auto 1fr; align-items: center; }
+@media (max-width: 480px) { .tf-enrol { grid-template-columns: 1fr; justify-items: center; } }
+.tf-enrol-text { display: grid; gap: 0.4rem; min-width: 0; }

@@ -70,23 +70,17 @@ export function Login() {
           SCREEN TIME FOR THE WHOLE FAMILY
         </p>
 
-        <div
-          className="flex gap-1 mb-6 border rounded p-1 w-fit"
-          style={{ borderColor: "var(--line)" }}
-        >
+        <div className="seg mb-6">
           {(["login", "register"] as Mode[]).map((m) => (
             <button
               key={m}
+              type="button"
               onClick={() => {
                 setMode(m);
                 setError(null);
               }}
-              className="focusable px-4 py-1.5 rounded text-[0.625rem] font-mono uppercase tracking-label transition-colors"
-              style={
-                mode === m
-                  ? { background: "var(--fg)", color: "var(--bg)" }
-                  : { color: "var(--fg-dim)" }
-              }
+              className="focusable seg-btn"
+              data-on={mode === m}
             >
               {m === "login" ? "SIGN IN" : "FIRST ADMIN"}
             </button>
@@ -176,9 +170,11 @@ export function Login() {
       >
         <div className="w-full max-w-md">
           <p className="label mb-3" style={{ color: "var(--fg-faint)" }}>
-            AGENT GUI — HOST INTERRUPTION
+            ON A CHILD'S COMPUTER — WHEN TIME IS UP
           </p>
-          <LockOverlay mode="timesup" countdown="00:00" challenge="math" />
+          <div style={{ boxShadow: "var(--elev-2)", borderRadius: "var(--radius)" }}>
+            <LockOverlay mode="timesup" countdown="00:00" challenge="math" />
+          </div>
         </div>
       </div>
     </div>

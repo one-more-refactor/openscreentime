@@ -76,7 +76,7 @@
 .shell-member:has(.theme-playful[data-mode="dark"]) { background: #1e1710; }
 .shell-main .me.theme-playful {
   background: var(--me-bg); border-radius: 28px; margin: 2rem auto; min-height: 0;
-  border: 1px solid var(--me-line);
+  border: 1px solid var(--me-line); box-shadow: var(--elev-1);
 }
 
 /* ---- head -------------------------------------------------------------------- */
@@ -182,6 +182,7 @@
   display: flex; align-items: center; gap: 0.8rem;
   padding: 0.9rem 1rem; border: 1px solid var(--me-line); border-radius: var(--me-radius);
   background: var(--me-surface); color: var(--me-ink);
+  box-shadow: var(--elev-1);
 }
 .me-card-title {
   margin: 0; color: var(--me-ink-3);

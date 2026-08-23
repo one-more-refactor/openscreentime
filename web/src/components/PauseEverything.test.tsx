@@ -7,9 +7,10 @@ import { render, screen, waitFor, act, cleanup, fireEvent } from "@testing-libra
 
 import type { Device } from "../types";
 // Registers the shared module mocks; must be imported before the component.
-import { apiCalls, apiImpl, toasts, stepUp, StepUpCancelled, resetApiMock, resetUiMocks } from "../test/mockApi";
+import { apiCalls, apiImpl, toasts, armChangeMode, resetApiMock, resetUiMocks } from "../test/mockApi";
 
 const { PauseEverything } = await import("./PauseEverything");
+const { ChangeModeProvider } = await import("../lib/changemode");
 
 function device(id: string, status: Device["status"] = "online", locked = false): Device {
   return {
@@ -18,7 +19,7 @@ function device(id: string, status: Device["status"] = "online", locked = false)
     name: id,
     hostname: id,
     os: "linux",
-    agent_version: "0.4.0",
+    agent_version: "0.5.0",
     status,
     locked,
     lock_pending: false,
@@ -32,6 +33,8 @@ function device(id: string, status: Device["status"] = "online", locked = false)
 beforeEach(() => {
   resetApiMock();
   resetUiMocks();
+  // Change mode is on for these — the pause itself is what's under test.
+  armChangeMode();
 });
 
 afterEach(cleanup);
@@ -40,14 +43,16 @@ function setup(devices: Device[], allPaused = false) {
   const onDone = mock(() => {});
   const onSweep = mock((_: boolean) => {});
   render(
-    <PauseEverything
-      devices={devices}
-      allPaused={allPaused}
-      onSweep={onSweep}
-      onDone={onDone}
-    />,
+    <ChangeModeProvider>
+      <PauseEverything
+        devices={devices}
+        allPaused={allPaused}
+        onSweep={onSweep}
+        onDone={onDone}
+      />
+    </ChangeModeProvider>,
   );
-  return { onDone, onSweep, button: screen.getByRole("button") };
+  return { onDone, onSweep, button: screen.getByRole("button", { name: /pause|resume/i }) };
 }
 
 describe("pause everything", () => {
@@ -117,8 +122,8 @@ describe("pause everything", () => {
     expect(toasts[0].tone).toBe("warn");
   });
 
-  test("cancelling the 2FA prompt is silent, not an error", async () => {
-    stepUp.guard = () => Promise.reject(new StepUpCancelled());
+  test("with change mode off, the hold asks for a code — and cancelling is silent", async () => {
+    apiImpl.getChangeMode = () => Promise.resolve({ armed_until: null, extended: false });
     const { button } = setup([device("a")]);
 
     await act(async () => {
@@ -126,8 +131,14 @@ describe("pause everything", () => {
       await new Promise((r) => setTimeout(r, 900));
     });
 
+    // The real change-mode dialog opens instead of the pause going through.
+    const cancel = await screen.findByRole("button", { name: /cancel/i });
+    expect(apiCalls.locked).toHaveLength(0);
+    fireEvent.click(cancel);
+
     await new Promise((r) => setTimeout(r, 60));
     // Changing your mind is not a failure and must not be scolded.
     expect(toasts).toHaveLength(0);
+    expect(apiCalls.locked).toHaveLength(0);
   });
 });

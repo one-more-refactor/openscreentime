@@ -9,10 +9,11 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   children: ReactNode;
 }
 
-// Silkscreen buttons: mono uppercase, hairline outline that sharpens on hover.
+// Silkscreen buttons: mono uppercase, hairline outline that sharpens on hover,
+// and the same press (scale 0.97) as every other control in the console.
 // `danger` = accent-red — reserved for locked/tamper/destructive actions.
 const base =
-  "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
+  "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded transition-[color,border-color,background-color,transform] duration-150 active:scale-[0.97] disabled:active:scale-100 disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
 
 const sizes: Record<Size, string> = {
   sm: "text-[0.625rem] px-2.5 py-1",

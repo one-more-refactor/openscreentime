@@ -33,10 +33,11 @@ import {
   policyForLevel,
 } from "../components/SecuritySlider";
 import { EventFeed } from "../components/EventFeed";
-import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { useChangeMode, StepUpCancelled } from "../lib/changemode";
 import { useFamily, familyChanged } from "../lib/family";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
+import { PageHead } from "../layout/PageHead";
 
 function hueFor(key: string): number {
   let h = 0;
@@ -168,7 +169,7 @@ function Identity({
 
 export function ChildDetail() {
   const { key = "" } = useParams();
-  const { guard } = useStepUp();
+  const { guard } = useChangeMode();
   const fam = useFamily();
   const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
@@ -331,36 +332,38 @@ export function ChildDetail() {
 
   return (
     <div className="ch-wrap">
-      <Link to="/" className="ch-back">← Family</Link>
-
-      <header className="ch-head">
-        <span
-          className="fam-avatar"
-          style={{
-            width: 64, height: 64, fontSize: 22,
-            background: `hsl(${hueFor(key)} 45% 88%)`,
-            color: `hsl(${hueFor(key)} 55% 26%)`,
-          }}
-          aria-hidden="true"
-        >
-          {initials(name)}
-        </span>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <h1 className="ch-name">{name}</h1>
-          <p className="ch-meta">
+      <PageHead
+        back={{ to: "/", label: "Family" }}
+        lead={
+          <span
+            className="fam-avatar"
+            style={{
+              width: 64, height: 64, fontSize: 22,
+              background: `hsl(${hueFor(key)} 45% 88%)`,
+              color: `hsl(${hueFor(key)} 55% 26%)`,
+            }}
+            aria-hidden="true"
+          >
+            {initials(name)}
+          </span>
+        }
+        title={name}
+        sub={
+          <>
             {profile?.name ?? "No rules yet"}
             {childDevices.length > 1 && ` · ${childDevices.length} devices`}
             {allPaused && " · paused"}
-          </p>
-          <Identity
-            bracket={child.age_bracket}
-            theme={child.theme}
-            busy={busy}
-            onBracket={setBracket}
-            onTheme={setTheme}
-          />
-        </div>
-      </header>
+          </>
+        }
+      >
+        <Identity
+          bracket={child.age_bracket}
+          theme={child.theme}
+          busy={busy}
+          onBracket={setBracket}
+          onTheme={setTheme}
+        />
+      </PageHead>
 
       {note && <p className="ch-note">{note}</p>}
       {error && <p className="fam-error" style={{ marginBottom: "1rem" }}>{error}</p>}

@@ -34,7 +34,7 @@ export function Toggle({ checked, onChange, label, hint, disabled, danger }: Pro
         aria-checked={checked}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
-        className="focusable relative w-11 h-6 border rounded transition-colors flex-none"
+        className="focusable tgl relative w-11 h-6 border rounded transition-colors flex-none"
         style={{
           borderColor: checked ? onColor : "var(--line-2)",
           background: checked ? onColor : "transparent",
