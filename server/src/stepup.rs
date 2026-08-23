@@ -40,9 +40,11 @@ use crate::auth::{gen_token, hash_token, session_cookie};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, AuthAdmin, SESSION_COOKIE};
 
-/// How long a grant lasts. Long enough to change several things in one sitting,
-/// short enough that a walked-away-from console is not a standing permission.
-const GRANT_MINUTES: i64 = 5;
+/// How long a grant lasts — the console calls this window **change mode**:
+/// enter a second factor once, change what you came to change, lock it again.
+/// Long enough for a real sitting, short enough that a walked-away-from
+/// console is not a standing permission. Extendable once (`/extend`).
+const GRANT_MINUTES: i64 = 15;
 /// Emailed codes are single-use and short-lived.
 const EMAIL_CODE_MINUTES: i64 = 10;
 /// Wrong second factors before the account has to wait.
@@ -51,7 +53,7 @@ const MAX_FAILS: i32 = 5;
 const LOCKOUT_BASE_SECS: i64 = 30;
 const LOCKOUT_MAX_SECS: i64 = 900;
 /// TOTP: RFC 6238 defaults, and one step of drift either side.
-const TOTP_STEP: u64 = 30;
+pub const TOTP_STEP: u64 = 30;
 const TOTP_SKEW: i64 = 1;
 const TOTP_DIGITS: u32 = 6;
 
@@ -80,6 +82,29 @@ fn now_counter() -> u64 {
     (Utc::now().timestamp() as u64) / TOTP_STEP
 }
 
+/// The code that is valid *right now* for a secret, and how many seconds it
+/// has left. This is what the console shows a parent as a device's unlock
+/// code: the server is the authenticator, the parent just reads.
+pub fn current_totp(secret_b32: &str) -> Option<(String, u64)> {
+    let now = Utc::now().timestamp() as u64;
+    let code = totp_at(secret_b32, now / TOTP_STEP)?;
+    Some((code, TOTP_STEP - now % TOTP_STEP))
+}
+
+/// Recovery-code MAC: hex HMAC-SHA256 over the ASCII digits of the code,
+/// keyed by the device's decoded TOTP secret. The agent computes the same
+/// (client `parentcode::recovery_mac`) to verify offline; the test vector
+/// below is shared with the client's tests so the two never drift.
+pub fn recovery_mac(secret_b32: &str, code: &str) -> Option<String> {
+    let key = base32::decode(
+        base32::Alphabet::Rfc4648 { padding: false },
+        &secret_b32.to_uppercase(),
+    )?;
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&key).ok()?;
+    mac.update(digits_only(code).as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
 /// A fresh 160-bit secret, base32 as the apps expect it.
 pub(crate) fn gen_totp_secret() -> String {
     let bytes: [u8; 20] = rand::thread_rng().gen();
@@ -102,6 +127,8 @@ fn exempt(path: &str) -> bool {
         || path == "/api/auth/voucher"
         || path == "/api/auth/stepup/verify"
         || path == "/api/auth/stepup/email/start"
+        // Locking change mode early must never itself need change mode.
+        || path == "/api/auth/stepup/lock"
         || path == "/api/me/2fa/totp/start"
         || path == "/api/me/2fa/totp/confirm"
         // A child asking for more time is not a takeover surface: it only
@@ -118,7 +145,8 @@ fn exempt(path: &str) -> bool {
 fn sensitive_read(path: &str) -> bool {
     path == "/api/me/passkeys"
         || path == "/api/parent-tokens"
-        || (path.starts_with("/api/devices/") && path.ends_with("/parent-code"))
+        || (path.starts_with("/api/devices/")
+            && (path.ends_with("/unlock-code") || path.ends_with("/recovery-codes")))
 }
 
 /// Layer over the `/api` router: any mutating request needs a live grant.
@@ -195,9 +223,10 @@ async fn session_id_for(st: &AppState, jar: &CookieJar) -> AppResult<Uuid> {
     .ok_or_else(|| AppError::Unauthorized("no session".into()))
 }
 
-/// Grant the current session five minutes of write access, and rotate its
-/// token while we are here — a step-up is the natural moment to re-issue,
-/// since it is the one point where the user has just re-proved themselves.
+/// Grant the current session its change-mode window, and rotate its token
+/// while we are here — a step-up is the natural moment to re-issue, since it
+/// is the one point where the user has just re-proved themselves. A fresh
+/// grant also gets its one extension back.
 async fn grant_and_rotate(
     st: &AppState,
     jar: CookieJar,
@@ -213,6 +242,7 @@ async fn grant_and_rotate(
                 prev_valid_until = now() + interval '2 minutes',
                 token_hash       = $2,
                 stepup_until     = $3,
+                stepup_extended  = false,
                 last_seen_at     = now(),
                 expires_at       = GREATEST(expires_at, now() + interval '7 days')
           WHERE id = $1",
@@ -489,8 +519,82 @@ pub async fn verify(
     let (jar, expires) = grant_and_rotate(&st, jar, session_id).await?;
     Ok((
         jar,
-        Json(json!({ "method": req.method, "expires_at": expires })),
+        Json(json!({ "method": req.method, "expires_at": expires, "extended": false })),
     ))
+}
+
+// ── change mode ─────────────────────────────────────────────────────────────
+//
+// The grant already existed; these three handlers make it a thing the console
+// can show, end and stretch — so "am I in change mode?" survives a reload,
+// "lock it down" is a click, and one overrun does not mean typing a code again.
+
+async fn change_mode_json(st: &AppState, session_id: Uuid) -> AppResult<Value> {
+    let row: (Option<DateTime<Utc>>, bool) =
+        sqlx::query_as("SELECT stepup_until, stepup_extended FROM admin_sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&st.db)
+            .await?;
+    let armed_until = row.0.filter(|t| *t > Utc::now());
+    Ok(json!({
+        "armed_until": armed_until,
+        "extended": armed_until.is_some() && row.1,
+    }))
+}
+
+/// `GET /api/auth/stepup` → is this session in change mode, until when, and
+/// has it used its extension. A plain read.
+pub async fn change_mode_status(
+    State(st): State<AppState>,
+    _admin: AuthAdmin,
+    jar: CookieJar,
+) -> AppResult<Json<Value>> {
+    let session_id = session_id_for(&st, &jar).await?;
+    Ok(Json(change_mode_json(&st, session_id).await?))
+}
+
+/// `POST /api/auth/stepup/lock` → leave change mode now. Exempt from the
+/// guard (you are giving power up, not taking it).
+pub async fn change_mode_lock(
+    State(st): State<AppState>,
+    _admin: AuthAdmin,
+    jar: CookieJar,
+) -> AppResult<Json<Value>> {
+    let session_id = session_id_for(&st, &jar).await?;
+    sqlx::query(
+        "UPDATE admin_sessions SET stepup_until = NULL, stepup_extended = false WHERE id = $1",
+    )
+    .bind(session_id)
+    .execute(&st.db)
+    .await?;
+    Ok(Json(json!({ "armed_until": null, "extended": false })))
+}
+
+/// `POST /api/auth/stepup/extend` → another window from now, once per grant.
+/// Guarded by the layer, so it only works while change mode is live — an
+/// expired grant cannot be revived without a factor.
+pub async fn change_mode_extend(
+    State(st): State<AppState>,
+    _admin: AuthAdmin,
+    jar: CookieJar,
+) -> AppResult<Json<Value>> {
+    let session_id = session_id_for(&st, &jar).await?;
+    let expires = Utc::now() + Duration::minutes(GRANT_MINUTES);
+    let updated = sqlx::query(
+        "UPDATE admin_sessions SET stepup_until = $2, stepup_extended = true
+          WHERE id = $1 AND stepup_extended = false AND stepup_until > now()",
+    )
+    .bind(session_id)
+    .bind(expires)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(AppError::Conflict(
+            "change mode was already extended once — lock and enter a code again".into(),
+        ));
+    }
+    Ok(Json(json!({ "armed_until": expires, "extended": true })))
 }
 
 async fn verify_totp(st: &AppState, admin_id: Uuid, code: &str) -> AppResult<bool> {
@@ -729,14 +833,43 @@ mod tests {
         assert!(exempt("/api/me/2fa/totp/confirm"));
         assert!(exempt("/api/auth/voucher"));
         assert!(exempt("/api/me/ask"));
+        // Leaving change mode never needs change mode; extending it does.
+        assert!(exempt("/api/auth/stepup/lock"));
+        assert!(!exempt("/api/auth/stepup/extend"));
+    }
+
+    /// Shared with the client (`parentcode::recovery_mac` test): the two sides
+    /// must agree byte-for-byte or no recovery code would ever open a door.
+    #[test]
+    fn recovery_mac_matches_the_shared_vector() {
+        assert_eq!(
+            recovery_mac("GEZDGNBVGY3TQOJQ", "12345678").as_deref(),
+            Some("0008171f02a4c9c7b347dcc77ff65745007d09e8b442eef48f92de5f11e953cd")
+        );
+        // The space people type is not part of the message.
+        assert_eq!(
+            recovery_mac("GEZDGNBVGY3TQOJQ", "1234 5678"),
+            recovery_mac("GEZDGNBVGY3TQOJQ", "12345678")
+        );
+        assert!(recovery_mac("not base32 !!", "12345678").is_none());
+    }
+
+    #[test]
+    fn current_totp_counts_down_within_the_step() {
+        let (code, left) = current_totp("GEZDGNBVGY3TQOJQ").unwrap();
+        assert_eq!(code.len(), 6);
+        assert!((1..=TOTP_STEP).contains(&left));
     }
 
     #[test]
     fn sensitive_inventories_are_guarded_reads() {
         assert!(sensitive_read("/api/me/passkeys"));
         assert!(sensitive_read("/api/parent-tokens"));
-        // The per-device parent code is the key to the child's machine.
-        assert!(sensitive_read("/api/devices/abc/parent-code"));
+        // The per-device unlock code is the key to the child's machine, and
+        // the recovery-code status says how many spare keys exist.
+        assert!(sensitive_read("/api/devices/abc/unlock-code"));
+        assert!(sensitive_read("/api/devices/abc/recovery-codes"));
+        assert!(!sensitive_read("/api/devices/abc/parent-code"));
         // The status the step-up dialog itself needs must stay free, or you
         // would need a grant to find out how to get a grant.
         assert!(!sensitive_read("/api/me/2fa"));

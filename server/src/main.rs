@@ -222,6 +222,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me/2fa/totp/confirm", post(stepup::totp_confirm))
         .route("/api/auth/stepup/email/start", post(stepup::email_start))
         .route("/api/auth/stepup/verify", post(stepup::verify))
+        // --- Change mode (the grant, made visible/endable/extendable) -------
+        .route("/api/auth/stepup", get(stepup::change_mode_status))
+        .route("/api/auth/stepup/lock", post(stepup::change_mode_lock))
+        .route("/api/auth/stepup/extend", post(stepup::change_mode_extend))
         .route("/api/auth/voucher", post(stepup::redeem_voucher))
         // --- Devices -------------------------------------------------------
         .route(
@@ -235,12 +239,16 @@ async fn main() -> anyhow::Result<()> {
                 .delete(devices::delete_device),
         )
         .route(
-            "/api/devices/{id}/parent-code",
-            get(devices::get_parent_code),
+            "/api/devices/{id}/unlock-code",
+            get(devices::get_unlock_code),
         )
         .route(
-            "/api/devices/{id}/parent-code/rotate",
-            post(devices::rotate_parent_code),
+            "/api/devices/{id}/unlock-code/rotate",
+            post(devices::rotate_unlock_code),
+        )
+        .route(
+            "/api/devices/{id}/recovery-codes",
+            get(devices::recovery_codes_status).post(devices::generate_recovery_codes),
         )
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
