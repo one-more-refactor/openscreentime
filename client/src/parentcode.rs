@@ -1,27 +1,33 @@
-//! The parent code — a per-device TOTP (RFC 6238) verified **offline**.
+//! The unlock code — a per-device TOTP (RFC 6238) verified **offline**, plus
+//! one-time recovery codes.
 //!
-//! The server mints a secret per device and shows it once as an `otpauth://`
-//! QR; the parent scans it into their authenticator app. The agent receives
-//! the same secret in the policy bundle (`parent_code.totp_secret`, cached
-//! root-only) and verifies typed codes here with no server round-trip: the
-//! lockout overlay's parent field, `ost unlock`, and the PAM helper that gates
-//! `sudo` on a managed machine all go through [`Verifier::verify`].
+//! The server mints a secret per device and keeps it; the parent never holds
+//! it. They read the *current* 6-digit code off the OpenScreenTime console
+//! (after proving it's them), and this agent — which received the same secret
+//! in the policy bundle (`parent_code.totp_secret`, cached root-only) —
+//! verifies what gets typed with no server round-trip: the lockout overlay's
+//! parent field, `ost unlock`, and the PAM helper that gates `sudo` on a
+//! managed machine all go through [`Verifier::verify`].
 //!
-//! Rules (docs/CONTRACT-0.4.md §4):
+//! Rules (docs/CONTRACT-0.4.md §4, CONTRACT-0.5.md §1):
 //! * SHA1, 6 digits, 30 s steps, ±1 step of clock drift.
 //! * **Single-use**: the last accepted counter is persisted, so a code that
 //!   was just typed cannot be replayed within its window by someone watching.
 //! * Five wrong codes → 60 s lockout, doubling per further failure, capped at
 //!   15 min. Persisted, so a restart does not reset the clock.
-//! * The device recovery PIN survives only as the **backup code**
-//!   (`parent_pin_hash`, argon2): accepted, but reported as such so the parent
-//!   knows the authenticator path was bypassed.
+//! * **Recovery codes**: 8 digits, one-time, generated in the console and
+//!   delivered here as `{id, mac}` with `mac = HMAC-SHA256(secret, digits)`.
+//!   Accepted offline, remembered as spent in the state file, and reported as
+//!   `parent_code_backup_used` with the id so the server retires it too.
+//! * A profile-level **backup code** (`parent_pin_hash`, argon2) still opens
+//!   the door when an admin set one deliberately; it is reported as such.
 //!
 //! Why per-device rather than the parent's account TOTP: extracting this
 //! secret needs root on the device, and root on the device is already game
 //! over *for that device* — it must not also be game over for the parent's
-//! console account. One authenticator entry per managed computer is the price.
+//! console account.
 
+use crate::policy::RecoveryCode;
 use crate::protocol::{Event, SEV_INFO, SEV_WARN};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -31,6 +37,8 @@ use std::path::{Path, PathBuf};
 
 pub const STEP_SECS: u64 = 30;
 pub const DIGITS: u32 = 6;
+/// Recovery codes are 8 digits ("1234 5678" on the printout).
+pub const RECOVERY_DIGITS: usize = 8;
 /// Accept the previous and next step as well as the current one.
 const WINDOW: u64 = 1;
 /// Wrong attempts before the first lockout.
@@ -51,10 +59,13 @@ pub fn state_path() -> PathBuf {
 /// The outcome of checking a typed code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// A fresh, in-window authenticator code.
+    /// A fresh, in-window unlock code.
     Ok,
-    /// Matched the backup code (the legacy recovery PIN). Still an unlock,
-    /// but the parent should hear that the authenticator was not used.
+    /// A one-time recovery code (its server id). Still an unlock, reported so
+    /// the console can retire the code and the parent sees it was used.
+    Recovery(String),
+    /// Matched a profile-level backup code (argon2 `parent_pin_hash`). Still
+    /// an unlock, but the parent should hear the unlock code was not used.
     Backup,
     Wrong,
     /// Too many wrong attempts; try again in this many seconds.
@@ -66,18 +77,19 @@ pub enum Verdict {
 impl Verdict {
     /// Anything that should open the door.
     pub fn accepted(&self) -> bool {
-        matches!(self, Verdict::Ok | Verdict::Backup)
+        matches!(self, Verdict::Ok | Verdict::Recovery(_) | Verdict::Backup)
     }
 
     /// One line for a person at the keyboard.
     pub fn message(&self) -> String {
         match self {
-            Verdict::Ok => "parent code accepted".into(),
-            Verdict::Backup => "backup code accepted (authenticator not used)".into(),
+            Verdict::Ok => "unlock code accepted".into(),
+            Verdict::Recovery(_) => "recovery code accepted (it is now used up)".into(),
+            Verdict::Backup => "backup code accepted (unlock code not used)".into(),
             Verdict::Wrong => "wrong code".into(),
             Verdict::LockedOut(s) => format!("too many wrong codes — try again in {s}s"),
             Verdict::NotConfigured => {
-                "no parent code is set up on this computer (no authenticator secret and no backup code)".into()
+                "no unlock code is set up on this computer yet (the agent has not pulled one from the server)".into()
             }
         }
     }
@@ -93,6 +105,10 @@ pub struct State {
     pub failures: u32,
     #[serde(default)]
     pub locked_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Recovery codes already spent on this device (by server id), so one is
+    /// single-use even while offline and before the server hears about it.
+    #[serde(default)]
+    pub used_recovery: Vec<String>,
 }
 
 impl State {
@@ -161,6 +177,28 @@ pub fn totp_at(key: &[u8], counter: u64) -> String {
     format!("{code:0width$}", width = DIGITS as usize)
 }
 
+/// The recovery-code MAC: hex HMAC-SHA256 over the 8 ASCII digits, keyed by
+/// the decoded TOTP secret. Must equal the server's `stepup::recovery_mac`
+/// byte for byte (shared test vector below). Only the server *produces* MACs;
+/// the agent only ever checks them (`recovery_matches`, constant-time), which
+/// is why this lives in the tests.
+#[cfg(test)]
+pub fn recovery_mac(key: &[u8], digits: &str) -> String {
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("hmac accepts any key length");
+    mac.update(digits.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Constant-time: does this code's MAC match the stored one?
+fn recovery_matches(key: &[u8], digits: &str, stored_hex: &str) -> bool {
+    let Ok(stored) = hex::decode(stored_hex.trim()) else {
+        return false;
+    };
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("hmac accepts any key length");
+    mac.update(digits.as_bytes());
+    mac.verify_slice(&stored).is_ok()
+}
+
 fn now_counter() -> u64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -169,12 +207,14 @@ fn now_counter() -> u64 {
     secs / STEP_SECS
 }
 
-/// Verifies parent codes for this device.
+/// Verifies unlock codes for this device.
 #[derive(Debug, Clone)]
 pub struct Verifier {
     /// Base32 TOTP secret (from the policy bundle's `parent_code`).
     secret: Option<String>,
-    /// Argon2 PHC hash of the backup code (the legacy recovery PIN).
+    /// Unused recovery codes `{id, mac}` from the same bundle.
+    recovery: Vec<RecoveryCode>,
+    /// Argon2 PHC hash of a profile-level backup code.
     backup_hash: Option<String>,
     state_path: PathBuf,
 }
@@ -183,21 +223,35 @@ impl Verifier {
     pub fn new(secret: Option<String>, backup_hash: Option<String>) -> Self {
         Verifier {
             secret: secret.filter(|s| !s.trim().is_empty()),
+            recovery: Vec::new(),
             backup_hash: backup_hash.filter(|h| !h.trim().is_empty()),
             state_path: state_path(),
         }
     }
 
+    /// Also accept these one-time recovery codes (needs the secret to check).
+    pub fn with_recovery(mut self, codes: Vec<RecoveryCode>) -> Self {
+        self.recovery = codes
+            .into_iter()
+            .filter(|c| !c.id.trim().is_empty() && !c.mac.trim().is_empty())
+            .collect();
+        self
+    }
+
     /// The verifier for this device, from what the agent last cached: the
-    /// bundle's `parent_code` secret plus the device's backup-code hash
-    /// (from any user's policy — the server fills the device PIN in wherever
-    /// a profile sets none). Works with no agent process and no network.
+    /// bundle's `parent_code` (secret + recovery codes) plus any profile-level
+    /// backup-code hash. Works with no agent process and no network.
     pub fn from_device() -> Self {
         let bundle = crate::policy::load_bundle_cache().ok();
         let secret = bundle
             .as_ref()
             .and_then(|b| b.parent_code.as_ref())
             .map(|p| p.totp_secret.clone());
+        let recovery = bundle
+            .as_ref()
+            .and_then(|b| b.parent_code.as_ref())
+            .map(|p| p.recovery_codes.clone())
+            .unwrap_or_default();
         let backup = bundle
             .as_ref()
             .and_then(|b| {
@@ -210,7 +264,17 @@ impl Verifier {
                     .ok()
                     .and_then(|p| p.parent_pin_hash)
             });
-        Self::new(secret, backup)
+        Self::new(secret, backup).with_recovery(recovery)
+    }
+
+    /// Recovery codes still usable on this device (the bundle's unused set
+    /// minus what this device already spent offline).
+    pub fn recovery_codes_left(&self) -> usize {
+        let st = State::load_from(&self.state_path);
+        self.recovery
+            .iter()
+            .filter(|c| !st.used_recovery.contains(&c.id))
+            .count()
     }
 
     #[cfg(test)]
@@ -255,6 +319,23 @@ impl Verifier {
                 }
             }
         }
+        // Recovery codes: 8 digits, keyed MAC, single-use (spent ids persist).
+        if verdict == Verdict::Wrong
+            && code.len() == RECOVERY_DIGITS
+            && code.chars().all(|c| c.is_ascii_digit())
+        {
+            if let Some(key) = self.secret.as_deref().and_then(base32_decode) {
+                if let Some(hit) = self
+                    .recovery
+                    .iter()
+                    .filter(|c| !st.used_recovery.contains(&c.id))
+                    .find(|c| recovery_matches(&key, &code, &c.mac))
+                {
+                    st.used_recovery.push(hit.id.clone());
+                    verdict = Verdict::Recovery(hit.id.clone());
+                }
+            }
+        }
         if verdict == Verdict::Wrong {
             if let Some(hash) = self.backup_hash.as_deref() {
                 if crate::pin::verify_pin(&code, hash) {
@@ -264,7 +345,7 @@ impl Verifier {
         }
 
         match verdict {
-            Verdict::Ok | Verdict::Backup => {
+            Verdict::Ok | Verdict::Recovery(_) | Verdict::Backup => {
                 st.failures = 0;
                 st.locked_until = None;
             }
@@ -286,15 +367,21 @@ impl Verifier {
 }
 
 /// The audit event for a verification attempt: `parent_code_ok` /
-/// `parent_code_backup_used` (warn) / `parent_code_failed` (warn).
+/// `parent_code_backup_used` (warn; carries `recovery_id` when a recovery
+/// code was spent, so the server retires it) / `parent_code_failed` (warn).
 /// `via` is where it was typed: `"overlay"`, `"unlock"`, `"tray"`, `"pam"`.
 pub fn event(verdict: &Verdict, via: &str, user: &str) -> Event {
     let (kind, sev, detail) = match verdict {
-        Verdict::Ok => (EV_PARENT_CODE_OK, SEV_INFO, "authenticator code accepted"),
+        Verdict::Ok => (EV_PARENT_CODE_OK, SEV_INFO, "unlock code accepted"),
+        Verdict::Recovery(_) => (
+            EV_PARENT_CODE_BACKUP_USED,
+            SEV_WARN,
+            "recovery code accepted — it is now used up",
+        ),
         Verdict::Backup => (
             EV_PARENT_CODE_BACKUP_USED,
             SEV_WARN,
-            "backup code accepted — the authenticator was not used",
+            "backup code accepted — the unlock code was not used",
         ),
         Verdict::Wrong => (EV_PARENT_CODE_FAILED, SEV_WARN, "wrong code"),
         Verdict::LockedOut(_) => (
@@ -302,13 +389,13 @@ pub fn event(verdict: &Verdict, via: &str, user: &str) -> Event {
             SEV_WARN,
             "locked out after repeated wrong codes",
         ),
-        Verdict::NotConfigured => (EV_PARENT_CODE_FAILED, SEV_WARN, "no parent code configured"),
+        Verdict::NotConfigured => (EV_PARENT_CODE_FAILED, SEV_WARN, "no unlock code configured"),
     };
-    let mut ev = Event::new(
-        kind,
-        sev,
-        json!({ "via": via, "user": user, "detail": detail }),
-    );
+    let mut payload = json!({ "via": via, "user": user, "detail": detail });
+    if let Verdict::Recovery(id) = verdict {
+        payload["recovery_id"] = json!(id);
+    }
+    let mut ev = Event::new(kind, sev, payload);
     if !user.is_empty() {
         ev = ev.for_user(user);
     }
@@ -429,6 +516,66 @@ mod tests {
         );
         assert_eq!(event(&Verdict::Ok, "pam", "kid").ev_type, EV_PARENT_CODE_OK);
         assert_eq!(event(&Verdict::Wrong, "overlay", "kid").severity, SEV_WARN);
+    }
+
+    /// Shared with the server (`stepup::recovery_mac` test): both sides must
+    /// produce this exact MAC or no recovery code would ever open a door.
+    #[test]
+    fn recovery_mac_matches_the_shared_vector() {
+        let key = base32_decode("GEZDGNBVGY3TQOJQ").unwrap();
+        assert_eq!(
+            recovery_mac(&key, "12345678"),
+            "0008171f02a4c9c7b347dcc77ff65745007d09e8b442eef48f92de5f11e953cd"
+        );
+    }
+
+    #[test]
+    fn recovery_code_opens_once_and_is_reported_by_id() {
+        let key = base32_decode("GEZDGNBVGY3TQOJQ").unwrap();
+        let codes = vec![
+            RecoveryCode {
+                id: "rc-a".into(),
+                mac: recovery_mac(&key, "12345678"),
+            },
+            RecoveryCode {
+                id: "rc-b".into(),
+                mac: recovery_mac(&key, "87654321"),
+            },
+        ];
+        let v = Verifier::new(Some("GEZDGNBVGY3TQOJQ".into()), None)
+            .with_recovery(codes)
+            .with_state_path(tmp("recovery.json"));
+        let now = chrono::Utc::now();
+        assert_eq!(v.recovery_codes_left(), 2);
+        // "1234 5678" as printed
+        assert_eq!(
+            v.verify_at("1234 5678", 3, now),
+            Verdict::Recovery("rc-a".into())
+        );
+        assert_eq!(v.recovery_codes_left(), 1);
+        // spent: the same code is now just wrong, even offline
+        assert_eq!(v.verify_at("12345678", 3, now), Verdict::Wrong);
+        // the other one still works; the 6-digit TOTP path is untouched
+        assert_eq!(
+            v.verify_at("87654321", 3, now),
+            Verdict::Recovery("rc-b".into())
+        );
+        assert_eq!(v.verify_at(&totp_at(&key, 4), 4, now), Verdict::Ok);
+        // the event carries the id for the server to retire it
+        let ev = event(&Verdict::Recovery("rc-a".into()), "pam", "kid");
+        assert_eq!(ev.ev_type, EV_PARENT_CODE_BACKUP_USED);
+        assert_eq!(ev.payload["recovery_id"], "rc-a");
+        // a recovery code without the secret can never be checked
+        let no_secret = Verifier::new(None, None)
+            .with_recovery(vec![RecoveryCode {
+                id: "x".into(),
+                mac: recovery_mac(&key, "11112222"),
+            }])
+            .with_state_path(tmp("recovery-nosecret.json"));
+        assert_eq!(
+            no_secret.verify_at("11112222", 3, now),
+            Verdict::NotConfigured
+        );
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! `openscreentime pam-auth` — the PAM half of "sudo on a managed machine asks
-//! for the parent's authenticator code" (docs/CONTRACT-0.4.md §8).
+//! for the parent's unlock code" (docs/CONTRACT-0.4.md §8; the code itself is
+//! read off the OpenScreenTime console, CONTRACT-0.5.md §1).
 //!
 //! Wired from `/etc/pam.d/openscreentime-parent` as
 //! `auth required pam_exec.so expose_authtok quiet …/openscreentime pam-auth`,
 //! and selected for managed users by a sudoers `Defaults:%ost-managed
 //! pam_service=openscreentime-parent`. pam_exec runs us with the privileges of
 //! the calling process — sudo is setuid root — so the root-only bundle cache
-//! (TOTP secret, backup hash) is readable, and we write the replay counter.
+//! (TOTP secret, recovery codes, backup hash) is readable, and we write the
+//! replay counter / spent-code list.
 //!
 //! Exit 0 = accept, 1 = refuse. Nothing is printed (pam_exec's `quiet` hides
 //! our stdout anyway; the user sees sudo's own "Sorry, try again.").

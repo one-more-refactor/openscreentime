@@ -232,8 +232,10 @@ pub struct Agent {
     /// os_username → profile kind (the age bracket id, or a legacy preset
     /// name). Drives overlay wording and the managed-sudo list.
     kinds: HashMap<String, String>,
-    /// The device's parent authenticator secret from the last bundle.
+    /// The device's unlock-code secret from the last bundle.
     parent_totp_secret: Option<String>,
+    /// Unused one-time recovery codes from the last bundle.
+    parent_recovery: Vec<crate::policy::RecoveryCode>,
     /// (user, app) → date an `app_blocked` event was already emitted.
     app_reported: HashMap<(String, String), chrono::NaiveDate>,
     /// Standing enforcement gap kinds from the last network apply.
@@ -452,6 +454,7 @@ impl Agent {
             policies: HashMap::new(),
             kinds: HashMap::new(),
             parent_totp_secret: None,
+            parent_recovery: Vec::new(),
             app_reported: HashMap::new(),
             standing_gaps: Vec::new(),
             active_users: Vec::new(),
@@ -504,11 +507,12 @@ impl Agent {
     }
 
     /// What a presenter needs to verify a parent at this machine: the device's
-    /// authenticator secret plus this user's backup-code hash.
+    /// unlock-code secret and recovery codes plus this user's backup-code hash.
     fn parent_keys(&self, policy: &Policy) -> ParentKeys {
         ParentKeys {
             pin_hash: policy.parent_pin_hash.clone(),
             totp_secret: self.parent_totp_secret.clone(),
+            recovery: self.parent_recovery.clone(),
         }
     }
 
@@ -799,11 +803,10 @@ impl Agent {
             self.policies.insert(up.os_username, up.policy);
         }
         self.vpn = bundle.vpn;
-        self.parent_totp_secret = bundle
-            .parent_code
-            .map(|p| p.totp_secret)
-            .filter(|s| !s.is_empty());
-        // sudo on this machine: managed users authenticate with the parent code.
+        let parent_code = bundle.parent_code.unwrap_or_default();
+        self.parent_totp_secret = Some(parent_code.totp_secret).filter(|s| !s.is_empty());
+        self.parent_recovery = parent_code.recovery_codes;
+        // sudo on this machine: managed users authenticate with the unlock code.
         let users_by_kind: Vec<(String, String)> = self
             .kinds
             .iter()
@@ -1031,7 +1034,7 @@ impl Agent {
                         None
                     } else {
                         // The overlay already verified the parent; this is the
-                        // audit trail of *how* (authenticator vs backup code).
+                        // audit trail of *how* (unlock, recovery or backup code).
                         match kind.as_str() {
                             "pin" => events.push(parentcode::event(
                                 &parentcode::Verdict::Ok,
@@ -1040,6 +1043,11 @@ impl Agent {
                             )),
                             "backup" => events.push(parentcode::event(
                                 &parentcode::Verdict::Backup,
+                                "overlay",
+                                &user,
+                            )),
+                            k if k.starts_with("recovery#") => events.push(parentcode::event(
+                                &parentcode::Verdict::Recovery(k["recovery#".len()..].to_string()),
                                 "overlay",
                                 &user,
                             )),
@@ -1060,7 +1068,7 @@ impl Agent {
                             events.push(parentcode::event(&verdict, "overlay", &user));
                             verdict
                                 .accepted()
-                                .then_some((PIN_OVERRIDE_GRANT_MIN, "parent code"))
+                                .then_some((PIN_OVERRIDE_GRANT_MIN, "unlock code"))
                         }
                         None => None,
                     }
@@ -1075,7 +1083,7 @@ impl Agent {
                 // isn't stuck locked after they've dealt with it.
                 if self.tamper_lockdown {
                     self.tamper_lockdown = false;
-                    tracing::info!("tamper lockdown cleared by parent code at the device");
+                    tracing::info!("tamper lockdown cleared by unlock code at the device");
                 }
                 self.pending_freeze.remove(&user);
                 if currently_frozen {

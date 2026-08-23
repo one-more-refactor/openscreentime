@@ -124,9 +124,10 @@ enum Cmd {
     /// approves time requests. Runs as the desktop user (no root).
     #[cfg(feature = "tray")]
     Tray,
-    /// Parent recovery: verify the parent code (from your authenticator app,
-    /// or the backup code) and suspend enforcement for a while (nft table +
-    /// resolv.conf pin torn down, users un-frozen). Works offline. Requires root.
+    /// Parent recovery: verify the unlock code (read it off the OpenScreenTime
+    /// console, or use a recovery code) and suspend enforcement for a while
+    /// (nft table + resolv.conf pin torn down, users un-frozen). Works
+    /// offline. Requires root.
     Unlock {
         /// Optional. Prefer omitting it: anything passed here is visible in
         /// /proc/<pid>/cmdline to every local user, including the person this
@@ -140,7 +141,7 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         minutes: u64,
     },
-    /// Remove the systemd units, the sudo/PAM parent-code hook and the
+    /// Remove the systemd units, the sudo/PAM unlock-code hook and the
     /// `ost-managed` group. Leaves the enrollment config in place. Requires root.
     Uninstall,
 }
@@ -155,13 +156,13 @@ fn init_tracing() {
         .init();
 }
 
-/// Read the parent code from the terminal without echoing it and without ever
+/// Read the unlock code from the terminal without echoing it and without ever
 /// placing it on a command line. No new dependency: raw-mode toggling via
 /// `stty` is enough for a one-shot prompt, and falls back to a plain read if
 /// that fails.
 fn rpassword_prompt() -> anyhow::Result<String> {
     use std::io::{BufRead, Write};
-    eprint!("Parent code (authenticator app, or the backup code): ");
+    eprint!("Unlock code (from the OpenScreenTime console, or a recovery code): ");
     std::io::stderr().flush().ok();
     let echo_off = std::process::Command::new("stty")
         .arg("-echo")
