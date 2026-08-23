@@ -52,16 +52,19 @@ is at that default, the entire `lockdown` object is omitted from the stored/seri
 (`NetworkLockdown::is_default` + `skip_serializing_if`) — a profile with no lockdown configured
 has no `lockdown` key at all, which is why the `default` preset below doesn't show one.
 
-### Parent code (per-device TOTP) — and `parent_pin_hash`, the backup code
+### Unlock code (per-device TOTP), recovery codes — and `parent_pin_hash`, the backup code
 
-Since 0.4 the parent's key to a managed device is a **per-device authenticator
-code**: `POST /api/devices` mints a TOTP secret, the console shows it as a QR to
-scan into an authenticator app, the agent receives it on every policy pull
+The parent's key to a managed device is a **per-device unlock code**: `POST
+/api/devices` mints a TOTP secret that only the server and the agent ever
+hold. The parent reads the live 6-digit code off the console (after entering
+change mode); the agent receives the secret on every policy pull
 (`parent_code.totp_secret`) and verifies codes **offline** (RFC 6238, ±1 step,
 single-use, lockout after five misses). The lockout overlay, `ost unlock`, and
-`sudo` on a managed machine (PAM) all ask for it. The device's 8-digit
-recovery PIN — shown once at enrollment — lives on as the **backup code**: it
-still unlocks, and its use is logged as `parent_code_backup_used`.
+`sudo` on a managed machine (PAM) all ask for it. For when the phone is not
+around, the console generates eight one-time 8-digit **recovery codes**
+(delivered to the agent as keyed MACs, `parent_code.recovery_codes`, spent
+ones are logged as `parent_code_backup_used` and retired on both sides).
+There is no enroll-time recovery PIN any more.
 
 #### `parent_pin_hash` (backup code, profile-level override)
 

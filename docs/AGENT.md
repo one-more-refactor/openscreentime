@@ -90,8 +90,8 @@ Subcommands:
 | `login` | `--print-url` `--json` | Opens the console in a browser, already signed in, using this computer's enrollment as proof. See [Autologin](#autologin-ost-login). |
 | `pair` | `--server <URL>` `--token <TOKEN>` | Stores a scoped **parent access token** (minted in the web console → Settings → Parent access) at `~/.config/openscreentime/parent.toml` (`0600`). Enables the tray's parent mode. Runs as the desktop user, never root. |
 | `tray` | — | *(feature `tray` only)* Per-user tray companion — see [Build features matrix](#build-features-matrix). With a `pair`ed token it also shows and approves time requests. Runs as the desktop user, never root. |
-| `unlock` | `--code <CODE>` `--minutes <N>` (default 60) | Parent recovery: verifies the **parent code** (authenticator TOTP, or the backup code) fully offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Omit `--code` and it is read from the terminal (`--pin` is a hidden alias). Requires root. See [Parent code](#parent-code). |
-| `uninstall` | — | Disables and removes the systemd units, the sudo/PAM parent-code hook and nothing else (enrollment config, state and the binary stay). Requires root. |
+| `unlock` | `--code <CODE>` `--minutes <N>` (default 60) | Parent recovery: verifies the **unlock code** (the 6 digits the console shows, a one-time recovery code, or a profile backup code) fully offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Omit `--code` and it is read from the terminal (`--pin` is a hidden alias). Requires root. See [Parent code](#parent-code). |
+| `uninstall` | — | Disables and removes the systemd units, the sudo/PAM unlock-code hook and nothing else (enrollment config, state and the binary stay). Requires root. |
 
 Two subcommands are intentionally hidden — not in `--help`, not real
 `clap::Subcommand` variants, invoked only by the agent itself:
@@ -99,7 +99,7 @@ Two subcommands are intentionally hidden — not in `--help`, not real
 | Hidden subcommand | Who spawns it | Purpose |
 |---|---|---|
 | `__lockout <base64 LockSpec>` | The running agent, detached, when presenting a lockout overlay on a `gui` build | Runs the blocking `eframe`/`egui` event loop in a subprocess so it never stalls the enforcement tick. Fails with an error if the binary wasn't built `--features gui`. |
-| `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as a parent code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
+| `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
 | `__intro` | The tray, detached, on first run (`gui`+`tray` build) | Shows the skippable first-run child intro cards, then writes `intro_seen` so it never shows again. Fails with an error if the binary wasn't built `--features gui`. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
 
@@ -194,8 +194,8 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/usr/local/bin/.openscreentime.download.$$` | root : — | `install.sh` (transient) | Staging path for the initial download; renamed atomically into place, cleaned up by a trap on any exit. |
 | `/etc/openscreentime/agent.toml` | root : **0600** | `enroll` | Persisted identity: `server_url`, `device_id`, `device_token`, `poll_interval_secs`, `tamper_level`, `auto_update`. See [Config fields](#config-fields). |
 | `/etc/openscreentime/policy_cache.json` | root : **0600** | `run` (after every applied policy bundle) | Last-applied effective `Policy`, JSON. Not read by enforcement itself (that's in-memory); exists only so `unlock` knows what to tear down without a live agent process. |
-| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code.totp_secret`. The boot fallback when the server is unreachable, and what `unlock` / `pam-auth` / the overlay verify parent codes against. |
-| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run`, `unlock`, `pam-auth`, the `__lockout` overlay (whoever verifies a code) | Parent-code replay counter (last accepted TOTP step — a code is single-use) and the wrong-attempt counter / lockout deadline. |
+| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code` (TOTP secret + unused recovery-code MACs). The boot fallback when the server is unreachable, and what `unlock` / `pam-auth` / the overlay verify unlock codes against. |
+| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run`, `unlock`, `pam-auth`, the `__lockout` overlay (whoever verifies a code) | Unlock-code replay counter (last accepted TOTP step — a code is single-use), the ids of recovery codes already spent on this device, and the wrong-attempt counter / lockout deadline. |
 | `/etc/pam.d/openscreentime-parent` | root : default | `install-service` | PAM service: `auth required pam_exec.so expose_authtok quiet /usr/local/bin/openscreentime pam-auth`. Removed by `uninstall`. |
 | `/etc/sudoers.d/10-openscreentime` | root : **0440** | `install-service`, then `run` on every policy apply (staged under a dot-name, `visudo -c -f` validated, renamed into place) | `Defaults:<managed users> pam_service=openscreentime-parent, timestamp_timeout=0` + `<managed users> ALL=(ALL:ALL) ALL`. Managed = every OS user whose profile kind is not `adult`/`default`. Removed by `uninstall`. |
 | `/etc/openscreentime/dnsmasq.d/openscreentime.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
@@ -206,8 +206,8 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
 | `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Transparency snapshot for the tray: connection state, device-lock / offline-lockdown / tamper-lockdown flags, per-user used/remaining minutes, frozen state, freeze countdown, and a short queue of agent-published notifications (id, title, body, urgency, target user) for the tray to deliver as desktop notifications. |
-| `/run/openscreentime/unlock_pin.<user>` | dropped by a companion tool acting for the parent | consumed by `run` every tick | A **parent-code attempt** (plaintext), single-use — read once and deleted regardless of outcome. Verified through the parent verifier (TOTP, then backup code); grants `PIN_OVERRIDE_GRANT_MIN` (30) minutes on match and emits the `parent_code_*` event. This is the headless (no-GUI) override path. |
-| `/run/openscreentime/unlock_grant.<user>` | root-only dir (0755) — no managed user can write here | written by the `__lockout` GUI subprocess on a verified dismissal; consumed by `run` every tick | An **already-verified** unlock, trusted at face value (safe only because `/run/openscreentime` is root-owned). `<kind>:<minutes>`, clamped to 1–240: `pin:30` for an authenticator code, `backup:30` for the backup code (the runner reports it as `parent_code_backup_used`), `challenge:5` for a solved math challenge, single-use. |
+| `/run/openscreentime/unlock_pin.<user>` | dropped by a companion tool acting for the parent | consumed by `run` every tick | An **unlock-code attempt** (plaintext), single-use — read once and deleted regardless of outcome. Verified through the parent verifier (TOTP, then recovery code, then backup code); grants `PIN_OVERRIDE_GRANT_MIN` (30) minutes on match and emits the `parent_code_*` event. This is the headless (no-GUI) override path. |
+| `/run/openscreentime/unlock_grant.<user>` | root-only dir (0755) — no managed user can write here | written by the `__lockout` GUI subprocess on a verified dismissal; consumed by `run` every tick | An **already-verified** unlock, trusted at face value (safe only because `/run/openscreentime` is root-owned). `<kind>:<minutes>`, clamped to 1–240: `pin:30` for an unlock code, `recovery#<id>:30` for a one-time recovery code (the runner reports `parent_code_backup_used` with the id so the server retires it), `backup:30` for a profile backup code (reported as `parent_code_backup_used`), `challenge:5` for a solved math challenge, single-use. |
 | `/var/lib/openscreentime/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
@@ -389,26 +389,33 @@ today."), teens the same fact plus the wind-down ("The screen stops in
 younger/older teens get `AgeBracket::wind_down_secs` (120 s). No ALL-CAPS,
 no euphemism: when it stops, it says it stopped.
 
-### Parent code
+### Unlock code
 
-`client/src/parentcode.rs`. The per-device **authenticator secret** replaces
-the parent PIN: the server mints it when the device is added and shows it as
-an `otpauth://` QR; the parent scans it into their authenticator app; the
-agent gets the same secret in the policy bundle (`parent_code.totp_secret`,
-cached root-only in `policy_bundle.json`). Verification is **offline** —
-RFC 6238, SHA1, 6 digits, 30 s, ±1 step — with a persisted last-accepted
-counter (a code is single-use) and a wrong-attempt lockout (5 wrong → 60 s,
-doubling, max 15 min; `/var/lib/openscreentime/parent_code.json`). The device
-recovery PIN survives only as the **backup code** (`parent_pin_hash`,
-argon2): accepted, but reported as `parent_code_backup_used` (warn) so the
-parent hears the authenticator was bypassed. Every attempt emits
+`client/src/parentcode.rs`. The per-device **TOTP secret** is held by the
+server and this agent, nobody else: the server mints it when the device is
+added, the agent gets it in the policy bundle (`parent_code.totp_secret`,
+cached root-only in `policy_bundle.json`), and the parent reads the *current*
+6-digit **unlock code** off the console (a step-up gated read). Verification
+is **offline** — RFC 6238, SHA1, 6 digits, 30 s, ±1 step — with a persisted
+last-accepted counter (a code is single-use) and a wrong-attempt lockout (5
+wrong → 60 s, doubling, max 15 min; `/var/lib/openscreentime/parent_code.json`).
+
+**Recovery codes** (8 digits, one-time) come from the same console page and
+arrive in the bundle as `parent_code.recovery_codes: [{id, mac}]` with
+`mac = hex HMAC-SHA256(decoded secret, the 8 digits)` — the code itself is
+never sent. A match is `Verdict::Recovery(id)`: the id is remembered in
+`parent_code.json` (single-use even offline) and reported as
+`parent_code_backup_used { recovery_id }` so the server retires it too. A
+profile-level **backup code** (`parent_pin_hash`, argon2) still opens the
+door, reported as `parent_code_backup_used` without an id. Every attempt emits
 `parent_code_ok` / `parent_code_failed` / `parent_code_backup_used` with
-payload `{ via: overlay|unlock|pam, user, detail }`.
+payload `{ via: overlay|unlock|pam, user, detail[, recovery_id] }`.
 
-Where it is asked for: the lockout overlay's "Parent code (from your
-authenticator app)" field, `ost unlock`, the headless file drop, and `sudo`
-on a managed machine (below). Secrets never travel on argv; the GUI overlay
-receives them through the root-only staged spec file as before.
+Where it is asked for: the lockout overlay's "Unlock code (from the
+OpenScreenTime console, or a recovery code)" field, `ost unlock`, the headless
+file drop, and `sudo` on a managed machine (below). Secrets never travel on
+argv; the GUI overlay receives them through the root-only staged spec file as
+before.
 
 ### Parent sudo (PAM)
 
@@ -417,7 +424,7 @@ drop-in, `/etc/sudoers.d/10-openscreentime`, that the agent rewrites on every
 policy apply with the current **managed** OS users (any profile kind except
 `adult`/`default`): `Defaults:<users> pam_service=openscreentime-parent,
 timestamp_timeout=0` and `<users> ALL=(ALL:ALL) ALL`. Effect: a child typing
-`sudo` is asked for the parent's authenticator code (verified by the hidden
+`sudo` is asked for the unlock code (verified by the hidden
 `pam-auth` helper via `pam_exec expose_authtok`), so the parent can
 administer the machine without a local password and the child cannot.
 Adults' sudo is untouched. The drop-in is staged under a dot-name (sudo
@@ -546,7 +553,7 @@ handling never black out all traffic):
   and dnsmasq installed *before* enrollment. On Debian and Arch, where
   NetworkManager writes a real file, none of them fire.
 - **Locked out and no server reachable**: `sudo ost unlock --minutes 60`
-  (it asks for the parent code — authenticator app, or the backup code)
+  (it asks for the unlock code — read it off the console, or use a recovery code)
   works fully offline against the cached bundle, as long as the agent has
   applied a policy at least once. If `policy_cache.json` doesn't exist yet,
   this path is unavailable — it fails with "no cached policy on this device".

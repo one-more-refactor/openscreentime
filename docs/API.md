@@ -41,7 +41,10 @@ Settings page reuses the register ceremony) is always allowed.
 | POST   | `/api/me/2fa/totp/start`    | → `{ secret, otpauth_uri }`; 409 once an authenticator is confirmed |
 | POST   | `/api/me/2fa/totp/confirm`  | `{ code }` → `{ ok, expires_at }` — confirming is itself a step-up |
 | POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `OST_STEPUP_WEBHOOK`) |
-| POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at }`, rotates the session |
+| POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at, extended: false }`, rotates the session |
+| GET    | `/api/auth/stepup`          | → `{ armed_until, extended }` — is this session in change mode (plain read, survives a reload) |
+| POST   | `/api/auth/stepup/lock`     | leave change mode now → `{ armed_until: null }` (exempt from the guard) |
+| POST   | `/api/auth/stepup/extend`   | another 15 min from now, once per grant → `{ armed_until, extended: true }`; 409 `already_extended` (guarded: only works while live) |
 | POST   | `/api/auth/voucher`         | `{ voucher }` → session (device-voucher autologin); the session can read but never starts stepped up |
 
 ### Step-up 2FA
@@ -51,10 +54,11 @@ enforced by a layer (`server/src/stepup.rs`) rather than per-handler, so routes
 added later are guarded automatically. Without a grant: **`428
 step_up_required`** — the client's contract is to run a step-up flow and retry
 the same request. Exempt (they are how a grant is obtained): the register/login
-ceremonies, logout, `/api/auth/voucher`, the two `/api/me/2fa/totp/*` calls and
-both `/api/auth/stepup/*` calls.
+ceremonies, logout, `/api/auth/voucher`, the two `/api/me/2fa/totp/*` calls,
+`/api/auth/stepup/email/start`, `/verify` and `/lock` (`/extend` is guarded).
 
-A grant lasts 5 minutes and is bound to the session row. Verifying rotates the
+A grant — **change mode** in the console — lasts 15 minutes, can be extended
+once, and is bound to the session row. Verifying rotates the
 session token, keeping the old one valid for 2 minutes so in-flight requests and
 second tabs survive. TOTP codes are single-use (a spent counter is dead even
 inside its window); five wrong factors start a doubling lockout, capped at 15
@@ -349,15 +353,29 @@ with `#[serde(default)]` on optional sub-objects.
   `/api/catalog`, `/api/me/2fa*`, `/api/auth/*`. Anything else under `/api/` →
   `403 forbidden_for_member` (a layer; fails closed for new routes).
 
-**Parent code (per-device TOTP).**
-- `POST /api/devices {name, account_id?}` → `{ device, enroll_token,
-  parent_code: {secret, otpauth_uri} }`. `account_id` = "this is <person>'s
-  computer": OS logins without a name match link to that person on enroll.
-- `GET /api/devices/{id}/parent-code` (sensitive read → 428 without a step-up
-  grant) → `{ parent_code }`; `POST /api/devices/{id}/parent-code/rotate`
-  → `{ parent_code }` and queues `apply_policy`.
-- Agent pull `GET /agent/policy` adds top-level `parent_code: { totp_secret }`.
-  `parent_pin_hash` in each user policy is still served as the **backup code**.
+**Unlock code (per-device TOTP) and recovery codes.** The secret behind the
+code is held by the server and the agent only; a parent reads codes off the
+console (0.5, `docs/CONTRACT-0.5.md` §1).
+- `POST /api/devices {name, account_id?}` → `{ device, enroll_token }`.
+  `account_id` = "this is <person>'s computer": OS logins without a name match
+  link to that person on enroll.
+- `GET /api/devices/{id}/unlock-code` (sensitive read → 428 without change
+  mode) → `{ code, seconds_left, period: 30, device_name }` — the 6 digits that
+  open that computer right now.
+- `POST /api/devices/{id}/unlock-code/rotate` → same shape plus
+  `recovery_codes_cleared: true`; new secret, recovery codes deleted (they are
+  keyed by it), queues `apply_policy`.
+- `POST /api/devices/{id}/recovery-codes` → `{ codes: ["1234 5678", …8],
+  generated_at }` — replaces the set; plaintext exactly once. Queues
+  `apply_policy`. `GET` (sensitive read) → `{ unused, total, generated_at }`.
+- Device JSON everywhere carries `recovery_codes_unused` (0 = none generated
+  or all spent).
+- Agent pull `GET /agent/policy` adds top-level
+  `parent_code: { totp_secret, recovery_codes: [{id, mac}] }` (unused only;
+  `mac` = hex HMAC-SHA256 keyed by the decoded secret over the 8 digits). An
+  agent event `parent_code_backup_used {recovery_id}` retires that code. A
+  profile-level `parent_pin_hash` is still served as a **backup code**; the
+  enroll-time device recovery PIN is no longer minted.
 
 **Presence.** Device JSON everywhere: `status` is presence only
 (`pending|online|offline`); `locked` (bool) is what the agent last reported;
