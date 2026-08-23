@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Device } from "../types";
 import { lockDevice, unlockDevice } from "../api";
-import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { useChangeMode, StepUpCancelled } from "../lib/changemode";
 import { useToast } from "../lib/toast";
 
 /** How long the hold must last before the pause commits. */
@@ -39,7 +39,7 @@ interface Props {
 type Phase = "idle" | "holding" | "working";
 
 export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) {
-  const { guard } = useStepUp();
+  const { guard } = useChangeMode();
   const { toast } = useToast();
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);

@@ -12,9 +12,10 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
 import type { Device } from "../types";
-import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { useChangeMode, StepUpCancelled } from "../lib/changemode";
 import { familyChanged } from "../lib/family";
 import { StateRing, type RingTone } from "../components/StateRing";
+import { PageHead } from "../layout/PageHead";
 
 function minsSince(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -100,7 +101,7 @@ function steadiness(d: Device): { label: string; tone?: "ok" | "warn" | "crit" }
 }
 
 function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => void }) {
-  const { guard } = useStepUp();
+  const { guard } = useChangeMode();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"crit" | undefined>();
@@ -163,6 +164,16 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
             <div className="dev-fact">
               <dt>changes</dt>
               <dd>on their way</dd>
+            </div>
+          )}
+          {d.recovery_codes_unused !== undefined && (
+            <div className="dev-fact">
+              <dt>recovery codes</dt>
+              <dd data-tone={d.recovery_codes_unused === 0 ? "warn" : undefined}>
+                {d.recovery_codes_unused === 0
+                  ? "none made"
+                  : `${d.recovery_codes_unused} left`}
+              </dd>
             </div>
           )}
         </dl>
@@ -271,13 +282,14 @@ export function Devices() {
   if (error)
     return (
       <div className="dev-wrap">
+        <PageHead eyebrow="Devices" title="Couldn't load the devices." />
         <p className="fam-error">{error}</p>
       </div>
     );
   if (!devices)
     return (
       <div className="dev-wrap">
-        <p className="fam-quiet">Loading…</p>
+        <PageHead eyebrow="Devices" title={<span className="ph-wait">Checking on every device…</span>} />
       </div>
     );
 
@@ -292,12 +304,7 @@ export function Devices() {
 
   return (
     <div className="dev-wrap">
-      <header className="dev-head">
-        <p className="fam-sub" style={{ marginBottom: "0.5rem" }}>
-          Devices
-        </p>
-        <h1 className="dev-title">{verdict}</h1>
-      </header>
+      <PageHead eyebrow="Devices" title={verdict} />
 
       {devices.length === 0 ? (
         <div className="dev-empty">
