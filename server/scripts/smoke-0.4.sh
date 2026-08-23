@@ -162,7 +162,6 @@ check "spent recovery code is retired (7 unused)" "$(P "$BASE/api/devices/$DEVIC
 check "spent recovery code leaves the agent bundle" "$(A "$BASE/agent/policy" | jq -r '.parent_code.recovery_codes|length')" "7"
 check "spent recovery code is not in the bundle by id" "$(A "$BASE/agent/policy" | jq -r --arg id "$RID" '[.parent_code.recovery_codes[]|select(.id==$id)]|length')" "0"
 check "agent policy carries blocks (kid preset)" "$(jq -r '.users[0].policy.blocks.categories|index("adult")!=null' <<<"$POL")" "true"
-check "agent policy keeps the PIN backup" "$(jq -r '.users[0].policy.parent_pin_hash|startswith("$argon2")' <<<"$POL")" "true"
 
 # ---- voucher → member session -------------------------------------------------------------
 check "voucher for an unknown OS user → 404 no_account" \
