@@ -1,6 +1,6 @@
 [package]
 name = "openscreentime-policy"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89"
 description = "OpenScreenTime — the shared Policy document (stored by the server, edited by the web, enforced by the agent)"

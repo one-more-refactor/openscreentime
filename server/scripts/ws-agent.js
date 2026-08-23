@@ -1,8 +1,9 @@
 // A stand-in agent for smoke-0.4.sh — run with Bun (its WebSocket client
 // accepts custom headers). Connects to /agent/ws, reports an unlocked state,
-// acks the first command it receives (the queued `lock`), reports locked, stays
-// connected for a moment so the server can be observed "online + locked", then
-// hangs up so "offline" can be observed too.
+// acks every command it receives (an `apply_policy` or two from the
+// recovery-code checks, then the queued `lock`), reports locked once the lock
+// arrives, stays connected for a moment so the server can be observed
+// "online + locked", then hangs up so "offline" can be observed too.
 //
 //   bun scripts/ws-agent.js ws://127.0.0.1:18080/agent/ws <device_token> [hold_ms]
 
@@ -30,6 +31,7 @@ const state = (locked) => ({
 
 const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });
 let acked = false;
+let locked = false;
 
 ws.onopen = () => {
   console.log("ws open");
@@ -38,15 +40,18 @@ ws.onopen = () => {
 ws.onmessage = (e) => {
   const v = JSON.parse(String(e.data));
   console.log("ws <-", JSON.stringify(v));
-  if (v.type === "command" && !acked) {
+  if (v.type !== "command") return;
+  ws.send(
+    JSON.stringify({
+      type: "ack",
+      ack: { command_id: v.command.id, status: "acked", result: { applied: v.command.type } },
+    }),
+  );
+  if (v.command.type === "lock") locked = true;
+  if (v.command.type === "unlock") locked = false;
+  ws.send(JSON.stringify(state(locked)));
+  if (!acked) {
     acked = true;
-    ws.send(
-      JSON.stringify({
-        type: "ack",
-        ack: { command_id: v.command.id, status: "acked", result: { applied: v.command.type } },
-      }),
-    );
-    ws.send(JSON.stringify(state(v.command.type === "lock")));
     ws.send(JSON.stringify({ type: "heartbeat", usage: [{ os_username: "mia", used_minutes_today: 12 }] }));
     setTimeout(() => ws.close(), hold);
   }

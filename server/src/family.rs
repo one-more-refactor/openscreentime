@@ -127,13 +127,15 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }
     }
 
-    // Devices, with liveness and pending chips folded in.
+    // Devices, with liveness, pending chips and spare keys folded in.
+    let recovery = crate::devices::recovery_unused_by_device(&st.db, admin.tenant_id).await?;
     let mut devices_json = Vec::with_capacity(device_rows.len());
     let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
     for r in &device_rows {
         let mut d = device_to_json(r);
         let p = pending.get(&r.0).cloned().unwrap_or_default();
         d["online"] = json!(d["status"] == "online");
+        d["recovery_codes_unused"] = json!(recovery.get(&r.0).copied().unwrap_or(0));
         let lp = lock_pending(&p, r.14.as_ref());
         d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
@@ -271,5 +273,6 @@ pub async fn set_offline_window(
     let row = row.ok_or_else(|| crate::error::AppError::NotFound("device not found".into()))?;
     let mut d = device_to_json(&row);
     d["online"] = json!(d["status"] == "online");
+    d["recovery_codes_unused"] = json!(crate::devices::recovery_unused_one(&st.db, id).await?);
     Ok(Json(json!({ "device": d })))
 }

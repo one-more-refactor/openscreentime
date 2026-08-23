@@ -1,6 +1,7 @@
 //! `openscreentime unlock` — the full agent-unlock recovery path ("admin is
-//! physically here"). Verifies the parent code (authenticator TOTP from the
-//! cached bundle, or the backup code — fully offline, see `parentcode`) and,
+//! physically here"). Verifies the unlock code (the 6 digits the console
+//! shows, a one-time recovery code, or a profile backup code — fully offline
+//! against the cached bundle, see `parentcode`) and,
 //! on success, suspends network enforcement for a configurable window: tears
 //! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`, and
 //! un-freezes every login user. Requires root (same check every other
@@ -25,14 +26,14 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
     ctx.require_root_for_enforcement()?;
 
     let policy = policy::load_cache().context(
-        "cannot verify the parent code: no cached policy on this device (has the agent ever run?)",
+        "cannot verify the unlock code: no cached policy on this device (has the agent ever run?)",
     )?;
 
     let verifier = crate::parentcode::Verifier::from_device();
     if !verifier.configured() {
         anyhow::bail!(
-            "no parent code is set up on this device — the server never sent an authenticator \
-             secret and no backup code is configured (use the console's lock/unlock instead)"
+            "no unlock code is set up on this device yet — the agent has not pulled one from \
+             the server and no backup code is configured (use the console's lock/unlock instead)"
         );
     }
     let verdict = verifier.verify(code);

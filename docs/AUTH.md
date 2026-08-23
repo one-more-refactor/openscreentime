@@ -18,7 +18,8 @@ wins for auth.
   log in**). No RBAC: every admin is fully powerful within its tenant. Isolation
   is app-layer `WHERE tenant_id = …` on every query.
 - **Second factor / email:** **none anywhere.** No TOTP, no email sender. The
-  device recovery PIN (argon2) is offline-unlock only, not account 2FA.
+  device recovery PIN (argon2) was offline-unlock only, not account 2FA
+  (retired in 0.5 — see *Unlock codes* below).
 - **Agent:** `enroll_token` (plaintext, 24h) → `device_token` (bearer, hashed).
   Binary `openscreentime`, env `OST_TOKEN`.
 
@@ -35,8 +36,9 @@ wins for auth.
 
 - The session cookie proves **who** you are (identity).
 - A **mutation** additionally requires a valid **step-up grant**: a short-lived
-  (≈5 min) server-issued marker bound to the session, obtained by passing a
-  second factor.
+  (15 min, extendable once) server-issued marker bound to the session, obtained
+  by passing a second factor. The console calls this window **change mode**
+  (below).
 - Enforced **server-side** by a `StepUp` extractor on every mutating `/api`
   handler — never by the client. Missing/expired grant → `428 step_up_required`.
 - Client reaction: catch `step_up_required`, open the **StepUp modal**, verify a
@@ -78,7 +80,36 @@ wins for auth.
 - `POST /api/me/2fa/totp/confirm { code }` → ok
 - `POST /api/auth/stepup/email/start` → sends code
 - `POST /api/auth/stepup/verify { method, code }` → sets step-up grant, returns expiry
+- `GET  /api/auth/stepup` → `{ armed_until, extended }` (is this session in change mode)
+- `POST /api/auth/stepup/lock` → leave change mode now (exempt from the guard)
+- `POST /api/auth/stepup/extend` → another 15 min, once per grant (guarded; 409 `already_extended`)
 - All mutating `/api/*` now require `StepUp`; without it → `428 step_up_required`.
+
+## Change mode (0.5)
+
+The grant has always been a window, not a per-request code; 0.5 makes the
+window a thing the console shows and controls instead of a popup that appears
+at the first change. In the console: a closed lock + "Make changes" → one
+second factor → the app is unlocked for **15 minutes** (countdown in the rail),
+with **Lock** to end it early and **Extend** once for another 15. Nothing
+pops up again while change mode is live. Server side this is the same grant,
+plus `GET /api/auth/stepup` (so a reload knows it is still in change mode),
+`POST /api/auth/stepup/lock` (clear `stepup_until`) and
+`POST /api/auth/stepup/extend` (once per grant, `admin_sessions.stepup_extended`,
+reset on every fresh grant). Contract: `docs/CONTRACT-0.5.md` §2.
+
+## Unlock codes (the keys to a managed device, 0.5)
+
+Not account 2FA — the other direction: how a parent proves themselves **at
+the child's computer**. Since 0.4 each device has a TOTP secret the agent
+verifies offline; since 0.5 the parent **never holds that secret**. They read
+the live 6-digit **unlock code** off the console (`GET
+/api/devices/{id}/unlock-code`, a sensitive read → needs change mode), and
+can generate eight one-time 8-digit **recovery codes** for when the phone is
+not around (`POST /api/devices/{id}/recovery-codes`, shown once; stored as
+keyed MACs, delivered to the agent as `{id, mac}`, retired server-side when
+the agent reports `parent_code_backup_used {recovery_id}`). The enroll-time
+recovery PIN is gone. Contract: `docs/CONTRACT-0.5.md` §1.
 
 ## Phasing
 
@@ -129,6 +160,8 @@ holds a live step-up grant:
 
 - `GET /api/me/passkeys`
 - `GET /api/parent-tokens`
+- `GET /api/devices/{id}/unlock-code` (the key to a child's machine)
+- `GET /api/devices/{id}/recovery-codes` (how many spare keys exist)
 
 (`GET /api/me/2fa` deliberately stays free: the step-up dialog needs it to
 know which factors to offer *before* any grant exists.)
