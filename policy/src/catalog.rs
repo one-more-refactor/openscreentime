@@ -859,6 +859,6 @@ mod tests {
         let j = as_json();
         assert!(j["apps"].as_array().unwrap().len() > 20);
         assert!(j["categories"].as_array().unwrap().len() >= 10);
-        assert!(j.to_string().find("googlevideo").is_none());
+        assert!(!j.to_string().contains("googlevideo"));
     }
 }
