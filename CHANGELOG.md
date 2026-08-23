@@ -49,6 +49,31 @@ and depth pass on top.
   line · actions), one segmented control, `/me` and `/login` on the same
   elevation language. No redesign — the system is the same, less flat.
 
+- **Unlock codes (server).** The device TOTP secret now lives only on the
+  server and the agent. `GET /api/devices/{id}/unlock-code` (a sensitive
+  read: change mode required) answers the current 6-digit code and how long
+  it has left; `POST …/unlock-code/rotate` re-keys and clears recovery codes;
+  `POST …/recovery-codes` mints eight one-time 8-digit codes (stored as
+  HMAC-SHA256 keyed by the device secret, shown once) and `GET …/recovery-codes`
+  reports how many are unused. `POST /api/devices` no longer returns a
+  secret, the `/parent-code` routes are gone, and enrolment mints no
+  recovery PIN any more. Migration `0016`.
+- **Unlock codes (agent).** The policy bundle carries the recovery-code MACs;
+  the agent verifies the rotating code and the recovery codes offline (a
+  spent recovery code is retired on the device at once and on the server as
+  soon as the event lands), and every prompt — lockout overlay, `ost unlock`,
+  tray, `sudo` on a managed machine — now asks for the "unlock code from the
+  OpenScreenTime console, or a recovery code". `ost status` shows how many
+  recovery codes are left. A profile-level `parent_pin_hash` still works as a
+  backup code.
+- **Change mode (server).** A grant lasts 15 minutes instead of 5.
+  `GET /api/auth/stepup` reports it, `POST /api/auth/stepup/lock` ends it,
+  `POST /api/auth/stepup/extend` adds 15 minutes once per grant
+  (`409 already_extended` after that).
+- **Upgrade note.** Authenticator-app entries made for devices under 0.4 keep
+  producing valid codes until you *Replace* the device's unlock code; do that
+  once, then delete the entries. Devices update themselves from the server.
+
 ## [0.4.0] — 2026-08-22
 
 **Headline: it works end to end now.** This release is the one where a
