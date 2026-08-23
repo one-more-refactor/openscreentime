@@ -185,20 +185,6 @@ pub struct EnrollReq {
     pub os_users: Vec<OsUser>,
 }
 
-/// An 8-digit device recovery PIN.
-///
-/// Digits only and fixed length because it gets read aloud down a phone, typed
-/// on a locked machine's overlay, and written on a sticker — not pasted. 10^8
-/// keyspace is fine: verification is argon2 against a local hash, offline, by
-/// someone already at the keyboard, and there is no remote guessing surface.
-fn gen_recovery_pin() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    (0..8)
-        .map(|_| char::from(b'0' + rng.gen_range(0..10u8)))
-        .collect()
-}
-
 pub async fn enroll(
     State(st): State<AppState>,
     Json(req): Json<EnrollReq>,
@@ -218,19 +204,14 @@ pub async fn enroll(
     let device_token = gen_token();
     let token_hash = hash_token(&device_token);
 
-    // Every device gets its own recovery PIN, whether anyone asked for one or
-    // not. It is the ONLY offline way back into a device that has locked itself
-    // out — no server, no network, no SSH. Leaving it optional meant devices
-    // shipped unrecoverable, with the lockout screen promising a PIN that did
-    // not exist. Shown once, here, and never stored in plaintext.
-    let recovery_pin = gen_recovery_pin();
-    let recovery_hash = crate::profiles::hash_pin(recovery_pin.clone()).await?;
-
+    // No recovery PIN is minted here any more (0.5): the offline ways back
+    // into a device are the unlock code and the recovery codes, both read off
+    // the console after a step-up and verified by the agent. Nothing is shown
+    // once on a terminal that a parent then has to write on a sticker.
     sqlx::query(
         "UPDATE devices SET device_token = $1, enroll_token = NULL,
              enroll_token_expires_at = NULL, status = 'online',
-             hostname = $2, os = $3, agent_version = $4, last_seen = now(),
-             recovery_pin_hash = $6, recovery_pin_set_at = now()
+             hostname = $2, os = $3, agent_version = $4, last_seen = now()
          WHERE id = $5",
     )
     .bind(&token_hash)
@@ -238,7 +219,6 @@ pub async fn enroll(
     .bind(&req.os)
     .bind(&req.agent_version)
     .bind(device_id)
-    .bind(&recovery_hash)
     .execute(&st.db)
     .await?;
 
@@ -259,10 +239,6 @@ pub async fn enroll(
         "device_id": device_id,
         "device_token": device_token,
         "poll_interval_secs": POLL_INTERVAL_SECS,
-        // Plaintext, exactly once. The agent prints it during enrollment so
-        // whoever set the device up can write it down; after this response it
-        // exists only as an argon2 hash.
-        "recovery_pin": recovery_pin,
     })))
 }
 
@@ -505,27 +481,14 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
     .fetch_all(&st.db)
     .await?;
 
-    // The device's own recovery PIN, used wherever the profile does not set one.
-    // Without this the agent never caches a parent_pin_hash, and `ost
-    // unlock --pin` — the only offline way out of a self-inflicted lockout —
-    // refuses before it checks anything.
-    let device_pin_hash: Option<String> =
-        sqlx::query_scalar("SELECT recovery_pin_hash FROM devices WHERE id = $1")
-            .bind(agent.device_id)
-            .fetch_optional(&st.db)
-            .await?
-            .flatten();
-
     let users: Vec<Value> = rows
         .into_iter()
         .map(|(os_username, kind, policy)| {
-            // Round-trip through the shared type for forward-compat normalization.
-            let mut normalized: Policy = serde_json::from_value(policy).unwrap_or_default();
-            // A profile-level PIN wins — an admin who set one deliberately
-            // should not be silently overridden by the generated fallback.
-            if normalized.parent_pin_hash.is_none() {
-                normalized.parent_pin_hash = device_pin_hash.clone();
-            }
+            // Round-trip through the shared type for forward-compat
+            // normalization. A profile-level `parent_pin_hash` (set
+            // deliberately by an admin) passes through untouched; the device
+            // recovery PIN is no longer folded in — recovery codes replaced it.
+            let normalized: Policy = serde_json::from_value(policy).unwrap_or_default();
             json!({
                 "os_username": os_username,
                 "profile_kind": kind,
@@ -536,13 +499,16 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
 
     let version = policy_version(&st.db, agent.device_id).await?;
     let totp_secret = crate::devices::ensure_parent_code(&st.db, agent.device_id).await?;
+    let recovery_codes = crate::devices::recovery_codes_for_agent(&st.db, agent.device_id).await?;
     Ok(Json(json!({
         "policy_version": version,
         "device_tamper_level": tamper_level,
         "users": users,
-        // The per-device parent code (docs/CONTRACT-0.4.md §4): verified
-        // offline by the agent, shown to the parent as a QR in the console.
-        "parent_code": { "totp_secret": totp_secret },
+        // The per-device unlock code (docs/CONTRACT-0.5.md §1): the secret
+        // behind the 6-digit code the console shows, plus the keyed MACs of
+        // the unused one-time recovery codes. Both verified offline by the
+        // agent; the parent only ever sees codes, never this.
+        "parent_code": { "totp_secret": totp_secret, "recovery_codes": recovery_codes },
         // The device's ACTIVE named VPN profile (raw config, private keys and
         // all) — only served here, on the authenticated agent pull. A
         // status of "testing" asks the agent to verify-then-report.
@@ -607,6 +573,10 @@ pub async fn push_events(
         if ev.r#type == "vpn_profile" {
             // The agent's verdict on a tested profile lands in the profile row.
             crate::vpn::apply_agent_report(&st.db, agent.device_id, &ev.payload).await;
+        }
+        if ev.r#type == "parent_code_backup_used" {
+            // A recovery code was spent offline; retire it here too.
+            crate::devices::mark_recovery_code_used(&st.db, agent.device_id, &ev.payload).await;
         }
         events::insert(
             &st.db,
@@ -922,61 +892,5 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The PIN is read aloud, typed on a locked machine, and written on a
-    /// sticker. Anything but fixed-length digits breaks one of those.
-    #[test]
-    fn recovery_pin_is_eight_digits() {
-        for _ in 0..200 {
-            let pin = gen_recovery_pin();
-            assert_eq!(pin.len(), 8, "wrong length: {pin}");
-            assert!(pin.chars().all(|c| c.is_ascii_digit()), "non-digit: {pin}");
-        }
-    }
-
-    /// Not a uniqueness guarantee — just a check that it is actually random and
-    /// not, say, a constant or a counter.
-    #[test]
-    fn recovery_pins_differ() {
-        let a: std::collections::HashSet<String> = (0..50).map(|_| gen_recovery_pin()).collect();
-        assert!(
-            a.len() > 45,
-            "generator looks degenerate: {} unique of 50",
-            a.len()
-        );
-    }
-
-    /// The whole point: a policy served to an agent must carry a
-    /// parent_pin_hash, or `ost unlock --pin` refuses and the device
-    /// has no offline way back in. A profile-set PIN must win over the
-    /// device-level fallback.
-    #[test]
-    fn device_pin_fills_in_only_when_the_profile_has_none() {
-        let device_hash = Some("$argon2id$device".to_string());
-
-        let mut without: Policy = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(without.parent_pin_hash.is_none());
-        if without.parent_pin_hash.is_none() {
-            without.parent_pin_hash = device_hash.clone();
-        }
-        assert_eq!(without.parent_pin_hash.as_deref(), Some("$argon2id$device"));
-
-        let mut with_profile_pin: Policy =
-            serde_json::from_value(serde_json::json!({"parent_pin_hash": "$argon2id$profile"}))
-                .unwrap();
-        if with_profile_pin.parent_pin_hash.is_none() {
-            with_profile_pin.parent_pin_hash = device_hash.clone();
-        }
-        assert_eq!(
-            with_profile_pin.parent_pin_hash.as_deref(),
-            Some("$argon2id$profile"),
-            "a deliberately set profile PIN must not be overridden by the fallback"
-        );
     }
 }
