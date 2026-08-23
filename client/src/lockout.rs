@@ -9,9 +9,9 @@
 //!     agent builds and runs with no display. This is what CI and the dev box use.
 //!   * `--features gui`: an `eframe/egui` fullscreen window (see `gui` module below).
 //!
-//! Challenge verification (math / wait / parent code) is pure logic in `challenge`
-//! so it's testable and shared by both presenters. The parent code itself
-//! (authenticator TOTP, backup code) is verified by `parentcode`.
+//! Challenge verification (math / wait / unlock code) is pure logic in `challenge`
+//! so it's testable and shared by both presenters. The unlock code itself
+//! (TOTP from the console, recovery code, backup code) is verified by `parentcode`.
 
 use crate::parentcode::{self, Verifier};
 use crate::policy::Lockout;
@@ -21,17 +21,21 @@ use serde::{Deserialize, Serialize};
 /// What a presenter needs to verify a parent at the keyboard, offline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParentKeys {
-    /// Argon2 PHC hash of the backup code (the legacy recovery PIN).
+    /// Argon2 PHC hash of a profile-level backup code.
     #[serde(default)]
     pub pin_hash: Option<String>,
-    /// Base32 TOTP secret for the authenticator app (the parent code).
+    /// Base32 TOTP secret behind the unlock code the console shows.
     #[serde(default)]
     pub totp_secret: Option<String>,
+    /// Unused one-time recovery codes `{id, mac}`.
+    #[serde(default)]
+    pub recovery: Vec<crate::policy::RecoveryCode>,
 }
 
 impl ParentKeys {
     pub fn verifier(&self) -> Verifier {
         Verifier::new(self.totp_secret.clone(), self.pin_hash.clone())
+            .with_recovery(self.recovery.clone())
     }
     /// Is there anything a parent could type?
     #[cfg_attr(not(feature = "gui"), allow(dead_code))] // the GUI presenter's input gate
@@ -62,9 +66,10 @@ pub struct LockSpec {
     /// `None` for immediate locks that have no grace. Defaults to `None`.
     #[serde(default)]
     pub countdown_secs: Option<u32>,
-    /// The parent's keys (authenticator secret + backup-code hash), carried
-    /// along so a presenter can verify a typed parent code fully offline. The
-    /// spec is staged root-only (0600) precisely because of this field.
+    /// The parent's keys (unlock-code secret, recovery codes, backup-code
+    /// hash), carried along so a presenter can verify a typed code fully
+    /// offline. The spec is staged root-only (0600) precisely because of this
+    /// field.
     #[serde(default)]
     pub parent: ParentKeys,
 }
@@ -79,7 +84,7 @@ pub mod challenge {
         Math { a: i64, b: i64, op: char },
         /// Wait out a cooldown before the dismiss button enables.
         Wait { seconds: u32 },
-        /// Enter the parent code (authenticator app, or the backup code).
+        /// Enter the unlock code (from the console, or a recovery code).
         ParentPin,
         /// No unlock challenge (nudge only).
         None,
@@ -106,7 +111,7 @@ pub mod challenge {
             match self {
                 Challenge::Math { a, b, op, .. } => format!("SOLVE  {a} {op} {b} = ?"),
                 Challenge::Wait { seconds } => format!("WAIT {seconds}s TO CONTINUE"),
-                Challenge::ParentPin => "ENTER PARENT CODE (AUTHENTICATOR APP)".into(),
+                Challenge::ParentPin => "ENTER UNLOCK CODE (FROM THE CONSOLE)".into(),
                 Challenge::None => String::new(),
             }
         }
@@ -312,11 +317,13 @@ pub fn check_and_consume_code_override(
 /// grant is trusted at face value — which is safe only because `/run/openscreentime`
 /// is root-owned (0755): no managed user can write there. The verification
 /// already happened in the presenter, against the same argon2 hash.
-/// `kind` is `"pin"` (parent code — a parent present, never rate-limited),
-/// `"backup"` (the backup code was used — same grant, but the runner reports
-/// it) or `"challenge"` (a solved self-serve challenge — the runner caps how
-/// many of these it honors per day so the trivial math can't be re-solved to
-/// defeat the limit). The grant file is `"<kind>:<minutes>"`.
+/// `kind` is `"pin"` (unlock code — a parent present, never rate-limited),
+/// `"recovery#<id>"` (a one-time recovery code was spent — same grant, and
+/// the runner reports the id so the server retires it), `"backup"` (a
+/// profile backup code was used — same grant, but the runner reports it) or
+/// `"challenge"` (a solved self-serve challenge — the runner caps how many of
+/// these it honors per day so the trivial math can't be re-solved to defeat
+/// the limit). The grant file is `"<kind>:<minutes>"`.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))] // written by the gui presenter only
 pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
     let dir = std::path::Path::new(crate::paths::RUN_DIR);
@@ -332,7 +339,7 @@ pub fn write_unlock_grant(user: &str, minutes: u32, kind: &str) {
 /// frozen ones — so a parent standing at the machine can always get in
 /// (the old code only consulted the override on the freeze-transition tick,
 /// which stranded frozen users).
-/// Returns `(minutes, kind)`. `kind` is `"pin"`, `"backup"` or `"challenge"`;
+/// Returns `(minutes, kind)`. `kind` is `"pin"`, `"recovery#<id>"`, `"backup"` or `"challenge"`;
 /// legacy/plain numeric content is read as `"pin"` (uncapped) so a real grant
 /// is never wrongly dropped — the safe direction for an unlock is to let the
 /// user in.
@@ -423,8 +430,8 @@ pub mod gui {
     /// (`openscreentime __lockout <spec-file>`). Returns false if it could not
     /// be spawned (caller falls back to the headless broadcast).
     ///
-    /// The spec carries the parent keys (the authenticator secret and the
-    /// backup-code hash), so it MUST NOT travel on argv — `/proc/<pid>/cmdline`
+    /// The spec carries the parent keys (the unlock-code secret, the recovery
+    /// codes, the backup-code hash), so it MUST NOT travel on argv — `/proc/<pid>/cmdline`
     /// is world-readable, which would hand them to any local user (e.g. the
     /// locked-out managed user on a second VT). Instead the spec is staged in a root-only (0600) file
     /// under root-owned `/run/openscreentime` and only its *path* — not a secret — is
@@ -612,9 +619,9 @@ pub mod gui {
         /// Typed response to the *challenge* — a maths answer. Shown as typed:
         /// a child working out 7 × 8 has to be able to see what they entered.
         input: String,
-        /// The parent code, kept separate and masked. (A TOTP is single-use,
-        /// but the backup code is not — and a child watching over a shoulder
-        /// should see neither.)
+        /// The unlock code, kept separate and masked. (A TOTP and a recovery
+        /// code are single-use, but a backup code is not — and a child
+        /// watching over a shoulder should see none of them.)
         pin: String,
         /// Feedback after a wrong / locked-out code ("wrong code", "try again in 60s").
         pin_msg: Option<String>,
@@ -691,9 +698,11 @@ pub mod gui {
                     }
                     if self.spec.parent.configured() {
                         ui.label(
-                            egui::RichText::new("Parent code (from your authenticator app)")
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(FAINT.0, FAINT.1, FAINT.2)),
+                            egui::RichText::new(
+                                "Unlock code (from the OpenScreenTime console, or a recovery code)",
+                            )
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(FAINT.0, FAINT.1, FAINT.2)),
                         );
                         ui.add(
                             egui::TextEdit::singleline(&mut self.pin)
@@ -735,14 +744,17 @@ pub mod gui {
                             };
                         let challenge_ok = self.spec.challenge.verify(&self.input, None);
                         if let Some(v) = verdict.as_ref().filter(|v| v.accepted()) {
+                            let kind = match v {
+                                crate::parentcode::Verdict::Backup => "backup".to_string(),
+                                crate::parentcode::Verdict::Recovery(id) => {
+                                    format!("recovery#{id}")
+                                }
+                                _ => "pin".to_string(),
+                            };
                             super::write_unlock_grant(
                                 &self.spec.for_user,
                                 GRANT_PARENT_PIN_MIN,
-                                if *v == crate::parentcode::Verdict::Backup {
-                                    "backup"
-                                } else {
-                                    "pin"
-                                },
+                                &kind,
                             );
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         } else if challenge_ok {
