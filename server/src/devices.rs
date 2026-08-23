@@ -87,10 +87,15 @@ pub fn lock_pending(pending_types: &[String], last_state: Option<&Value>) -> boo
     }
 }
 
-// --- Parent code (per-device TOTP) -----------------------------------------
+// --- Unlock code (per-device TOTP) + recovery codes ------------------------
+//
+// The device secret is shared by exactly two parties: this server and the
+// agent. A parent never sees it — they read the *current* 6-digit code from
+// the console (after a step-up), and the agent verifies it offline. No QR, no
+// third-party authenticator, nothing to scan or lose.
 
-/// The device's parent authenticator secret, minting one if the device
-/// predates 0.4. Base32, 20 bytes.
+/// The device's unlock-code secret, minting one if the device predates 0.4.
+/// Base32, 20 bytes. Only ever handed to the agent.
 pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<String> {
     let existing: Option<Option<String>> =
         sqlx::query_scalar("SELECT parent_totp_secret FROM devices WHERE id = $1")
@@ -114,40 +119,53 @@ pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult
     Ok(secret)
 }
 
-fn parent_code_json(device_name: &str, secret: &str) -> Value {
-    json!({
-        "secret": secret,
-        "otpauth_uri": crate::stepup::otpauth_uri(device_name, secret),
-    })
+/// The live 6-digit unlock code for a device, as the parent reads it off the
+/// console. `seconds_left` lets the UI draw the countdown and refetch on the
+/// step boundary instead of polling.
+fn unlock_code_json(device_name: &str, secret: &str) -> AppResult<Value> {
+    let (code, seconds_left) = crate::stepup::current_totp(secret)
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("device secret is not valid base32")))?;
+    Ok(json!({
+        "code": code,
+        "seconds_left": seconds_left,
+        "period": crate::stepup::TOTP_STEP,
+        "device_name": device_name,
+    }))
 }
 
-/// `GET /api/devices/{id}/parent-code` — step-up gated (sensitive read).
-pub async fn get_parent_code(
+/// `GET /api/devices/{id}/unlock-code` — step-up gated (sensitive read): the
+/// code that opens this computer right now.
+pub async fn get_unlock_code(
     State(st): State<AppState>,
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
     let secret = ensure_parent_code(&st.db, id).await?;
-    Ok(Json(
-        json!({ "parent_code": parent_code_json(&row.2, &secret) }),
-    ))
+    Ok(Json(unlock_code_json(&row.2, &secret)?))
 }
 
-/// `POST /api/devices/{id}/parent-code/rotate` — a new secret; the old
-/// authenticator entry stops working once the agent pulls policy.
-pub async fn rotate_parent_code(
+/// `POST /api/devices/{id}/unlock-code/rotate` — a new secret; the codes the
+/// console shows change on the spot, and the device follows once it pulls
+/// policy. Recovery codes are keyed by the secret, so they die with it.
+pub async fn rotate_unlock_code(
     State(st): State<AppState>,
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
     let fresh = crate::stepup::gen_totp_secret();
+    let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE devices SET parent_totp_secret = $2 WHERE id = $1")
         .bind(id)
         .bind(&fresh)
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM device_recovery_codes WHERE device_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     enqueue_command(&st, id, "apply_policy", json!({})).await?;
     events::insert(
         &st.db,
@@ -159,9 +177,164 @@ pub async fn rotate_parent_code(
         json!({ "action": "rotated", "by": admin.admin_id }),
     )
     .await?;
-    Ok(Json(
-        json!({ "parent_code": parent_code_json(&row.2, &fresh) }),
-    ))
+    let mut out = unlock_code_json(&row.2, &fresh)?;
+    out["recovery_codes_cleared"] = json!(true);
+    Ok(Json(out))
+}
+
+/// How many recovery codes a device gets per set.
+pub const RECOVERY_CODES_PER_SET: usize = 8;
+
+/// An 8-digit recovery code. Digits only and fixed length because it gets read
+/// off a printout and typed on a locked machine's overlay — not pasted. The
+/// keyspace is fine: it is verified offline against a keyed MAC by someone
+/// already at the keyboard, single-use, behind the agent's lockout.
+fn gen_recovery_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..8)
+        .map(|_| char::from(b'0' + rng.gen_range(0..10u8)))
+        .collect()
+}
+
+/// "1234 5678" — how a code is shown and printed. The agent strips the space.
+fn format_recovery_code(code: &str) -> String {
+    format!("{} {}", &code[..4], &code[4..])
+}
+
+/// `POST /api/devices/{id}/recovery-codes` — replace the set with eight fresh
+/// one-time codes. Returned in plaintext exactly once; the server keeps only
+/// the keyed MACs, the agent gets the same MACs on its next policy pull.
+pub async fn generate_recovery_codes(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    get_device_row(&st.db, id, admin.tenant_id).await?;
+    let secret = ensure_parent_code(&st.db, id).await?;
+    let codes: Vec<String> = (0..RECOVERY_CODES_PER_SET)
+        .map(|_| gen_recovery_code())
+        .collect();
+    let mut tx = st.db.begin().await?;
+    sqlx::query("DELETE FROM device_recovery_codes WHERE device_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for (i, code) in codes.iter().enumerate() {
+        let mac = crate::stepup::recovery_mac(&secret, code).ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("device secret is not valid base32"))
+        })?;
+        sqlx::query("INSERT INTO device_recovery_codes (device_id, idx, mac) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(i as i16)
+            .bind(&mac)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    enqueue_command(&st, id, "apply_policy", json!({})).await?;
+    events::insert(
+        &st.db,
+        admin.tenant_id,
+        Some(id),
+        None,
+        "parent_code_ok",
+        "info",
+        json!({ "action": "recovery_codes_generated", "by": admin.admin_id }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "codes": codes.iter().map(|c| format_recovery_code(c)).collect::<Vec<_>>(),
+        "generated_at": Utc::now(),
+    })))
+}
+
+/// `GET /api/devices/{id}/recovery-codes` — step-up gated: how many are left
+/// and when the set was made. Never the codes themselves.
+pub async fn recovery_codes_status(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    get_device_row(&st.db, id, admin.tenant_id).await?;
+    let row: (i64, i64, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE used_at IS NULL), count(*), max(created_at)
+           FROM device_recovery_codes WHERE device_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&st.db)
+    .await?;
+    Ok(Json(json!({
+        "unused": row.0,
+        "total": row.1,
+        "generated_at": row.2,
+    })))
+}
+
+/// How many one-time recovery codes each of a tenant's devices still has
+/// unused — folded into device JSON as `recovery_codes_unused` (0 = none were
+/// ever generated, or all are spent). The codes themselves are shown once, at
+/// generation, and never again.
+pub async fn recovery_unused_by_device(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+) -> AppResult<std::collections::HashMap<Uuid, i64>> {
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT rc.device_id, count(*) FROM device_recovery_codes rc
+           JOIN devices d ON d.id = rc.device_id
+          WHERE d.tenant_id = $1 AND rc.used_at IS NULL GROUP BY rc.device_id",
+    )
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Same, for one device.
+pub async fn recovery_unused_one(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM device_recovery_codes WHERE device_id = $1 AND used_at IS NULL",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?)
+}
+
+/// The unused recovery codes of a device, for the agent's policy bundle.
+pub async fn recovery_codes_for_agent(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<Value>> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, mac FROM device_recovery_codes
+          WHERE device_id = $1 AND used_at IS NULL ORDER BY idx",
+    )
+    .bind(device_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, mac)| json!({ "id": id, "mac": mac }))
+        .collect())
+}
+
+/// The agent reports a recovery code as spent (`parent_code_backup_used`
+/// with a `recovery_id`): mark it so it is neither shown as unused nor sent
+/// to the device again. Unknown or foreign ids are ignored — a rooted device
+/// can only ever burn its own codes.
+pub async fn mark_recovery_code_used(db: &sqlx::PgPool, device_id: Uuid, payload: &Value) {
+    let Some(id) = payload
+        .get("recovery_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return;
+    };
+    let _ = sqlx::query(
+        "UPDATE device_recovery_codes SET used_at = now()
+          WHERE id = $1 AND device_id = $2 AND used_at IS NULL",
+    )
+    .bind(id)
+    .bind(device_id)
+    .execute(db)
+    .await;
 }
 
 /// Types of commands still pending (queued|sent) for a device — drives the
@@ -197,11 +370,13 @@ pub async fn list_devices(State(st): State<AppState>, admin: AuthAdmin) -> AppRe
     .fetch_all(&st.db)
     .await?;
 
+    let recovery = recovery_unused_by_device(&st.db, admin.tenant_id).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let mut d = device_to_json(r);
         d["users"] = device_users_json(&st.db, r.0).await?;
         d["online"] = json!(d["status"] == "online");
+        d["recovery_codes_unused"] = json!(recovery.get(&r.0).copied().unwrap_or(0));
         let pending = pending_command_types(&st.db, r.0).await?;
         d["lock_pending"] = json!(lock_pending(&pending, r.14.as_ref()));
         d["pending_commands"] = json!(pending);
@@ -221,6 +396,7 @@ pub async fn get_device(
 
     let mut d = device_to_json(&row);
     d["online"] = json!(d["status"] == "online");
+    d["recovery_codes_unused"] = json!(recovery_unused_one(&st.db, id).await?);
     let pending = pending_command_types(&st.db, id).await?;
     d["lock_pending"] = json!(lock_pending(&pending, row.14.as_ref()));
     d["pending_commands"] = json!(pending);
@@ -252,8 +428,9 @@ pub async fn create_device(
         crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
     }
     let enroll_token = gen_token();
-    // The parent code is born with the device so the QR can sit next to the
-    // install command; the agent receives the same secret on its first pull.
+    // The unlock-code secret is born with the device; only the agent ever
+    // receives it (on its first policy pull). The parent reads codes off the
+    // console.
     let secret = crate::stepup::gen_totp_secret();
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status,
@@ -272,7 +449,6 @@ pub async fn create_device(
     Ok(Json(json!({
         "device": device_to_json(&row),
         "enroll_token": enroll_token,
-        "parent_code": parent_code_json(&row.2, &secret),
     })))
 }
 
@@ -672,5 +848,28 @@ mod tests {
         assert!(lock_pending(&none, Some(&applying)));
         let old_agent = json!({ "locked": false });
         assert!(!lock_pending(&none, Some(&old_agent)));
+    }
+
+    /// A recovery code is read off a printout and typed on a locked machine:
+    /// anything but fixed-length digits breaks that.
+    #[test]
+    fn recovery_codes_are_eight_digits_and_random() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let c = gen_recovery_code();
+            assert_eq!(c.len(), 8, "wrong length: {c}");
+            assert!(c.chars().all(|ch| ch.is_ascii_digit()), "non-digit: {c}");
+            seen.insert(c);
+        }
+        assert!(
+            seen.len() > 190,
+            "generator looks degenerate: {}",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn recovery_code_is_shown_in_two_halves() {
+        assert_eq!(format_recovery_code("12345678"), "1234 5678");
     }
 }
