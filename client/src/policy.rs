@@ -93,19 +93,36 @@ pub struct PolicyBundle {
     /// not "leave it alone" (the bundle is declarative).
     #[serde(default)]
     pub vpn: Option<VpnProfile>,
-    /// The device's parent code: a TOTP secret the parent holds in their
-    /// authenticator app, verified offline by `parentcode`. `None` on a server
-    /// that predates 0.4 — the backup code (`parent_pin_hash`) still works.
+    /// The device's unlock code: the TOTP secret behind the 6-digit code the
+    /// console shows a parent, plus the keyed MACs of the unused one-time
+    /// recovery codes — both verified offline by `parentcode`. `None` on a
+    /// server that predates 0.4 — a profile's backup code (`parent_pin_hash`)
+    /// still works.
     #[serde(default)]
     pub parent_code: Option<ParentCode>,
 }
 
-/// Per-device parent authenticator secret (base32). Transported only over the
-/// authenticated agent channel; cached root-only with the bundle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Per-device unlock-code material. Transported only over the authenticated
+/// agent channel; cached root-only with the bundle. Nobody but this agent and
+/// the server ever holds the secret — the parent reads codes off the console.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParentCode {
+    /// Base32 TOTP secret (RFC 6238, SHA1, 6 digits, 30 s).
     #[serde(default)]
     pub totp_secret: String,
+    /// Unused recovery codes, as `{id, mac}`; the code itself is never sent.
+    #[serde(default)]
+    pub recovery_codes: Vec<RecoveryCode>,
+}
+
+/// One unused recovery code: its server id (reported back when it is spent)
+/// and hex HMAC-SHA256(key = decoded TOTP secret, msg = the 8 digits).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCode {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub mac: String,
 }
 
 /// An admin-uploaded VPN client config for this device. The `config` body
@@ -165,6 +182,10 @@ mod tests {
             }),
             parent_code: Some(ParentCode {
                 totp_secret: "GEZDGNBVGY3TQOJQ".into(),
+                recovery_codes: vec![RecoveryCode {
+                    id: "rc-1".into(),
+                    mac: "00".into(),
+                }],
             }),
         };
 
@@ -185,6 +206,10 @@ mod tests {
         assert_eq!(
             back.parent_code.as_ref().map(|p| p.totp_secret.as_str()),
             Some("GEZDGNBVGY3TQOJQ")
+        );
+        assert_eq!(
+            back.parent_code.as_ref().map(|p| p.recovery_codes.len()),
+            Some(1)
         );
 
         let _ = std::fs::remove_file(&path);

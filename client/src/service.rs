@@ -35,10 +35,10 @@ pub const BIN_ALIAS: &str = "/usr/local/bin/ost";
 /// memory — keeps working.
 pub const LEGACY_BIN: &str = "/usr/local/bin/sentinel-agent";
 
-/// PAM service that makes `sudo` on a managed machine ask for the parent code
+/// PAM service that makes `sudo` on a managed machine ask for the unlock code
 /// (docs/CONTRACT-0.4.md §8). `pam_exec` runs our `pam-auth` helper with the
 /// typed token on stdin; it verifies it offline against the device's
-/// authenticator secret / backup code.
+/// unlock-code secret / recovery codes / backup code.
 pub const PAM_SERVICE_NAME: &str = "openscreentime-parent";
 pub const PAM_SERVICE_PATH: &str = "/etc/pam.d/openscreentime-parent";
 /// The sudoers drop-in that routes the *managed* OS users through that PAM
@@ -53,8 +53,9 @@ const SUDOERS_TMP: &str = "/etc/sudoers.d/.10-openscreentime.tmp";
 fn pam_service_body() -> String {
     format!(
         "# Managed by openscreentime — do not edit. Removed by `ost uninstall`.\n\
-         # sudo for managed users authenticates with the PARENT CODE\n\
-         # (authenticator app / backup code), verified offline by the agent.\n\
+         # sudo for managed users authenticates with the UNLOCK CODE\n\
+         # (read off the OpenScreenTime console, or a recovery code),\n\
+         # verified offline by the agent.\n\
          auth     required   pam_exec.so expose_authtok quiet {BIN_TARGET} pam-auth\n\
          account  required   pam_permit.so\n\
          session  required   pam_permit.so\n"
@@ -80,8 +81,8 @@ pub fn sudoers_body(managed_users: &[String]) -> String {
     users.dedup();
     let mut out = String::from(
         "# Managed by openscreentime — rewritten on every policy apply, do not edit.\n\
-         # Managed users may sudo, but the password asked for is the PARENT CODE\n\
-         # (authenticator app). Removed by `ost uninstall`.\n",
+         # Managed users may sudo, but the password asked for is the UNLOCK CODE\n\
+         # (from the OpenScreenTime console). Removed by `ost uninstall`.\n",
     );
     if users.is_empty() {
         out.push_str("# (no managed users on this device right now)\n");
@@ -90,7 +91,7 @@ pub fn sudoers_body(managed_users: &[String]) -> String {
     let list = users.join(",");
     out.push_str(&format!(
         "Defaults:{list} pam_service={PAM_SERVICE_NAME}, timestamp_timeout=0\n\
-         Defaults:{list} passprompt=\"Parent code (authenticator app): \"\n\
+         Defaults:{list} passprompt=\"Unlock code (OpenScreenTime console): \"\n\
          {list} ALL=(ALL:ALL) ALL\n"
     ));
     out
@@ -339,6 +340,23 @@ pub fn status() -> Result<()> {
         }
     }
     println!("  root        {}", crate::config::is_root());
+    // The keys to this machine: is an unlock code set up, how many spare
+    // one-time recovery codes are left. Readable only as root (the bundle
+    // cache is 0600), so non-root just sees a dash.
+    if crate::config::is_root() {
+        let v = crate::parentcode::Verifier::from_device();
+        println!(
+            "  unlock      {}",
+            if v.configured() {
+                format!(
+                    "code set up · {} recovery code(s) left on this device",
+                    v.recovery_codes_left()
+                )
+            } else {
+                "not set up yet (no policy pulled)".to_string()
+            }
+        );
+    }
     // Best-effort service state (read-only; safe even non-root).
     let out = std::process::Command::new("systemctl")
         .args(["is-active", AGENT_UNIT])

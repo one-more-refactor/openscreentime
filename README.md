@@ -140,7 +140,7 @@ Organized by audience in [`docs/README.md`](docs/README.md):
 
 - **Start here** — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md): how it all fits together.
 - **Parents** — [the day-to-day guide](docs/PARENT-GUIDE.md): profiles, screen time,
-  granting time, the parent code (authenticator app), locking, gone-dark devices.
+  granting time, the unlock code (read off the console), locking, gone-dark devices.
 - **The person being managed** — [`TRANSPARENCY.md`](docs/TRANSPARENCY.md): exactly what
   your parents can and cannot see. (The kid also gets a short version as a first-run
   intro on the device.)
