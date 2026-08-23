@@ -51,7 +51,11 @@ A light theme mirrors these (white surfaces, black ink, same accent). Dark is de
 
 - **Dot grid.** Subtle repeating dot pattern as texture on empty panels
   (`radial-gradient(var(--line) 1px, transparent 1px)` at ~16px spacing).
-- **Hairlines.** 1px `--line` borders everywhere; no shadows for separation.
+- **Hairlines, then depth.** 1px `--line` borders everywhere; separation is the hairline.
+  Depth is ambient and tokenised — `--elev-1` for a resting card, `--elev-2` for anything
+  floating (modal, drawer) or hovered — never an ad-hoc shadow. The dark theme has no light to
+  cast a shadow in, so its tokens use a faint inset top edge and a surface step instead; the
+  rail is its own plane (`--rail`). Interactive cards lift 1px on hover; every button presses.
 - **LED indicators.** Small filled circles with a soft glow for status (online/offline/locked).
 - **Glyph / pixel icons.** Simple, monoline or pixel-style icons. No filled emoji.
 - **Mono captions** under controls, like device labels on hardware.
@@ -102,5 +106,18 @@ Motion in all three is the living-data rule only: the ring draws itself on arriv
 The parent picks the look per child (auto by bracket, or an explicit override) on the child's page.
 
 Enforcement copy is the same plain words everywhere: "Stop — time's up for today", "paused by a
-parent". The parent code (authenticator app) replaces the PIN in all copy; the old recovery PIN
-is the **backup code**.
+parent". The **unlock code** (read live from the console — there is no authenticator app and no
+QR for devices) replaces the parent code / PIN in all copy; **recovery codes** are the one-time
+spare keys.
+
+### Change mode
+
+The console has one security state, and it is visible. Reading is free; changing needs a second
+factor **once**: a verified code turns *change mode* on for fifteen minutes. The control lives in
+the rail footer (and the phone drawer): a shut lock and *Make changes* while locked; an open
+lock, the minutes left, *Extend* (once) and *Lock* while on. Every control that mutates sits at
+the same reduced presence (`[data-changemode="off"]`, opacity 0.55) until it is on, then the whole
+console relaxes at once; the first locked control you touch opens the dialog, nothing asks
+again while it is on. Turning it on or off plays a full-screen veil (`ChangeModeVeil`): an ink
+field, a lock glyph that draws and opens (or closes), one ring sweep, the words — ≈1.1 s in,
+≈0.7 s out, a 150 ms fade under `prefers-reduced-motion`. It never blocks input.

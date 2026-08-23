@@ -244,6 +244,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: ago(2),
     created_at: "2026-06-10T08:00:00Z",
+    recovery_codes_unused: 6,
     users: [
       du("u-mia", "d-livingroom", "mia", "Mia", "p-kids", 48, 15),
       du("u-leo", "d-livingroom", "leo", "Leo", "p-teen", 96, 0),
@@ -265,6 +266,7 @@ export const mockDevices: Device[] = [
     public_ip: "84.112.22.9",
     last_seen: ago(18),
     created_at: "2026-06-12T18:20:00Z",
+    recovery_codes_unused: 8,
     users: [du("u-noah", "d-studio", "noah", "Noah", "p-teen", 120, 20)],
   },
   {
@@ -283,6 +285,8 @@ export const mockDevices: Device[] = [
     created_at: "2026-06-14T09:00:00Z",
     // Ada took the desktop to a school project day — offline is allowed.
     offline_allowed_until: ago(-3 * 60),
+    // Nobody made recovery codes for this one yet — the card says so.
+    recovery_codes_unused: 0,
     users: [du("u-ada", "d-loft", "ada", "Ada", "p-default")],
   },
   {
@@ -842,10 +846,11 @@ export function mockGenerateRecoveryCodes(deviceId: string): RecoveryCodes {
 export function mockRecoveryCodesStatus(deviceId: string): RecoveryCodesStatus {
   const set = mockRecovery.get(deviceId);
   const dev = mockDevices.find((d) => d.id === deviceId);
+  const unused = set ? 8 : (dev?.recovery_codes_unused ?? 0);
   return {
-    unused: set ? 8 : (dev?.recovery_codes_unused ?? 0),
+    unused,
     total: 8,
-    generated_at: set?.generated_at ?? null,
+    generated_at: set?.generated_at ?? (unused > 0 ? ago(9 * 24 * 60) : null),
   };
 }
 

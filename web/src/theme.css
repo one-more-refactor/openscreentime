@@ -545,10 +545,14 @@
 .ch-btn:active:not(:disabled) { transform: scale(0.96); }
 .ch-btn:disabled { opacity: 0.45; cursor: default; }
 .ch-btn-yes { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
+/* Ink buttons stay ink on hover — the generic hover fill would wash the label out. */
+.ch-btn-yes:hover:not(:disabled) { background: var(--fg); border-color: var(--fg); }
 
 /* The hard stop reads as ink; while paused, resuming is the loud action. */
 .ch-btn-pause { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
+.ch-btn-pause:hover:not(:disabled) { background: var(--fg); border-color: var(--fg); }
 .ch-btn-pause[data-paused="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ch-btn-pause[data-paused="true"]:hover:not(:disabled) { background: var(--crit); border-color: var(--crit); }
 
 .ch-section { margin-bottom: 3rem; }
 
@@ -1283,11 +1287,7 @@ body[data-leaving="true"] .shell {
   font-weight: 500; letter-spacing: -0.02em; line-height: 1.15;
   color: var(--fg-display);
 }
-.ph-sub {
-  margin: 0.45rem 0 0; color: var(--fg-dim);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
-}
+.ph-sub { margin: 0.45rem 0 0; color: var(--fg-dim); font-size: 0.95rem; max-width: 44rem; }
 .ph-actions { flex: none; display: flex; align-items: center; gap: 0.5rem; padding-top: 0.35rem; }
 .ph-action {
   display: inline-flex; align-items: center;
@@ -1343,8 +1343,8 @@ body[data-leaving="true"] .shell {
 .lockglyph[data-open="true"] .lockglyph-shackle { transform: translateY(-2px) rotate(-22deg); }
 
 .cm-rail {
-  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-  margin-bottom: 0.9rem; padding: 0.5rem 0.5rem 0.5rem 0.7rem;
+  display: grid; gap: 0.45rem;
+  margin-bottom: 0.9rem; padding: 0.6rem 0.6rem 0.5rem 0.7rem;
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface); box-shadow: var(--elev-1);
   transition: border-color var(--dur-data) var(--ease), background var(--dur-data) var(--ease);
@@ -1356,12 +1356,12 @@ body[data-leaving="true"] .shell {
   transition: color var(--dur-data) var(--ease);
 }
 .cm-rail[data-on="true"] .cm-rail-state { color: var(--fg-display); }
-.cm-rail-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm-rail-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 .cm-rail-time {
   font-family: var(--font-mono); font-size: 0.6875rem; color: var(--fg-dim);
   font-variant-numeric: tabular-nums; margin-left: 0.15rem;
 }
-.cm-rail-actions { display: flex; gap: 0.2rem; flex: none; }
+.cm-rail-actions { display: flex; gap: 0.2rem; justify-content: flex-end; }
 .cm-rail-btn {
   font-family: var(--font-sans); font-size: 0.75rem; padding: 0.3rem 0.6rem;
   border: 1px solid transparent; border-radius: 999px; background: none;
@@ -1502,10 +1502,12 @@ body[data-leaving="true"] .shell {
   text-transform: uppercase; letter-spacing: 0.08em;
 }
 .uc-code {
-  margin: 0; font-family: var(--font-mono);
-  font-size: clamp(2rem, 1.4rem + 2.4vw, 2.75rem); letter-spacing: 0.12em; line-height: 1;
+  margin: 0; font-family: var(--font-mono); white-space: nowrap;
+  font-size: clamp(1.75rem, 1.2rem + 1.8vw, 2.5rem); letter-spacing: 0.12em; line-height: 1;
   color: var(--fg-display); font-variant-numeric: tabular-nums;
 }
+.uc[data-variant="step"] .uc-code { font-size: clamp(1.6rem, 1rem + 1.4vw, 2.1rem); }
+.uc[data-variant="step"] .uc-live { gap: 1rem; padding: 0.9rem 1rem; }
 .uc-note { margin: 0.45rem 0 0; font-size: 0.8125rem; color: var(--fg-dim); }
 .uc-step-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
