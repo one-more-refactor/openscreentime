@@ -4,12 +4,12 @@
 // The front room is harmless: who you are, how the app looks. It renders
 // immediately, because reading is free.
 //
-// The back room — passkeys, second factors, paired companions — is the set of
-// levers that would let someone take the family over. It is not rendered, and
-// its data is NOT EVEN FETCHED, until a second factor clears: the fetches run
-// only after step-up, and the server (docs/AUTH.md) answers them with 428
-// unless the session holds a live step-up grant. The client gate is comfort;
-// the server is the lock.
+// The back room — the computers' unlock codes, passkeys, second factors,
+// paired companions — is the set of levers that would let someone take the
+// family over. It is not rendered, and its data is NOT EVEN FETCHED, until
+// change mode is on: the fetches run only then, and the server (docs/AUTH.md)
+// answers them with 428 unless the session holds a live grant. The client
+// gate is comfort; the server is the lock.
 // ============================================================================
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -19,21 +19,18 @@ import {
   confirmTotpEnrollment,
   deletePasskey,
   getAuthConfig,
-  getParentCode,
   getTwoFactorStatus,
   listDevices,
   listParentTokens,
   listPasskeys,
   mintParentToken,
   revokeParentToken,
-  rotateParentCode,
   startTotpEnrollment,
 } from "../api";
 import type {
   AuthConfig,
   Device,
   MintedParentToken,
-  ParentCode,
   ParentToken,
   Passkey,
   TotpEnrollment,
@@ -43,9 +40,12 @@ import { QrCode } from "../components/QrCode";
 import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
-import { useStepUp, StepUpCancelled } from "../lib/stepup";
+import { useChangeMode } from "../lib/changemode";
 import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
 import { CodeRing } from "../components/CodeRing";
+import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { LockGlyph } from "../layout/Shell";
+import { PageHead } from "../layout/PageHead";
 import { relTime } from "../lib/format";
 
 export function Settings() {
@@ -53,10 +53,7 @@ export function Settings() {
 
   return (
     <div className="dev-wrap">
-      <header className="dev-head">
-        <p className="fam-sub" style={{ marginBottom: "0.5rem" }}>Settings</p>
-        <h1 className="dev-title">Your household, your rules.</h1>
-      </header>
+      <PageHead eyebrow="Settings" title="Your household, your rules." />
 
       <You />
       <Appearance />
@@ -142,19 +139,15 @@ function Appearance() {
 // ---- the back room ---------------------------------------------------------
 
 function Security() {
-  const { requireStepUp, armed } = useStepUp();
+  const { enter, armed } = useChangeMode();
   const [checking, setChecking] = useState(false);
 
-  // The room is open exactly while the grant is live — when it lapses, the
+  // The room is open exactly while change mode is on — when it lapses, the
   // gate closes again by itself. No stale "unlocked" state to forget.
-  const unlocked = armed;
-
   async function unlock() {
     setChecking(true);
     try {
-      await requireStepUp();
-    } catch (e) {
-      if (!(e instanceof StepUpCancelled)) throw e;
+      await enter();
     } finally {
       setChecking(false);
     }
@@ -163,17 +156,20 @@ function Security() {
   return (
     <section className="ch-section">
       <h2 className="ch-h2">Security &amp; access</h2>
-      {unlocked ? (
+      {armed ? (
         <SecurityPanels />
       ) : (
-        <div className="gate">
-          <p className="gate-title">Locked until it's you</p>
+        <div className="gate card">
+          <span className="gate-glyph" aria-hidden="true">
+            <LockGlyph open={false} size={22} />
+          </span>
+          <p className="gate-title">Turn on change mode to see this</p>
           <p className="gate-sub">
-            Passkeys, second factors and paired companions live here. Seeing them takes a
-            second factor — the server won't hand this data to a session without one.
+            The computers' unlock codes, your passkeys, second factors and paired companions
+            live here. The server only hands them to a session that has proved it's you.
           </p>
           <button className="ch-btn ch-btn-yes no-code" disabled={checking} onClick={() => void unlock()}>
-            {checking ? "Checking…" : "Unlock"}
+            {checking ? "Checking…" : "Turn on change mode"}
           </button>
         </div>
       )}
@@ -181,12 +177,12 @@ function Security() {
   );
 }
 
-/** Mounted only after step-up — so these fetches never fire on an idle visit. */
+/** Mounted only while change mode is on — these fetches never fire on an idle visit. */
 function SecurityPanels() {
   return (
     <div className="rl">
+      <UnlockCodes />
       <TwoFactor />
-      <ParentCodes />
       <Passkeys />
       <ParentAccess />
     </div>
@@ -194,128 +190,33 @@ function SecurityPanels() {
 }
 
 /**
- * The parent code of each computer — the authenticator secret that device
- * verifies offline. Showing it again is a sensitive read (the server answers
- * 428 without a live grant, which is why this panel only mounts after one);
- * rotating it re-mints the secret and the old one dies on the next policy
- * pull.
+ * Each computer's unlock code — the 6-digit code that unlocks its screen,
+ * reopens time and allows `sudo` there, verified on the device with no
+ * internet. The secret behind it stays on the server: a parent reads the code
+ * here when they need it. Recovery codes and replacing the key live in the
+ * same row.
  */
-function ParentCodes() {
+function UnlockCodes() {
   const devices = useAsync<Device[]>(listDevices, []);
-  const [showing, setShowing] = useState<{ device: Device; code: ParentCode; fresh: boolean } | null>(null);
-  const [confirmRotate, setConfirmRotate] = useState<Device | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-
-  async function show(d: Device) {
-    setBusy(true);
-    setStatus(null);
-    try {
-      setShowing({ device: d, code: await getParentCode(d.id), fresh: false });
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't load the parent code.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function rotate() {
-    if (!confirmRotate) return;
-    const d = confirmRotate;
-    setBusy(true);
-    setStatus(null);
-    try {
-      const code = await rotateParentCode(d.id);
-      setConfirmRotate(null);
-      setShowing({ device: d, code, fresh: true });
-      setStatus(`New parent code for ${d.name}. The old one stops working once the device checks in.`);
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't replace the parent code.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const list = (devices.data ?? []).filter((d) => d.status !== "pending" || true);
+  const list = devices.data ?? [];
 
   return (
     <div className="rl-row rl-row-stack">
       <div className="rl-what">
-        <p className="rl-name">Parent codes</p>
+        <p className="rl-name">Unlock codes</p>
         <p className="rl-value">
-          One authenticator entry per computer. The 6-digit code unlocks the screen, reopens time
-          and allows <code>sudo</code> there — verified on the device, with no internet needed.
+          One per computer. The 6-digit code unlocks the screen, reopens time and allows{" "}
+          <code>sudo</code> there — verified on the device, offline. Read it here on your phone
+          when you need it; no authenticator app involved.
           {devices.error ? ` · couldn't load: ${devices.error}` : ""}
         </p>
-        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
       </div>
       {list.map((d) => (
-        <div className="rl-app" key={d.id}>
-          <span className="rl-app-name">{d.name}</span>
-          <span className="rl-app-mins">
-            {d.status === "pending" ? "not set up yet" : `last heard ${relTime(d.last_seen)}`}
-          </span>
-          <span className="rl-controls">
-            <button className="ch-btn" disabled={busy} onClick={() => void show(d)}>
-              Show QR
-            </button>
-            <button className="ch-btn" disabled={busy} onClick={() => setConfirmRotate(d)}>
-              Replace
-            </button>
-          </span>
-        </div>
+        <UnlockCodePanel key={d.id} device={d} />
       ))}
       {!devices.loading && list.length === 0 && (
-        <p className="fam-quiet">No computers yet — a parent code is made when you set one up.</p>
+        <p className="fam-quiet">No computers yet — an unlock code is made when you set one up.</p>
       )}
-
-      <Modal
-        open={!!showing}
-        onClose={() => setShowing(null)}
-        title={showing?.fresh ? "NEW PARENT CODE" : "PARENT CODE"}
-        footer={<Button onClick={() => setShowing(null)}>DONE</Button>}
-      >
-        {showing && (
-          <div className="pc-modal">
-            <p className="text-sm" style={{ color: "var(--fg-dim)", margin: 0 }}>
-              Scan into your authenticator app as{" "}
-              <span style={{ color: "var(--fg)" }}>OpenScreenTime · {showing.device.name}</span>.
-              {showing.fresh && " Delete the old entry for this computer."}
-            </p>
-            <QrCode value={showing.code.otpauth_uri} size={200} label={`Parent code for ${showing.device.name}`} />
-            <div className="add-qr-text" style={{ justifyItems: "center" }}>
-              <p className="add-secret-label">Or type the secret</p>
-              <code className="add-secret">{showing.code.secret}</code>
-              <Button size="sm" variant="ghost" onClick={() => navigator.clipboard?.writeText(showing.code.secret)}>
-                COPY
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      <Modal
-        open={!!confirmRotate}
-        onClose={() => setConfirmRotate(null)}
-        title="REPLACE PARENT CODE"
-        danger
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setConfirmRotate(null)} disabled={busy}>
-              CANCEL
-            </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void rotate()}>
-              {busy ? "REPLACING…" : "REPLACE"}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
-          Make a new parent code for <span className="dot text-fg">{confirmRotate?.name}</span>? The
-          current authenticator entry stops working as soon as that computer next checks in, so
-          scan the new one straight away. The backup code printed at install is unaffected.
-        </p>
-      </Modal>
     </div>
   );
 }
@@ -396,7 +297,15 @@ function TwoFactor() {
             then enter the 6-digit code it shows for{" "}
             <span style={{ color: "var(--fg)" }}>{me?.account?.email ?? "your account"}</span>.
           </p>
-          {enrolling && <TokenBlock token={enrolling.secret} />}
+          {enrolling && (
+            <div className="tf-enrol">
+              <QrCode value={enrolling.otpauth_uri} size={148} label="Scan into your authenticator app" />
+              <div className="tf-enrol-text">
+                <p className="add-secret-label">Can't scan? Type the secret</p>
+                <TokenBlock token={enrolling.secret} />
+              </div>
+            </div>
+          )}
           <div className="cr-wrap">
             <CodeRing
               value={code}

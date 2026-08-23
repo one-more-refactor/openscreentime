@@ -18,6 +18,37 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-23
+
+**Headline: the console owns the keys.** The code a parent types on a
+child's computer now comes from OpenScreenTime itself — no authenticator app,
+no QR — and the console has an explicit *change mode*: prove it's you once,
+change things for fifteen minutes, lock it again. The web got a consistency
+and depth pass on top.
+
+- **Change mode (web).** One control in the rail (and the phone drawer): a
+  shut lock and *Make changes* while locked; an open lock, the minutes left,
+  *Extend* (once) and *Lock* while on. Turning it on or off plays a short
+  full-screen veil (≈1.1 s in, ≈0.7 s out; a 150 ms fade under
+  `prefers-reduced-motion`). The first locked control you touch asks once;
+  nothing pops up again while it is on. A reloaded console asks the server
+  whether it is still on (`GET /api/auth/stepup`). Every mutating control sits
+  at the same reduced presence while it is off.
+- **Unlock codes (web).** *Add a child → step 2* and *Settings → Unlock
+  codes* show the live 6-digit code for a computer with a 30-second ring,
+  refetched as it rolls; *Recovery codes* makes eight one-time codes (shown
+  once, print/copy, "n of 8 left"); *Replace* re-keys the device and warns
+  that its recovery codes are cleared. The parent-code QR, the secret text
+  and the "write down the backup code" step are gone. Device cards show how
+  many recovery codes are left. The parent's *own* authenticator enrolment
+  (console 2FA) gains a QR alongside the secret.
+- **Consistency & depth (web).** Tokenised elevation (`--elev-1` resting,
+  `--elev-2` floating/hover; the dark theme uses a faint top edge instead of a
+  drop shadow), the rail as its own plane, hover lift on cards, a pressed
+  state on every button, one `PageHead` on every page (eyebrow · title · quiet
+  line · actions), one segmented control, `/me` and `/login` on the same
+  elevation language. No redesign — the system is the same, less flat.
+
 ## [0.4.0] — 2026-08-22
 
 **Headline: it works end to end now.** This release is the one where a

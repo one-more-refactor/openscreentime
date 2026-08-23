@@ -20,7 +20,11 @@ import type {
   MemberPatch,
   MeToday,
   NewMember,
-  ParentCode,
+  ChangeModeStatus,
+  RecoveryCodes,
+  RecoveryCodesStatus,
+  UnlockCode,
+  UnlockCodeRotated,
   CommandRow,
   VpnProfile,
   UsageHistoryResponse,
@@ -66,11 +70,14 @@ import {
   mockFamily,
   mockMe,
   mockMeToday,
-  mockParentCode,
   mockPasskeys,
   mockProfiles,
-  mockRotateParentCode,
   mockTwoFactor,
+  mockChangeMode,
+  mockUnlockCode,
+  mockRotateUnlockCode,
+  mockGenerateRecoveryCodes,
+  mockRecoveryCodesStatus,
   mockUpdateMember,
   MOCK_STEPUP_CODE,
 } from "./mock";
@@ -209,10 +216,11 @@ export async function getMe(): Promise<Me> {
   return read<Me>("/api/me", () => mockMe);
 }
 
-// ---- Step-up 2FA -----------------------------------------------------------
-// "Reading is free; every change needs a second factor." The mutation itself
-// (in api calls below) returns STEP_UP_REQUIRED when no grant is live; the UI
-// catches that, runs one of these flows, then retries. See docs/AUTH.md.
+// ---- Change mode (step-up 2FA) ----------------------------------------------
+// "Reading is free; changing needs a second factor — once." A verified factor
+// turns change mode on for 15 minutes (the server's step-up grant); the
+// console locks it again on request, on expiry, or on reload if it lapsed.
+// A mutation attempted without it returns STEP_UP_REQUIRED. See docs/AUTH.md.
 
 export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
   return read<TwoFactorStatus>("/api/me/2fa", () => mockTwoFactor);
@@ -250,7 +258,7 @@ export async function startEmailStepUp(): Promise<void> {
   return request<void>("/api/auth/stepup/email/start", { method: "POST" });
 }
 
-/** Verify a second factor; on success a short-lived step-up grant is set. */
+/** Verify a second factor; on success change mode is on for 15 minutes. */
 export async function verifyStepUp(
   method: SecondFactorMethod,
   code: string,
@@ -259,14 +267,29 @@ export async function verifyStepUp(
     if (code.replace(/\s/g, "") !== MOCK_STEPUP_CODE) {
       throw new ApiError("invalid_code", "That code didn't match. Try again.", 400);
     }
-    // A five-minute grant, mirroring the server's window.
-    const expires = new Date(Date.now() + 5 * 60_000).toISOString();
-    return { method, expires_at: expires };
+    return { method, ...mockChangeMode.enter() };
   }
   return request<StepUpGrant>("/api/auth/stepup/verify", {
     method: "POST",
     body: JSON.stringify({ method, code }),
   });
+}
+
+/** Is change mode on for this session (survives a reload), and until when. */
+export async function getChangeMode(): Promise<ChangeModeStatus> {
+  return read<ChangeModeStatus>("/api/auth/stepup", () => mockChangeMode.status());
+}
+
+/** Lock it down again, now. */
+export async function lockChangeMode(): Promise<ChangeModeStatus> {
+  if (usingMock) return mockChangeMode.lock();
+  return request<ChangeModeStatus>("/api/auth/stepup/lock", { method: "POST" });
+}
+
+/** Another 15 minutes from now — once per grant (409 `already_extended`). */
+export async function extendChangeMode(): Promise<ChangeModeStatus> {
+  if (usingMock) return mockChangeMode.extend();
+  return request<ChangeModeStatus>("/api/auth/stepup/extend", { method: "POST" });
 }
 
 // ---- Family ----------------------------------------------------------------
@@ -702,20 +725,36 @@ export async function askForTime(minutes: number, reason?: string): Promise<void
   });
 }
 
-// ---- Parent code (per-device authenticator secret) ---------------------------
+// ---- Unlock codes (per device) ------------------------------------------------
+// The device verifies these offline; the server holds the secret and shows the
+// parent the current code. Reading it is a sensitive read: 428 without change
+// mode on, so callers wrap it in guard().
 
-/** Sensitive read: the server answers 428 without a live step-up grant. */
-export async function getParentCode(deviceId: string): Promise<ParentCode> {
-  if (usingMock) return mockParentCode(deviceId);
-  return request<ParentCode>(`/api/devices/${deviceId}/parent-code`);
+export async function getUnlockCode(deviceId: string): Promise<UnlockCode> {
+  if (usingMock) return mockUnlockCode(deviceId);
+  return request<UnlockCode>(`/api/devices/${deviceId}/unlock-code`);
 }
 
-/** Re-mint the device's parent code; the old one stops working once the
- * agent pulls the new policy bundle. */
-export async function rotateParentCode(deviceId: string): Promise<ParentCode> {
-  if (usingMock) return mockRotateParentCode(deviceId);
-  return request<ParentCode>(`/api/devices/${deviceId}/parent-code/rotate`, {
+/** New secret: the old codes stop working once the device checks in, and the
+ * recovery codes (keyed by the old secret) are cleared. */
+export async function rotateUnlockCode(deviceId: string): Promise<UnlockCodeRotated> {
+  if (usingMock) return mockRotateUnlockCode(deviceId);
+  return request<UnlockCodeRotated>(`/api/devices/${deviceId}/unlock-code/rotate`, {
     method: "POST",
     body: JSON.stringify({}),
   });
+}
+
+/** Eight fresh one-time codes, shown once; replaces any previous set. */
+export async function generateRecoveryCodes(deviceId: string): Promise<RecoveryCodes> {
+  if (usingMock) return mockGenerateRecoveryCodes(deviceId);
+  return request<RecoveryCodes>(`/api/devices/${deviceId}/recovery-codes`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function getRecoveryCodes(deviceId: string): Promise<RecoveryCodesStatus> {
+  if (usingMock) return mockRecoveryCodesStatus(deviceId);
+  return request<RecoveryCodesStatus>(`/api/devices/${deviceId}/recovery-codes`);
 }
