@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import * as api from "../api";
 import type { RecoveryCodesStatus, UnlockCode } from "../types";
-import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { Button } from "./Button";
 import { Modal } from "./Modal";
 import { relTime } from "../lib/format";
@@ -47,7 +47,7 @@ function spaced(code: string): string {
 }
 
 export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: Props) {
-  const { guard } = useChangeMode();
+  const { guard } = useConfirm();
   const [code, setCode] = useState<UnlockCode | null>(null);
   const [showing, setShowing] = useState(autoShow);
   const [secondsLeft, setSecondsLeft] = useState(0);

@@ -20,9 +20,9 @@
 //    is paused when one laptop never got the message.
 // ============================================================================
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Device } from "../types";
-import { lockDevice, unlockDevice } from "../api";
-import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { STEP_UP_REQUIRED, type Device } from "../types";
+import { ApiError, lockDevice, unlockDevice } from "../api";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useToast } from "../lib/toast";
 
 /** How long the hold must last before the pause commits. */
@@ -39,7 +39,7 @@ interface Props {
 type Phase = "idle" | "holding" | "working";
 
 export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) {
-  const { guard } = useChangeMode();
+  const { guard } = useConfirm();
   const { toast } = useToast();
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
@@ -61,11 +61,22 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
       setPhase("working");
       if (pause) onSweep(true);
       try {
-        const results = await guard(async () =>
-          Promise.allSettled(
+        const results = await guard(async () => {
+          const settled = await Promise.allSettled(
             devices.map((d) => (pause ? lockDevice(d.id) : unlockDevice(d.id))),
-          ),
-        );
+          );
+          // allSettled would swallow the server's "prove it's you" — rethrow
+          // it so guard() can ask once and re-run the whole batch (locking is
+          // idempotent, so the retry is safe).
+          const ask = settled.find(
+            (r): r is PromiseRejectedResult =>
+              r.status === "rejected" &&
+              r.reason instanceof ApiError &&
+              r.reason.code === STEP_UP_REQUIRED,
+          );
+          if (ask) throw ask.reason;
+          return settled;
+        });
 
         const failed = results.filter((r) => r.status === "rejected").length;
         // `delivered: false` means the command is queued for a device that is

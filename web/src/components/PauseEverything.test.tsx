@@ -7,10 +7,10 @@ import { render, screen, waitFor, act, cleanup, fireEvent } from "@testing-libra
 
 import type { Device } from "../types";
 // Registers the shared module mocks; must be imported before the component.
-import { apiCalls, apiImpl, toasts, armChangeMode, resetApiMock, resetUiMocks } from "../test/mockApi";
+import { ApiError, apiCalls, apiImpl, toasts, armChangeMode, resetApiMock, resetUiMocks } from "../test/mockApi";
 
 const { PauseEverything } = await import("./PauseEverything");
-const { ChangeModeProvider } = await import("../lib/changemode");
+const { ConfirmProvider } = await import("../lib/confirm");
 
 function device(id: string, status: Device["status"] = "online", locked = false): Device {
   return {
@@ -43,14 +43,14 @@ function setup(devices: Device[], allPaused = false) {
   const onDone = mock(() => {});
   const onSweep = mock((_: boolean) => {});
   render(
-    <ChangeModeProvider>
+    <ConfirmProvider>
       <PauseEverything
         devices={devices}
         allPaused={allPaused}
         onSweep={onSweep}
         onDone={onDone}
       />
-    </ChangeModeProvider>,
+    </ConfirmProvider>,
   );
   return { onDone, onSweep, button: screen.getByRole("button", { name: /pause|resume/i }) };
 }
@@ -122,8 +122,12 @@ describe("pause everything", () => {
     expect(toasts[0].tone).toBe("warn");
   });
 
-  test("with change mode off, the hold asks for a code — and cancelling is silent", async () => {
+  test("an untrusted session gets the confirm dialog — and cancelling is silent", async () => {
+    // Trust lives at login now; a trusted session pauses with no ceremony.
+    // Only when the server itself asks for proof (428) does a dialog appear.
     apiImpl.getChangeMode = () => Promise.resolve({ armed_until: null, extended: false });
+    apiImpl.lockDevice = () =>
+      Promise.reject(new ApiError("step_up_required", "prove it's you", 428));
     const { button } = setup([device("a")]);
 
     await act(async () => {
@@ -131,14 +135,12 @@ describe("pause everything", () => {
       await new Promise((r) => setTimeout(r, 900));
     });
 
-    // The real change-mode dialog opens instead of the pause going through.
+    // The confirm dialog opens instead of the pause claiming success.
     const cancel = await screen.findByRole("button", { name: /cancel/i });
-    expect(apiCalls.locked).toHaveLength(0);
     fireEvent.click(cancel);
 
     await new Promise((r) => setTimeout(r, 60));
     // Changing your mind is not a failure and must not be scolded.
     expect(toasts).toHaveLength(0);
-    expect(apiCalls.locked).toHaveLength(0);
   });
 });

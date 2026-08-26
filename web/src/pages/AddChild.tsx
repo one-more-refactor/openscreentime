@@ -23,7 +23,7 @@ import {
   type EnrollTokenResponse,
   type Theme,
 } from "../types";
-import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
 import { PageHead } from "../layout/PageHead";
 import { familyChanged } from "../lib/family";
@@ -37,7 +37,7 @@ const BRACKET_BLURB: Record<AgeBracket, string> = {
 };
 
 export function AddChild() {
-  const { guard } = useChangeMode();
+  const { guard } = useConfirm();
   const [name, setName] = useState("");
   const [birthdate, setBirthdate] = useState("");
   const [override, setOverride] = useState<AgeBracket | null>(null);
@@ -151,7 +151,7 @@ export function AddChild() {
                   type="button"
                   role="radio"
                   aria-checked={b.key === bracket}
-                  className="add-bracket no-code"
+                  className="add-bracket"
                   data-on={b.key === bracket}
                   onClick={() => setOverride(b.key === derived ? null : b.key)}
                 >
@@ -169,14 +169,14 @@ export function AddChild() {
                 <strong>{THEMES.find((t) => t.key === autoTheme)?.label}</strong> for this bracket.
               </p>
               <div className="pills">
-                <button type="button" className="pill no-code" data-on={theme === null} onClick={() => setTheme(null)}>
+                <button type="button" className="pill" data-on={theme === null} onClick={() => setTheme(null)}>
                   Auto
                 </button>
                 {THEMES.map((t) => (
                   <button
                     key={t.key}
                     type="button"
-                    className="pill no-code"
+                    className="pill"
                     data-on={theme === t.key}
                     title={t.blurb}
                     onClick={() => setTheme(t.key)}
@@ -209,7 +209,7 @@ export function AddChild() {
                 Open a Terminal on their computer, paste this in, and press Enter.
               </p>
               <pre className="add-code">{oneLiner}</pre>
-              <button className="ch-btn no-code" onClick={copy}>
+              <button className="ch-btn" onClick={copy}>
                 {copied ? "Copied" : "Copy command"}
               </button>
               <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
@@ -240,7 +240,7 @@ export function AddChild() {
             </p>
           </div>
 
-          <button className="ch-btn ch-btn-yes add-submit no-code" onClick={done}>
+          <button className="ch-btn ch-btn-yes add-submit" onClick={done}>
             Done
           </button>
           <p className="ch-meta" style={{ marginTop: "0.75rem" }}>

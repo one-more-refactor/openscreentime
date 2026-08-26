@@ -53,6 +53,10 @@ pub fn session_cookie(value: String, secure: bool) -> Cookie<'static> {
 
 /// Create a DB-backed admin session and return the raw cookie value (the DB
 /// stores only its sha256 hash, like device tokens).
+///
+/// Every caller is a completed login ceremony — passkey, SSO, or a device
+/// voucher — so the session is born **trusted**: proving it's you happens at
+/// the door, not again inside.
 pub async fn create_session(
     db: &sqlx::PgPool,
     admin_id: Uuid,
@@ -60,8 +64,8 @@ pub async fn create_session(
 ) -> AppResult<String> {
     let token = gen_token();
     sqlx::query(
-        "INSERT INTO admin_sessions (token_hash, admin_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(days => $4))",
+        "INSERT INTO admin_sessions (token_hash, admin_id, tenant_id, expires_at, trusted)
+         VALUES ($1, $2, $3, now() + make_interval(days => $4), true)",
     )
     .bind(hash_token(&token))
     .bind(admin_id)

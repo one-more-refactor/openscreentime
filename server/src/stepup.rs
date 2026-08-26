@@ -1,20 +1,25 @@
-//! Step-up 2FA — "reading is frictionless; every change needs a second factor"
-//! (docs/AUTH.md phase 2a).
+//! Trust at login — "prove it's you at the door, then just use it."
 //!
-//! The session cookie proves **who** you are. A mutation additionally requires a
-//! **step-up grant**: a short-lived marker on the session row, set only by this
-//! module after a second factor is verified. Missing or expired → `428
-//! step_up_required`, which the web console catches to open its modal and retry.
+//! A session born from a completed login ceremony — passkey, SSO, or an
+//! enrolled device's voucher — is **trusted** and mutates freely. There is no
+//! separate change-mode ceremony any more: the proof happened at sign-in.
+//! A session that is *not* trusted (pre-migration cookies, or a future weak
+//! login path) gets `428 step_up_required` on any mutation; passing one factor
+//! makes it trusted for good, which is "verify once at login" in practice.
+//!
+//! What remains guarded for everyone is the **sensitive corner** — the handful
+//! of routes that are themselves takeover surface (a child's unlock code and
+//! recovery codes, the passkey inventory, standing pairing tokens). Touching
+//! those needs a short-lived **confirm window** on the session: one factor —
+//! a code, or a Telegram tap — opens it for a few minutes.
 //!
 //! Two design notes worth keeping:
 //!
-//! **It is a layer, not a per-handler extractor.** AUTH.md describes a `StepUp`
-//! extractor on every mutating handler; the invariant it is really asking for is
-//! "no mutation without a grant". A layer over the whole `/api` router with a
-//! small, explicit exempt list delivers that without depending on nobody ever
-//! forgetting to add a parameter to a new handler. Forgetting here fails
-//! closed — a new mutating route is guarded the moment it exists. The exempt
-//! list is the auth flow itself, which cannot require the thing it is producing.
+//! **It is a layer, not a per-handler extractor.** A layer over the whole
+//! `/api` router with a small, explicit exempt list means a new mutating route
+//! is guarded the moment it exists — failing closed instead of depending on
+//! nobody ever forgetting a parameter. The exempt list is the auth flow
+//! itself, which cannot require the thing it is producing.
 //!
 //! **The verifier reads the secret.** TOTP secrets are stored as base32, not
 //! hashed: a one-way digest cannot generate the next code. That is inherent to
@@ -40,10 +45,9 @@ use crate::auth::{gen_token, hash_token, session_cookie};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, AuthAdmin, SESSION_COOKIE};
 
-/// How long a grant lasts — the console calls this window **change mode**:
-/// enter a second factor once, change what you came to change, lock it again.
-/// Long enough for a real sitting, short enough that a walked-away-from
-/// console is not a standing permission. Extendable once (`/extend`).
+/// How long a confirm window lasts once a factor is passed — long enough to
+/// read an unlock code to a child or rotate a device's keys, short enough
+/// that a walked-away-from console is not a standing permission.
 const GRANT_MINUTES: i64 = 15;
 /// Emailed codes are single-use and short-lived.
 const EMAIL_CODE_MINUTES: i64 = 10;
@@ -137,23 +141,29 @@ fn exempt(path: &str) -> bool {
         || path == "/api/me/ask"
 }
 
-/// The one exception to "reading is free": inventories that are themselves
-/// takeover surface. A passkey list tells an attacker what to remove; a pairing
-/// token list is standing parent access. Viewing either proves it's you first.
-/// (`GET /api/me/2fa` stays free — the step-up dialog needs it to know which
-/// factors to offer BEFORE any grant exists.)
-fn sensitive_read(path: &str) -> bool {
-    path == "/api/me/passkeys"
-        || path == "/api/parent-tokens"
+/// The sensitive corner: routes that are themselves takeover surface, read
+/// **or** write. A passkey list tells an attacker what to remove; a pairing
+/// token is standing parent access; a device's unlock code is the key to a
+/// child's machine and its recovery codes are the spares. Touching any of
+/// these needs a live confirm window, whoever you are.
+/// (`GET /api/me/2fa` stays free — the confirm dialog needs it to know which
+/// factors to offer BEFORE any window exists.)
+fn sensitive(path: &str) -> bool {
+    path.starts_with("/api/me/passkeys")
+        || path.starts_with("/api/parent-tokens")
         || (path.starts_with("/api/devices/")
-            && (path.ends_with("/unlock-code") || path.ends_with("/recovery-codes")))
+            && (path.ends_with("/unlock-code")
+                || path.ends_with("/unlock-code/rotate")
+                || path.ends_with("/recovery-codes")))
 }
 
-/// Layer over the `/api` router: any mutating request needs a live grant.
+/// Layer over the `/api` router.
 ///
-/// Reads pass straight through — that is the whole point of the invariant, and
-/// it is what lets a glanceable surface like the notch poll usage without ever
-/// asking for a code. The only read exceptions are in [`sensitive_read`].
+/// Ordinary reads pass straight through, and ordinary mutations pass for any
+/// **trusted** session — trust was earned at login. What stops here:
+/// a sensitive route (read or write) without a live confirm window, and a
+/// mutation from an untrusted session (which one passed factor repairs, for
+/// the life of the session).
 pub async fn require_step_up(
     State(st): State<AppState>,
     jar: CookieJar,
@@ -167,12 +177,9 @@ pub async fn require_step_up(
         method,
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
-    let guarded = if mutating {
-        path.starts_with("/api/") && !exempt(&path)
-    } else {
-        sensitive_read(&path)
-    };
-    if !guarded {
+    let needs_confirm = sensitive(&path) && !exempt(&path);
+    let needs_trust = mutating && path.starts_with("/api/") && !exempt(&path);
+    if !needs_confirm && !needs_trust {
         return Ok(next.run(req).await);
     }
 
@@ -184,8 +191,8 @@ pub async fn require_step_up(
     };
 
     let hash = hash_token(cookie.value());
-    let until: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
-        "SELECT stepup_until FROM admin_sessions
+    let row: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "SELECT stepup_until, trusted FROM admin_sessions
          WHERE (token_hash = $1
                 OR (prev_token_hash = $1 AND prev_valid_until > now()))
            AND expires_at > now()",
@@ -194,13 +201,22 @@ pub async fn require_step_up(
     .fetch_optional(&st.db)
     .await?;
 
-    match until {
+    match row {
         // Unknown session: let the handler's extractor produce the 401.
         None => Ok(next.run(req).await),
-        Some(Some(t)) if t > Utc::now() => Ok(next.run(req).await),
-        _ => Err(AppError::StepUpRequired(
-            "this change needs a second factor".into(),
-        )),
+        Some((until, trusted)) => {
+            if needs_confirm && !until.is_some_and(|t| t > Utc::now()) {
+                return Err(AppError::StepUpRequired(
+                    "confirm it's you to touch the keys".into(),
+                ));
+            }
+            if needs_trust && !trusted {
+                return Err(AppError::StepUpRequired(
+                    "this session hasn't proved itself yet — one code fixes that for good".into(),
+                ));
+            }
+            Ok(next.run(req).await)
+        }
     }
 }
 
@@ -223,10 +239,9 @@ async fn session_id_for(st: &AppState, jar: &CookieJar) -> AppResult<Uuid> {
     .ok_or_else(|| AppError::Unauthorized("no session".into()))
 }
 
-/// Grant the current session its change-mode window, and rotate its token
-/// while we are here — a step-up is the natural moment to re-issue, since it
-/// is the one point where the user has just re-proved themselves. A fresh
-/// grant also gets its one extension back.
+/// Open the session's confirm window, mark it trusted for good, and rotate
+/// its token while we are here — a passed factor is the natural moment to
+/// re-issue, since the user has just re-proved themselves.
 async fn grant_and_rotate(
     st: &AppState,
     jar: CookieJar,
@@ -243,6 +258,7 @@ async fn grant_and_rotate(
                 token_hash       = $2,
                 stepup_until     = $3,
                 stepup_extended  = false,
+                trusted          = true,
                 last_seen_at     = now(),
                 expires_at       = GREATEST(expires_at, now() + interval '7 days')
           WHERE id = $1",
@@ -523,11 +539,11 @@ pub async fn verify(
     ))
 }
 
-// ── change mode ─────────────────────────────────────────────────────────────
+// ── the confirm window ──────────────────────────────────────────────────────
 //
-// The grant already existed; these three handlers make it a thing the console
-// can show, end and stretch — so "am I in change mode?" survives a reload,
-// "lock it down" is a click, and one overrun does not mean typing a code again.
+// These three handlers let the console show, end and stretch the sensitive-
+// corner confirm window — so "is it open?" survives a reload, "close it" is a
+// click, and one overrun does not mean typing a code again.
 
 async fn change_mode_json(st: &AppState, session_id: Uuid) -> AppResult<Value> {
     let row: (Option<DateTime<Utc>>, bool) =
@@ -676,8 +692,9 @@ pub struct MintVoucherReq {
 /// local surface on its own machine (the browser, the notch) to exchange.
 ///
 /// The device is authenticated by its bearer token, so a voucher is only ever
-/// as good as possession of the machine — which is why the session it buys
-/// starts with no grant. Possession of a laptop is not possession of the phone.
+/// as good as possession of the machine — and under trust-at-login that is
+/// the point: your own signed-in computer signs you in. The sensitive corner
+/// (unlock codes, passkeys, pairing tokens) still asks for a factor.
 ///
 /// The voucher is bound to the **account** behind `os_username`
 /// (`device_users.account_id`). An OS login nobody is linked to gets
@@ -738,7 +755,7 @@ pub struct VoucherReq {
 /// `POST /api/auth/voucher` — voucher in, session out, server-verified.
 ///
 /// The session is issued for the account the voucher was minted for (the
-/// person behind the OS login that asked). It never starts stepped up.
+/// person behind the OS login that asked), and it is trusted from birth.
 pub async fn redeem_voucher(
     State(st): State<AppState>,
     jar: CookieJar,
@@ -781,9 +798,12 @@ pub async fn redeem_voucher(
     let role = role.ok_or_else(|| AppError::Unauthorized("no account on this household".into()))?;
 
     let token = gen_token();
+    // A voucher session is a completed login on an enrolled machine: trusted,
+    // for a parent and a child alike. Possession of your own signed-in
+    // computer *is* the proof — the same bar Screen Time on a phone sets.
     sqlx::query(
-        "INSERT INTO admin_sessions (token_hash, admin_id, tenant_id, expires_at, via_voucher)
-         VALUES ($1, $2, $3, now() + interval '7 days', true)",
+        "INSERT INTO admin_sessions (token_hash, admin_id, tenant_id, expires_at, via_voucher, trusted)
+         VALUES ($1, $2, $3, now() + interval '7 days', true, true)",
     )
     .bind(hash_token(&token))
     .bind(account_id)
@@ -862,23 +882,30 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_inventories_are_guarded_reads() {
-        assert!(sensitive_read("/api/me/passkeys"));
-        assert!(sensitive_read("/api/parent-tokens"));
-        // The per-device unlock code is the key to the child's machine, and
-        // the recovery-code status says how many spare keys exist.
-        assert!(sensitive_read("/api/devices/abc/unlock-code"));
-        assert!(sensitive_read("/api/devices/abc/recovery-codes"));
-        assert!(!sensitive_read("/api/devices/abc/parent-code"));
-        // The status the step-up dialog itself needs must stay free, or you
-        // would need a grant to find out how to get a grant.
-        assert!(!sensitive_read("/api/me/2fa"));
-        // Ordinary reads stay frictionless.
-        assert!(!sensitive_read("/api/devices"));
+    fn the_sensitive_corner_covers_reads_and_writes() {
+        assert!(sensitive("/api/me/passkeys"));
+        assert!(sensitive("/api/me/passkeys/abc")); // removal is the takeover
+        assert!(sensitive("/api/parent-tokens"));
+        assert!(sensitive("/api/parent-tokens/abc"));
+        // The per-device unlock code is the key to the child's machine, the
+        // recovery codes are the spares, and re-keying mints new ones.
+        assert!(sensitive("/api/devices/abc/unlock-code"));
+        assert!(sensitive("/api/devices/abc/unlock-code/rotate"));
+        assert!(sensitive("/api/devices/abc/recovery-codes"));
+        assert!(!sensitive("/api/devices/abc/parent-code"));
+        // The status the confirm dialog itself needs must stay free, or you
+        // would need a window to find out how to open a window.
+        assert!(!sensitive("/api/me/2fa"));
+        // Everything else — reads and ordinary mutations — stays out of it.
+        assert!(!sensitive("/api/devices"));
+        assert!(!sensitive("/api/devices/abc/lock"));
+        assert!(!sensitive("/api/device-users/abc/credit-time"));
     }
 
     #[test]
-    fn everything_that_changes_something_is_guarded() {
+    fn ordinary_mutations_ride_on_session_trust_not_exemption() {
+        // Not exempt = they still go through the layer, where a trusted
+        // session passes and an untrusted one is asked for a factor once.
         assert!(!exempt("/api/devices"));
         assert!(!exempt("/api/profiles/abc"));
         assert!(!exempt("/api/device-users/abc/credit-time"));

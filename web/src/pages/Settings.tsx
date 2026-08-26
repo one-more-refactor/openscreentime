@@ -7,9 +7,9 @@
 // The back room — the computers' unlock codes, passkeys, second factors,
 // paired companions — is the set of levers that would let someone take the
 // family over. It is not rendered, and its data is NOT EVEN FETCHED, until
-// change mode is on: the fetches run only then, and the server (docs/AUTH.md)
-// answers them with 428 unless the session holds a live grant. The client
-// gate is comfort; the server is the lock.
+// the person confirms it's them: the fetches run only then, and the server
+// (docs/AUTH.md) answers them with 428 unless the session holds a live
+// confirm window. The client gate is comfort; the server is the lock.
 // ============================================================================
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -41,7 +41,7 @@ import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { FluentSlider } from "../components/FluentSlider";
-import { useChangeMode } from "../lib/changemode";
+import { useConfirm } from "../lib/confirm";
 import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
 import { CodeRing } from "../components/CodeRing";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
@@ -93,7 +93,7 @@ function You() {
             </p>
           </div>
           <span className="rl-controls">
-            <button className="ch-btn no-code" onClick={() => void handleLogout()}>
+            <button className="ch-btn" onClick={() => void handleLogout()}>
               Log out
             </button>
           </span>
@@ -153,11 +153,11 @@ function Appearance() {
 // ---- the back room ---------------------------------------------------------
 
 function Security() {
-  const { enter, armed } = useChangeMode();
+  const { enter, armed } = useConfirm();
   const [checking, setChecking] = useState(false);
 
-  // The room is open exactly while change mode is on — when it lapses, the
-  // gate closes again by itself. No stale "unlocked" state to forget.
+  // The room is open exactly while the confirm window is — when it lapses,
+  // the gate closes again by itself. No stale "unlocked" state to forget.
   async function unlock() {
     setChecking(true);
     try {
@@ -177,13 +177,13 @@ function Security() {
           <span className="gate-glyph" aria-hidden="true">
             <LockGlyph open={false} size={22} />
           </span>
-          <p className="gate-title">Turn on change mode to see this</p>
+          <p className="gate-title">Confirm it's you to see this</p>
           <p className="gate-sub">
             The computers' unlock codes, your passkeys, second factors and paired companions
             live here. The server only hands them to a session that has proved it's you.
           </p>
-          <button className="ch-btn ch-btn-yes no-code" disabled={checking} onClick={() => void unlock()}>
-            {checking ? "Checking…" : "Turn on change mode"}
+          <button className="ch-btn ch-btn-yes" disabled={checking} onClick={() => void unlock()}>
+            {checking ? "Checking…" : "Confirm it's you"}
           </button>
         </div>
       )}
@@ -191,7 +191,7 @@ function Security() {
   );
 }
 
-/** Mounted only while change mode is on — these fetches never fire on an idle visit. */
+/** Mounted only while confirmed — these fetches never fire on an idle visit. */
 function SecurityPanels() {
   return (
     <div className="rl">
