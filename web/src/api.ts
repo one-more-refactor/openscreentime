@@ -44,6 +44,8 @@ import type {
   Passkey,
   ParentToken,
   MintedParentToken,
+  TelegramPairing,
+  TelegramStatus,
   Policy,
   Profile,
   Severity,
@@ -273,6 +275,41 @@ export async function verifyStepUp(
     method: "POST",
     body: JSON.stringify({ method, code }),
   });
+}
+
+/** Ask the server to send one confirm-tap to the paired Telegram chat. */
+export async function startTelegramStepUp(): Promise<void> {
+  if (usingMock) return;
+  return request<void>("/api/auth/stepup/telegram/start", { method: "POST" });
+}
+
+/** Pairing state of the account's Telegram companion (Security room). */
+export async function getTelegram(): Promise<TelegramStatus> {
+  return read<TelegramStatus>("/api/me/telegram", () => ({
+    configured: true,
+    bot: "OpenScreenTimeBot",
+    paired: false,
+    username: null,
+    paired_at: null,
+  }));
+}
+
+/** Mint a pairing code, shown once — sent to the bot as /start <code>. */
+export async function pairTelegram(): Promise<TelegramPairing> {
+  if (usingMock)
+    return {
+      code: "SAMPLE42",
+      bot: "OpenScreenTimeBot",
+      deep_link: "https://t.me/OpenScreenTimeBot?start=SAMPLE42",
+      expires_in_minutes: 10,
+    };
+  return request<TelegramPairing>("/api/me/telegram/pair", { method: "POST" });
+}
+
+/** Unpair every Telegram chat of this account. */
+export async function unpairTelegram(): Promise<void> {
+  if (usingMock) return;
+  return request<void>("/api/me/telegram", { method: "DELETE" });
 }
 
 /** Is change mode on for this session (survives a reload), and until when. */

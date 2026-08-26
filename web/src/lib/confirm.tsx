@@ -30,6 +30,7 @@ import {
   getTwoFactorStatus,
   lockChangeMode,
   startEmailStepUp,
+  startTelegramStepUp,
   verifyStepUp,
 } from "../api";
 import { STEP_UP_REQUIRED } from "../types";
@@ -227,21 +228,51 @@ interface ModalProps {
 
 function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
   const totp = status?.totp_enrolled ?? false;
+  const telegram = status?.telegram_available ?? false;
   const [method, setMethod] = useState<SecondFactorMethod>("totp");
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The phone path: a tap sent, and a poll waiting for it to land.
+  const [tapSent, setTapSent] = useState(false);
 
-  // When the dialog opens, reset and default to the strongest available method.
+  // When the dialog opens, reset and default to the easiest available method:
+  // one tap on the phone beats typing any code.
   useEffect(() => {
     if (!open) return;
-    setMethod(totp ? "totp" : "email");
+    setMethod(telegram ? "telegram" : totp ? "totp" : "email");
     setCode("");
     setSent(false);
+    setTapSent(false);
     setError(null);
     setBusy(false);
-  }, [open, totp]);
+  }, [open, totp, telegram]);
+
+  // While a tap is out, poll the server until the window opens (the bot has
+  // no way to reach this tab — the tab asks). Two minutes, then give up.
+  useEffect(() => {
+    if (!open || !tapSent) return;
+    const startedAt = Date.now();
+    const t = setInterval(async () => {
+      if (Date.now() - startedAt > 120_000) {
+        clearInterval(t);
+        setTapSent(false);
+        setError("No tap arrived — try again, or use a code.");
+        return;
+      }
+      try {
+        const s = await getChangeMode();
+        if (s.armed_until && new Date(s.armed_until).getTime() > Date.now()) {
+          clearInterval(t);
+          onVerified({ method: "telegram", expires_at: s.armed_until, extended: s.extended });
+        }
+      } catch {
+        /* keep polling — a blip is not a verdict */
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [open, tapSent, onVerified]);
 
   async function sendEmail() {
     setBusy(true);
@@ -298,8 +329,18 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
           stays confirmed for 15 minutes.
         </p>
 
-        {(totp || (status?.email_available ?? false)) && (
+        {(totp || telegram || (status?.email_available ?? false)) && (
           <div className="seg">
+            {telegram && (
+              <MethodTab
+                active={method === "telegram"}
+                label="Phone"
+                onClick={() => {
+                  setMethod("telegram");
+                  setError(null);
+                }}
+              />
+            )}
             {totp && (
               <MethodTab
                 active={method === "totp"}
@@ -314,7 +355,35 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
           </div>
         )}
 
-        {method === "email" && !sent ? (
+        {method === "telegram" ? (
+          tapSent ? (
+            <p className="text-sm" role="status" style={{ color: "var(--fg-dim)" }}>
+              Sent. Tap <strong style={{ color: "var(--fg)" }}>✅ It's me</strong> on your
+              phone — this dialog closes by itself.
+            </p>
+          ) : (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                void (async () => {
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    await startTelegramStepUp();
+                    setTapSent(true);
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : "Could not reach your phone.");
+                  } finally {
+                    setBusy(false);
+                  }
+                })()
+              }
+            >
+              {busy ? "Sending…" : "Send a tap to my phone"}
+            </Button>
+          )
+        ) : method === "email" && !sent ? (
           <Button variant="ghost" onClick={() => void sendEmail()} disabled={busy}>
             {busy ? "Sending…" : "Send a code to my email"}
           </Button>
