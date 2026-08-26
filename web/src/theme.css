@@ -955,17 +955,7 @@
 }
 .cr-note[data-error="true"] { color: var(--accent); }
 
-/* ---- change mode off / on — the app's visible security state ---------------
-   Every control that changes something sits at the same reduced presence
-   while change mode is off; when it turns on the whole app relaxes at once.
-   `.no-code` marks the exceptions (navigation, cancel, theme, copy — things
-   that never mutate). The list below IS the audit: a new mutating control
-   joins it or carries one of these classes. */
-[data-changemode="off"]
-  :is(.ch-btn, .pill, .chip-x, .chip-input, .fs-range, .rl-time, .apps-cat, .apps-tile,
-      .add-bracket, .sec-range, .pause-btn, .tgl, .me-ask-big, .me-ask-pill):not(.no-code) {
-  opacity: 0.55;
-}
+/* Controls share one transition voice so state changes feel like one system. */
 .ch-btn, .pill, .chip-x, .chip-input, .fs-range, .rl-time, .apps-cat, .apps-tile,
 .add-bracket, .sec-range, .pause-btn, .tgl {
   transition-property: opacity, transform, background, color, border-color, box-shadow;
@@ -1333,7 +1323,7 @@ body[data-leaving="true"] .shell {
 .seg-btn[data-on="true"] { background: var(--fg-display); color: var(--bg); }
 
 /* ============================================================================
-   CHANGE MODE — the rail control, the lock glyph, and the full-screen veil.
+   LOCK GLYPH — the small lock whose shackle swings open (the Security gate).
    ========================================================================== */
 .lockglyph { flex: none; }
 .lockglyph-shackle {
@@ -1341,126 +1331,6 @@ body[data-leaving="true"] .shell {
   transition: transform var(--dur-data) var(--ease);
 }
 .lockglyph[data-open="true"] .lockglyph-shackle { transform: translateY(-2px) rotate(-22deg); }
-
-.cm-rail {
-  display: grid; gap: 0.45rem;
-  margin-bottom: 0.9rem; padding: 0.6rem 0.6rem 0.5rem 0.7rem;
-  border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: var(--surface); box-shadow: var(--elev-1);
-  transition: border-color var(--dur-data) var(--ease), background var(--dur-data) var(--ease);
-}
-.cm-rail[data-on="true"] { border-color: var(--fg-dim); }
-.cm-rail-state {
-  display: flex; align-items: center; gap: 0.45rem; min-width: 0;
-  color: var(--fg-dim); font-size: 0.8125rem;
-  transition: color var(--dur-data) var(--ease);
-}
-.cm-rail[data-on="true"] .cm-rail-state { color: var(--fg-display); }
-.cm-rail-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
-.cm-rail-time {
-  font-family: var(--font-mono); font-size: 0.6875rem; color: var(--fg-dim);
-  font-variant-numeric: tabular-nums; margin-left: 0.15rem;
-}
-.cm-rail-actions { display: flex; gap: 0.2rem; justify-content: flex-end; }
-.cm-rail-btn {
-  font-family: var(--font-sans); font-size: 0.75rem; padding: 0.3rem 0.6rem;
-  border: 1px solid transparent; border-radius: 999px; background: none;
-  color: var(--fg-dim); cursor: pointer; white-space: nowrap;
-  transition: color var(--dur-tick) var(--ease), border-color var(--dur-tick) var(--ease),
-    background var(--dur-tick) var(--ease), transform var(--dur-tick) var(--ease);
-}
-.cm-rail-btn:hover:not(:disabled) { color: var(--fg); border-color: var(--line-2); }
-.cm-rail-btn:active:not(:disabled) { transform: scale(0.96); }
-.cm-rail-btn:disabled { opacity: 0.5; cursor: default; }
-.cm-rail-btn-go { border-color: var(--line-2); color: var(--fg); }
-.cm-rail-btn-go:hover:not(:disabled) { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
-.cm-rail-btn-lock:hover:not(:disabled) { background: var(--surface-2); }
-
-/* The veil. One clock (--cm-ms) drives every keyframe below as percentages,
-   so the component's unmount timer and the motion always agree. */
-.cm-veil {
-  position: fixed; inset: 0; z-index: 80;
-  display: grid; place-items: center;
-  pointer-events: none;
-  animation: cm-veil-io-enter var(--cm-ms) var(--ease) both;
-}
-.cm-veil[data-kind="lock"] { animation-name: cm-veil-io-lock; }
-.cm-veil-field { position: absolute; inset: 0; background: var(--bg); opacity: 0.97; }
-.cm-veil-center {
-  position: relative; display: grid; justify-items: center; gap: 0.4rem;
-  color: var(--fg-display);
-}
-.cm-veil-mark { position: relative; display: grid; place-items: center; margin-bottom: 1rem; }
-.cm-veil-ring { position: absolute; inset: 0; }
-.cm-veil-track { stroke: var(--line-2); }
-.cm-veil-arc {
-  stroke: var(--fg-display);
-  animation: cm-veil-sweep var(--cm-ms) var(--ease) both;
-}
-.cm-veil[data-kind="lock"] .cm-veil-arc { animation-name: cm-veil-unsweep; }
-.cm-veil-lock { position: relative; }
-.cm-veil-body {
-  stroke-dasharray: 120; stroke-dashoffset: 0;
-  animation: cm-veil-draw var(--cm-ms) var(--ease) both;
-}
-.cm-veil[data-kind="lock"] .cm-veil-body { animation: none; }
-.cm-veil-shackle {
-  transform-origin: 32px 21px;
-  animation: cm-veil-open var(--cm-ms) var(--ease) both;
-}
-.cm-veil[data-kind="lock"] .cm-veil-shackle { animation-name: cm-veil-close; }
-.cm-veil-title {
-  margin: 0; font-family: var(--font-mono);
-  font-size: clamp(1.05rem, 0.9rem + 1vw, 1.4rem);
-  text-transform: uppercase; letter-spacing: 0.32em; padding-left: 0.32em;
-  animation: cm-veil-rise var(--cm-ms) var(--ease) both;
-}
-.cm-veil-sub {
-  margin: 0; font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim);
-  animation: cm-veil-rise-late var(--cm-ms) var(--ease) both;
-}
-@keyframes cm-veil-io-enter {
-  0% { opacity: 0; } 12% { opacity: 1; } 84% { opacity: 1; } 100% { opacity: 0; }
-}
-@keyframes cm-veil-io-lock {
-  0% { opacity: 0; } 15% { opacity: 1; } 76% { opacity: 1; } 100% { opacity: 0; }
-}
-@keyframes cm-veil-sweep {
-  0%, 10% { stroke-dashoffset: var(--cm-c); } 60%, 100% { stroke-dashoffset: 0; }
-}
-@keyframes cm-veil-unsweep {
-  0%, 10% { stroke-dashoffset: 0; } 60%, 100% { stroke-dashoffset: var(--cm-c); }
-}
-@keyframes cm-veil-draw {
-  0%, 8% { stroke-dashoffset: 120; } 42%, 100% { stroke-dashoffset: 0; }
-}
-@keyframes cm-veil-open {
-  0%, 48% { transform: none; } 72%, 100% { transform: translateY(-5px) rotate(-22deg); }
-}
-@keyframes cm-veil-close {
-  0%, 15% { transform: translateY(-5px) rotate(-22deg); } 50%, 100% { transform: none; }
-}
-@keyframes cm-veil-rise {
-  0%, 24% { opacity: 0; transform: translateY(8px); } 46%, 100% { opacity: 1; transform: none; }
-}
-@keyframes cm-veil-rise-late {
-  0%, 34% { opacity: 0; transform: translateY(6px); } 56%, 100% { opacity: 1; transform: none; }
-}
-/* Reduced motion: a plain fade on the same clock, no choreography. The global
-   0.01ms rule above is overridden on purpose — a 150ms fade is the point. */
-.cm-veil[data-reduced="true"],
-.cm-veil[data-reduced="true"] * {
-  animation: none !important;
-}
-.cm-veil[data-reduced="true"] {
-  animation: cm-veil-fade var(--cm-ms) var(--ease) both !important;
-  animation-duration: var(--cm-ms) !important;
-}
-.cm-veil[data-reduced="true"][data-kind="enter"] .cm-veil-shackle { transform: translateY(-5px) rotate(-22deg); }
-.cm-veil[data-reduced="true"][data-kind="enter"] .cm-veil-arc { stroke-dashoffset: 0; }
-.cm-veil[data-reduced="true"][data-kind="lock"] .cm-veil-arc { stroke-dashoffset: var(--cm-c); }
-@keyframes cm-veil-fade { 0% { opacity: 0; } 45% { opacity: 1; } 100% { opacity: 0; } }
 
 /* ============================================================================
    UNLOCK CODES — the live code, and the recovery-code sheet.

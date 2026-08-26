@@ -12,7 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
 import type { Device } from "../types";
-import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { familyChanged } from "../lib/family";
 import { StateRing, type RingTone } from "../components/StateRing";
 import { PageHead } from "../layout/PageHead";
@@ -101,7 +101,7 @@ function steadiness(d: Device): { label: string; tone?: "ok" | "warn" | "crit" }
 }
 
 function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => void }) {
-  const { guard } = useChangeMode();
+  const { guard } = useConfirm();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"crit" | undefined>();
@@ -236,12 +236,12 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
                   >
                     Until tomorrow
                   </button>
-                  <button className="ch-btn no-code" disabled={busy} onClick={() => setPickingDuration(false)}>
+                  <button className="ch-btn" disabled={busy} onClick={() => setPickingDuration(false)}>
                     Cancel
                   </button>
                 </span>
               ) : (
-                <button className="ch-btn no-code" disabled={busy} onClick={() => setPickingDuration(true)}>
+                <button className="ch-btn" disabled={busy} onClick={() => setPickingDuration(true)}>
                   Allow offline…
                 </button>
               ))}

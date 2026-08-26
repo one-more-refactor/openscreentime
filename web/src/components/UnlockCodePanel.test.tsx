@@ -5,18 +5,18 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { render, screen, waitFor, cleanup, fireEvent, act, within } from "@testing-library/react";
 
 // Registers the shared API mock; must be imported before the components.
-import { apiCalls, apiImpl, armChangeMode, resetApiMock } from "../test/mockApi";
+import { ApiError, apiCalls, apiImpl, armChangeMode, resetApiMock } from "../test/mockApi";
 
-const { ChangeModeProvider } = await import("../lib/changemode");
+const { ConfirmProvider } = await import("../lib/confirm");
 const { UnlockCodePanel } = await import("./UnlockCodePanel");
 
 const laptop = { id: "d1", name: "Mia's laptop", status: "online" as const, last_seen: new Date().toISOString() };
 
 function setup(props: Partial<Parameters<typeof UnlockCodePanel>[0]> = {}) {
   render(
-    <ChangeModeProvider>
+    <ConfirmProvider>
       <UnlockCodePanel device={laptop} {...props} />
-    </ChangeModeProvider>,
+    </ConfirmProvider>,
   );
 }
 
@@ -46,10 +46,13 @@ describe("unlock code panel", () => {
     expect(apiCalls.unlockCode.length).toBeGreaterThanOrEqual(2);
   });
 
-  test("without change mode the code is not shown — the dialog is", async () => {
+  test("when the server wants proof, the code is not shown — the dialog is", async () => {
+    // The server is the lock: an unconfirmed session's read comes back 428,
+    // and the confirm dialog opens instead of the code.
+    apiImpl.getUnlockCode = () =>
+      Promise.reject(new ApiError("step_up_required", "confirm it's you", 428));
     setup({ autoShow: true, variant: "step" });
-    expect(await screen.findByRole("dialog", { name: /turn on change mode/i })).toBeTruthy();
-    expect(apiCalls.unlockCode).toHaveLength(0);
+    expect(await screen.findByRole("dialog", { name: /confirm it's you/i })).toBeTruthy();
     expect(screen.queryByText("123 456")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));

@@ -206,7 +206,7 @@ function AppsAndCategories({ pol, busy, onSave }: { pol: Policy; busy: boolean; 
             })}
           </div>
           {sorted.length > FOLD && (
-            <button className="ch-btn no-code" style={{ justifySelf: "start" }} onClick={() => setShowAll((s) => !s)}>
+            <button className="ch-btn" style={{ justifySelf: "start" }} onClick={() => setShowAll((s) => !s)}>
               {showAll ? "Show fewer" : `All ${sorted.length} apps`}
             </button>
           )}

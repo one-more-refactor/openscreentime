@@ -33,7 +33,7 @@ import {
   policyForLevel,
 } from "../components/SecuritySlider";
 import { EventFeed } from "../components/EventFeed";
-import { useChangeMode, StepUpCancelled } from "../lib/changemode";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
@@ -119,7 +119,7 @@ function Identity({
   const b = AGE_BRACKETS.find((x) => x.key === bracket);
   return (
     <div className="ch-ident">
-      <button className="ch-ident-btn no-code" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+      <button className="ch-ident-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {b ? `${b.label} · ${b.range}` : bracket}
         <span className="ch-ident-sep">·</span>
         {theme ? `${THEMES.find((t) => t.key === theme)?.label ?? theme} look` : `${THEMES.find((t) => t.key === auto)?.label ?? auto} look (auto)`}
@@ -169,7 +169,7 @@ function Identity({
 
 export function ChildDetail() {
   const { key = "" } = useParams();
-  const { guard } = useChangeMode();
+  const { guard } = useConfirm();
   const fam = useFamily();
   const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
@@ -235,7 +235,7 @@ export function ChildDetail() {
       <div className="ch-wrap">
         <Link to="/" className="ch-back">← Family</Link>
         <p className="fam-error">{fam.error ?? "There's no one with that name in your family."}</p>
-        <button className="ch-btn no-code" onClick={() => void fam.reload()}>
+        <button className="ch-btn" onClick={() => void fam.reload()}>
           Try again
         </button>
       </div>

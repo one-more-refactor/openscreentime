@@ -4,6 +4,32 @@ The contract for the auth rework (step 2 of `OPENSCREENTIME.md`). Grounded in
 what the server actually does today. When this conflicts with older docs, this
 wins for auth.
 
+## Trust at login (0.6 — supersedes the per-mutation step-up below)
+
+The operator's verdict on change mode: the ceremony went. **Proving it's you
+happens at the door, not again inside.**
+
+- A session born from a completed login ceremony — **passkey**, **SSO**, or an
+  enrolled device's **voucher** — is `trusted` (column on `admin_sessions`)
+  and mutates freely. Pausing, granting time, changing rules: no second
+  factor, no armed window, no veil.
+- **Device sign-in is the default** on managed machines, for parents and
+  children alike: the installed client vouches for whoever is logged into the
+  computer (`ost login` → voucher URL → session for the account behind that OS
+  login). Possession of your own signed-in computer is the proof — the same
+  bar a phone's Screen Time sets.
+- A session that is *not* trusted (pre-0.6 cookies; any future weak login)
+  gets `428 step_up_required` on mutations; passing **one** factor marks it
+  trusted for the rest of its life.
+- What still asks, for everyone, is the **sensitive corner** — routes that are
+  themselves takeover surface: a device's unlock code (read/rotate), its
+  recovery codes, the passkey inventory, parent pairing tokens. One factor
+  opens a 15-minute **confirm window** (`stepup_until`, extendable once).
+  The console shows this as the Security & access gate; nothing else in the
+  console is gated.
+- The step-up grant/verify machinery below survives as the implementation of
+  that confirm window; read the old sections with that scope in mind.
+
 ## Today (as-built)
 
 - **Sessions:** opaque token in an HttpOnly cookie `ost_session`; DB table

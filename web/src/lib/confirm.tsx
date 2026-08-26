@@ -1,17 +1,17 @@
 // ============================================================================
-// Change mode — the console's explicit edit state.
+// Confirm — the one dialog that asks you to prove it's you.
 //
-// Reading is free. Changing anything needs a second factor — but once, not per
-// change: a verified code turns change mode ON for fifteen minutes (the
-// server's step-up grant, docs/AUTH.md), the whole console visibly unlocks,
-// and it locks again when the parent says so, when the time runs out, or when
-// a reloaded console finds the grant gone.
+// Trust lives at login now: a session born from a passkey, SSO, or the
+// installed client on your own computer mutates freely — pausing, granting
+// time, changing rules just work, with nothing to arm first. The server
+// remains the authority; the rare route that still wants proof answers
+// 428 `step_up_required`, and `guard()` turns that into "confirm, then do it"
+// instead of a dead end.
 //
-// The server is still the authority: a mutation without a live grant comes
-// back 428 `step_up_required`, and `guard()` turns that into "turn on change
-// mode, then do it" instead of a dead end. Entering and leaving both play a
-// short full-screen veil (ChangeModeVeil) so the state change is felt, not
-// inferred from a chip somewhere.
+// Two things still ask:
+//   - the sensitive corner (unlock codes, recovery codes, passkeys, pairing
+//     tokens) — one factor opens a fifteen-minute confirm window,
+//   - a session that predates trust-at-login — one factor repairs it for good.
 // ============================================================================
 import {
   createContext,
@@ -37,68 +37,52 @@ import type { SecondFactorMethod, StepUpGrant, TwoFactorStatus } from "../types"
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { CodeRing } from "../components/CodeRing";
-import { ChangeModeVeil, type VeilKind } from "../components/ChangeModeVeil";
 
 /** Thrown when the user dismisses the dialog — callers no-op on it. */
 export class StepUpCancelled extends Error {
   constructor() {
-    super("Step-up cancelled");
+    super("Confirm cancelled");
     this.name = "StepUpCancelled";
   }
 }
 
-export interface ChangeModeApi {
-  /** Change mode is on right now. */
+export interface ConfirmApi {
+  /** The sensitive-corner confirm window is open right now. */
   armed: boolean;
-  /** When it lapses (ISO), or null while locked. */
+  /** When it lapses (ISO), or null while shut. */
   armedUntil: string | null;
   /** The one allowed extension has been used. */
   extended: boolean;
-  /** Turn change mode on (opens the code dialog unless already on). */
+  /** Open the window (asks for a factor unless it is already open). */
   enter: () => Promise<void>;
-  /** Lock it down again, now. */
+  /** Shut it now. */
   lock: () => Promise<void>;
   /** Another fifteen minutes from now — once. */
   extend: () => Promise<void>;
-  /** Resolve when change mode is on, prompting for a code if not. */
-  requireStepUp: () => Promise<void>;
-  /** Run a mutation behind change mode, retrying once if the server demands it. */
+  /** Resolve once the window is open, prompting for a factor if needed. */
+  requireConfirm: () => Promise<void>;
+  /** Run a call; if the server asks for proof, ask the person once and retry. */
   guard: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
-const Ctx = createContext<ChangeModeApi | null>(null);
+const Ctx = createContext<ConfirmApi | null>(null);
 
 function live(until: string | null): boolean {
   return !!until && new Date(until).getTime() > Date.now();
 }
 
-/** A promise whose settling is in someone else's hands. */
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve: () => void = () => {};
-  const promise = new Promise<void>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
-
-export function ChangeModeProvider({ children }: { children: ReactNode }) {
-  // The grant, mirrored for rendering; the ref is what async code reads so a
+export function ConfirmProvider({ children }: { children: ReactNode }) {
+  // The window, mirrored for rendering; the ref is what async code reads so a
   // guard() that started before a re-render still sees the current truth.
   const [armedUntil, setArmedUntil] = useState<string | null>(null);
   const [extended, setExtended] = useState(false);
   const untilRef = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<TwoFactorStatus | null>(null);
-  const [veil, setVeil] = useState<VeilKind | null>(null);
-  // Everyone waiting on the dialog. Two controls can ask at once (a panel
-  // that loads a code and its recovery count together); one dialog answers
-  // them all, and cancelling it tells them all.
+  // Everyone waiting on the dialog. Two calls can ask at once (a panel that
+  // loads a code and its recovery count together); one dialog answers them
+  // all, and cancelling it tells them all.
   const waiters = useRef<{ resolve: () => void; reject: (e: Error) => void }[]>([]);
-  // The first question to the server — "is change mode still on?" — settles
-  // before any guard() decides to open the dialog, so a click on a reloaded
-  // console (or a child that loads on mount — children's effects run before
-  // ours) does not ask for a code the session already has.
-  const ready = useRef(deferred());
 
   const setGrant = useCallback((until: string | null, ext: boolean) => {
     untilRef.current = until;
@@ -106,27 +90,24 @@ export function ChangeModeProvider({ children }: { children: ReactNode }) {
     setExtended(ext);
   }, []);
 
-  // A reloaded console asks the server whether change mode is still on —
-  // otherwise the controls would show locked while mutations quietly succeed.
+  // A reloaded console asks the server whether the window is still open, so
+  // the Security room doesn't show shut while sensitive reads quietly work.
   useEffect(() => {
     let alive = true;
-    const gate = ready.current;
     getChangeMode()
       .then((s) => {
         if (!alive) return;
         setGrant(live(s.armed_until) ? s.armed_until : null, s.extended);
       })
       .catch(() => {
-        /* no session yet, or an older server: stay locked */
-      })
-      .finally(() => gate.resolve());
+        /* no session yet, or an older server: stay shut */
+      });
     return () => {
       alive = false;
     };
   }, [setGrant]);
 
-  // Lock the moment the grant lapses, without waiting for a failed call —
-  // and say so with the same veil a manual lock shows.
+  // Shut the moment it lapses, without waiting for a failed call.
   useEffect(() => {
     if (!armedUntil) return;
     const ms = new Date(armedUntil).getTime() - Date.now();
@@ -134,15 +115,11 @@ export function ChangeModeProvider({ children }: { children: ReactNode }) {
       setGrant(null, false);
       return;
     }
-    const t = setTimeout(() => {
-      setGrant(null, false);
-      setVeil("lock");
-    }, ms);
+    const t = setTimeout(() => setGrant(null, false), ms);
     return () => clearTimeout(t);
   }, [armedUntil, setGrant]);
 
-  const requireStepUp = useCallback(async () => {
-    await ready.current.promise;
+  const requireConfirm = useCallback(async () => {
     if (live(untilRef.current)) return;
     const first = waiters.current.length === 0;
     const wait = new Promise<void>((resolve, reject) => {
@@ -160,41 +137,40 @@ export function ChangeModeProvider({ children }: { children: ReactNode }) {
     await wait;
   }, []);
 
+  // Optimistic: run the call; only if the server wants proof does anyone get
+  // asked. On a trusted session the dialog never appears at all.
   const guard = useCallback(
     async <T,>(fn: () => Promise<T>): Promise<T> => {
-      await requireStepUp();
       try {
         return await fn();
       } catch (e) {
-        // The grant may have lapsed between check and call — once more.
         if (e instanceof ApiError && e.code === STEP_UP_REQUIRED) {
           setGrant(null, false);
-          await requireStepUp();
+          await requireConfirm();
           return await fn();
         }
         throw e;
       }
     },
-    [requireStepUp, setGrant],
+    [requireConfirm, setGrant],
   );
 
   const enter = useCallback(async () => {
     try {
-      await requireStepUp();
+      await requireConfirm();
     } catch (e) {
       if (!(e instanceof StepUpCancelled)) throw e;
     }
-  }, [requireStepUp]);
+  }, [requireConfirm]);
 
   const lock = useCallback(async () => {
     try {
       await lockChangeMode();
     } catch {
-      // Even if the server could not be told, the console locks: the next
-      // mutation simply asks again.
+      // Even if the server could not be told, the window shuts locally: the
+      // next sensitive read simply asks again.
     }
     setGrant(null, false);
-    setVeil("lock");
   }, [setGrant]);
 
   const extend = useCallback(async () => {
@@ -206,9 +182,6 @@ export function ChangeModeProvider({ children }: { children: ReactNode }) {
     (grant: StepUpGrant) => {
       setGrant(grant.expires_at, grant.extended ?? false);
       setOpen(false);
-      // The veil plays over an app that is already unlocked — the mutation
-      // that asked for this proceeds underneath it.
-      setVeil("enter");
       const all = waiters.current;
       waiters.current = [];
       all.forEach((w) => w.resolve());
@@ -224,27 +197,22 @@ export function ChangeModeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const armed = armedUntil !== null;
-  const api = useMemo<ChangeModeApi>(
-    () => ({ armed, armedUntil, extended, enter, lock, extend, requireStepUp, guard }),
-    [armed, armedUntil, extended, enter, lock, extend, requireStepUp, guard],
+  const api = useMemo<ConfirmApi>(
+    () => ({ armed, armedUntil, extended, enter, lock, extend, requireConfirm, guard }),
+    [armed, armedUntil, extended, enter, lock, extend, requireConfirm, guard],
   );
 
   return (
     <Ctx.Provider value={api}>
-      {/* display:contents — a pure CSS scope: off greys the code-gated
-          controls, on releases them all at once. */}
-      <div data-changemode={armed ? "on" : "off"} style={{ display: "contents" }}>
-        {children}
-      </div>
-      <StepUpModal open={open} status={status} onVerified={onVerified} onCancel={onCancel} />
-      {veil && <ChangeModeVeil kind={veil} onDone={() => setVeil(null)} />}
+      {children}
+      <ConfirmModal open={open} status={status} onVerified={onVerified} onCancel={onCancel} />
     </Ctx.Provider>
   );
 }
 
-export function useChangeMode(): ChangeModeApi {
+export function useConfirm(): ConfirmApi {
   const ctx = useContext(Ctx);
-  if (!ctx) throw new Error("useChangeMode must be used within a ChangeModeProvider");
+  if (!ctx) throw new Error("useConfirm must be used within a ConfirmProvider");
   return ctx;
 }
 
@@ -257,7 +225,7 @@ interface ModalProps {
   onCancel: () => void;
 }
 
-function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
+function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
   const totp = status?.totp_enrolled ?? false;
   const [method, setMethod] = useState<SecondFactorMethod>("totp");
   const [code, setCode] = useState("");
@@ -317,17 +285,17 @@ function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
     <Modal
       open={open}
       onClose={onCancel}
-      title="TURN ON CHANGE MODE"
+      title="Confirm it's you"
       footer={
         <Button variant="ghost" onClick={onCancel} disabled={busy}>
-          CANCEL
+          Cancel
         </Button>
       }
     >
       <div className="flex flex-col gap-4">
         <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-          Enter a code once. Change mode stays on for 15 minutes — every change
-          goes through without asking again — and you can lock it any time.
+          This touches the keys to your household. Enter a code once — it
+          stays confirmed for 15 minutes.
         </p>
 
         {(totp || (status?.email_available ?? false)) && (
@@ -348,7 +316,7 @@ function StepUpModal({ open, status, onVerified, onCancel }: ModalProps) {
 
         {method === "email" && !sent ? (
           <Button variant="ghost" onClick={() => void sendEmail()} disabled={busy}>
-            {busy ? "SENDING…" : "SEND CODE TO MY EMAIL"}
+            {busy ? "Sending…" : "Send a code to my email"}
           </Button>
         ) : (
           <div className="cr-wrap">

@@ -4,7 +4,7 @@
 // here, and tests steer it through these handles.
 //
 // Change mode is NOT mocked: components render inside the real
-// ChangeModeProvider, which talks to this mocked API. That keeps one truth for
+// ConfirmProvider, which talks to this mocked API. That keeps one truth for
 // "what does guard() do" and lets the provider's own tests live here too.
 import { mock } from "bun:test";
 import type {
