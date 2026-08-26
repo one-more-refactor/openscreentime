@@ -18,6 +18,43 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+**Headline: trust lives at login, and the bot grows hands.** The change-mode
+ceremony is gone: prove it's you when you sign in — with a passkey, SSO, or
+the installed client on your own computer, parent and child alike — and then
+just use the console. A paired Telegram bot brings alerts, one-tap chore
+approvals, and one-tap confirm checks to your phone. And the "My screen time"
+page finally tells you what you did.
+
+- **Trust at login (web + server).** A session born from a completed login is
+  trusted and mutates freely — no armed window, no veil, no lock in the rail,
+  no reduced-presence controls. What still asks, for everyone, is the
+  sensitive corner (a device's unlock code and recovery codes, passkeys,
+  pairing tokens): one factor opens a 15-minute confirm window, shown only as
+  the Security & access gate. A pre-existing session gets `428` on its first
+  mutation and one code repairs it for good. Migration `0017`.
+- **Sign in with your device, promoted.** `ost login` — the installed client
+  vouching for whoever is signed into the computer — is the default way into
+  the console on a managed machine, for parents and children. The login page
+  says so, leads with the activity ring instead of a lockout preview, and
+  speaks sentence case.
+- **Telegram companion (server + web).** One bot per deployment
+  (`OST_TELEGRAM_BOT_TOKEN`); a parent pairs their personal chat from
+  Settings → Security & access with a single-use `/start` code. A paired
+  phone gets every alert, can answer a time request with inline ✅/❌ right
+  in the message, and serves as a confirm factor — the dialog's Phone tab
+  sends one "Was that you?" tap. Long-poll only; nothing listens. The legacy
+  `OST_TELEGRAM_CHAT_ID` broadcast still works. Migration `0018`.
+- **The week on /me (web + server).** `GET /api/me/history` sums the last 14
+  ledger days across the person's devices. The page shows seven bars with
+  minutes, the limit as a tick, today outlined and over-limit days in the
+  stop color — plus "how does today compare to my usual" and where today's
+  minutes went, device by device. All three looks, adults included.
+- **Theme slider (web).** The Settings theme control is a three-stop slider
+  (Light — Match my system — Dark) that previews live while dragging; the
+  broken pinned-mode re-render is fixed at the store.
+- **Language.** Modal titles and login stop shouting (sentence case);
+  the sample household is neutral.
+
 ## [0.5.0] — 2026-08-23
 
 **Headline: the console owns the keys.** The code a parent types on a
