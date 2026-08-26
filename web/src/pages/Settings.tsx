@@ -40,6 +40,7 @@ import { QrCode } from "../components/QrCode";
 import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
+import { FluentSlider } from "../components/FluentSlider";
 import { useChangeMode } from "../lib/changemode";
 import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
 import { CodeRing } from "../components/CodeRing";
@@ -102,13 +103,28 @@ function You() {
   );
 }
 
+// The theme control is a three-stop slider: Light — Match my system — Dark.
+// Dragging previews the theme live; the choice sticks on release.
+const THEME_STOPS: { key: ThemeMode; label: string }[] = [
+  { key: "light", label: "Light" },
+  { key: "system", label: "Match my system" },
+  { key: "dark", label: "Dark" },
+];
+
 function Appearance() {
   const { mode, setTheme, followSystem } = useTheme();
-  const choices: { key: ThemeMode; label: string }[] = [
-    { key: "system", label: "Match my system" },
-    { key: "dark", label: "Dark" },
-    { key: "light", label: "Light" },
-  ];
+
+  function apply(idx: number, persist: boolean) {
+    const stop = THEME_STOPS[idx]?.key ?? "system";
+    if (stop === "system") {
+      if (persist) followSystem();
+      // Live preview of "system" = whatever the OS says right now.
+      else setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light", false);
+    } else {
+      setTheme(stop, persist);
+    }
+  }
+
   return (
     <section className="ch-section">
       <h2 className="ch-h2">Appearance</h2>
@@ -116,20 +132,18 @@ function Appearance() {
         <div className="rl-row">
           <div className="rl-what">
             <p className="rl-name">Theme</p>
-            <p className="rl-value">Both modes are first-class — pick one, or let the OS decide</p>
+            <p className="rl-value">Both modes are first-class — slide to pick one, or let the OS decide</p>
           </div>
-          <div className="pills">
-            {choices.map((c) => (
-              <button
-                key={c.key}
-                className="pill no-code"
-                data-on={mode === c.key}
-                onClick={() => (c.key === "system" ? followSystem() : setTheme(c.key))}
-              >
-                {c.label}
-              </button>
-            ))}
-          </div>
+          <FluentSlider
+            min={0}
+            max={2}
+            step={1}
+            value={THEME_STOPS.findIndex((s) => s.key === mode)}
+            format={(v) => THEME_STOPS[v]?.label ?? ""}
+            onLive={(v) => apply(v, false)}
+            onCommit={(v) => apply(v, true)}
+            aria-label="Theme"
+          />
         </div>
       </div>
     </section>
