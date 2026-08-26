@@ -83,11 +83,11 @@ knows you and you're already in. The code a parent types to unlock a child's
 computer is read live off the console — no authenticator app to install, no QR
 to scan, and eight one-time recovery codes as the spare key in the drawer.
 
-**Reading is free; changing needs proof.** Anyone can look. To change
-anything — grant time, move a limit, pause, enroll — you prove it's you once,
-and the console unlocks *change mode* for fifteen minutes, visibly, then locks
-itself again. No permission popup per click, and no way for a borrowed browser
-tab to quietly rewrite the rules.
+**Trust lives at sign-in.** Prove it's you at the door — a passkey, SSO, or
+your own computer vouching — and then just use it: pause, grant time, change
+rules, no ceremony inside. Only the keys to the household (unlock codes,
+recovery codes, passkeys, pairing) ask again, and even that can be one tap on
+your paired phone instead of a typed code.
 
 **When it stops, it says so.** Time up is a plain hard stop — "Stop — time's
 up for today", a 60-second save-your-work countdown, no euphemism and no
@@ -96,8 +96,9 @@ restarts and the day boundary only moves forward, so a reboot or a clock
 set-back hands out no free time.
 
 **Fair to both sides.** The kid asks for more time from their own screen; a
-parent answers from the console or a one-way phone alert (Discord / Slack /
-Telegram — send-only, nobody writes back to a bot). A first-run intro tells
+parent answers from the console — or right on their phone: pair the Telegram
+bot once and the request arrives with ✅/❌ buttons, so "ok to a chore" is one
+tap (Discord/Slack webhooks stay send-only). A first-run intro tells
 the kid exactly what a parent can and can't see, there is **no remote shell**,
 and everything a parent can do goes through the same UI the kid can read about
 in [`docs/TRANSPARENCY.md`](docs/TRANSPARENCY.md). What the software can't
@@ -120,9 +121,10 @@ For the person operating it, the same product is a serious enforcement stack:
   (a sustained attack locks the device with an honest "tampering detected"
   screen; a transient blip does not), and the server independently flags a
   client under-reporting its usage.
-- **Passkey-only admin auth** (WebAuthn/FIDO2), optional OIDC SSO, rotating
-  session tokens, and step-up verification on every mutation — the server
-  validates everything; no client is trusted for authorization.
+- **Trust decided at login** — passkey (WebAuthn/FIDO2), optional OIDC SSO, or
+  a device voucher from the installed client; rotating session tokens; a
+  second factor (code or Telegram tap) guards the sensitive corner — the
+  server validates everything; no client is trusted for authorization.
 - **One-liner enrollment**, sha256-verified, daily self-updates with a
   kept-`.bak` rollback, and **remote lockdown** that works behind NAT — the
   agent dials out, so nothing is port-forwarded and nothing listens.
