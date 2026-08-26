@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import * as api from "../api";
-import type { Catalog, MeToday, Theme } from "../types";
+import type { Catalog, MeHistory, MeToday, Theme } from "../types";
 import { useSession } from "../lib/session";
 import { useCountUp } from "../lib/useCountUp";
 import { useTheme } from "../lib/theme";
@@ -180,6 +180,97 @@ function Blocked({ today, catalog, theme }: { today: MeToday; catalog: Catalog |
   );
 }
 
+// ---- the week ----------------------------------------------------------------
+// "Know what you did" is the floor of any motivation: seven bars, today
+// telling you how it compares to your usual, and where today's minutes went.
+
+function fmtLong(m: number): string {
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  return r === 0 ? `${h} h` : `${h} h ${r.toString().padStart(2, "0")}`;
+}
+
+function Week({
+  history,
+  today,
+  theme,
+}: {
+  history: MeHistory;
+  today: MeToday;
+  theme: Theme;
+}) {
+  // The last 7 calendar days, today last, missing days as zero.
+  const byDay = new Map(history.days.map((d) => [d.day, d]));
+  const week = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return {
+      key,
+      letter: d.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 2),
+      used: byDay.get(key)?.used_minutes ?? 0,
+      isToday: i === 6,
+    };
+  });
+  // Live truth beats a possibly momentarily-stale history row for today.
+  week[6].used = Math.max(week[6].used, today.used_minutes);
+
+  const limit = today.limit_minutes !== null ? today.limit_minutes + today.earned_minutes : null;
+  const max = Math.max(...week.map((d) => d.used), limit ?? 0, 30);
+
+  // "How does today compare to my usual?" — the average of the earlier days
+  // in the strip that saw any use. Fewer than three and we stay quiet.
+  const prior = week.slice(0, 6).filter((d) => d.used > 0);
+  const avg = prior.length >= 3 ? Math.round(prior.reduce((s, d) => s + d.used, 0) / prior.length) : null;
+  const delta = avg !== null ? week[6].used - avg : null;
+  const compare =
+    delta === null
+      ? null
+      : Math.abs(delta) < 10
+        ? "Right around your usual so far."
+        : delta < 0
+          ? `${fmtLong(-delta)} less than your usual day — nice.`
+          : `${fmtLong(delta)} more than your usual day.`;
+
+  const devices = history.today_by_device;
+
+  return (
+    <section className="me-section me-week-wrap">
+      <h2 className="me-h2">{theme === "playful" ? "Your week" : "This week"}</h2>
+      <div className="me-week" role="img" aria-label="Screen time, last seven days">
+        {week.map((d) => (
+          <div key={d.key} className="me-week-day" data-today={d.isToday}>
+            <div className="me-week-bar">
+              {limit !== null && (
+                <span className="me-week-limit" style={{ bottom: `${(limit / max) * 100}%` }} />
+              )}
+              <span
+                className="me-week-fill"
+                data-over={limit !== null && d.used > limit}
+                style={{ height: `${Math.max(4, (d.used / max) * 100)}%` }}
+              />
+            </div>
+            <span className="me-week-min">{d.used > 0 ? fmt(d.used) : "·"}</span>
+            <span className="me-week-label">{d.letter}</span>
+          </div>
+        ))}
+      </div>
+      {compare && <p className="me-week-compare">{compare}</p>}
+      {devices.length > 0 && (
+        <ul className="me-where">
+          {devices.map((d) => (
+            <li key={d.name} className="me-where-row">
+              <span className="me-where-name">{d.name}</span>
+              <span className="me-where-min">{fmtLong(d.used_minutes)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function Schedule({ today, theme }: { today: MeToday; theme: Theme }) {
   if (!today.bedtime && today.windows.length === 0) return null;
   const w = today.windows;
@@ -251,6 +342,7 @@ export function Me() {
   const navigate = useNavigate();
   const { theme: mode } = useTheme();
   const [today, setToday] = useState<MeToday | null>(null);
+  const [history, setHistory] = useState<MeHistory | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -261,6 +353,8 @@ export function Me() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load your day");
     }
+    // The week is decoration on top of the day — it failing is not an error.
+    void api.getMeHistory().then(setHistory).catch(() => {});
   }
   useEffect(() => {
     void load();
@@ -364,6 +458,9 @@ export function Me() {
             </section>
           )}
 
+          {history && history.days.length > 0 && (
+            <Week history={history} today={today} theme={theme} />
+          )}
           <Schedule today={today} theme={theme} />
           <Blocked today={today} catalog={catalog} theme={theme} />
           <Devices today={today} theme={theme} />

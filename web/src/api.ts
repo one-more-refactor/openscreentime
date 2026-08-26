@@ -18,6 +18,7 @@ import type {
   Account,
   Catalog,
   MemberPatch,
+  MeHistory,
   MeToday,
   NewMember,
   ChangeModeStatus,
@@ -747,6 +748,32 @@ export async function deleteMember(id: string): Promise<void> {
  * this is the one read a member session can make besides /api/me. */
 export async function getMeToday(): Promise<MeToday> {
   return read<MeToday>("/api/me/today", () => mockMeToday());
+}
+
+/** The last two weeks of the person's own use, summed across their devices. */
+export async function getMeHistory(): Promise<MeHistory> {
+  return read<MeHistory>("/api/me/history", () => {
+    // A believable sample week for design review: school-day dips, a weekend
+    // spike, today still in progress.
+    // Today (the last slot) stays low so the page's live "used today" wins.
+    const pattern = [95, 110, 70, 125, 88, 160, 142, 90, 105, 74, 118, 96, 150, 0];
+    const days = pattern.map((used, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (pattern.length - 1 - i));
+      return {
+        day: d.toISOString().slice(0, 10),
+        used_minutes: used,
+        earned_minutes: i % 5 === 0 ? 15 : 0,
+      };
+    });
+    return {
+      days,
+      today_by_device: [
+        { name: "Living Room PC", used_minutes: 31 },
+        { name: "Studio Laptop", used_minutes: 16 },
+      ],
+    };
+  });
 }
 
 /** POST /api/me/ask — "can I have more time?" to the parent. Not available
