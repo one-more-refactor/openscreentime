@@ -530,7 +530,7 @@ export interface Me {
 
 // ---- Two-factor / step-up ("reading is free, changing needs a factor") -----
 
-export type SecondFactorMethod = "totp" | "email";
+export type SecondFactorMethod = "totp" | "email" | "telegram";
 
 /** Error code the server returns from a mutation with no valid step-up grant. */
 export const STEP_UP_REQUIRED = "step_up_required";
@@ -540,6 +540,27 @@ export interface TwoFactorStatus {
   totp_enrolled: boolean;
   /** The account has an email a code can be sent to. */
   email_available: boolean;
+  /** A Telegram chat is paired — one tap on the phone is a factor. */
+  telegram_available?: boolean;
+}
+
+/** Pairing state of the account's Telegram companion. */
+export interface TelegramStatus {
+  /** A bot token is configured on the server at all. */
+  configured: boolean;
+  /** The bot's @username (for the t.me link), once known. */
+  bot: string | null;
+  paired: boolean;
+  username: string | null;
+  paired_at: string | null;
+}
+
+/** A fresh pairing code, shown once. */
+export interface TelegramPairing {
+  code: string;
+  bot: string | null;
+  deep_link: string | null;
+  expires_in_minutes: number;
 }
 
 /** Returned by TOTP enrollment start — the secret is shown exactly once. */

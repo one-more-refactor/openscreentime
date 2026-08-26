@@ -24,6 +24,7 @@ mod rate_limit;
 mod state;
 mod static_web;
 mod stepup;
+mod telegram;
 mod vpn;
 
 use std::collections::HashMap;
@@ -134,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
     // Phone alerts: one-way chat-bot messages on tamper/lockdown + time
     // requests. No-op unless a channel is configured in the environment.
     alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
+    telegram::spawn(state.clone());
 
     // Settled commands age out after 30 days; the event log is the audit trail.
     commands::spawn_janitor(state.clone());
@@ -220,6 +222,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me/2fa", get(stepup::status))
         .route("/api/me/2fa/totp/start", post(stepup::totp_start))
         .route("/api/me/2fa/totp/confirm", post(stepup::totp_confirm))
+        .route(
+            "/api/me/telegram",
+            get(telegram::status).delete(telegram::unpair),
+        )
+        .route("/api/me/telegram/pair", post(telegram::pair_start))
+        .route(
+            "/api/auth/stepup/telegram/start",
+            post(telegram::verify_start),
+        )
         .route("/api/auth/stepup/email/start", post(stepup::email_start))
         .route("/api/auth/stepup/verify", post(stepup::verify))
         // --- Change mode (the grant, made visible/endable/extendable) -------

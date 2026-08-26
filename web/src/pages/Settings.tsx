@@ -11,7 +11,7 @@
 // (docs/AUTH.md) answers them with 428 unless the session holds a live
 // confirm window. The client gate is comfort; the server is the lock.
 // ============================================================================
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ApiError,
@@ -19,13 +19,16 @@ import {
   confirmTotpEnrollment,
   deletePasskey,
   getAuthConfig,
+  getTelegram,
   getTwoFactorStatus,
   listDevices,
   listParentTokens,
   listPasskeys,
   mintParentToken,
+  pairTelegram,
   revokeParentToken,
   startTotpEnrollment,
+  unpairTelegram,
 } from "../api";
 import type {
   AuthConfig,
@@ -33,6 +36,8 @@ import type {
   MintedParentToken,
   ParentToken,
   Passkey,
+  TelegramPairing,
+  TelegramStatus,
   TotpEnrollment,
   TwoFactorStatus,
 } from "../types";
@@ -197,8 +202,129 @@ function SecurityPanels() {
     <div className="rl">
       <UnlockCodes />
       <TwoFactor />
+      <Telegram />
       <Passkeys />
       <ParentAccess />
+    </div>
+  );
+}
+
+/**
+ * The Telegram companion: pair once, then the phone gets alerts, can ok a
+ * time request with one tap, and answers the confirm dialog's "send a tap".
+ */
+function Telegram() {
+  const tg = useAsync<TelegramStatus>(getTelegram, []);
+  const [pairing, setPairing] = useState<TelegramPairing | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  // While the pairing sheet is open, watch for the bot to report the pair —
+  // the moment it lands, the sheet closes itself.
+  useEffect(() => {
+    if (!pairing) return;
+    const t = setInterval(() => tg.reload(), 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairing]);
+  useEffect(() => {
+    if (pairing && tg.data?.paired) {
+      setPairing(null);
+      setStatus("Phone paired ✓");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tg.data?.paired]);
+
+  async function begin() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      setPairing(await pairTelegram());
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't start pairing.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unpair() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await unpairTelegram();
+      setStatus("Unpaired.");
+      tg.reload();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Couldn't unpair.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const d = tg.data;
+  return (
+    <div className="rl-row">
+      <div className="rl-what">
+        <p className="rl-name">Phone (Telegram)</p>
+        <p className="rl-value">
+          {tg.loading
+            ? "Checking…"
+            : !d?.configured
+              ? "No bot on this server — set OST_TELEGRAM_BOT_TOKEN to enable phone taps"
+              : d.paired
+                ? `Paired${d.username ? ` as @${d.username}` : ""} — alerts, one-tap chore approvals, and confirm checks go to your phone`
+                : "Pair your phone: get alerts, ok a chore, and confirm it's you with one tap"}
+        </p>
+        {status && (
+          <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>
+            {status}
+          </p>
+        )}
+      </div>
+      <span className="rl-controls">
+        {d?.configured && !tg.loading && (
+          <button className="ch-btn" disabled={busy} onClick={() => void (d.paired ? unpair() : begin())}>
+            {d.paired ? "Unpair" : "Pair phone"}
+          </button>
+        )}
+      </span>
+
+      <Modal
+        open={!!pairing}
+        onClose={() => setPairing(null)}
+        title="Pair your phone"
+        footer={
+          <Button variant="ghost" onClick={() => setPairing(null)} disabled={busy}>
+            Cancel
+          </Button>
+        }
+      >
+        {pairing && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
+              Open Telegram and send this code to the bot — the sheet closes by
+              itself once the pair lands. The code works for{" "}
+              {pairing.expires_in_minutes} minutes.
+            </p>
+            {pairing.deep_link ? (
+              <a
+                className="focusable ch-btn ch-btn-yes"
+                style={{ textAlign: "center" }}
+                href={pairing.deep_link}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open @{pairing.bot} in Telegram
+              </a>
+            ) : (
+              <p className="text-sm">
+                Message your bot: <code>/start {pairing.code}</code>
+              </p>
+            )}
+            <TokenBlock token={`/start ${pairing.code}`} />
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -298,7 +424,7 @@ function TwoFactor() {
       <Modal
         open={!!enrolling}
         onClose={() => setEnrolling(null)}
-        title="CONNECT AUTHENTICATOR"
+        title="Connect authenticator"
         footer={
           <Button variant="ghost" onClick={() => setEnrolling(null)} disabled={busy}>
             CANCEL
@@ -423,7 +549,7 @@ function Passkeys() {
       <Modal
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
-        title="REMOVE PASSKEY"
+        title="Remove passkey"
         danger
         footer={
           <>
@@ -530,7 +656,7 @@ function ParentAccess() {
       <Modal
         open={!!minted}
         onClose={() => setMinted(null)}
-        title="PAIRING TOKEN"
+        title="Pairing token"
         footer={<Button onClick={() => setMinted(null)}>DONE</Button>}
       >
         <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--fg-dim)" }}>

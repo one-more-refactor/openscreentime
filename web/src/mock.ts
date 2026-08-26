@@ -502,6 +502,7 @@ export const mockMe: Me = {
 export const mockTwoFactor: TwoFactorStatus = {
   totp_enrolled: true,
   email_available: true,
+  telegram_available: true,
 };
 
 /** The code the mock step-up flow accepts, so the modal is demoable offline. */

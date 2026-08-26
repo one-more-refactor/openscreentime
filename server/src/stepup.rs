@@ -131,6 +131,7 @@ fn exempt(path: &str) -> bool {
         || path == "/api/auth/voucher"
         || path == "/api/auth/stepup/verify"
         || path == "/api/auth/stepup/email/start"
+        || path == "/api/auth/stepup/telegram/start"
         // Locking change mode early must never itself need change mode.
         || path == "/api/auth/stepup/lock"
         || path == "/api/me/2fa/totp/start"
@@ -150,6 +151,7 @@ fn exempt(path: &str) -> bool {
 /// factors to offer BEFORE any window exists.)
 fn sensitive(path: &str) -> bool {
     path.starts_with("/api/me/passkeys")
+        || path.starts_with("/api/me/telegram")
         || path.starts_with("/api/parent-tokens")
         || (path.starts_with("/api/devices/")
             && (path.ends_with("/unlock-code")
@@ -321,10 +323,20 @@ pub async fn status(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<J
             .fetch_optional(&st.db)
             .await?;
     let locked = locked_until(&st, admin.admin_id).await?;
+    // A paired phone is a factor the dialog can offer (one tap, no typing).
+    let telegram: Option<i64> = if crate::telegram::bot_token().is_some() {
+        sqlx::query_scalar("SELECT chat_id FROM telegram_chats WHERE admin_id = $1 LIMIT 1")
+            .bind(admin.admin_id)
+            .fetch_optional(&st.db)
+            .await?
+    } else {
+        None
+    };
 
     Ok(Json(json!({
         "totp_enrolled": confirmed.flatten().is_some(),
         "email_available": email_sender_configured(),
+        "telegram_available": telegram.is_some(),
         "locked_until": locked,
     })))
 }

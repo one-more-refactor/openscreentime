@@ -149,6 +149,7 @@ mock.module("../api", () => ({
   },
   getTwoFactorStatus: () => apiImpl.getTwoFactorStatus(),
   startEmailStepUp: () => Promise.resolve(),
+  startTelegramStepUp: () => Promise.resolve(),
   getUnlockCode: (id: string) => {
     apiCalls.unlockCode.push(id);
     return apiImpl.getUnlockCode(id);

@@ -1,15 +1,16 @@
-//! One-way phone alerts via a chat bot.
+//! Phone alerts via a chat bot.
 //!
-//! Deliberately NOT web push. The operator points OpenScreenTime at a chat channel
-//! they already have — a Discord/Slack incoming webhook, or a Telegram bot — and
-//! OpenScreenTime *sends* short messages when something needs attention (a confirmed
-//! tamper attempt, a device locking down, a new time request). It never reads
-//! anything back: no webhook server, no bot polling, nobody writes to the bot.
-//! Setup is a URL (or a token + chat id) in `.env`, and that's it.
+//! Deliberately NOT web push. The operator points OpenScreenTime at a chat
+//! channel they already have — a Discord/Slack incoming webhook, or a Telegram
+//! bot — and OpenScreenTime *sends* short messages when something needs
+//! attention (a confirmed tamper attempt, a device locking down, a new time
+//! request). No webhook server: nothing listens, the bot dials out.
 //!
-//! Config is global to the deployment (env vars). For the common single-family
-//! install that's exactly right; a multi-tenant host gets one operator channel
-//! for all tenants (documented — revisit with a per-tenant table if needed).
+//! Telegram grew hands (`telegram.rs`): alongside the optional legacy
+//! broadcast chat (`OST_TELEGRAM_CHAT_ID`), every chat a parent has **paired**
+//! gets the alerts too — and a time request arrives with inline ✅/❌ buttons
+//! so "ok to a chore" is one tap on the phone. Webhook channels stay
+//! send-only.
 
 use std::time::Duration;
 
@@ -23,8 +24,11 @@ use uuid::Uuid;
 pub struct AlertConfig {
     /// A Discord/Slack-style incoming webhook URL (POST JSON, no auth).
     webhook: Option<String>,
-    /// Telegram bot token + chat id.
-    telegram: Option<(String, String)>,
+    /// Telegram bot token. Alone it serves the *paired* chats; with
+    /// `tg_env_chat` it additionally broadcasts to that fixed chat (legacy).
+    tg_token: Option<String>,
+    /// Legacy fixed broadcast chat id (`OST_TELEGRAM_CHAT_ID`).
+    tg_env_chat: Option<String>,
 }
 
 impl AlertConfig {
@@ -36,14 +40,10 @@ impl AlertConfig {
         )
     }
 
-    /// Build from raw values, treating empty/whitespace as unset and requiring
-    /// BOTH halves of the Telegram pair. Pure, so it's unit-testable.
+    /// Build from raw values, treating empty/whitespace as unset. A bot token
+    /// alone is a live channel now — paired chats give it somewhere to send.
     fn build(webhook: Option<String>, tg_token: Option<String>, tg_chat: Option<String>) -> Self {
         let clean = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
-        let telegram = match (clean(tg_token), clean(tg_chat)) {
-            (Some(t), Some(c)) => Some((t, c)),
-            _ => None,
-        };
         // Only accept an http(s) webhook URL: a stray value with some other
         // scheme (or garbage) must disable the channel, not be POSTed to.
         let webhook = clean(webhook).filter(|u| match url::Url::parse(u) {
@@ -53,20 +53,33 @@ impl AlertConfig {
                 false
             }
         });
-        AlertConfig { webhook, telegram }
+        AlertConfig {
+            webhook,
+            tg_token: clean(tg_token),
+            tg_env_chat: clean(tg_chat),
+        }
     }
 
     pub fn enabled(&self) -> bool {
-        self.webhook.is_some() || self.telegram.is_some()
+        self.webhook.is_some() || self.tg_token.is_some()
     }
 
-    /// Send `text` to every configured channel. Best-effort: a failure on one
-    /// channel is logged and never propagated (alerts must not break anything).
+    /// Send `text` to every configured channel: the webhook, the legacy env
+    /// chat, and every chat paired to the event's tenant. Best-effort: a
+    /// failure on one channel is logged and never propagated.
     ///
     /// Callers must pass text whose user/device-controlled parts have been run
     /// through [`sanitize`]; `allowed_mentions` additionally disables Discord
     /// `@everyone`/`@here`/role pings so a crafted name/message can't ping.
-    async fn send(&self, client: &reqwest::Client, text: &str) {
+    /// `tg_keyboard` rides only on Telegram sends — webhooks stay send-only.
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        db: &sqlx::PgPool,
+        tenant_id: Option<Uuid>,
+        text: &str,
+        tg_keyboard: Option<serde_json::Value>,
+    ) {
         if let Some(url) = &self.webhook {
             // Discord uses `content`, Slack uses `text` — send both; each ignores
             // the key it doesn't know. `allowed_mentions: {parse: []}` tells
@@ -80,11 +93,26 @@ impl AlertConfig {
                 tracing::warn!("alert webhook failed: {e}");
             }
         }
-        if let Some((token, chat_id)) = &self.telegram {
-            let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-            let body = json!({ "chat_id": chat_id, "text": text });
-            if let Err(e) = client.post(url).json(&body).send().await {
-                tracing::warn!("alert telegram failed: {e}");
+        if let Some(token) = &self.tg_token {
+            if let Some(chat) = &self.tg_env_chat {
+                let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+                let mut body = json!({ "chat_id": chat, "text": text });
+                if let Some(kb) = &tg_keyboard {
+                    body["reply_markup"] = kb.clone();
+                }
+                if let Err(e) = client.post(url).json(&body).send().await {
+                    tracing::warn!("alert telegram failed: {e}");
+                }
+            }
+            if let Some(tenant) = tenant_id {
+                for chat_id in crate::telegram::chats_for_tenant(db, tenant).await {
+                    // Skip a paired chat that duplicates the env broadcast.
+                    if self.tg_env_chat.as_deref() == Some(chat_id.to_string().as_str()) {
+                        continue;
+                    }
+                    crate::telegram::send_message(client, token, chat_id, text, tg_keyboard.clone())
+                        .await;
+                }
             }
         }
     }
@@ -104,7 +132,7 @@ pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
     }
     tracing::info!(
         webhook = cfg.webhook.is_some(),
-        telegram = cfg.telegram.is_some(),
+        telegram = cfg.tg_token.is_some(),
         "phone alerts enabled"
     );
     tokio::spawn(async move {
@@ -143,16 +171,26 @@ fn sanitize(s: &str) -> String {
     }
 }
 
-/// (id, type, payload, created_at, device name) for a critical event.
+/// (id, type, payload, created_at, device name, tenant) for a critical event.
 type EventRow = (
     Uuid,
     String,
     serde_json::Value,
     DateTime<Utc>,
     Option<String>,
+    Uuid,
 );
-/// (os_username, display_name, task_label, minutes, created_at) for a request.
-type EarnRow = (String, Option<String>, String, i32, DateTime<Utc>);
+/// (request id, tenant, os_username, display_name, task_label, minutes,
+/// created_at) for a request.
+type EarnRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    String,
+    i32,
+    DateTime<Utc>,
+);
 
 /// New critical events since `since` → one message each. Returns the advanced
 /// high-water mark.
@@ -163,7 +201,7 @@ async fn drain_events(
     since: DateTime<Utc>,
 ) -> DateTime<Utc> {
     let rows: Vec<EventRow> = match sqlx::query_as(
-        "SELECT e.id, e.type, e.payload, e.created_at, d.name
+        "SELECT e.id, e.type, e.payload, e.created_at, d.name, e.tenant_id
              FROM events e LEFT JOIN devices d ON d.id = e.device_id
              WHERE e.severity = 'critical' AND e.created_at > $1
              ORDER BY e.created_at LIMIT 50",
@@ -180,7 +218,7 @@ async fn drain_events(
     };
 
     let mut high = since;
-    for (_, etype, payload, created_at, device) in rows {
+    for (_, etype, payload, created_at, device, tenant_id) in rows {
         high = high.max(created_at);
         let raw_msg = payload
             .get("message")
@@ -188,8 +226,14 @@ async fn drain_events(
             .unwrap_or(etype.as_str());
         let msg = sanitize(raw_msg);
         let dev = sanitize(device.as_deref().unwrap_or("a device"));
-        cfg.send(client, &format!("⚠ OpenScreenTime — {dev}: {msg}"))
-            .await;
+        cfg.send(
+            client,
+            db,
+            Some(tenant_id),
+            &format!("⚠ OpenScreenTime — {dev}: {msg}"),
+            None,
+        )
+        .await;
     }
     high
 }
@@ -202,7 +246,8 @@ async fn drain_earn(
     since: DateTime<Utc>,
 ) -> DateTime<Utc> {
     let rows: Vec<EarnRow> = match sqlx::query_as(
-        "SELECT du.os_username, du.display_name, er.task_label, er.minutes, er.created_at
+        "SELECT er.id, er.tenant_id, du.os_username, du.display_name, er.task_label,
+                er.minutes, er.created_at
          FROM earn_requests er JOIN device_users du ON du.id = er.device_user_id
          WHERE er.status = 'pending' AND er.created_at > $1
          ORDER BY er.created_at LIMIT 50",
@@ -219,7 +264,7 @@ async fn drain_earn(
     };
 
     let mut high = since;
-    for (os_username, display_name, task_label, minutes, created_at) in rows {
+    for (id, tenant_id, os_username, display_name, task_label, minutes, created_at) in rows {
         high = high.max(created_at);
         let who = sanitize(
             &display_name
@@ -227,11 +272,13 @@ async fn drain_earn(
                 .unwrap_or(os_username),
         );
         let label = sanitize(&task_label);
+        // Paired Telegram chats can answer right here — one tap, done.
         cfg.send(
             client,
-            &format!(
-                "⏳ {who} is asking for +{minutes} min ({label}). Approve it in OpenScreenTime."
-            ),
+            db,
+            Some(tenant_id),
+            &format!("⏳ {who} is asking for +{minutes} min ({label})."),
+            Some(crate::telegram::earn_keyboard(id)),
         )
         .await;
     }
@@ -254,7 +301,7 @@ mod tests {
     fn webhook_alone_enables() {
         let cfg = AlertConfig::build(Some("https://hooks.example/x".into()), None, None);
         assert!(cfg.enabled());
-        assert!(cfg.telegram.is_none());
+        assert!(cfg.tg_token.is_none());
     }
 
     #[test]
@@ -279,14 +326,18 @@ mod tests {
     }
 
     #[test]
-    fn telegram_needs_both_halves() {
-        // Only a token, no chat id → not configured.
+    fn a_bot_token_alone_is_a_live_channel_now() {
+        // Paired chats give a bare token somewhere to send — it enables.
         let cfg = AlertConfig::build(None, Some("tok".into()), None);
-        assert!(!cfg.enabled());
-        // Both present → configured.
+        assert!(cfg.enabled());
+        assert!(cfg.tg_env_chat.is_none());
+        // The legacy fixed chat still works alongside.
         let cfg = AlertConfig::build(None, Some("tok".into()), Some("123".into()));
         assert!(cfg.enabled());
-        assert_eq!(cfg.telegram, Some(("tok".into(), "123".into())));
+        assert_eq!(cfg.tg_env_chat.as_deref(), Some("123"));
+        // A chat id without a token sends nothing.
+        let cfg = AlertConfig::build(None, None, Some("123".into()));
+        assert!(!cfg.enabled());
     }
 
     #[tokio::test]
@@ -320,7 +371,11 @@ mod tests {
         });
 
         let cfg = AlertConfig::build(Some(format!("http://127.0.0.1:{port}/hook")), None, None);
-        cfg.send(&reqwest::Client::new(), "hello-alert").await;
+        // A lazy pool never connects unless used — and with no tenant and no
+        // bot token, send() never touches it.
+        let db = sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").unwrap();
+        cfg.send(&reqwest::Client::new(), &db, None, "hello-alert", None)
+            .await;
 
         let req = server.join().unwrap();
         assert!(req.contains("POST"), "should be a POST: {req}");
