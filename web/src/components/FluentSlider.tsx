@@ -13,6 +13,8 @@ interface Props {
   /** live formatted readout shown while dragging */
   format: (v: number) => string;
   onCommit: (v: number) => void;
+  /** fires on every movement, before release — for previews (e.g. the theme) */
+  onLive?: (v: number) => void;
   disabled?: boolean;
   "aria-label": string;
 }
@@ -24,6 +26,7 @@ export function FluentSlider({
   value,
   format,
   onCommit,
+  onLive,
   disabled,
   "aria-label": ariaLabel,
 }: Props) {
@@ -58,6 +61,7 @@ export function FluentSlider({
         onChange={(e) => {
           setDragging(true);
           setLive(Number(e.target.value));
+          onLive?.(Number(e.target.value));
         }}
         onPointerUp={commit}
         onKeyUp={(e) => {

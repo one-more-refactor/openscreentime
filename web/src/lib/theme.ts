@@ -14,14 +14,24 @@ export function getInitialTheme(): Theme {
 
 // Module-level store so every useTheme() consumer shares one state — toggling
 // in Settings updates the Shell (and vice versa) immediately.
+//
+// The snapshot must cover mode (pinned vs system) as well as the resolved
+// theme: pinning "light" while the OS already renders light changes nothing
+// visually, but Settings still has to re-render its control.
 let current: Theme = getInitialTheme();
 const listeners = new Set<() => void>();
+let snapshot = { theme: current, mode: themeMode() };
+
+function bump() {
+  snapshot = { theme: current, mode: themeMode() };
+  listeners.forEach((l) => l());
+}
 
 export function applyTheme(theme: Theme, persist = true) {
   current = theme;
   document.documentElement.setAttribute("data-theme", theme);
   if (persist) localStorage.setItem(KEY, theme);
-  listeners.forEach((l) => l());
+  bump();
 }
 
 // Until the user toggles explicitly, track the OS live.
@@ -53,10 +63,10 @@ export function followSystem() {
 }
 
 export function useTheme() {
-  const theme = useSyncExternalStore(subscribe, () => current);
+  const snap = useSyncExternalStore(subscribe, () => snapshot);
   return {
-    theme,
-    mode: themeMode(),
+    theme: snap.theme,
+    mode: snap.mode,
     toggle: () => applyTheme(current === "dark" ? "light" : "dark"),
     setTheme: applyTheme,
     followSystem,
