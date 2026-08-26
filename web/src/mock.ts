@@ -396,7 +396,7 @@ const mockTenant: Tenant = {
 
 const mockHousehold: Household = {
   id: TENANT_ID,
-  name: "The Ludwig house",
+  name: "The Harper house",
   created_at: "2026-06-01T10:00:00Z",
 };
 
