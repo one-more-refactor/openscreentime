@@ -657,6 +657,57 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     })))
 }
 
+/// `GET /api/me/history` — the last 14 days summed across the person's
+/// devices, plus where today's minutes went, device by device. The /me page
+/// draws its week from this: knowing what you actually did is the floor of
+/// any motivation.
+pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
+    let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
+
+    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+        "SELECT l.day, SUM(l.used_seconds)::bigint, SUM(l.earned_seconds)::bigint
+           FROM screen_time_ledger l
+           JOIN device_users du ON du.id = l.device_user_id
+           JOIN devices d ON d.id = du.device_id
+          WHERE du.account_id = $1 AND d.tenant_id = $2
+            AND l.day > CURRENT_DATE - 14
+          GROUP BY l.day ORDER BY l.day",
+    )
+    .bind(acct.0)
+    .bind(acct.1)
+    .fetch_all(&st.db)
+    .await?;
+
+    let today_by_device: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT d.name, SUM(l.used_seconds)::bigint
+           FROM screen_time_ledger l
+           JOIN device_users du ON du.id = l.device_user_id
+           JOIN devices d ON d.id = du.device_id
+          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = CURRENT_DATE
+          GROUP BY d.name HAVING SUM(l.used_seconds) > 0
+          ORDER BY SUM(l.used_seconds) DESC",
+    )
+    .bind(acct.0)
+    .bind(acct.1)
+    .fetch_all(&st.db)
+    .await?;
+
+    Ok(Json(json!({
+        "days": days
+            .into_iter()
+            .map(|(day, used, earned)| json!({
+                "day": day,
+                "used_minutes": used / 60,
+                "earned_minutes": earned / 60,
+            }))
+            .collect::<Vec<_>>(),
+        "today_by_device": today_by_device
+            .into_iter()
+            .map(|(name, used)| json!({ "name": name, "used_minutes": used / 60 }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct AskReq {
     pub minutes: i32,
@@ -752,6 +803,7 @@ pub async fn ask(
 pub fn member_allowed(path: &str) -> bool {
     path == "/api/me"
         || path == "/api/me/today"
+        || path == "/api/me/history"
         || path == "/api/me/ask"
         || path == "/api/catalog"
         || path.starts_with("/api/me/2fa")

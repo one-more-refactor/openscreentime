@@ -261,7 +261,71 @@
 .shell-member { min-height: 100vh; }
 .shell-member .shell-main { padding: 0; }
 
+/* ---- the week: seven bars, today's story ------------------------------------ */
+.me-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.6rem;
+  align-items: end;
+}
+.me-week-day { display: grid; justify-items: center; gap: 0.3rem; }
+.me-week-bar {
+  position: relative;
+  width: 100%;
+  max-width: 2.4rem;
+  height: 92px;
+  background: var(--me-track);
+  border-radius: min(var(--me-radius), 10px);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+}
+.me-week-fill {
+  display: block;
+  width: 100%;
+  background: var(--me-fill);
+  border-radius: inherit;
+  transition: height 700ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+.me-week-fill[data-over="true"] { background: var(--me-stop); }
+.me-week-limit {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--me-ink-3);
+  opacity: 0.7;
+  z-index: 1;
+}
+.me-week-day[data-today="true"] .me-week-bar {
+  outline: 2px solid var(--me-ink);
+  outline-offset: 2px;
+}
+.me-week-min {
+  font-size: 0.72rem;
+  color: var(--me-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.me-week-label { font-size: 0.72rem; color: var(--me-ink-3); }
+.me-week-compare { margin: 0.9rem 0 0; font-size: 0.95rem; color: var(--me-ink-2); }
+.me-where {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.me-where-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.9rem;
+}
+.me-where-name { color: var(--me-ink-2); }
+.me-where-min { color: var(--me-ink); font-variant-numeric: tabular-nums; }
+
 @media (prefers-reduced-motion: reduce) {
   .me-ring-fill { transition: none; }
   .me-ask-big { transition: none; }
+  .me-week-fill { transition: none; }
 }

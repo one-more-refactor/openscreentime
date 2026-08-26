@@ -483,6 +483,19 @@ export interface MeToday {
   windows: TimeWindow[];
 }
 
+/** One day of a person's own history (GET /api/me/history). */
+export interface MeHistoryDay {
+  day: string; // YYYY-MM-DD
+  used_minutes: number;
+  earned_minutes: number;
+}
+
+/** The /me page's week: what you did, and where today went. */
+export interface MeHistory {
+  days: MeHistoryDay[];
+  today_by_device: { name: string; used_minutes: number }[];
+}
+
 // ---- Unlock codes (per device, owned by the server) ---------------------------
 // The 6-digit code a parent types on a child's computer — to unlock the
 // screen, reopen time, or `sudo` — is verified offline by the device, but the

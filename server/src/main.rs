@@ -214,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(members::me))
         .route("/api/me/today", get(members::today))
+        .route("/api/me/history", get(members::history))
         .route("/api/me/ask", post(members::ask))
         .route("/api/catalog", get(members::catalog_json))
         .route("/api/me/passkeys", get(auth::list_passkeys))
