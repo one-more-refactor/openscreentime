@@ -1,8 +1,10 @@
 # OpenScreenTime — Product & Design Brief
 
-> The north star for the OpenScreenTime → **OpenScreenTime** rebrand + rebuild.
+> The north star for the Sentinel → **OpenScreenTime** rebrand + rebuild.
 > Decisions below were made with the operator, not guessed. When something
-> here conflicts with older docs (they still say "OpenScreenTime"), this wins.
+> here conflicts with older docs, this wins — and where **`CONTRACT-0.6.md`**
+> (the passive turn: allow-by-default, client-first login, where-time-goes)
+> conflicts with THIS, 0.6 wins.
 
 ## What it is
 
@@ -39,11 +41,15 @@ user-facing.
 - **Age brackets** — autonomy scales with age. Enforcement, *when it happens*, is
   always a **plain hard stop** (no euphemism, no softening the words):
 
+  The network model is the same for everyone: **allow by default; what a
+  parent explicitly blocks is strictly enforced** (CONTRACT-0.6). Brackets
+  differ by limits, autonomy, and which categories come pre-blocked.
+
   | Bracket | Autonomy | Enforcement |
   |---|---|---|
-  | **0–6 Little** | Curated good-by-default allowlist only. Parent does everything. No request UI. | Hard daily limit, hard stop. Biggest, simplest lock button. |
-  | **6–12 Kid** | Can send time requests and earn time via tasks. Default-good allowlist; parent widens. | Hard limit, hard stop. |
-  | **12–16 Younger teen** | Goals + limit, rich own stats. Requests to parent. More categories open by default. | Hard stop with a brief wind-down countdown, then stop. |
+  | **0–6 Little** | Parent does everything. No request UI. Adult content, gambling, dating, VPNs pre-blocked. | Hard daily limit, hard stop. Biggest, simplest lock button. |
+  | **6–12 Kid** | Can send time requests and earn time via tasks. Same pre-blocked categories. | Hard limit, hard stop. |
+  | **12–16 Younger teen** | Goals + limit, rich own stats. Requests to parent. Fewer pre-blocked categories. | Hard stop with a brief wind-down countdown, then stop. |
   | **16–18 Older teen** | Mostly self-set goals with parent visibility; parent can still cap. | Hard stop only where the parent enforces a cap. |
   | **Adult 18+** | Fully private self-tracking. No parent, no external enforcement. Can be a hub for others. | Self-imposed only (self-set focus / limits). |
 
@@ -71,8 +77,9 @@ Order, top to bottom:
 
 ## Healthy alternatives = defaults, not a feed
 
-- Ship a curated, age-bracketed set of "good" apps/sites **pre-added to
-  allowlists by default**.
+- Ship a curated, age-bracketed set of "good" apps/sites the setup flow can
+  **offer as defaults** — nothing to unlock, because nothing is locked by
+  default (CONTRACT-0.6).
 - On setup / device add: **offer to set healthy defaults** — browser homepage,
   pinned tabs, default search — behind one confirm.
 - No nag feed, no in-the-moment interruptions. The good thing is simply already
