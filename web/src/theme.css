@@ -1404,3 +1404,31 @@ body[data-leaving="true"] .shell {
   .rc-code { color: #000; border-color: #000; background: #fff; }
   .rc-sheet p { color: #000 !important; }
 }
+
+/* ============================================================================
+   LOGIN — the waiting shimmer while a computer is being asked.
+   ========================================================================== */
+.login-wait-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  position: relative;
+  overflow: hidden;
+}
+.login-wait-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  border-radius: inherit;
+  background: var(--fg-dim);
+  animation: login-wait 1.4s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+@keyframes login-wait {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-wait-bar::after { animation: none; width: 100%; opacity: 0.4; }
+}

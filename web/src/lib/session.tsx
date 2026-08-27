@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { Me } from "../types";
 import { auth, getMe, usingMock } from "../api";
+import * as api from "../api";
 import { resetFamily } from "./family";
 
 interface SessionState {
@@ -17,6 +18,12 @@ interface SessionState {
   mock: boolean;
   refresh: () => Promise<void>;
   login: (email: string) => Promise<void>;
+  /**
+   * Client-first login (CONTRACT-0.6): ask by name, the person's own computer
+   * approves. `onPrompted` fires once with the device names being asked.
+   * Resolves when the approval lands; throws on deny/timeout.
+   */
+  deviceLogin: (username: string, onPrompted?: (devices: string[]) => void) => Promise<void>;
   register: (email: string, displayName: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -90,6 +97,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [refresh],
   );
 
+  const deviceLogin = useCallback(
+    async (username: string, onPrompted?: (devices: string[]) => void) => {
+      const { verifier, challenge } = await api.pkcePair();
+      const started = await api.startDeviceLogin(username, challenge);
+      onPrompted?.(started.devices);
+      const deadline = Date.now() + (started.expires_in_secs + 5) * 1000;
+      // Poll until the human at the machine answers. The server answers
+      // "pending" politely; anything else is a verdict.
+      for (;;) {
+        const r = await api.finishDeviceLogin(started.request_id, verifier);
+        if (r.status === "approved") {
+          await refresh();
+          return;
+        }
+        if (Date.now() > deadline) {
+          throw new Error("Nobody approved in time — try again, or use your passkey.");
+        }
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+    },
+    [refresh],
+  );
+
   const register = useCallback(
     async (email: string, displayName: string) => {
       await auth.register(email, displayName);
@@ -111,8 +141,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<SessionState>(
-    () => ({ me, loading, mock, refresh, login, register, logout }),
-    [me, loading, mock, refresh, login, register, logout],
+    () => ({ me, loading, mock, refresh, login, deviceLogin, register, logout }),
+    [me, loading, mock, refresh, login, deviceLogin, register, logout],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

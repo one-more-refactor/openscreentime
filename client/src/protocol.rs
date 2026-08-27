@@ -20,6 +20,10 @@ pub const CMD_CREDIT_TIME: &str = "credit_time";
 /// Lets the agent clear its once-per-day dedupe so the teen can re-ask, and
 /// tell them they were denied instead of leaving "WAITING FOR APPROVAL" up all day.
 pub const CMD_DENY_EARN: &str = "deny_earn";
+/// Client-first login (CONTRACT-0.6 §2): `{request_id, username, os_users,
+/// expires_in_secs}` — prompt exactly those OS logins to approve or deny a
+/// web sign-in as `username`.
+pub const CMD_LOGIN_APPROVE: &str = "login_approve";
 
 /// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
 /// `enrolled` also exist but are written server-side, never by the agent).

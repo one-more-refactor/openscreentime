@@ -8,6 +8,7 @@ mod agent;
 mod agent_dist;
 mod alerts;
 mod auth;
+mod auth_device;
 mod auth_oidc;
 mod commands;
 mod db;
@@ -164,6 +165,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/register/finish", post(auth::register_finish))
         .route("/api/auth/login/start", post(auth::login_start))
         .route("/api/auth/login/finish", post(auth::login_finish))
+        .route("/api/auth/device/start", post(auth_device::start))
+        .route("/api/auth/device/finish", post(auth_device::finish))
         .route("/api/auth/oidc/start", get(auth_oidc::start))
         .route("/api/auth/oidc/callback", get(auth_oidc::callback))
         .route_layer(middleware::from_fn_with_state(
@@ -342,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
         .route("/agent/voucher", post(stepup::mint_voucher))
+        .route("/agent/login-decision", post(auth_device::decision))
         // --- Parent companion API ------------------------------------------
         .merge(parent_api)
         // Read is free, write is stepped — enforced as a layer rather than a

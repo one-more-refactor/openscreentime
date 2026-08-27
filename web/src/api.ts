@@ -278,6 +278,56 @@ export async function verifyStepUp(
   });
 }
 
+// ---- Client-first login (CONTRACT-0.6) --------------------------------------
+// The browser asks by name; the person's own computer approves. PKCE-style:
+// the verifier below never leaves this browser.
+
+export interface DeviceLoginStart {
+  request_id: string;
+  devices: string[];
+  expires_in_secs: number;
+}
+
+function b64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/** A fresh PKCE pair: keep the verifier, send only the challenge. */
+export async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  const verifier = b64url(raw);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return { verifier, challenge: b64url(new Uint8Array(digest)) };
+}
+
+export async function startDeviceLogin(
+  username: string,
+  code_challenge: string,
+): Promise<DeviceLoginStart> {
+  if (usingMock)
+    return { request_id: "mock-req", devices: ["Living Room PC"], expires_in_secs: 120 };
+  return request<DeviceLoginStart>("/api/auth/device/start", {
+    method: "POST",
+    body: JSON.stringify({ username, code_challenge }),
+  });
+}
+
+/** One poll. `status` is "pending" until the human at the machine answers. */
+export async function finishDeviceLogin(
+  request_id: string,
+  code_verifier: string,
+): Promise<{ status: string; role?: string }> {
+  if (usingMock) return { status: "approved", role: "admin" };
+  return request<{ status: string; role?: string }>("/api/auth/device/finish", {
+    method: "POST",
+    body: JSON.stringify({ request_id, code_verifier }),
+  });
+}
+
 /** Ask the server to send one confirm-tap to the paired Telegram chat. */
 export async function startTelegramStepUp(): Promise<void> {
   if (usingMock) return;

@@ -166,6 +166,30 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// POST /agent/login-decision — the human at this machine answered a
+    /// web sign-in prompt (CONTRACT-0.6 client-first login).
+    pub async fn post_login_decision(
+        &self,
+        request_id: &str,
+        approve: bool,
+        os_username: &str,
+    ) -> Result<()> {
+        let body = json!({
+            "request_id": request_id,
+            "approve": approve,
+            "os_username": os_username,
+        });
+        self.http
+            .post(format!("{}/agent/login-decision", self.base))
+            .header("Authorization", self.bearer())
+            .json(&body)
+            .send()
+            .await
+            .context("POST /agent/login-decision")?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// GET /agent/policy — the full per-user policy bundle.
     pub async fn get_policy(&self) -> Result<crate::policy::PolicyBundle> {
         let resp = self

@@ -127,6 +127,7 @@ fn digits_only(s: &str) -> String {
 fn exempt(path: &str) -> bool {
     path.starts_with("/api/auth/register/")
         || path.starts_with("/api/auth/login/")
+        || path.starts_with("/api/auth/device/")
         || path == "/api/auth/logout"
         || path == "/api/auth/voucher"
         || path == "/api/auth/stepup/verify"

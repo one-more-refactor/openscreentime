@@ -316,6 +316,23 @@ pub struct Agent {
     notifications: VecDeque<UserNotification>,
     /// Monotonic id for the next notification (so the tray shows each once).
     notif_seq: u64,
+    /// Web sign-in requests waiting for a human at this machine to answer
+    /// (CONTRACT-0.6 client-first login). Published per target user in the
+    /// status snapshot; answered via a marker file in `/run/user/<uid>`.
+    pending_logins: Vec<PendingLogin>,
+}
+
+/// One outstanding "approve this web sign-in?" prompt.
+#[derive(Debug, Clone)]
+struct PendingLogin {
+    /// The server's `login_requests.id` (opaque here).
+    id: String,
+    /// Display name of the person signing in — what the prompt shows.
+    username: String,
+    /// The OS logins on this device that belong to that person; only their
+    /// sessions see the prompt, and only their decision files are honored.
+    os_users: Vec<String>,
+    expires: chrono::DateTime<chrono::Utc>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -485,6 +502,7 @@ impl Agent {
             pending_events,
             notifications: VecDeque::new(),
             notif_seq: 0,
+            pending_logins: Vec::new(),
         })
     }
 
@@ -1202,6 +1220,9 @@ impl Agent {
         // On-demand "request more time" markers dropped by users' trays.
         self.check_ondemand_earn().await;
 
+        // Web sign-in decisions dropped by users' trays (client-first login).
+        self.check_login_decisions().await;
+
         // Persist the freeze/grant state every tick, like the usage ledger
         // above — a power-cycle at any moment must resume, not reset.
         if !self.exec.dry_run() {
@@ -1209,6 +1230,62 @@ impl Agent {
         }
         self.write_status_file();
         events
+    }
+
+    /// Collect the sign-in decisions users' trays dropped in their own
+    /// `/run/user/<uid>/openscreentime` (the same spoof-proof channel as the
+    /// earn marker: only that user and root can write there), report them to
+    /// the server, and expire prompts nobody answered.
+    async fn check_login_decisions(&mut self) {
+        if self.pending_logins.is_empty() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let pending = self.pending_logins.clone();
+        let mut done: Vec<String> = Vec::new();
+        for p in &pending {
+            if p.expires < now {
+                done.push(p.id.clone());
+                continue;
+            }
+            for u in &p.os_users {
+                let Some(uid) = crate::sysusers::uid_of(u) else {
+                    continue;
+                };
+                let path = std::path::PathBuf::from(format!(
+                    "/run/user/{uid}/openscreentime/login_decision_{}",
+                    p.id
+                ));
+                let Ok(raw) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let _ = std::fs::remove_file(&path);
+                let approve = raw.trim() == "approve";
+                match self.client.post_login_decision(&p.id, approve, u).await {
+                    Ok(()) => {
+                        self.notify_user(
+                            Some(u),
+                            if approve { "Signed in" } else { "Blocked" },
+                            if approve {
+                                "The web session is open."
+                            } else {
+                                "That sign-in was refused."
+                            },
+                            !approve,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("login decision for {} failed: {e}", p.id);
+                    }
+                }
+                done.push(p.id.clone());
+                break;
+            }
+        }
+        if !done.is_empty() {
+            self.pending_logins.retain(|p| !done.contains(&p.id));
+            self.write_status_file();
+        }
     }
 
     /// Snapshot the reboot-surviving enforcement state to disk. Users inside a
@@ -1456,6 +1533,19 @@ impl Agent {
                     d.saturating_duration_since(Instant::now()).as_secs()),
             }]);
             view["notifications"] = json!(notifs);
+            // Sign-in prompts addressed to this user's sessions — the tray
+            // renders these as actionable notifications and answers via a
+            // decision file (client-first login, CONTRACT-0.6).
+            view["login_requests"] = json!(self
+                .pending_logins
+                .iter()
+                .filter(|l| l.os_users.iter().any(|x| x == u))
+                .map(|l| json!({
+                    "id": l.id,
+                    "username": l.username,
+                    "expires_at": l.expires.to_rfc3339(),
+                }))
+                .collect::<Vec<_>>());
             write_private_status(dir, u, uid, &view.to_string());
         }
     }
@@ -1580,6 +1670,60 @@ impl Agent {
                     json!({ "source": "command" }),
                 ));
                 json!({ "locked": false })
+            }
+            CMD_LOGIN_APPROVE => {
+                let request_id = cmd
+                    .payload
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let username = cmd
+                    .payload
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("someone")
+                    .to_string();
+                let os_users: Vec<String> = cmd
+                    .payload
+                    .get("os_users")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let secs = cmd
+                    .payload
+                    .get("expires_in_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(120);
+                if request_id.is_empty() || os_users.is_empty() {
+                    return (ack_failed(&cmd.id, "bad login_approve payload"), events);
+                }
+                for u in &os_users {
+                    self.notify_user(
+                        Some(u),
+                        "Sign-in request",
+                        &format!(
+                            "{username} is signing in to OpenScreenTime on the web. \
+                             Approve from the notification — only if this is you."
+                        ),
+                        false,
+                    );
+                }
+                self.pending_logins.retain(|p| p.id != request_id);
+                self.pending_logins.push(PendingLogin {
+                    id: request_id,
+                    username,
+                    os_users: os_users.clone(),
+                    expires: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
+                });
+                // Snappy: the tray polls the snapshot every 5 s — publish now
+                // rather than waiting for the next tick.
+                self.write_status_file();
+                json!({ "prompted": os_users })
             }
             CMD_APPLY_POLICY => match self.client.get_policy().await {
                 Ok(bundle) => {
