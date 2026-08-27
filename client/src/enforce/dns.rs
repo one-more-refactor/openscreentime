@@ -145,6 +145,11 @@ pub fn render_dnsmasq(
     out.push_str("domain-needed\n");
     out.push_str("listen-address=127.0.0.1\n");
     out.push_str("bind-interfaces\n");
+    // Where-the-time-goes (CONTRACT-0.6): the extra-format query log is the
+    // site-level attribution signal. The agent tails and truncates it
+    // (attrib.rs); dnsmasq appends, so truncation under it is safe.
+    out.push_str("log-queries=extra\n");
+    out.push_str(&format!("log-facility={}\n", crate::attrib::DNSQ_LOG));
 
     if dns.is_default_deny() && !dns.allows_everything() {
         // Zero-trust: forward ONLY allowlisted domains to the filtered upstream.

@@ -23,6 +23,7 @@ import { useSession } from "../lib/session";
 import { useCountUp } from "../lib/useCountUp";
 import { useTheme } from "../lib/theme";
 import { Wordmark } from "../components/Wordmark";
+import { WhereTheTime } from "../components/WhereTheTime";
 
 // ---- the ring ----------------------------------------------------------------
 
@@ -461,6 +462,7 @@ export function Me() {
           {history && history.days.length > 0 && (
             <Week history={history} today={today} theme={theme} />
           )}
+          <WhereTheTime />
           <Schedule today={today} theme={theme} />
           <Blocked today={today} catalog={catalog} theme={theme} />
           <Devices today={today} theme={theme} />

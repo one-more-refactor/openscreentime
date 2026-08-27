@@ -190,6 +190,19 @@ impl ServerClient {
         Ok(())
     }
 
+    /// POST /agent/usage — where-the-time-goes slices (CONTRACT-0.6 §3).
+    pub async fn post_usage_slices(&self, slices: &[serde_json::Value]) -> Result<()> {
+        self.http
+            .post(format!("{}/agent/usage", self.base))
+            .header("Authorization", self.bearer())
+            .json(&json!({ "slices": slices }))
+            .send()
+            .await
+            .context("POST /agent/usage")?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// GET /agent/policy — the full per-user policy bundle.
     pub async fn get_policy(&self) -> Result<crate::policy::PolicyBundle> {
         let resp = self

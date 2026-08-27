@@ -688,6 +688,31 @@ pub fn category(id: &str) -> Option<&'static CategoryDef> {
     CATEGORIES.iter().find(|c| c.id == id)
 }
 
+/// The catalog app that owns `domain`, by suffix match — `m.youtube.com`
+/// belongs to YouTube. Used by usage attribution (CONTRACT-0.6 §3): a DNS
+/// query for an app's domain is activity in that app.
+pub fn app_for_domain(domain: &str) -> Option<&'static AppDef> {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    APPS.iter().find(|a| {
+        a.domains
+            .iter()
+            .any(|ad| d == *ad || d.ends_with(&format!(".{ad}")))
+    })
+}
+
+/// `comm` (process name) → app id, across the WHOLE catalog — the index the
+/// attribution sampler matches running processes against. Exact comm names
+/// only, same discipline as the blocker.
+pub fn comm_to_app() -> std::collections::HashMap<&'static str, &'static str> {
+    let mut out = std::collections::HashMap::new();
+    for a in APPS {
+        for p in a.processes {
+            out.insert(*p, a.id);
+        }
+    }
+    out
+}
+
 /// The concrete things the device enforces for a set of blocks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Expanded {

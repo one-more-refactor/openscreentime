@@ -5,6 +5,7 @@
 //!   --dry-run       log actions instead of executing them (safe as non-root)
 //!   --tamper-max    raise the tamper ceiling to level 3 (opt-in, TAMPER.md)
 
+mod attrib;
 mod childcli;
 mod client;
 mod config;

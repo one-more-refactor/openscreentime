@@ -33,6 +33,7 @@ import {
   policyForLevel,
 } from "../components/SecuritySlider";
 import { Moments } from "../components/Moments";
+import { WhereTheTime } from "../components/WhereTheTime";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Avatar } from "./Family";
@@ -383,6 +384,8 @@ export function ChildDetail() {
       {error && <p className="fam-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
       <Today used={used} limit={limit} earned={earned} />
+
+      <WhereTheTime accountId={child.account_id} />
 
       {requests.length > 0 && (
         <section className="ch-section">
