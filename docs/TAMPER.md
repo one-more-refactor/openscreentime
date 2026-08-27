@@ -118,6 +118,17 @@ Claims you might expect from this category of product that we deliberately do no
 - **Physical access + root wins eventually.** The design goal is that it can't win *silently*:
   the attempt costs real effort, generates tamper events on the way, and the end state is a
   loudly visible gone-dark device in the console — not a quietly green one.
+- **Browser DNS-over-HTTPS to an arbitrary IP is not fully stopped.** Whenever a policy blocks
+  anything, the agent forces plaintext DNS through its own resolver and drops DoT plus the
+  known public DoH provider IPs (`lockdown.force_dns`/`block_doh`/`block_dot`, applied
+  automatically when blocks exist). That closes plaintext alt-resolvers and the common
+  one-click DoH toggles. It does **not** stop a determined user who points a browser at a DoH
+  endpoint on an IP not in our list, pinned so its bootstrap never hits the local resolver —
+  the query rides ordinary HTTPS/443, indistinguishable from any other. The enforcement-honesty
+  probe checks the *system* resolver path (`getent`), so it can report the DNS block healthy
+  while a browser tunnels around it; a **blocked category briefly reappearing in "Where the time
+  goes" is the signal a parent actually has** for this. Truly closing it needs egress
+  443-to-approved-only (a future maximum-lockdown option), which breaks too much to be a default.
 
 ## Zero-trust enforcement primitives (Linux)
 

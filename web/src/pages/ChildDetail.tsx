@@ -29,6 +29,7 @@ import {
 import {
   LEVELS,
   SecuritySlider,
+  isLegacyLocked,
   levelForPolicy,
   policyForLevel,
 } from "../components/SecuritySlider";
@@ -264,6 +265,7 @@ export function ChildDetail() {
   // A disabled schedule means no limit, whatever number the policy carries.
   const limit = child.limit_minutes ?? 0;
   const level = profile ? levelForPolicy(profile.policy) : 2;
+  const legacyLocked = profile ? isLegacyLocked(profile.policy) : false;
 
   /** Every change funnels through here: step-up, do it, refetch the family. */
   async function change(doneNote: string, fn: () => Promise<unknown>, failNote: string) {
@@ -451,7 +453,7 @@ export function ChildDetail() {
 
       <section className="ch-section">
         {profile ? (
-          <SecuritySlider value={level} busy={busy} onChange={setLevel} />
+          <SecuritySlider value={level} busy={busy} onChange={setLevel} legacyLocked={legacyLocked} />
         ) : (
           <p className="fam-quiet">No rules assigned, so there is nothing to protect yet.</p>
         )}
@@ -491,8 +493,12 @@ export function ChildDetail() {
       </section>
 
       {/* The day's story, not a log: only moments that mattered, and nothing
-          at all on a healthy day. The raw feed lives with the machinery. */}
-      <Moments events={events} />
+          at all on a healthy day. Events are fetched per device, so on a
+          shared computer they include siblings' — filter to THIS child's OS
+          logins (a device-wide event with no user, e.g. a tamper, still shows). */}
+      <Moments
+        events={events.filter((e) => e.device_user_id === null || deviceUserIds.has(e.device_user_id))}
+      />
     </div>
   );
 }

@@ -342,7 +342,9 @@ export function Family() {
       {loading && children.length === 0 ? (
         <FamilyWaiting />
       ) : children.length === 0 ? (
-        <FirstRun />
+        // Only invite first-run setup when the family is genuinely empty — not
+        // when the first load errored (that just shows the error above).
+        error ? null : <FirstRun />
       ) : (
         <ul className="fam-grid">
           {children.map((c, i) => (

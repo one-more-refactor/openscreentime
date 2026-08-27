@@ -117,6 +117,11 @@ export function policyForLevel(level: number, base: Policy): Policy {
     // Open at every level (CONTRACT-0.6): protection is the filtered
     // upstream + the blocklist, never a closed internet.
     mode: "allow_all",
+    // Clear any legacy allowlist. A default-deny profile run through the
+    // slider kept its curated list, which then read as "not allow-everything"
+    // and — on a shared machine — deterministically overrode the strictest
+    // child's DNS in the host merge. The wildcard is the allow_all marker.
+    allowlist: ["*"],
     safe_search: level >= 1,
     // 1.1.1.1 no filtering · 1.1.1.2 malware · 1.1.1.3 malware + adult
     upstream: level === 0 ? "1.1.1.1" : level === 1 ? "1.1.1.2" : "1.1.1.3",
@@ -155,14 +160,21 @@ export function policyForLevel(level: number, base: Policy): Policy {
   return next;
 }
 
-/** Best-effort read of which level a policy currently matches. */
+/** True for a legacy closed-network profile (pre-0.6 "Approved sites only" /
+ * default-deny). The slider can't represent it — every level is open now — so
+ * the page shows an explicit "open it up" action instead of a mislabelled
+ * level with no Apply button. */
+export function isLegacyLocked(p: Policy): boolean {
+  return p.dns?.mode === "default_deny" || p.firewall?.mode === "default_deny";
+}
+
+/** Best-effort read of which level a NON-legacy policy matches (guard with
+ * isLegacyLocked first). Optional-chained throughout so a hand-edited DB row
+ * can't white-screen the child page. */
 export function levelForPolicy(p: Policy): number {
-  // A legacy hand-edited default-deny profile reads as Strict; applying any
-  // level from here opens the network again (the 0.6 posture).
-  if (p.dns.mode === "default_deny") return 3;
   if (p.lockdown?.block_vpn) return 3;
   if (p.screen_time?.enabled) return 2;
-  if (p.dns.safe_search) return 1;
+  if (p.dns?.safe_search) return 1;
   return 0;
 }
 
@@ -170,11 +182,39 @@ export function SecuritySlider({
   value,
   onChange,
   busy,
+  legacyLocked,
 }: {
   value: number;
   onChange: (level: number) => void;
   busy?: boolean;
+  /** The profile is a pre-0.6 closed-network one — offer to open it up. */
+  legacyLocked?: boolean;
 }) {
+  if (legacyLocked) {
+    return (
+      <div className="sec">
+        <div className="sec-head">
+          <p className="sec-title">Protection</p>
+          <p className="sec-level">Locked-down (old style)</p>
+        </div>
+        <p className="sec-summary">
+          This profile still uses the old "only approved sites work" network,
+          from before OpenScreenTime switched to blocking by exception. Open it
+          up and it becomes a normal profile: everything works unless you block
+          it, and what you block is still really blocked.
+        </p>
+        <div className="sec-apply">
+          <button
+            className="ch-btn ch-btn-yes"
+            disabled={busy}
+            onClick={() => onChange(2)}
+          >
+            Open it up (keep Protected)
+          </button>
+        </div>
+      </div>
+    );
+  }
   // Dragging previews; nothing is written until "Apply". The old version fired
   // a policy write for every notch the thumb crossed, so sliding from Off to
   // Strict briefly applied two settings nobody chose — and a parent had no way

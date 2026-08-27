@@ -53,8 +53,28 @@ pub async fn ingest(
     if req.slices.len() > MAX_SLICES_PER_POST {
         return Err(AppError::BadRequest("too many slices in one post".into()));
     }
+    // OS logins the agent may attribute app-seconds to on ITS OWN device —
+    // so a compromised agent can't misattribute a sibling's usage to another
+    // account by inventing an os_username (the where-queries join on it).
+    let known_users: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT os_username FROM device_users WHERE device_id = $1",
+    )
+    .bind(agent.device_id)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
+
     for s in &req.slices {
         if !matches!(s.kind.as_str(), "app" | "site") || s.amount <= 0 || s.amount > 86_400 {
+            continue;
+        }
+        // Site slices are device-wide (os_username ""); app slices must name a
+        // real OS login of this device.
+        if s.kind == "app" && (s.os_username.is_empty() || !known_users.contains(&s.os_username)) {
+            continue;
+        }
+        if s.kind == "site" && !s.os_username.is_empty() {
             continue;
         }
         let key: String = s.key.chars().take(120).collect();
@@ -82,6 +102,14 @@ pub async fn ingest(
 
 /// Today's attribution for one account: top apps (their own seconds), top
 /// sites (their devices' activity), and a 24-slot activity curve.
+///
+/// KNOWN LIMITATION: "today" here is the **UTC** calendar day, while the
+/// screen-time TimeBar comes from the ledger's device-local day. In a
+/// non-UTC timezone the two can disagree near local midnight (late-night use
+/// straddles the boundary differently). Fixing it properly needs a stored
+/// per-device UTC offset; deferred deliberately — this is a soft attribution
+/// signal, not the enforced budget. The web still buckets the hour curve into
+/// the viewer's local time, so the strip reads correctly within the window.
 pub async fn where_for_account(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -117,23 +145,17 @@ pub async fn where_for_account(
     .fetch_all(db)
     .await?;
 
-    // The day's curve: everything attributable to them or their machines,
-    // as raw hourly totals the web buckets into local time.
+    // The day's curve: the person's own app-SECONDS per hour (only — mixing in
+    // site lookup COUNTS made the intensity unit-soup, where 200 DNS hits
+    // dwarfed an hour of real use). Site activity has its own list above.
     let hours: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(
-        "SELECT h, SUM(a)::bigint FROM (
-            SELECT us.hour AS h, us.amount AS a
+        "SELECT us.hour, SUM(us.amount)::bigint
               FROM usage_slices us
               JOIN device_users du ON du.device_id = us.device_id
                                   AND du.os_username = us.os_username
              WHERE du.account_id = $1 AND us.tenant_id = $2 AND us.kind = 'app'
                AND us.hour >= date_trunc('day', now())
-            UNION ALL
-            SELECT us.hour, us.amount
-              FROM usage_slices us
-             WHERE us.tenant_id = $2 AND us.kind = 'site' AND us.os_username = ''
-               AND us.hour >= date_trunc('day', now())
-               AND us.device_id IN (SELECT device_id FROM device_users WHERE account_id = $1)
-         ) t GROUP BY h ORDER BY h",
+             GROUP BY us.hour ORDER BY us.hour",
     )
     .bind(account_id)
     .bind(tenant_id)

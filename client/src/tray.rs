@@ -67,6 +67,8 @@ struct LoginRequest {
     #[serde(default)]
     username: String,
     #[serde(default)]
+    match_code: String,
+    #[serde(default)]
     expires_at: String,
 }
 
@@ -341,16 +343,19 @@ fn prompt_login(req: LoginRequest) {
         };
         let shown = notify_rust::Notification::new()
             .appname("OpenScreenTime")
-            .summary("Sign-in request")
+            .summary(&format!("Sign-in request — code {}", req.match_code))
             .body(&format!(
-                "{} is signing in to OpenScreenTime on the web.\nApprove only if this is you.",
-                req.username
+                "{} is signing in on the web. Approve ONLY if the web page shows {}.",
+                req.username, req.match_code
             ))
             .icon("security-high")
-            .action("approve", "It's me — approve")
+            .action("approve", &format!("It's me — {}", req.match_code))
             .action("deny", "Not me — block")
             .urgency(notify_rust::Urgency::Critical)
-            .timeout(notify_rust::Timeout::Never)
+            // Time-bounded so a long-expired prompt doesn't linger clickable
+            // (the server rejects a stale approval anyway, but a dead button
+            // is a bad prompt). The approval window is ~2 minutes.
+            .timeout(notify_rust::Timeout::Milliseconds(150_000))
             .show();
         match shown {
             Ok(handle) => handle.wait_for_action(|action| match action {

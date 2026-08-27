@@ -127,7 +127,7 @@ pub fn younger_teen_policy() -> Value {
             "earn_time": { "enabled": true, "tasks": [
                 {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
             "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
-        "lockdown": lockdown(false, true, true, true),
+        "lockdown": lockdown(true, true, true, true),
         "blocks": {
             "apps": [],
             "categories": ["adult","gambling","proxies"],
@@ -143,7 +143,7 @@ pub fn older_teen_policy() -> Value {
         "firewall": open_firewall(),
         "screen_time": no_screen_time(),
         "gamification": no_gamification(),
-        "lockdown": lockdown(false, true, true, true),
+        "lockdown": lockdown(true, true, true, true),
         "blocks": {
             "apps": [],
             "categories": ["adult","gambling","proxies"],
