@@ -32,23 +32,13 @@ import {
   levelForPolicy,
   policyForLevel,
 } from "../components/SecuritySlider";
-import { EventFeed } from "../components/EventFeed";
+import { Moments } from "../components/Moments";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
+import { Avatar } from "./Family";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
-
-function hueFor(key: string): number {
-  let h = 0;
-  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return h;
-}
-function initials(name: string): string {
-  const p = name.trim().split(/\s+/).filter(Boolean);
-  if (!p.length) return "?";
-  return (p.length === 1 ? p[0].slice(0, 2) : p[0][0] + p[p.length - 1][0]).toUpperCase();
-}
 
 function since(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -100,19 +90,26 @@ function Today({ used, limit, earned }: { used: number; limit: number; earned: n
   );
 }
 
-/** Age bracket + look, in the header. Both are one tap, both step up. */
+/** The faces a parent can pick — stable, friendly, no uploads to moderate. */
+const FACES = ["🦊", "🐼", "🦖", "🚀", "⚽", "🎨", "🐙", "🌟", "🦄", "🐸", "🎮", "🎧", "📚", "🌈", "🐳", "🐯"];
+
+/** Age bracket + look + face, in the header. Each is one tap. */
 function Identity({
   bracket,
   theme,
+  avatar,
   busy,
   onBracket,
   onTheme,
+  onAvatar,
 }: {
   bracket: AgeBracket;
   theme: Theme | null;
+  avatar: string | null | undefined;
   busy: boolean;
   onBracket: (b: AgeBracket) => void;
   onTheme: (t: Theme | null) => void;
+  onAvatar: (a: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const auto = defaultThemeFor(bracket);
@@ -139,6 +136,25 @@ function Identity({
                 onClick={() => x.key !== bracket && onBracket(x.key)}
               >
                 {x.label} <span className="pill-range">{x.range}</span>
+              </button>
+            ))}
+          </div>
+          <p className="rl-name" style={{ marginTop: "1rem" }}>Their face</p>
+          <p className="rl-value">The icon that stands for them everywhere in the console.</p>
+          <div className="pills faces" style={{ marginTop: "0.5rem" }}>
+            <button className="pill" data-on={!avatar} disabled={busy} onClick={() => avatar && onAvatar("")}>
+              Auto
+            </button>
+            {FACES.map((f) => (
+              <button
+                key={f}
+                className="pill pill-face"
+                data-on={avatar === f}
+                disabled={busy}
+                onClick={() => avatar !== f && onAvatar(f)}
+                aria-label={`Use ${f} as their face`}
+              >
+                {f}
               </button>
             ))}
           </div>
@@ -303,6 +319,14 @@ export function ChildDetail() {
     );
   }
 
+  function setAvatar(a: string) {
+    void change(
+      a ? `${name} is ${a} now.` : `${name}'s face is back to their initials.`,
+      () => api.updateMember(child!.account_id, { avatar: a }),
+      "Could not change the face",
+    );
+  }
+
   /** The hard stop: pause (lock) every device this child uses. */
   const allPaused = childDevices.length > 0 && childDevices.every((d) => d.locked);
   const anyPending = childDevices.some((d) => d.lock_pending);
@@ -334,19 +358,7 @@ export function ChildDetail() {
     <div className="ch-wrap">
       <PageHead
         back={{ to: "/", label: "Family" }}
-        lead={
-          <span
-            className="fam-avatar"
-            style={{
-              width: 64, height: 64, fontSize: 22,
-              background: `hsl(${hueFor(key)} 45% 88%)`,
-              color: `hsl(${hueFor(key)} 55% 26%)`,
-            }}
-            aria-hidden="true"
-          >
-            {initials(name)}
-          </span>
-        }
+        lead={<Avatar name={name} seed={key} avatar={child.avatar} size={64} />}
         title={name}
         sub={
           <>
@@ -359,9 +371,11 @@ export function ChildDetail() {
         <Identity
           bracket={child.age_bracket}
           theme={child.theme}
+          avatar={child.avatar}
           busy={busy}
           onBracket={setBracket}
           onTheme={setTheme}
+          onAvatar={setAvatar}
         />
       </PageHead>
 
@@ -473,12 +487,9 @@ export function ChildDetail() {
         </ul>
       </section>
 
-      {childDevices.length > 0 && (
-        <section className="ch-section">
-          <h2 className="ch-h2">Recent activity</h2>
-          <EventFeed events={events} emptyLabel="NOTHING RECORDED YET" />
-        </section>
-      )}
+      {/* The day's story, not a log: only moments that mattered, and nothing
+          at all on a healthy day. The raw feed lives with the machinery. */}
+      <Moments events={events} />
     </div>
   );
 }

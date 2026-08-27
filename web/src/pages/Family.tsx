@@ -12,9 +12,11 @@
 // the freeze visibly sweeps across the family rather than the page silently
 // re-rendering.
 // ============================================================================
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
-import type { Device } from "../types";
+import type { Device, MeToday } from "../types";
+import * as api from "../api";
+import { useSession } from "../lib/session";
 import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
@@ -34,7 +36,18 @@ function initials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export function Avatar({ name, seed, size = 56 }: { name: string; seed: string; size?: number }) {
+export function Avatar({
+  name,
+  seed,
+  avatar,
+  size = 56,
+}: {
+  name: string;
+  seed: string;
+  /** parent-picked emoji face; falls back to the deterministic monogram */
+  avatar?: string | null;
+  size?: number;
+}) {
   const hue = hueFor(seed);
   return (
     <span
@@ -42,13 +55,13 @@ export function Avatar({ name, seed, size = 56 }: { name: string; seed: string; 
       style={{
         width: size,
         height: size,
-        fontSize: size * 0.34,
+        fontSize: avatar ? size * 0.5 : size * 0.34,
         background: `hsl(${hue} 45% 88%)`,
         color: `hsl(${hue} 55% 26%)`,
       }}
       aria-hidden="true"
     >
-      {initials(name)}
+      {avatar || initials(name)}
     </span>
   );
 }
@@ -156,7 +169,7 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
       // instead of every card blinking at once.
       style={{ "--i": index } as CSSProperties}
     >
-      <Avatar name={child.name} seed={child.key} />
+      <Avatar name={child.name} seed={child.key} avatar={child.avatar} />
       <div className="fam-card-body">
         <p className="fam-name">{child.name}</p>
         <p className="fam-meta">
@@ -182,6 +195,42 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
           Pausing…
         </span>
       ) : null}
+    </Link>
+  );
+}
+
+/**
+ * The parent, in the family — "My screen time" left the nav (CONTRACT-0.6);
+ * their own day lives here as a quieter card that opens the full page.
+ * Everyone in the house has a ring in this product, the hub included.
+ */
+function YouCard({ index }: { index: number }) {
+  const { me } = useSession();
+  const [today, setToday] = useState<MeToday | null>(null);
+  useEffect(() => {
+    void api
+      .getMeToday()
+      .then(setToday)
+      .catch(() => setToday(null));
+  }, []);
+  const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
+  return (
+    <Link to="/me" className="fam-card fam-card-you" style={{ "--i": index } as CSSProperties}>
+      <Avatar name={name} seed={me?.account?.id ?? "you"} />
+      <div className="fam-card-body">
+        <p className="fam-name">
+          {name} <span className="fam-you-tag">you</span>
+        </p>
+        <p className="fam-meta">Your own day, private to you</p>
+        {today ? (
+          <p className="fam-time-none">
+            {today.used_minutes} min today
+            {today.limit_minutes !== null ? ` · ${Math.max(0, today.left_minutes ?? 0)} left` : ""}
+          </p>
+        ) : (
+          <p className="fam-time-none">&nbsp;</p>
+        )}
+      </div>
     </Link>
   );
 }
@@ -270,6 +319,9 @@ export function Family() {
               <ChildCard child={c} index={i} />
             </li>
           ))}
+          <li key="__you">
+            <YouCard index={children.length} />
+          </li>
         </ul>
       )}
     </div>

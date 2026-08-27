@@ -35,7 +35,7 @@ use openscreentime_policy::{catalog, AgeBracket, Policy, Theme};
 // ── the account row ─────────────────────────────────────────────────────────
 
 pub const ACCOUNT_COLS: &str = "id, tenant_id, display_name, email, role, age_bracket, birthdate, \
-    theme, self_managed, profile_id, created_at";
+    theme, self_managed, profile_id, created_at, avatar";
 
 pub type AccountRow = (
     Uuid,              // id
@@ -49,6 +49,8 @@ pub type AccountRow = (
     bool,              // self_managed
     Option<Uuid>,      // profile_id
     DateTime<Utc>,     // created_at
+    Option<String>,    // avatar (emoji; NULL = monogram) — appended last so
+                       //   the positional accesses above it never renumber
 );
 
 pub fn bracket_of(r: &AccountRow) -> AgeBracket {
@@ -79,6 +81,7 @@ pub fn account_json(r: &AccountRow) -> Value {
         "self_managed": r.8,
         "profile_id": r.9,
         "created_at": r.10,
+        "avatar": r.11,
     })
 }
 
@@ -420,6 +423,9 @@ pub struct PatchMemberReq {
     pub theme: Option<String>,
     #[serde(default)]
     pub profile_id: Option<Uuid>,
+    /// An emoji face; empty string clears back to the monogram.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 /// `PATCH /api/members/{id}`. Changing the bracket does not rewrite the
@@ -480,6 +486,18 @@ pub async fn patch_member(
         sqlx::query("UPDATE admins SET theme = $2 WHERE id = $1")
             .bind(id)
             .bind(theme)
+            .execute(&st.db)
+            .await?;
+    }
+    if let Some(av) = &req.avatar {
+        let av = av.trim();
+        // A face is one emoji, not an essay; over-long input is a bug or abuse.
+        if av.chars().count() > 4 {
+            return Err(AppError::BadRequest("avatar must be a single emoji".into()));
+        }
+        sqlx::query("UPDATE admins SET avatar = $2 WHERE id = $1")
+            .bind(id)
+            .bind(if av.is_empty() { None } else { Some(av) })
             .execute(&st.db)
             .await?;
     }

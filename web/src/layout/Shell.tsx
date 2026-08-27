@@ -20,10 +20,11 @@ interface NavEntry {
   label: string;
 }
 
+// "My screen time" left the nav (CONTRACT-0.6): the parent appears in the
+// family, where they belong — their card on the home grid opens /me.
 const NAV: NavEntry[] = [
   { to: "/", label: "Family" },
   { to: "/devices", label: "Devices" },
-  { to: "/me", label: "My screen time" },
   { to: "/settings", label: "Settings" },
 ];
 

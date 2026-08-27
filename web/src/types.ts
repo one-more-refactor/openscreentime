@@ -251,6 +251,8 @@ export interface FamilyChild {
   key: string;
   account_id: string;
   name: string;
+  /** parent-picked emoji face; null = the deterministic monogram */
+  avatar?: string | null;
   age_bracket: AgeBracket;
   /** the parent's explicit pick, or null for "auto by bracket" */
   theme: Theme | null;
@@ -402,6 +404,8 @@ export interface Account {
   id: string;
   household_id: string;
   display_name: string;
+  /** parent-picked emoji face; null = the deterministic monogram */
+  avatar?: string | null;
   /** Members young enough not to log in may have no email. */
   email: string | null;
   role: Role;
@@ -465,6 +469,8 @@ export type MemberPatch = Partial<{
   age_bracket: AgeBracket;
   theme: Theme | null;
   profile_id: string;
+  /** emoji face; "" clears back to the monogram */
+  avatar: string;
 }>;
 
 /** GET /api/me/today — the person's own day, for their own page. */
