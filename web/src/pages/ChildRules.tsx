@@ -477,11 +477,11 @@ function ChipList({
 }
 
 function Websites({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (p: Policy, note: string) => void }) {
-  const openWeb = pol.dns.allowlist.includes("*");
-  const allow = pol.dns.allowlist.filter((s) => s !== "*");
-
   function saveDns(next: Partial<Policy["dns"]>, note: string) {
-    onSave({ ...pol, dns: { ...pol.dns, ...next } }, note);
+    // CONTRACT-0.6: the web is open by default; the blocklist is the whole
+    // story. Saving from here also clears any legacy allowlist mode so an old
+    // hand-edited profile relaxes into the current posture.
+    onSave({ ...pol, dns: { ...pol.dns, mode: "allow_all", ...next } }, note);
   }
 
   return (
@@ -489,29 +489,10 @@ function Websites({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (
       <div className="rl-what">
         <p className="rl-name">Websites</p>
         <p className="rl-value">
-          {openWeb
-            ? "The web is open — blocked sites are the exception"
-            : "Only approved sites work — everything else is off"}
+          Everything works unless you block it — and what you block is really
+          blocked, on every device they use
         </p>
       </div>
-      {!openWeb && (
-        <div className="rl-app">
-          <span className="rl-app-name">Approved</span>
-          <ChipList
-            items={allow}
-            busy={busy}
-            placeholder="+ site, e.g. wikipedia.org"
-            onAdd={(v) =>
-              allow.includes(v)
-                ? undefined
-                : saveDns({ allowlist: [...allow, v] }, `${v} is now approved.`)
-            }
-            onRemove={(v) =>
-              saveDns({ allowlist: allow.filter((s) => s !== v) }, `${v} is no longer approved.`)
-            }
-          />
-        </div>
-      )}
       <div className="rl-app">
         <span className="rl-app-name">Blocked</span>
         <ChipList

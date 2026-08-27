@@ -12,6 +12,13 @@
 //! self-inflicted lockout has a way in; `block_vpn` stays off so a managed
 //! tunnel is not killed by its own firewall; `offline_lockdown_days` stays 0 so
 //! a device that cannot reach the server does not brick itself.
+//!
+//! CONTRACT-0.6 sharpened it into doctrine: **allow by default, for every
+//! bracket.** Presets pre-block only the categories that are never age-
+//! appropriate (adult, gambling, dating for the small ones; plus the proxy/
+//! VPN category everywhere as anti-bypass, matching the lockdown flags). A
+//! preset never closes the internet, blocks no social app by name, and
+//! curation is a parent's act, not a default.
 
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -56,8 +63,13 @@ fn no_gamification() -> Value {
             "lockout": { "enabled": false, "unlock_challenge": "wait" } })
 }
 
-/// 0–6: curated, parent does everything. Hard daily limit, hard stop, no
-/// request UI and no earning — the overlay just says it stopped.
+/// 0–6: parent does everything. Hard daily limit, hard stop, no request UI
+/// and no earning — the overlay just says it stopped.
+///
+/// CONTRACT-0.6 (the passive turn): the world is open — the family upstream
+/// filters, safe search is on, and only the categories no small child has
+/// any business in come pre-blocked. Curation happens by a parent *adding*
+/// blocks, never by the preset closing the internet.
 pub fn little_policy() -> Value {
     json!({
         "version": 1,
@@ -71,14 +83,14 @@ pub fn little_policy() -> Value {
             "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
         "lockdown": lockdown(true, true, true, true),
         "blocks": {
-            "apps": ["youtube"],
-            "categories": ["social","video_streaming","games","messaging","adult",
-                           "gambling","dating","ai_chat","proxies"],
+            "apps": [],
+            "categories": ["adult","gambling","dating","proxies"],
             "custom_domains": [] }
     })
 }
 
-/// 6–12: hard limit, hard stop, can ask for time and earn it.
+/// 6–12: hard limit, hard stop, can ask for time and earn it. Same open
+/// network as everyone (CONTRACT-0.6); same pre-blocked categories as Little.
 pub fn kid_policy() -> Value {
     json!({
         "version": 1,
@@ -95,8 +107,8 @@ pub fn kid_policy() -> Value {
             "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
         "lockdown": lockdown(true, true, true, true),
         "blocks": {
-            "apps": ["tiktok","snapchat","instagram","discord","twitch","omegle"],
-            "categories": ["social","adult","gambling","dating","proxies"],
+            "apps": [],
+            "categories": ["adult","gambling","dating","proxies"],
             "custom_domains": [] }
     })
 }
@@ -117,8 +129,8 @@ pub fn younger_teen_policy() -> Value {
             "lockout": { "enabled": true, "unlock_challenge": "parent_pin" } },
         "lockdown": lockdown(false, true, true, true),
         "blocks": {
-            "apps": ["tiktok"],
-            "categories": ["adult","gambling","dating","proxies"],
+            "apps": [],
+            "categories": ["adult","gambling","proxies"],
             "custom_domains": [] }
     })
 }
