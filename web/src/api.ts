@@ -19,6 +19,7 @@ import type {
   Catalog,
   MemberPatch,
   MeHistory,
+  WhereData,
   MeToday,
   NewMember,
   ChangeModeStatus,
@@ -798,6 +799,32 @@ export async function deleteMember(id: string): Promise<void> {
  * this is the one read a member session can make besides /api/me. */
 export async function getMeToday(): Promise<MeToday> {
   return read<MeToday>("/api/me/today", () => mockMeToday());
+}
+
+/** Where today went — the parent's view of a person (`accountId`), or your
+ * own when omitted. */
+export async function getWhere(accountId?: string): Promise<WhereData> {
+  const mock = (): WhereData => ({
+    apps: [
+      { key: "discord", seconds: 52 * 60 },
+      { key: "minecraft", seconds: 40 * 60 },
+      { key: "spotify", seconds: 35 * 60 },
+      { key: "steam", seconds: 12 * 60 },
+    ],
+    sites: [
+      { key: "youtube.com", hits: 420 },
+      { key: "wikipedia.org", hits: 160 },
+      { key: "discord.com", hits: 120 },
+      { key: "github.com", hits: 60 },
+    ],
+    hours: [15, 16, 17, 19, 20].map((h) => {
+      const d = new Date();
+      d.setHours(h, 0, 0, 0);
+      return { hour: d.toISOString(), amount: h === 17 ? 300 : 120 };
+    }),
+  });
+  if (accountId) return read<WhereData>(`/api/usage/where?account_id=${accountId}`, mock);
+  return read<WhereData>("/api/me/where", mock);
 }
 
 /** The last two weeks of the person's own use, summed across their devices. */

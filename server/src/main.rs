@@ -26,6 +26,7 @@ mod state;
 mod static_web;
 mod stepup;
 mod telegram;
+mod usage;
 mod vpn;
 
 use std::collections::HashMap;
@@ -218,6 +219,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(members::me))
         .route("/api/me/today", get(members::today))
         .route("/api/me/history", get(members::history))
+        .route("/api/me/where", get(usage::me_where))
+        .route("/api/usage/where", get(usage::where_api))
         .route("/api/me/ask", post(members::ask))
         .route("/api/catalog", get(members::catalog_json))
         .route("/api/me/passkeys", get(auth::list_passkeys))
@@ -346,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/ws", get(agent::ws))
         .route("/agent/voucher", post(stepup::mint_voucher))
         .route("/agent/login-decision", post(auth_device::decision))
+        .route("/agent/usage", post(usage::ingest))
         // --- Parent companion API ------------------------------------------
         .merge(parent_api)
         // Read is free, write is stepped — enforced as a layer rather than a

@@ -502,6 +502,16 @@ export interface MeHistory {
   today_by_device: { name: string; used_minutes: number }[];
 }
 
+/** GET /api/usage/where · /api/me/where — today's attribution. */
+export interface WhereData {
+  /** catalog apps open on their machines, their seconds today */
+  apps: { key: string; seconds: number }[];
+  /** registrable domains their computers looked up, query counts */
+  sites: { key: string; hits: number }[];
+  /** raw UTC hour rows; the client buckets them into local hours */
+  hours: { hour: string; amount: number }[];
+}
+
 // ---- Unlock codes (per device, owned by the server) ---------------------------
 // The 6-digit code a parent types on a child's computer — to unlock the
 // screen, reopen time, or `sudo` — is verified offline by the device, but the

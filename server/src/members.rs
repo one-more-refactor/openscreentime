@@ -822,6 +822,7 @@ pub fn member_allowed(path: &str) -> bool {
     path == "/api/me"
         || path == "/api/me/today"
         || path == "/api/me/history"
+        || path == "/api/me/where"
         || path == "/api/me/ask"
         || path == "/api/catalog"
         || path.starts_with("/api/me/2fa")

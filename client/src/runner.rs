@@ -320,6 +320,10 @@ pub struct Agent {
     /// (CONTRACT-0.6 client-first login). Published per target user in the
     /// status snapshot; answered via a marker file in `/run/user/<uid>`.
     pending_logins: Vec<PendingLogin>,
+    /// Where-the-time-goes sampler (apps by /proc, sites by dnsmasq log).
+    attrib: crate::attrib::Attrib,
+    /// Ticks since the last usage post (posts every 6 ticks ≈ 1 min).
+    attrib_ticks: u32,
 }
 
 /// One outstanding "approve this web sign-in?" prompt.
@@ -503,6 +507,8 @@ impl Agent {
             notifications: VecDeque::new(),
             notif_seq: 0,
             pending_logins: Vec::new(),
+            attrib: crate::attrib::Attrib::new(),
+            attrib_ticks: 0,
         })
     }
 
@@ -1010,6 +1016,32 @@ impl Agent {
         for user in &active {
             self.tracker
                 .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
+        }
+
+        // Where the time goes (CONTRACT-0.6): sample running catalog apps for
+        // the active, unfrozen users, and tail the resolver's query log.
+        {
+            let uids: std::collections::HashMap<String, u32> = active
+                .iter()
+                .filter(|u| !self.frozen.contains(*u))
+                .filter_map(|u| crate::sysusers::uid_of(u).map(|id| (u.clone(), id)))
+                .collect();
+            self.attrib.sample_apps(&uids, TICK.as_secs() as i64);
+            self.attrib.ingest_dns_log();
+            self.attrib_ticks += 1;
+            if self.attrib_ticks >= 6 {
+                self.attrib_ticks = 0;
+                let batch = self.attrib.drain(400);
+                if !batch.is_empty() {
+                    match self.client.post_usage_slices(&batch).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::debug!("usage post failed, keeping batch: {e}");
+                            self.attrib.requeue(batch);
+                        }
+                    }
+                }
+            }
         }
         // Blocked apps with a native client: deny their processes (CONTRACT-0.4 §7).
         events.extend(enforce::apps::deny(
