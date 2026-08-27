@@ -181,6 +181,50 @@ function Blocked({ today, catalog, theme }: { today: MeToday; catalog: Catalog |
   );
 }
 
+// ---- first visit ---------------------------------------------------------------
+// The transparency intro, in the console (CONTRACT-0.6 §3): the first time a
+// member opens their page, it says plainly what a parent can and cannot see.
+// Shown once per browser; the full version lives in docs/TRANSPARENCY.md and
+// as the device's first-run intro.
+
+function FirstVisit({ theme }: { theme: Theme }) {
+  const KEY = "ost-intro-seen";
+  const [seen, setSeen] = useState(() => {
+    try {
+      return localStorage.getItem(KEY) === "1";
+    } catch {
+      return true;
+    }
+  });
+  if (seen) return null;
+  const dismiss = () => {
+    try {
+      localStorage.setItem(KEY, "1");
+    } catch {
+      /* private mode: show again next time, no harm */
+    }
+    setSeen(true);
+  };
+  return (
+    <section className="me-section me-intro">
+      <h2 className="me-h2">{theme === "playful" ? "What this is" : "Before anything else"}</h2>
+      <p className="me-intro-p">
+        {theme === "playful"
+          ? "Your grown-ups can see how long you've been on the computer and which apps were open — like a clock, not a camera."
+          : "Your parents can see: your minutes, which apps and sites your computer used, and the moments the rules kicked in."}
+      </p>
+      <p className="me-intro-p">
+        {theme === "playful"
+          ? "They can NOT read your messages, see your screen, or watch what you type. Ever."
+          : "They can NOT read messages, see your screen, record keystrokes, or open a remote shell — that last one doesn't even exist in this software."}
+      </p>
+      <button className="me-link" onClick={dismiss}>
+        Okay, got it
+      </button>
+    </section>
+  );
+}
+
 // ---- the week ----------------------------------------------------------------
 // "Know what you did" is the floor of any motivation: seven bars, today
 // telling you how it compares to your usual, and where today's minutes went.
@@ -402,6 +446,8 @@ export function Me() {
           <button className="me-link" onClick={() => void load()}>Try again</button>
         </p>
       )}
+
+      {member && <FirstVisit theme={theme} />}
 
       {today && (
         <>
