@@ -200,6 +200,42 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
 }
 
 /**
+ * The first minutes with an empty household — a real introduction, not an
+ * empty grid with a lonely button (CONTRACT-0.6 §3). Three honest steps and
+ * one door in.
+ */
+function FirstRun() {
+  return (
+    <div className="fr card">
+      <p className="fr-hi">Welcome. This page becomes your family's day, at a glance.</p>
+      <ol className="fr-steps">
+        <li>
+          <strong>Add each person.</strong> A name and a birthdate — the age
+          decides how much they run themselves.
+        </li>
+        <li>
+          <strong>Connect their computer.</strong> One command, shown right in
+          the add flow; the software installs from GitHub and the machine
+          appears here within a minute.
+        </li>
+        <li>
+          <strong>Then mostly… look.</strong> Everything works unless you block
+          it. Rings fill, requests arrive, and this page stays quiet unless a
+          human is needed.
+        </li>
+      </ol>
+      <Link to="/add" className="fam-cta">
+        Add the first person
+      </Link>
+      <p className="fr-note">
+        Everyone you add can see exactly what you can and can't see of them —
+        that page is part of their first visit too.
+      </p>
+    </div>
+  );
+}
+
+/**
  * The parent, in the family — "My screen time" left the nav (CONTRACT-0.6);
  * their own day lives here as a quieter card that opens the full page.
  * Everyone in the house has a ring in this product, the hub included.
@@ -306,12 +342,7 @@ export function Family() {
       {loading && children.length === 0 ? (
         <FamilyWaiting />
       ) : children.length === 0 ? (
-        <div className="fam-empty">
-          <p>Once a device is set up, the people using it appear here.</p>
-          <Link to="/add" className="fam-cta">
-            Add a child
-          </Link>
-        </div>
+        <FirstRun />
       ) : (
         <ul className="fam-grid">
           {children.map((c, i) => (

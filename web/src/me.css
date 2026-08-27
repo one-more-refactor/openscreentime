@@ -329,3 +329,13 @@
   .me-ask-big { transition: none; }
   .me-week-fill { transition: none; }
 }
+
+/* ---- first visit: the transparency intro --------------------------------- */
+.me-intro {
+  border: 1px solid var(--me-line);
+  border-radius: var(--me-radius);
+  padding: 1.1rem 1.2rem;
+  background: var(--me-surface);
+}
+.me-intro-p { margin: 0 0 0.6rem; font-size: 0.95rem; color: var(--me-ink-2); }
+.me-intro-p:first-of-type { color: var(--me-ink); }
