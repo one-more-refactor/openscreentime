@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { EMPTY_BLOCKS, type AppBlocks, type Catalog, type Policy, type Profile, type TimeWindow, type UnlockChallenge } from "../types";
 import { FluentSlider } from "../components/FluentSlider";
+import { AppGlyph } from "../components/AppGlyph";
 import { getCatalog } from "../api";
 import { useAsync } from "../lib/useAsync";
 
@@ -85,21 +86,8 @@ export function Rules({ profile, busy, onSave }: RulesProps) {
 // rules. Names come from the server's catalog; the device holds the domains.
 
 /** A recognisable tile without shipping a logo pack: two letters, a hue. */
-function Monogram({ id, name }: { id: string; name: string }) {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  const parts = name.replace(/[()]/g, "").split(/[\s/]+/).filter(Boolean);
-  const mono = (parts.length >= 2 ? parts[0][0] + parts[1][0] : name.slice(0, 2)).toUpperCase();
-  return (
-    <span
-      className="apps-mono"
-      style={{ background: `hsl(${h} 45% 88%)`, color: `hsl(${h} 55% 26%)` }}
-      aria-hidden="true"
-    >
-      {mono}
-    </span>
-  );
-}
+// App icons live in components/AppGlyph: bundled brand glyphs where the
+// simple-icons project still carries them, stable monogram tiles elsewhere.
 
 function AppsAndCategories({ pol, busy, onSave }: { pol: Policy; busy: boolean; onSave: (p: Policy, note: string) => void }) {
   const catalog = useAsync<Catalog>(getCatalog, []);
@@ -198,7 +186,7 @@ function AppsAndCategories({ pol, busy, onSave }: { pol: Policy; busy: boolean; 
                   title={viaCat ? `Blocked with ${catName}` : on ? `Allow ${a.name}` : `Block ${a.name}`}
                   onClick={() => !viaCat && toggleApp(a.id, a.name)}
                 >
-                  <Monogram id={a.id} name={a.name} />
+                  <AppGlyph id={a.id} name={a.name} />
                   <span className="apps-tile-name">{a.name}</span>
                   <span className="apps-tile-state">{viaCat ? `via ${catName}` : on ? "blocked" : "allowed"}</span>
                 </button>
@@ -355,7 +343,7 @@ function AllowedHours({
       <div className="rl-what">
         <p className="rl-name">Allowed hours</p>
         <p className="rl-value">
-          When screens work at all — outside these hours the device is a brick, limit or not
+          When screens are on at all — outside these hours they are off, limit or not
         </p>
       </div>
       <HoursWindow label="School days" win={weekday} days={WEEKDAYS} busy={busy}
