@@ -13,8 +13,12 @@ pub mod catalog;
 fn default_version() -> u32 {
     1
 }
-fn default_deny() -> String {
-    "default_deny".to_string()
+/// CONTRACT-0.6: the network is open by default, for every bracket. The
+/// blocklist (categories, apps, sites) is the whole story — and it is
+/// strictly enforced. `"default_deny"` still parses and the engine still
+/// honors it for old hand-edited profiles, but nothing ships it any more.
+fn default_allow() -> String {
+    "allow_all".to_string()
 }
 fn default_upstream() -> String {
     "1.1.1.2".to_string()
@@ -97,7 +101,7 @@ impl AppBlocks {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgeBracket {
-    /// 0–6: curated allowlist, parent does everything, no request UI.
+    /// 0–6: parent does everything, no request UI.
     Little,
     /// 6–12: hard limits, can request / earn time.
     Kid,
@@ -278,8 +282,10 @@ impl NetworkLockdown {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsPolicy {
-    #[serde(default = "default_deny")]
+    #[serde(default = "default_allow")]
     pub mode: String,
+    /// Retired from the UI and presets (CONTRACT-0.6); still parsed and
+    /// honored by the engine for old hand-edited default-deny profiles.
     #[serde(default)]
     pub allowlist: Vec<String>,
     #[serde(default)]
@@ -293,7 +299,7 @@ pub struct DnsPolicy {
 impl Default for DnsPolicy {
     fn default() -> Self {
         DnsPolicy {
-            mode: default_deny(),
+            mode: default_allow(),
             allowlist: Vec::new(),
             blocklist: Vec::new(),
             safe_search: true,
@@ -303,9 +309,10 @@ impl Default for DnsPolicy {
 }
 
 impl DnsPolicy {
-    /// Zero-trust default-deny is on unless the policy explicitly opts out.
+    /// Only an EXPLICIT `"default_deny"` still means allowlist mode — a
+    /// missing or unknown mode is open (CONTRACT-0.6 flipped the default).
     pub fn is_default_deny(&self) -> bool {
-        self.mode != "allow_all"
+        self.mode == "default_deny"
     }
     /// `["*"]` means "forward everything to the filtered upstream" (see the
     /// `default` profile in docs/PROFILES.md).
@@ -316,7 +323,7 @@ impl DnsPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallPolicy {
-    #[serde(default = "default_deny")]
+    #[serde(default = "default_allow")]
     pub mode: String,
     #[serde(default)]
     pub allow_outbound_ports: Vec<u16>,
@@ -327,16 +334,17 @@ pub struct FirewallPolicy {
 impl Default for FirewallPolicy {
     fn default() -> Self {
         FirewallPolicy {
-            mode: default_deny(),
-            allow_outbound_ports: vec![53, 80, 443],
+            mode: default_allow(),
+            allow_outbound_ports: Vec::new(),
             allow_inbound_ports: Vec::new(),
         }
     }
 }
 
 impl FirewallPolicy {
+    /// Only an EXPLICIT `"default_deny"` closes the firewall (CONTRACT-0.6).
     pub fn is_default_deny(&self) -> bool {
-        self.mode != "allow_all"
+        self.mode == "default_deny"
     }
 }
 
@@ -436,17 +444,22 @@ mod tests {
             "future_field": { "nope": 1 }
         }"#;
         let p: Policy = serde_json::from_str(raw).unwrap();
+        // An explicit old-style default_deny is still honored by the engine.
         assert!(p.dns.is_default_deny());
         assert_eq!(p.screen_time.daily_limit_minutes, 60);
         assert_eq!(p.dns.upstream, "1.1.1.2");
     }
 
     #[test]
-    fn empty_object_gets_safe_defaults() {
+    fn empty_object_is_open_by_default() {
+        // CONTRACT-0.6: an unset policy is an OPEN network with safe search —
+        // never a brick. Blocking only ever comes from an explicit blocklist.
         let p: Policy = serde_json::from_str("{}").unwrap();
-        assert!(p.dns.is_default_deny());
-        assert!(p.firewall.is_default_deny());
-        assert_eq!(p.dns.mode, "default_deny");
+        assert!(!p.dns.is_default_deny());
+        assert!(!p.firewall.is_default_deny());
+        assert_eq!(p.dns.mode, "allow_all");
+        assert!(p.dns.safe_search);
+        assert!(p.blocks.is_empty());
     }
 
     #[test]

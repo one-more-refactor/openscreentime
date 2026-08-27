@@ -66,33 +66,12 @@ export const LEVELS: SecurityLevel[] = [
       "Apps that hide what a computer is doing are blocked too",
     ],
   },
-  {
-    id: 4,
-    name: "Approved sites only",
-    summary: "Everything is blocked except sites you add by hand.",
-    detail: [
-      "Only sites on your list will open — everything else stops",
-      "Starts with five learning sites (Wikipedia, Khan Academy, PBS Kids, Scratch, Duolingo)",
-      "App stores, game launchers and updates will break until you add them",
-      "Meant for short periods, not for every day",
-    ],
-  },
 ];
-
-/**
- * What "Approved sites only" starts with when the parent has not added any
- * sites yet. Without this, an empty list would block literally everything on
- * first use — or worse, a leftover "*" wildcard would make the strictest level
- * silently allow everything (the agent reads `default_deny` + a "*" entry as
- * "allows everything" and emits no catch-all block at all).
- */
-export const STARTER_ALLOWLIST = [
-  "wikipedia.org",
-  "khanacademy.org",
-  "pbskids.org",
-  "scratch.mit.edu",
-  "duolingo.com",
-];
+// "Approved sites only" is gone (CONTRACT-0.6): the network is open by
+// default at every level, and what a parent blocks is really blocked. An
+// allowlist internet was the strict-gatekeeper posture this product left
+// behind — and in practice it mostly broke apt, game launchers and school
+// software while teaching nobody anything.
 
 /** Domains that get blocked by name once filtering is on. */
 const BLOCKLIST = [
@@ -110,10 +89,6 @@ const BLOCKLIST = [
  */
 export function policyForLevel(level: number, base: Policy): Policy {
   const next: Policy = structuredClone(base);
-  // The parent's real list, with wildcards stripped: "*" is how permissive
-  // levels used to be stored, and a "*" surviving into level 4 turns
-  // "Approved sites only" into "approve everything" on the agent.
-  const curated = (base.dns.allowlist ?? []).filter((d) => d.trim() !== "*");
 
   // The agent never opens an inbound listener — the remote shell is gone
   // (TAMPER.md). Forcing inbound 22 open only exposed the box's own sshd (and
@@ -121,9 +96,9 @@ export function policyForLevel(level: number, base: Policy): Policy {
   // The recovery path is the offline PIN + ost-admin at the keyboard.
   next.firewall = {
     ...next.firewall,
-    mode: level >= 4 ? "default_deny" : "allow_all",
+    mode: "allow_all",
     allow_inbound_ports: [],
-    allow_outbound_ports: level >= 4 ? [53, 80, 443] : [],
+    allow_outbound_ports: [],
   };
   next.lockdown = {
     ...next.lockdown,
@@ -139,16 +114,13 @@ export function policyForLevel(level: number, base: Policy): Policy {
 
   next.dns = {
     ...next.dns,
-    mode: level >= 4 ? "default_deny" : "allow_all",
+    // Open at every level (CONTRACT-0.6): protection is the filtered
+    // upstream + the blocklist, never a closed internet.
+    mode: "allow_all",
     safe_search: level >= 1,
     // 1.1.1.1 no filtering · 1.1.1.2 malware · 1.1.1.3 malware + adult
     upstream: level === 0 ? "1.1.1.1" : level === 1 ? "1.1.1.2" : "1.1.1.3",
     blocklist: level >= 2 ? BLOCKLIST : [],
-    // Never destroy a curated allowlist, and never let "*" reach level 4.
-    // The list is kept at every level and simply not consulted while the mode
-    // is permissive; at level 4 an empty list falls back to a starter set so
-    // the strictest level both works on first use and actually denies.
-    allowlist: level >= 4 ? (curated.length ? curated : STARTER_ALLOWLIST) : curated,
   };
 
   next.screen_time = {
@@ -185,7 +157,9 @@ export function policyForLevel(level: number, base: Policy): Policy {
 
 /** Best-effort read of which level a policy currently matches. */
 export function levelForPolicy(p: Policy): number {
-  if (p.dns.mode === "default_deny") return 4;
+  // A legacy hand-edited default-deny profile reads as Strict; applying any
+  // level from here opens the network again (the 0.6 posture).
+  if (p.dns.mode === "default_deny") return 3;
   if (p.lockdown?.block_vpn) return 3;
   if (p.screen_time?.enabled) return 2;
   if (p.dns.safe_search) return 1;
