@@ -167,12 +167,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login/start", post(auth::login_start))
         .route("/api/auth/login/finish", post(auth::login_finish))
         .route("/api/auth/device/start", post(auth_device::start))
-        .route("/api/auth/device/finish", post(auth_device::finish))
         .route("/api/auth/oidc/start", get(auth_oidc::start))
         .route("/api/auth/oidc/callback", get(auth_oidc::callback))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::limit_auth,
+        ));
+
+    // The device-login poll gets its own generous bucket — it fires ~60 times
+    // per honest sign-in and must not exhaust (or be exhausted by) the auth
+    // bucket that guards the passkey fallback.
+    let login_poll = Router::new()
+        .route("/api/auth/device/finish", post(auth_device::finish))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_poll,
         ));
 
     // Enrollment: 5 req / 60 s / IP.
@@ -214,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(agent_dist)
         // --- Auth ----------------------------------------------------------
         .merge(auth_attempts)
+        .merge(login_poll)
         .route("/api/auth/config", get(auth_oidc::auth_config))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(members::me))

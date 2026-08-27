@@ -28,6 +28,13 @@ use crate::state::AppState;
 const WINDOW: Duration = Duration::from_secs(60);
 const AUTH_MAX: u32 = 10;
 const ENROLL_MAX: u32 = 5;
+/// Client-first login POLLING (`/api/auth/device/finish`). The browser polls
+/// every 2 s across a 2-minute approval window — ~60 hits for one honest
+/// sign-in — so it cannot share the 10/min auth bucket (that 429s the poll
+/// mid-wait AND locks the passkey fallback out for the rest of the minute).
+/// The poll is verifier-gated and does nothing until the human approves, so a
+/// generous ceiling is safe.
+const POLL_MAX: u32 = 120;
 /// Agent distribution (`/install.sh`, `/api/agent/latest`, downloads): public
 /// but bounded so the endpoints can't be used as a free bandwidth amplifier.
 /// One install touches ~3 of these; fleets poll the manifest once a day.
@@ -115,6 +122,11 @@ pub async fn limit_auth(State(st): State<AppState>, req: Request, next: Next) ->
 /// Middleware for `/agent/enroll`: 5 req / 60 s / IP.
 pub async fn limit_enroll(State(st): State<AppState>, req: Request, next: Next) -> Response {
     limit(st, "enroll", ENROLL_MAX, req, next).await
+}
+
+/// Middleware for the device-login poll: 120 req / 60 s / IP (its own bucket).
+pub async fn limit_poll(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    limit(st, "poll", POLL_MAX, req, next).await
 }
 
 /// Middleware for the agent-distribution endpoints: 30 req / 60 s / IP.

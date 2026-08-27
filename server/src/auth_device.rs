@@ -26,6 +26,7 @@ use axum::{extract::State, Json};
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -47,6 +48,15 @@ fn challenge_of(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// A 4-digit match code shown in BOTH the browser and the approving device's
+/// prompt. The human approves only if they match — so an attacker who
+/// triggers the prompt for a name they know cannot get it approved, because
+/// their browser shows a different number than the victim's device does.
+fn gen_match_code() -> String {
+    let n: u16 = rand::thread_rng().gen_range(0..10_000);
+    format!("{n:04}")
+}
+
 #[derive(Deserialize)]
 pub struct StartReq {
     #[serde(default)]
@@ -62,8 +72,24 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
         return Err(AppError::BadRequest("who is signing in?".into()));
     }
 
+    // The match code is generated for EVERY request, real or not, so the
+    // response shape and timing don't distinguish a known name from an
+    // unknown one (the login page must not be a username/device oracle).
+    let match_code = gen_match_code();
+    let uniform = |code: &str| {
+        // A decoy request_id that indexes no row: the browser polls, gets
+        // "pending" until the window closes, then "nobody approved". Identical
+        // to a real request that no one approves.
+        Json(json!({
+            "request_id": Uuid::new_v4(),
+            "match_code": code,
+            "expires_in_secs": REQUEST_MINUTES * 60,
+        }))
+    };
+
     // The account behind the name: a display name, or an OS login on an
-    // enrolled device. Distinct accounts; ambiguity is a hard no.
+    // enrolled device. Distinct accounts; ambiguity resolves to a decoy (never
+    // a distinguishable "which household are you in" answer).
     let accounts: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
         "SELECT DISTINCT a.id, a.tenant_id, a.display_name
            FROM admins a
@@ -75,26 +101,16 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
     .fetch_all(&st.db)
     .await?;
 
-    // One generic failure for "unknown" — a login page must not be a
-    // username oracle. Ambiguity gets its own honest answer.
     let (account_id, tenant_id, display_name) = match accounts.as_slice() {
         [one] => one.clone(),
-        [] => {
-            return Err(AppError::NotFound(
-                "nobody answered to that name — try your passkey".into(),
-            ))
-        }
-        _ => {
-            return Err(AppError::Conflict(
-                "more than one person answers to that name here — use your passkey".into(),
-            ))
-        }
+        // Unknown or ambiguous → a decoy that never approves. Uniform.
+        _ => return Ok(uniform(&match_code)),
     };
 
     // Every online device that person actually uses, with the OS logins that
     // are theirs on it — the agent prompts only those sessions.
-    let targets: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT d.id, d.name, du.os_username
+    let targets: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT d.id, du.os_username
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
           WHERE du.account_id = $1 AND d.tenant_id = $2 AND d.status = 'online'",
@@ -105,19 +121,20 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
     .await?;
 
     if targets.is_empty() {
-        return Err(AppError::NotFound(
-            "none of your computers are awake right now — use your passkey".into(),
-        ));
+        // No awake device → a decoy, same shape. The browser's own copy tells
+        // the human to use their passkey when nothing answers.
+        return Ok(uniform(&match_code));
     }
 
     let request_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO login_requests (tenant_id, account_id, code_challenge, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4))
+        "INSERT INTO login_requests (tenant_id, account_id, code_challenge, match_code, expires_at)
+         VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5))
         RETURNING id",
     )
     .bind(tenant_id)
     .bind(account_id)
     .bind(&req.code_challenge)
+    .bind(&match_code)
     .bind(REQUEST_MINUTES as i32)
     .fetch_one(&st.db)
     .await?;
@@ -125,19 +142,14 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
         .execute(&st.db)
         .await;
 
-    // Group OS logins per device and push one command each.
-    let mut by_device: std::collections::HashMap<Uuid, (String, Vec<String>)> =
+    // Group OS logins per device and push one command each. The prompt carries
+    // the match code; device names are NOT returned to the caller.
+    let mut by_device: std::collections::HashMap<Uuid, Vec<String>> =
         std::collections::HashMap::new();
-    for (device_id, device_name, os_user) in targets {
-        by_device
-            .entry(device_id)
-            .or_insert_with(|| (device_name, Vec::new()))
-            .1
-            .push(os_user);
+    for (device_id, os_user) in targets {
+        by_device.entry(device_id).or_default().push(os_user);
     }
-    let mut device_names = Vec::new();
-    for (device_id, (device_name, os_users)) in by_device {
-        device_names.push(device_name);
+    for (device_id, os_users) in by_device {
         let _ = enqueue_command_delivered(
             &st,
             device_id,
@@ -146,6 +158,7 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
                 "request_id": request_id,
                 "username": display_name,
                 "os_users": os_users,
+                "match_code": match_code,
                 "expires_in_secs": REQUEST_MINUTES * 60,
             }),
         )
@@ -154,7 +167,7 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
 
     Ok(Json(json!({
         "request_id": request_id,
-        "devices": device_names,
+        "match_code": match_code,
         "expires_in_secs": REQUEST_MINUTES * 60,
     })))
 }
@@ -209,15 +222,23 @@ pub async fn finish(
         _ => {}
     }
 
-    // Approved: the verifier must hash to the stored challenge — constant
-    // shape, single use.
+    // Approved: the verifier must hash to the stored challenge.
     if challenge_of(req.code_verifier.trim()) != challenge {
         return Err(AppError::Unauthorized("that sign-in isn't yours".into()));
     }
-    let _ = sqlx::query("DELETE FROM login_requests WHERE id = $1")
-        .bind(req.request_id)
-        .execute(&st.db)
-        .await;
+    // Single-use, atomically: exactly one concurrent finish() wins the row and
+    // mints a session; the rest see zero rows and fail. Deletes-after-select
+    // let two polls both mint a session from one approval.
+    let consumed = sqlx::query(
+        "DELETE FROM login_requests WHERE id = $1 AND status = 'approved'",
+    )
+    .bind(req.request_id)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
+    if consumed == 0 {
+        return Err(AppError::Unauthorized("that sign-in was already used".into()));
+    }
 
     let role: Option<String> =
         sqlx::query_scalar("SELECT role FROM admins WHERE id = $1 AND tenant_id = $2")
@@ -304,5 +325,14 @@ mod tests {
             challenge_of("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn match_code_is_four_digits() {
+        for _ in 0..50 {
+            let c = gen_match_code();
+            assert_eq!(c.len(), 4);
+            assert!(c.chars().all(|ch| ch.is_ascii_digit()));
+        }
     }
 }

@@ -154,6 +154,12 @@ fn sensitive(path: &str) -> bool {
     path.starts_with("/api/me/passkeys")
         || path.starts_with("/api/me/telegram")
         || path.starts_with("/api/parent-tokens")
+        // Re-pointing an OS login at another account re-keys the whole
+        // device-voucher trust chain (a child's laptop could then mint parent
+        // sessions), and an enroll token is standing device access — both are
+        // at least as powerful as an unlock code.
+        || path.ends_with("/assign-account")
+        || path.ends_with("/enroll-token")
         || (path.starts_with("/api/devices/")
             && (path.ends_with("/unlock-code")
                 || path.ends_with("/unlock-code/rotate")
@@ -909,6 +915,10 @@ mod tests {
         // The status the confirm dialog itself needs must stay free, or you
         // would need a window to find out how to open a window.
         assert!(!sensitive("/api/me/2fa"));
+        // Re-keying the voucher trust chain and minting device credentials are
+        // takeover surface too (they slipped through as ordinary mutations).
+        assert!(sensitive("/api/device-users/abc/assign-account"));
+        assert!(sensitive("/api/devices/abc/enroll-token"));
         // Everything else — reads and ordinary mutations — stays out of it.
         assert!(!sensitive("/api/devices"));
         assert!(!sensitive("/api/devices/abc/lock"));

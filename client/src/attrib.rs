@@ -166,8 +166,21 @@ impl Attrib {
             return;
         };
         buf.truncate(n);
-        self.log_offset += n as u64;
-        let text = String::from_utf8_lossy(&buf);
+        // Only consume up to the last newline; a read that lands mid-line
+        // (READ_CAP boundary, or the writer still appending) would otherwise
+        // parse a truncated name like "www.you" into a bogus "site". The
+        // remainder is re-read next tick because we advance the offset by the
+        // consumed bytes, not by `n`.
+        let last_nl = buf.iter().rposition(|&b| b == b'\n');
+        let consume = match last_nl {
+            Some(i) => i + 1,
+            // No newline in a full READ_CAP read → a pathological single line;
+            // consume it so we don't wedge, but don't parse the fragment.
+            None if n == to_read && to_read == READ_CAP => n,
+            None => return, // partial line still being written; wait for more
+        };
+        self.log_offset += consume as u64;
+        let text = String::from_utf8_lossy(&buf[..consume]);
         for line in text.lines() {
             if let Some(name) = queried_name(line) {
                 let site = registrable(name);

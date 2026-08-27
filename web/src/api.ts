@@ -285,7 +285,8 @@ export async function verifyStepUp(
 
 export interface DeviceLoginStart {
   request_id: string;
-  devices: string[];
+  /** The code the approver's device must show — the human matches it. */
+  match_code: string;
   expires_in_secs: number;
 }
 
@@ -310,7 +311,7 @@ export async function startDeviceLogin(
   code_challenge: string,
 ): Promise<DeviceLoginStart> {
   if (usingMock)
-    return { request_id: "mock-req", devices: ["Living Room PC"], expires_in_secs: 120 };
+    return { request_id: "mock-req", match_code: "1234", expires_in_secs: 120 };
   return request<DeviceLoginStart>("/api/auth/device/start", {
     method: "POST",
     body: JSON.stringify({ username, code_challenge }),

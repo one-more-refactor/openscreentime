@@ -23,7 +23,7 @@ interface SessionState {
    * approves. `onPrompted` fires once with the device names being asked.
    * Resolves when the approval lands; throws on deny/timeout.
    */
-  deviceLogin: (username: string, onPrompted?: (devices: string[]) => void) => Promise<void>;
+  deviceLogin: (username: string, onPrompted?: (matchCode: string) => void) => Promise<void>;
   register: (email: string, displayName: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -98,18 +98,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const deviceLogin = useCallback(
-    async (username: string, onPrompted?: (devices: string[]) => void) => {
+    async (username: string, onPrompted?: (matchCode: string) => void) => {
       const { verifier, challenge } = await api.pkcePair();
       const started = await api.startDeviceLogin(username, challenge);
-      onPrompted?.(started.devices);
+      onPrompted?.(started.match_code);
       const deadline = Date.now() + (started.expires_in_secs + 5) * 1000;
       // Poll until the human at the machine answers. The server answers
-      // "pending" politely; anything else is a verdict.
+      // "pending" politely; a real verdict (approved/denied) or the deadline
+      // ends the loop. A transient network blip or a rate-limit 429 is NOT a
+      // verdict — swallow it and keep polling until the window closes, so a
+      // slow walk to the machine never aborts an approval that's still coming.
       for (;;) {
-        const r = await api.finishDeviceLogin(started.request_id, verifier);
-        if (r.status === "approved") {
-          await refresh();
-          return;
+        try {
+          const r = await api.finishDeviceLogin(started.request_id, verifier);
+          if (r.status === "approved") {
+            await refresh();
+            return;
+          }
+        } catch (e) {
+          // 401 = denied/expired, a real verdict; rethrow. Anything else
+          // (429, a dropped request) is transient — wait and retry.
+          if (e instanceof api.ApiError && e.status === 401) throw e;
         }
         if (Date.now() > deadline) {
           throw new Error("Nobody approved in time — try again, or use your passkey.");

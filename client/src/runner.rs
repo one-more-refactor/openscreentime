@@ -338,6 +338,9 @@ struct PendingLogin {
     /// The OS logins on this device that belong to that person; only their
     /// sessions see the prompt, and only their decision files are honored.
     os_users: Vec<String>,
+    /// The 4-digit code shown in the browser; the human approves only if the
+    /// prompt's code matches it (anti-phishing).
+    match_code: String,
     expires: chrono::DateTime<chrono::Utc>,
 }
 
@@ -880,45 +883,85 @@ impl Agent {
         Ok(events)
     }
 
-    /// Merge all users' network policies into the tightest host-global ruleset:
-    /// intersection of allowed ports, union of DNS allowlists only if every active
-    /// policy allows the name — the skeleton takes the *first* user's policy or the
-    /// default, and documents per-user network isolation as future work.
+    /// Merge every user's network policy into ONE host-global ruleset — dnsmasq
+    /// and the nft table are per-host, not per-user, so a shared machine must
+    /// serve the tightest of everyone present or the strictest child's
+    /// protections silently evaporate (this used to be a coin-flip: after the
+    /// allow-by-default flip every preset keyed identically, so `min_by_key` on
+    /// a HashMap returned an arbitrary, restart-varying winner).
+    ///
+    /// "Tightest" is now computed field by field, deterministically:
+    /// - blocks, `dns.blocklist`: union (most restrictive);
+    /// - `safe_search`: on if any user needs it;
+    /// - `dns.upstream`: the most-filtering family resolver present;
+    /// - lockdown flags: on if any user sets them;
+    /// - the base (firewall ports etc.) comes from a stable pick: a managed
+    ///   user first, then lowest username, so it never changes across restarts.
     fn effective_network_policy(&self) -> Policy {
-        // Prefer a non-wildcard, screen-time-enabled (i.e. "managed") policy so the
-        // host DNS/firewall reflect the strictest present. Fall back to default.
-        let mut effective = self
+        // Deterministic base: managed (screen-time on) beats unmanaged; ties
+        // break on the username so the choice is stable across restarts.
+        let mut base = self
             .policies
-            .values()
-            .min_by_key(|p| {
-                let allow_all = p.dns.allows_everything();
-                let ports = p.firewall.allow_outbound_ports.len();
-                (allow_all as usize, ports)
+            .iter()
+            .min_by(|(ua, pa), (ub, pb)| {
+                let managed = |p: &Policy| !p.screen_time.enabled; // false (managed) sorts first
+                managed(pa)
+                    .cmp(&managed(pb))
+                    .then_with(|| ua.cmp(ub))
             })
-            .cloned()
+            .map(|(_, p)| p.clone())
             .unwrap_or_default();
-        // App/category blocks are DNS-level and therefore host-global too: the
-        // union over every user (most restrictive wins, like the rest).
+
+        // How much a family resolver filters, for "most-filtering wins".
+        let upstream_rank = |u: &str| match u {
+            "1.1.1.3" => 3, // malware + adult
+            "1.1.1.2" => 2, // malware
+            _ => 1,
+        };
+
         let mut blocks = crate::policy::AppBlocks::default();
+        let mut blocklist: Vec<String> = base.dns.blocklist.clone();
         for p in self.policies.values() {
             blocks.apps.extend(p.blocks.apps.iter().cloned());
-            blocks
-                .categories
-                .extend(p.blocks.categories.iter().cloned());
-            blocks
-                .custom_domains
-                .extend(p.blocks.custom_domains.iter().cloned());
+            blocks.categories.extend(p.blocks.categories.iter().cloned());
+            blocks.custom_domains.extend(p.blocks.custom_domains.iter().cloned());
+            blocklist.extend(p.dns.blocklist.iter().cloned());
+            // Any user who needs it turns it on for the shared host.
+            base.dns.safe_search |= p.dns.safe_search;
+            base.lockdown.force_dns |= p.lockdown.force_dns;
+            base.lockdown.block_doh |= p.lockdown.block_doh;
+            base.lockdown.block_dot |= p.lockdown.block_dot;
+            base.lockdown.block_tor |= p.lockdown.block_tor;
+            base.lockdown.block_vpn |= p.lockdown.block_vpn;
+            if upstream_rank(&p.dns.upstream) > upstream_rank(&base.dns.upstream) {
+                base.dns.upstream = p.dns.upstream.clone();
+            }
         }
         for v in [
             &mut blocks.apps,
             &mut blocks.categories,
             &mut blocks.custom_domains,
+            &mut blocklist,
         ] {
             v.sort();
             v.dedup();
         }
-        effective.blocks = blocks;
-        effective
+        base.blocks = blocks;
+        base.dns.blocklist = blocklist;
+
+        // CONTRACT-0.6 §1/§4: what is blocked must be *really* blocked. A block
+        // realized only as a dnsmasq sinkhole is theater the moment a browser
+        // resolves names elsewhere — a plaintext alt-resolver or DoH. So the
+        // presence of ANY block implies the anti-bypass posture: force all
+        // plaintext DNS through our resolver, and drop DoT + the known DoH
+        // providers. (DoH to an arbitrary IP pinned by hand still costs more
+        // than it should — see docs/TAMPER.md, which says so honestly.)
+        if !base.blocks.is_empty() || !base.dns.blocklist.is_empty() {
+            base.lockdown.force_dns = true;
+            base.lockdown.block_doh = true;
+            base.lockdown.block_dot = true;
+        }
+        base
     }
 
     /// The periodic enforcement tick: screen-time accounting + lockout + tamper
@@ -1311,12 +1354,20 @@ impl Agent {
                             },
                             !approve,
                         );
+                        done.push(p.id.clone());
                     }
                     Err(e) => {
-                        tracing::warn!("login decision for {} failed: {e}", p.id);
+                        // A transient POST failure must not swallow the human's
+                        // decision: re-drop the file and keep the prompt so the
+                        // next tick retries until the prompt expires.
+                        tracing::warn!("login decision for {} failed, will retry: {e}", p.id);
+                        let path = std::path::PathBuf::from(format!(
+                            "/run/user/{uid}/openscreentime/login_decision_{}",
+                            p.id
+                        ));
+                        let _ = std::fs::write(&path, raw.trim());
                     }
                 }
-                done.push(p.id.clone());
                 break;
             }
         }
@@ -1390,7 +1441,17 @@ impl Agent {
             if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
                 let answered_routable = out.lines().any(|l| {
                     let addr = l.split_whitespace().next().unwrap_or("");
-                    !addr.is_empty() && addr != "0.0.0.0" && addr != "::" && addr != "127.0.0.1"
+                    // Sinkhole answers, in every form glibc may render them —
+                    // including the v4-mapped-v6 shape ::ffff:0.0.0.0, which
+                    // must NOT be read as routable (that was a false
+                    // "the lock isn't biting" on a perfectly healthy device).
+                    !addr.is_empty()
+                        && addr != "0.0.0.0"
+                        && addr != "::"
+                        && addr != "127.0.0.1"
+                        && addr != "::1"
+                        && addr != "::ffff:0.0.0.0"
+                        && !addr.ends_with(":0.0.0.0")
                 });
                 if answered_routable {
                     if let Some(ev) = report(
@@ -1661,6 +1722,7 @@ impl Agent {
                 .map(|l| json!({
                     "id": l.id,
                     "username": l.username,
+                    "match_code": l.match_code,
                     "expires_at": l.expires.to_rfc3339(),
                 }))
                 .collect::<Vec<_>>());
@@ -1817,6 +1879,12 @@ impl Agent {
                     .get("expires_in_secs")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(120);
+                let match_code = cmd
+                    .payload
+                    .get("match_code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("----")
+                    .to_string();
                 if request_id.is_empty() || os_users.is_empty() {
                     return (ack_failed(&cmd.id, "bad login_approve payload"), events);
                 }
@@ -1825,8 +1893,8 @@ impl Agent {
                         Some(u),
                         "Sign-in request",
                         &format!(
-                            "{username} is signing in to OpenScreenTime on the web. \
-                             Approve from the notification — only if this is you."
+                            "{username} is signing in on the web. Approve ONLY if the \
+                             screen shows {match_code}."
                         ),
                         false,
                     );
@@ -1836,6 +1904,7 @@ impl Agent {
                     id: request_id,
                     username,
                     os_users: os_users.clone(),
+                    match_code,
                     expires: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
                 });
                 // Snappy: the tray polls the snapshot every 5 s — publish now

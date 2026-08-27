@@ -25,7 +25,7 @@ export function Login() {
   const [params] = useSearchParams();
   const [name, setName] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
-  const [devices, setDevices] = useState<string[]>([]);
+  const [matchCode, setMatchCode] = useState("");
   const [error, setError] = useState<string | null>(() =>
     params.get("error") ? "Sign-in failed — try again." : null,
   );
@@ -43,12 +43,12 @@ export function Login() {
     setError(null);
     setPhase("waiting");
     try {
-      await deviceLogin(who, setDevices);
+      await deviceLogin(who, setMatchCode);
       navigate("/", { replace: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : "That didn't work — try again.");
       setPhase("idle");
-      setDevices([]);
+      setMatchCode("");
     }
   }
 
@@ -90,12 +90,23 @@ export function Login() {
         {phase === "waiting" ? (
           <div className="flex flex-col gap-4" role="status" aria-live="polite">
             <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>
-              Check {devices.length === 1 ? devices[0] : "your computer"}.
+              Check your computer.
             </p>
             <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              A notification is asking whether this is you
-              {devices.length > 1 ? ` (on ${devices.join(", ")})` : ""}. One
-              click there signs you in here.
+              A notification is asking whether this is you. Approve it only if
+              it shows this code:
+            </p>
+            <p
+              style={{
+                fontSize: "2.4rem",
+                fontWeight: 600,
+                letterSpacing: "0.3em",
+                color: "var(--fg-display)",
+                fontVariantNumeric: "tabular-nums",
+                textAlign: "center",
+              }}
+            >
+              {matchCode}
             </p>
             <span className="login-wait-bar" aria-hidden="true" />
             <Button variant="ghost" onClick={() => window.location.reload()}>

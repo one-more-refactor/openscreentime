@@ -72,11 +72,18 @@ pub fn apply_network_policy(
     // App/category blocks → DNS sinkholes (the catalog is the single source;
     // `policy.blocks` on the effective policy is the union over every user).
     let sinkhole = openscreentime_policy::catalog::expand(&policy.blocks).domains;
-    let mut gaps: Vec<Gap> =
-        dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?
-            .into_iter()
-            .map(Gap::Dns)
-            .collect();
+    let dns_gaps = dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?;
+    // If there is no local resolver, dns::apply deliberately did NOT pin
+    // resolv.conf (the box stays usable and loudly degraded). The firewall's
+    // `force_dns` drops would then sever ALL name resolution — for the child
+    // AND for the agent's own control channel, so no relaxing policy could
+    // ever arrive. Suppress force_dns exactly in that case; every other
+    // lockdown flag still applies. (The gap is already reported as critical.)
+    let mut fw_lockdown = policy.lockdown.clone();
+    if dns_gaps.contains(&dns::DnsGap::NoLocalResolver) {
+        fw_lockdown.force_dns = false;
+    }
+    let mut gaps: Vec<Gap> = dns_gaps.into_iter().map(Gap::Dns).collect();
     // Firewall first (with the tunnel's accepts in place), THEN the tunnel —
     // bringing a wg/ovpn unit up before its endpoint accept exists would fail
     // its handshake against our own default-deny.
@@ -84,7 +91,7 @@ pub fn apply_network_policy(
     firewall::apply(
         exec,
         &policy.firewall,
-        &policy.lockdown,
+        &fw_lockdown,
         &policy.dns.upstream,
         server_host,
         &plan,
