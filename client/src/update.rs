@@ -1,11 +1,17 @@
-//! Agent self-update: once shortly after startup and then once a day, fetch
-//! `GET {server}/api/agent/latest` and, if the server bundles a newer headless
-//! build for this arch, swap it in atomically and restart the service.
+//! Agent self-update: once shortly after startup and then once a day, check
+//! for a newer build and swap it in atomically, then restart the service.
 //!
-//! Trust model v1 (docs/CONTRACT-PROD.md): the manifest's sha256 over TLS from
-//! the enrolled server. A compromised server therefore compromises the fleet —
-//! which is already true (it can push root commands); v2 should pin a minisign
-//! key so binaries are verified independently of the transport.
+//! Distribution moved to **GitHub releases** (CONTRACT-0.6 §5): the newest
+//! release's `manifest.json` + artifacts, fetched straight from
+//! `github.com/<repo>/releases`, sha256-verified. The enrolled server's
+//! bundled `/api/agent/latest` remains the fallback for air-gapped installs
+//! (and whenever GitHub is unreachable).
+//!
+//! Trust model: the manifest's sha256 over TLS — from GitHub (repo slug
+//! pinned at compile time; `OST_UPDATE_REPO` exists for forks) or from the
+//! enrolled server. Either origin could compromise the fleet — the server
+//! already can (it pushes root commands); v2 should pin a minisign key so
+//! binaries verify independently of any transport.
 //!
 //! Safety rails:
 //!   * only runs when this process IS `/usr/local/bin/openscreentime` (never
@@ -63,6 +69,67 @@ const SELF_FEATURES: &str = "desktop";
 const SELF_TARGET: &str = "x86_64-linux-musl";
 #[cfg(not(any(feature = "gui", feature = "tray")))]
 const SELF_FEATURES: &str = "headless";
+
+/// Where releases live. A fork can point its fleet elsewhere with
+/// `OST_UPDATE_REPO=owner/repo`; with root on the device that env var is not
+/// a new trust surface.
+const GITHUB_REPO: &str = "one-more-refactor/openscreentime";
+
+fn github_repo() -> String {
+    std::env::var("OST_UPDATE_REPO")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| GITHUB_REPO.to_string())
+}
+
+/// The newest GitHub release's manifest and its download base
+/// (`https://github.com/<repo>/releases/download/<tag>`). Newest by list
+/// order, prereleases included — every release of this project is one.
+async fn github_manifest(http: &reqwest::Client) -> Result<(Manifest, String)> {
+    let repo = github_repo();
+    let releases: serde_json::Value = http
+        .get(format!(
+            "https://api.github.com/repos/{repo}/releases?per_page=1"
+        ))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("GET github releases")?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rel = releases
+        .get(0)
+        .ok_or_else(|| anyhow::anyhow!("no releases on {repo}"))?;
+    let tag = rel
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("release without a tag"))?;
+    let murl = rel
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|assets| {
+            assets.iter().find_map(|a| {
+                (a.get("name").and_then(|n| n.as_str()) == Some("manifest.json"))
+                    .then(|| a.get("browser_download_url").and_then(|u| u.as_str()))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("release {tag} has no manifest.json"))?;
+    let manifest: Manifest = http
+        .get(murl)
+        .send()
+        .await
+        .context("GET release manifest")?
+        .error_for_status()?
+        .json()
+        .await
+        .context("decoding release manifest")?;
+    Ok((
+        manifest,
+        format!("https://github.com/{repo}/releases/download/{tag}"),
+    ))
+}
 
 /// Whether this build/process is allowed to self-update at all.
 fn enabled(cfg: &AgentConfig) -> bool {
@@ -123,15 +190,24 @@ pub async fn check_and_update(
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
-    let manifest: Manifest = http
-        .get(format!("{base}/api/agent/latest"))
-        .send()
-        .await
-        .context("GET /api/agent/latest")?
-        .error_for_status()?
-        .json()
-        .await
-        .context("decoding agent manifest")?;
+    // GitHub first (CONTRACT-0.6 §5); the enrolled server's bundle covers
+    // air-gapped installs and GitHub outages.
+    let (manifest, github_base): (Manifest, Option<String>) = match github_manifest(&http).await {
+        Ok((m, dl_base)) => (m, Some(dl_base)),
+        Err(e) => {
+            tracing::debug!("github update check unavailable ({e}); asking the enrolled server");
+            let m: Manifest = http
+                .get(format!("{base}/api/agent/latest"))
+                .send()
+                .await
+                .context("GET /api/agent/latest")?
+                .error_for_status()?
+                .json()
+                .await
+                .context("decoding agent manifest")?;
+            (m, None)
+        }
+    };
 
     let current = crate::client::AGENT_VERSION;
     if parse_version(&manifest.version) <= parse_version(current) {
@@ -152,11 +228,24 @@ pub async fn check_and_update(
         return Ok(false);
     };
 
-    // The binary download must come from the ENROLLED server over the same
-    // origin as the API. A manifest must not be able to point this root-installed
-    // fetch at an arbitrary host or downgrade it to plaintext http — that would
-    // widen a fleet-wide root-RCE surface well beyond the server we already trust.
-    let url = if art.url.starts_with('/') {
+    // The binary must come from the origin the manifest did — GitHub's
+    // release download path, or the ENROLLED server. A manifest must not be
+    // able to point this root-installed fetch at an arbitrary host or
+    // downgrade it to plaintext http — that would widen a fleet-wide
+    // root-RCE surface beyond the origins we already trust.
+    let url = if let Some(dl_base) = &github_base {
+        // Only the artifact's basename is taken from the manifest; the base
+        // is pinned to this release's download path on github.com.
+        let file = art.url.rsplit('/').next().unwrap_or_default();
+        if file.is_empty()
+            || !file
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+        {
+            anyhow::bail!("self-update: suspicious artifact filename — refusing");
+        }
+        format!("{dl_base}/{file}")
+    } else if art.url.starts_with('/') {
         format!("{base}{}", art.url)
     } else {
         let (Ok(want), Ok(got)) = (reqwest::Url::parse(base), reqwest::Url::parse(&art.url)) else {

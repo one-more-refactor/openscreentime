@@ -324,6 +324,8 @@ pub struct Agent {
     attrib: crate::attrib::Attrib,
     /// Ticks since the last usage post (posts every 6 ticks ≈ 1 min).
     attrib_ticks: u32,
+    /// Once-per-day dedupe for enforcement probe findings (kind[/user] → day).
+    probe_reported: HashMap<String, chrono::NaiveDate>,
 }
 
 /// One outstanding "approve this web sign-in?" prompt.
@@ -509,6 +511,7 @@ impl Agent {
             pending_logins: Vec::new(),
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
+            probe_reported: HashMap::new(),
         })
     }
 
@@ -1041,6 +1044,9 @@ impl Agent {
                         }
                     }
                 }
+                // The lock must never lie (CONTRACT-0.6 §4): probe that the
+                // stops we believe in are real, on the same 1-minute cadence.
+                events.extend(self.probe_enforcement());
             }
         }
         // Blocked apps with a native client: deny their processes (CONTRACT-0.4 §7).
@@ -1318,6 +1324,86 @@ impl Agent {
             self.pending_logins.retain(|p| !done.contains(&p.id));
             self.write_status_file();
         }
+    }
+
+    /// Probe that enforcement is real, not just logged (CONTRACT-0.6 §4).
+    ///
+    /// Two active checks, each finding deduped to once per day:
+    /// - every user we believe frozen must read back frozen from the kernel
+    ///   freezer — a lock screen over an unfrozen session is a lie;
+    /// - if anything is blocked, the system resolver must actually sinkhole a
+    ///   blocked domain — `getent hosts` walks the same path the child's apps
+    ///   do, so a routable answer means the block is theater.
+    fn probe_enforcement(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        if self.exec.dry_run() {
+            return events;
+        }
+        let today = chrono::Local::now().date_naive();
+        let mut report = |me: &mut HashMap<String, chrono::NaiveDate>, key: String, msg: String| {
+            if me.get(&key) == Some(&today) {
+                return None;
+            }
+            me.insert(key.clone(), today);
+            tracing::error!("enforcement probe: {msg}");
+            Some(Event::new(
+                EV_ENFORCEMENT_DEGRADED,
+                SEV_CRITICAL,
+                json!({ "kind": key, "message": msg }),
+            ))
+        };
+
+        // 1. Frozen means frozen.
+        for user in self.frozen.clone() {
+            if screentime::is_frozen(&user) == Some(false) {
+                if let Some(ev) = report(
+                    &mut self.probe_reported,
+                    format!("freeze_ineffective:{user}"),
+                    format!("{user} should be stopped but the kernel says their session is running"),
+                ) {
+                    self.notify_user(
+                        None,
+                        "A stop isn't holding",
+                        &format!("{user}'s screen should be stopped but isn't — check the console."),
+                        true,
+                    );
+                    events.push(ev);
+                }
+            }
+        }
+
+        // 2. Blocked means blocked. One domain per probe round is enough —
+        //    the sinkhole is one dnsmasq config; if one entry fails they all do.
+        let probe_domain = self.policies.values().find_map(|p| {
+            openscreentime_policy::catalog::expand(&p.blocks)
+                .domains
+                .first()
+                .cloned()
+                .or_else(|| {
+                    p.dns
+                        .blocklist
+                        .first()
+                        .map(|d| d.trim_start_matches("*.").trim_start_matches('.').to_string())
+                })
+        });
+        if let Some(domain) = probe_domain.filter(|d| !d.is_empty()) {
+            if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
+                let answered_routable = out.lines().any(|l| {
+                    let addr = l.split_whitespace().next().unwrap_or("");
+                    !addr.is_empty() && addr != "0.0.0.0" && addr != "::" && addr != "127.0.0.1"
+                });
+                if answered_routable {
+                    if let Some(ev) = report(
+                        &mut self.probe_reported,
+                        "sinkhole_ineffective".to_string(),
+                        format!("blocked domain {domain} still resolves — the DNS block is not biting"),
+                    ) {
+                        events.push(ev);
+                    }
+                }
+            }
+        }
+        events
     }
 
     /// Snapshot the reboot-surviving enforcement state to disk. Users inside a

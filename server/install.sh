@@ -54,8 +54,27 @@ else
   fail "curl or wget is required"
 fi
 
-echo "Fetching agent manifest from $SERVER/api/agent/latest ..."
-manifest="$(fetch "$SERVER/api/agent/latest")" || fail "could not fetch the agent manifest (does this server bundle an agent build?)"
+# Distribution streams from GitHub releases (CONTRACT-0.6 §5): the newest
+# release's manifest + binaries, sha256-verified. The enrolled server's
+# bundled build stays as fallback for air-gapped installs. OST_UPDATE_REPO
+# overrides the repo for forks; OST_NO_GITHUB=1 forces the server path.
+REPO="${OST_UPDATE_REPO:-one-more-refactor/openscreentime}"
+GH_BASE=""
+manifest=""
+if [ "${OST_NO_GITHUB:-0}" != 1 ]; then
+  echo "Checking github.com/$REPO for the newest release ..."
+  rel="$(fetch "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null || true)"
+  tag="$(printf '%s' "$rel" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  if [ -n "$tag" ]; then
+    GH_BASE="https://github.com/$REPO/releases/download/$tag"
+    manifest="$(fetch "$GH_BASE/manifest.json" 2>/dev/null || true)"
+    [ -n "$manifest" ] && echo "Using release $tag from GitHub."
+  fi
+fi
+if [ -z "$manifest" ]; then
+  echo "Fetching agent manifest from $SERVER/api/agent/latest ..."
+  manifest="$(fetch "$SERVER/api/agent/latest")" || fail "could not fetch the agent manifest (does this server bundle an agent build?)"
+fi
 
 # In auto mode, install the desktop build only where it can actually show its
 # UI: a real graphical session. A headless server that happens to have Xorg
@@ -96,7 +115,13 @@ echo "Selected the '$want' agent build."
 url="$(printf '%s' "$artifact" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
 sha="$(printf '%s' "$artifact" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')"
 [ -n "$url" ] && [ -n "$sha" ] || fail "manifest is missing url/sha256: $manifest"
-case "$url" in /*) url="$SERVER$url" ;; esac
+if [ -n "$GH_BASE" ]; then
+  # From GitHub, only the artifact's basename is trusted; the base is pinned
+  # to this release's download path.
+  url="$GH_BASE/$(basename "$url")"
+else
+  case "$url" in /*) url="$SERVER$url" ;; esac
+fi
 
 # Download to a temp file IN THE TARGET DIRECTORY so the final mv is an atomic
 # rename on the same filesystem — a crash mid-install can never leave a
