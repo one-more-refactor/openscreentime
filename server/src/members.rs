@@ -35,7 +35,7 @@ use openscreentime_policy::{catalog, AgeBracket, Policy, Theme};
 // ── the account row ─────────────────────────────────────────────────────────
 
 pub const ACCOUNT_COLS: &str = "id, tenant_id, display_name, email, role, age_bracket, birthdate, \
-    theme, self_managed, profile_id, created_at, avatar";
+    theme, self_managed, profile_id, created_at, avatar, goal_minutes";
 
 pub type AccountRow = (
     Uuid,              // id
@@ -51,6 +51,7 @@ pub type AccountRow = (
     DateTime<Utc>,     // created_at
     Option<String>,    // avatar (emoji; NULL = monogram) — appended last so
                        //   the positional accesses above it never renumber
+    Option<i32>,       // goal_minutes (person-set; NULL = none)
 );
 
 pub fn bracket_of(r: &AccountRow) -> AgeBracket {
@@ -82,6 +83,7 @@ pub fn account_json(r: &AccountRow) -> Value {
         "profile_id": r.9,
         "created_at": r.10,
         "avatar": r.11,
+        "goal_minutes": r.12,
     })
 }
 
@@ -426,6 +428,9 @@ pub struct PatchMemberReq {
     /// An emoji face; empty string clears back to the monogram.
     #[serde(default)]
     pub avatar: Option<String>,
+    /// The person's daily goal, set by a parent for a young child. 0 clears it.
+    #[serde(default)]
+    pub goal_minutes: Option<i32>,
 }
 
 /// `PATCH /api/members/{id}`. Changing the bracket does not rewrite the
@@ -498,6 +503,14 @@ pub async fn patch_member(
         sqlx::query("UPDATE admins SET avatar = $2 WHERE id = $1")
             .bind(id)
             .bind(if av.is_empty() { None } else { Some(av) })
+            .execute(&st.db)
+            .await?;
+    }
+    if let Some(g) = req.goal_minutes {
+        let goal = Some(g).filter(|m| *m > 0 && *m <= 24 * 60);
+        sqlx::query("UPDATE admins SET goal_minutes = $2 WHERE id = $1")
+            .bind(id)
+            .bind(goal)
             .execute(&st.db)
             .await?;
     }
@@ -672,7 +685,33 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "bedtime": policy.screen_time.bedtime,
         "windows": policy.screen_time.schedule,
         "display_name": acct.2,
+        // The person's own goal (minutes/day), distinct from the parent cap.
+        "goal_minutes": acct.12,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct GoalReq {
+    /// Minutes/day the person is aiming for; 0/absent clears the goal.
+    #[serde(default)]
+    pub minutes: Option<i32>,
+}
+
+/// `POST /api/me/goal` — the person sets (or clears) their OWN daily goal.
+/// This is theirs, not the parent's — the whole point is self-set. A parent
+/// can also set it for a young child via `PATCH /api/members/{id}`.
+pub async fn set_goal(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Json(req): Json<GoalReq>,
+) -> AppResult<Json<Value>> {
+    let goal = req.minutes.filter(|m| *m > 0 && *m <= 24 * 60);
+    sqlx::query("UPDATE admins SET goal_minutes = $2 WHERE id = $1")
+        .bind(admin.admin_id)
+        .bind(goal)
+        .execute(&st.db)
+        .await?;
+    Ok(Json(json!({ "goal_minutes": goal })))
 }
 
 /// `GET /api/me/history` — the last 14 days summed across the person's
@@ -710,6 +749,41 @@ pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<
     .fetch_all(&st.db)
     .await?;
 
+    // A streak that counts the RIGHT thing: consecutive recent days the person
+    // met their own goal (used ≤ goal). A screen-free day is the best possible
+    // day for it, never a break — the opposite of an engagement streak. Only
+    // when a goal is set; today is forgiven until it's over (used ≤ goal so far
+    // still counts, and a day with no row is a 0-minute day = met).
+    let goal_min: Option<i64> = acct.12.map(i64::from);
+    let goal_streak: i64 = if let Some(goal) = goal_min {
+        use std::collections::HashMap;
+        let by_day: HashMap<chrono::NaiveDate, i64> =
+            days.iter().map(|(d, used, _)| (*d, used / 60)).collect();
+        let today = chrono::Utc::now().date_naive();
+        let mut streak = 0i64;
+        let mut cursor = today;
+        loop {
+            let used = by_day.get(&cursor).copied().unwrap_or(0);
+            let met = used <= goal;
+            if met {
+                streak += 1;
+            } else if cursor != today {
+                break; // a real miss on a finished day ends it
+            } else {
+                // Over goal already today — no streak credit for today, but
+                // don't reset yesterday's.
+            }
+            let Some(prev) = cursor.pred_opt() else { break };
+            if today.signed_duration_since(prev).num_days() >= 14 {
+                break;
+            }
+            cursor = prev;
+        }
+        streak
+    } else {
+        0
+    };
+
     Ok(Json(json!({
         "days": days
             .into_iter()
@@ -723,6 +797,8 @@ pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<
             .into_iter()
             .map(|(name, used)| json!({ "name": name, "used_minutes": used / 60 }))
             .collect::<Vec<_>>(),
+        "goal_minutes": acct.12,
+        "goal_streak": goal_streak,
     })))
 }
 
@@ -823,6 +899,7 @@ pub fn member_allowed(path: &str) -> bool {
         || path == "/api/me/today"
         || path == "/api/me/history"
         || path == "/api/me/where"
+        || path == "/api/me/goal"
         || path == "/api/me/ask"
         || path == "/api/catalog"
         || path.starts_with("/api/me/2fa")

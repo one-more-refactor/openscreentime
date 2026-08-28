@@ -17,6 +17,7 @@ import { Link } from "react-router-dom";
 import type { Device, MeToday } from "../types";
 import * as api from "../api";
 import { useSession } from "../lib/session";
+import { AvatarRing } from "../components/AvatarRing";
 import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
@@ -169,7 +170,16 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
       // instead of every card blinking at once.
       style={{ "--i": index } as CSSProperties}
     >
-      <Avatar name={child.name} seed={child.key} avatar={child.avatar} />
+      <AvatarRing
+        name={child.name}
+        seed={child.key}
+        avatar={child.avatar}
+        used={child.used_minutes}
+        // The ring fills toward their own goal if they've set one, else the
+        // parent's limit (+earned). No target → a plain identity disc.
+        target={child.goal_minutes ?? minutesTotal(child)}
+        paused={paused}
+      />
       <div className="fam-card-body">
         <p className="fam-name">{child.name}</p>
         <p className="fam-meta">
@@ -250,9 +260,18 @@ function YouCard({ index }: { index: number }) {
       .catch(() => setToday(null));
   }, []);
   const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
+  const target =
+    today?.goal_minutes ??
+    (today?.limit_minutes != null ? today.limit_minutes + today.earned_minutes : null);
   return (
     <Link to="/me" className="fam-card fam-card-you" style={{ "--i": index } as CSSProperties}>
-      <Avatar name={name} seed={me?.account?.id ?? "you"} />
+      <AvatarRing
+        name={name}
+        seed={me?.account?.id ?? "you"}
+        avatar={me?.account?.avatar}
+        used={today?.used_minutes ?? 0}
+        target={target ?? null}
+      />
       <div className="fam-card-body">
         <p className="fam-name">
           {name} <span className="fam-you-tag">you</span>
@@ -307,6 +326,18 @@ export function Family() {
   const pausable = (devices ?? []).filter((d) => d.status !== "pending");
   const allPaused = pausable.length > 0 && pausable.every((d) => d.locked);
 
+  // "Who needs me" floats to the top-left (reading order): anyone with a
+  // request waiting, then paused, then over/at limit; everyone fine settles
+  // below. Stable within a tier (keeps the household from reshuffling on every
+  // poll). This makes the grid a scannable to-do list, not just cards.
+  const needsScore = (c: FamilyChild): number => {
+    if (c.pending_requests > 0) return 0;
+    if (c.locked) return 1;
+    if (minutesLeft(c) === 0) return 2;
+    return 3;
+  };
+  const sortedChildren = [...children].sort((a, b) => needsScore(a) - needsScore(b));
+
   return (
     <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>
       <PageHead
@@ -347,7 +378,7 @@ export function Family() {
         error ? null : <FirstRun />
       ) : (
         <ul className="fam-grid">
-          {children.map((c, i) => (
+          {sortedChildren.map((c, i) => (
             <li key={c.key}>
               <ChildCard child={c} index={i} />
             </li>

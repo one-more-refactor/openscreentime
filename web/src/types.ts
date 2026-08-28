@@ -264,6 +264,8 @@ export interface FamilyChild {
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
   limit_minutes: number | null;
+  /** the person's own daily goal (minutes), or null */
+  goal_minutes?: number | null;
   profile_id: string | null;
   profile_name: string | null;
   devices: ChildDevice[];
@@ -487,6 +489,8 @@ export interface MeToday {
   pending_request: boolean;
   bedtime: Bedtime | null;
   windows: TimeWindow[];
+  /** the person's own daily goal (minutes), or null if none set */
+  goal_minutes?: number | null;
 }
 
 /** One day of a person's own history (GET /api/me/history). */
@@ -500,6 +504,10 @@ export interface MeHistoryDay {
 export interface MeHistory {
   days: MeHistoryDay[];
   today_by_device: { name: string; used_minutes: number }[];
+  /** the person's own goal (minutes), or null */
+  goal_minutes?: number | null;
+  /** consecutive recent days they met their goal (0 if no goal) */
+  goal_streak?: number;
 }
 
 /** GET /api/usage/where · /api/me/where — today's attribution. */

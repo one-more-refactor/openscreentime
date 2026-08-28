@@ -229,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(members::me))
         .route("/api/me/today", get(members::today))
         .route("/api/me/history", get(members::history))
+        .route("/api/me/goal", post(members::set_goal))
         .route("/api/me/where", get(usage::me_where))
         .route("/api/usage/where", get(usage::where_api))
         .route("/api/me/ask", post(members::ask))
