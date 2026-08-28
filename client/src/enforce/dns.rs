@@ -151,25 +151,48 @@ pub fn render_dnsmasq(
     out.push_str("log-queries=extra\n");
     out.push_str(&format!("log-facility={}\n", crate::attrib::DNSQ_LOG));
 
+    // The upstream is interpolated into `server=` lines and must be a bare IP.
+    // A policy field with a newline or a directive would otherwise inject
+    // arbitrary dnsmasq config into this root-owned, root-reloaded file. A
+    // malformed value falls back to the malware+adult family resolver rather
+    // than passing through.
+    let upstream = if dns.upstream.parse::<std::net::IpAddr>().is_ok() {
+        dns.upstream.as_str()
+    } else {
+        tracing::warn!("ignoring non-IP DNS upstream {:?}; using 1.1.1.3", dns.upstream);
+        "1.1.1.3"
+    };
+    // A domain safe to interpolate into a resolver directive — same discipline
+    // as the catalog sinkhole. Rejects anything with a control char, slash,
+    // whitespace or a config-directive shape.
+    let clean_domain = |raw: &str| -> Option<String> {
+        let d = raw
+            .trim_start_matches("*.")
+            .trim_start_matches('*')
+            .trim_start_matches('.')
+            .trim();
+        if d.is_empty()
+            || !d
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+        {
+            return None;
+        }
+        Some(d.to_string())
+    };
+
     if dns.is_default_deny() && !dns.allows_everything() {
         // Zero-trust: forward ONLY allowlisted domains to the filtered upstream.
         // dnsmasq with no-resolv and no matching server returns NXDOMAIN/REFUSED
         // for everything else, which is the default-deny behavior we want.
         for domain in &dns.allowlist {
-            let d = domain.trim_start_matches("*.").trim_start_matches('*');
-            let d = d.trim_start_matches('.');
-            if d.is_empty() {
-                continue;
+            if let Some(d) = clean_domain(domain) {
+                out.push_str(&format!("server=/{d}/{upstream}\n"));
             }
-            out.push_str(&format!("server=/{d}/{}\n", dns.upstream));
         }
         // Explicit extra blocks (redundant under default-deny, honored anyway).
         for b in &dns.blocklist {
-            let b = b
-                .trim_start_matches("*.")
-                .trim_start_matches('*')
-                .trim_start_matches('.');
-            if !b.is_empty() {
+            if let Some(b) = clean_domain(b) {
                 out.push_str(&format!("address=/{b}/0.0.0.0\n"));
             }
         }
@@ -179,7 +202,9 @@ pub fn render_dnsmasq(
         // console has no way to undo what it just did.
         if let Some(host) = server_host {
             if host.parse::<std::net::IpAddr>().is_err() {
-                out.push_str(&format!("server=/{host}/{}\n", dns.upstream));
+                if let Some(h) = clean_domain(host) {
+                    out.push_str(&format!("server=/{h}/{upstream}\n"));
+                }
             }
         }
         // Catch-all: anything not matched above is NXDOMAIN.
@@ -188,13 +213,9 @@ pub fn render_dnsmasq(
         // allow_all mode, or allowlist == ["*"] (the `default` profile): forward
         // everything to the filtered upstream. Structurally still zero-trust:
         // firewall ports + safe-search stay on.
-        out.push_str(&format!("server={}\n", dns.upstream));
+        out.push_str(&format!("server={upstream}\n"));
         for b in &dns.blocklist {
-            let b = b
-                .trim_start_matches("*.")
-                .trim_start_matches('*')
-                .trim_start_matches('.');
-            if !b.is_empty() {
+            if let Some(b) = clean_domain(b) {
                 out.push_str(&format!("address=/{b}/0.0.0.0\n"));
             }
         }
@@ -353,6 +374,25 @@ pub fn reassert(exec: &Exec) -> Result<(bool, Vec<DnsGap>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injection_in_dns_fields_cannot_add_directives() {
+        // A newline-bearing blocklist entry and a non-IP upstream must not
+        // inject dnsmasq config; the upstream falls back to the family resolver.
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec!["evil.test\nconf-file=/tmp/pwn".into(), "ok.example".into()],
+            safe_search: false,
+            upstream: "1.1.1.2\nlog-facility=/tmp/x".into(),
+        };
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
+        assert!(!conf.contains("conf-file"), "no injected directive");
+        assert!(!conf.contains("log-facility=/tmp/x"), "no injected upstream directive");
+        assert!(conf.contains("server=1.1.1.3"), "malformed upstream → safe fallback");
+        // The clean sibling entry still applies.
+        assert!(conf.contains("address=/ok.example/0.0.0.0"));
+    }
 
     #[test]
     fn default_deny_emits_catch_all_nxdomain() {

@@ -90,7 +90,9 @@ impl AlertConfig {
                 "allowed_mentions": { "parse": [] },
             });
             if let Err(e) = client.post(url).json(&body).send().await {
-                tracing::warn!("alert webhook failed: {e}");
+                // Don't interpolate `e`: a webhook URL is itself the secret
+                // (Discord/Slack embed a token in the path).
+                tracing::warn!(timeout = e.is_timeout(), "alert webhook failed");
             }
         }
         if let Some(token) = &self.tg_token {
@@ -101,7 +103,8 @@ impl AlertConfig {
                     body["reply_markup"] = kb.clone();
                 }
                 if let Err(e) = client.post(url).json(&body).send().await {
-                    tracing::warn!("alert telegram failed: {e}");
+                    // The URL embeds the bot token — log only the shape.
+                    tracing::warn!(timeout = e.is_timeout(), "alert telegram failed");
                 }
             }
             if let Some(tenant) = tenant_id {

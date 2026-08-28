@@ -99,9 +99,16 @@ async fn answer_one(
     user: &str,
     req: &Path,
 ) -> Result<()> {
-    // Only real local users, and only their own request.
+    // Only real local users, and only their own request. `symlink_metadata`
+    // (lstat), NOT `metadata` (stat): the request lives in a world-writable
+    // sticky dir, so a child could point `alice.req` at a file alice owns and
+    // pass a follow-based uid check to mint a voucher "as alice". lstat checks
+    // the link itself, and we reject any symlink outright.
     let pw = users::get_user_by_name(user).ok_or_else(|| anyhow::anyhow!("no such OS user"))?;
-    let meta = std::fs::metadata(req)?;
+    let meta = std::fs::symlink_metadata(req)?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("request file is a symlink — refusing");
+    }
     if meta.uid() != pw.uid() {
         anyhow::bail!(
             "request file owned by uid {} but {user} is uid {}",

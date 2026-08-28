@@ -1922,8 +1922,17 @@ impl Agent {
             let Some(path) = ondemand_earn_marker(&user) else {
                 continue;
             };
-            if !path.exists() {
-                continue;
+            // lstat, not stat: don't let a symlink in the child's own dir make
+            // this trigger off some unrelated root file. (No content is read
+            // and remove_file unlinks the link itself, so the risk is nil — but
+            // keep the whole channel symlink-averse on principle.)
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
             }
             let _ = std::fs::remove_file(&path); // single-use
             let policy = self.policies.get(&user).cloned().unwrap_or_default();

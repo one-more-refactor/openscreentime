@@ -148,6 +148,60 @@ fn merge_config(edited: &str, stored: &str) -> String {
     out.join("\n")
 }
 
+/// OpenVPN directives that run a command or reshape routing — every one is a
+/// root-exec or LAN-pivot primitive, delivered verbatim to every managed
+/// device. An admin (or a session taken over via login) could otherwise push
+/// `up /bin/sh …` and own the whole fleet. We reject the config outright
+/// rather than try to strip lines (a partial strip is worse than a clear no).
+/// `script-security 2` is what enables the hooks at all; `plugin` loads a
+/// shared object; `route`/`redirect-gateway` reshape routing for the pivot.
+const OVPN_FORBIDDEN: &[&str] = &[
+    "up",
+    "down",
+    "route-up",
+    "route-pre-down",
+    "ipchange",
+    "tls-verify",
+    "auth-user-pass-verify",
+    "client-connect",
+    "client-disconnect",
+    "learn-address",
+    "script-security",
+    "plugin",
+    "redirect-gateway",
+    "redirect-private",
+];
+
+/// Reject an OpenVPN config that carries an exec-hook or routing-override
+/// directive. WireGuard has no script hooks, but `AllowedIPs` can still bridge
+/// the device onto an attacker's network — a `0.0.0.0/0`/`::/0` catch-all is
+/// how a legitimate full-tunnel VPN works, so we allow it but the config is
+/// gated behind the sensitive-corner confirm window (see routes) so it can't
+/// ride ordinary session trust.
+fn reject_dangerous_vpn(config: &str, kind: &str) -> AppResult<()> {
+    if kind != "openvpn" {
+        return Ok(());
+    }
+    for raw in config.lines() {
+        // A directive is the first token of a non-comment line (OpenVPN also
+        // honors a leading `--`).
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let first = line.trim_start_matches("--");
+        let directive = first.split_whitespace().next().unwrap_or("");
+        if OVPN_FORBIDDEN.contains(&directive) {
+            return Err(AppError::BadRequest(format!(
+                "this OpenVPN config uses '{directive}', which can run commands or reroute the \
+                 device — remove it. OpenScreenTime never delivers a config that can execute \
+                 code on a managed machine."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Cheap shape check so a wrong-file upload fails here with a clear message
 /// instead of on the device with a dead tunnel. Returns the sniffed kind.
 fn sniff_kind(config: &str, kind_hint: Option<&str>) -> AppResult<&'static str> {
@@ -309,6 +363,7 @@ pub async fn create(
         )));
     }
     let kind = sniff_kind(&req.config, req.kind.as_deref())?;
+    reject_dangerous_vpn(&req.config, kind)?;
 
     let pid: Uuid = sqlx::query_scalar(
         "INSERT INTO device_vpn_profiles (device_id, name, kind, config)
@@ -364,7 +419,8 @@ pub async fn update(
                 return Err(AppError::BadRequest("VPN config too large".into()));
             }
             let merged = merge_config(edited, &row.3);
-            sniff_kind(&merged, Some(row.2.as_str()))?;
+            let k = sniff_kind(&merged, Some(row.2.as_str()))?;
+            reject_dangerous_vpn(&merged, k)?;
             merged
         }
         None => row.3.clone(),
@@ -565,6 +621,27 @@ mod tests {
     use super::*;
 
     const WG: &str = "[Interface]\nPrivateKey = SECRETKEY123=\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = PUB=\nPresharedKey = PSK456=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0";
+
+    #[test]
+    fn rejects_openvpn_exec_and_route_directives() {
+        // Each of these is a root-exec or routing-override primitive.
+        for bad in [
+            "client\nremote x 1194\nup /bin/sh",
+            "client\nremote x 1194\nscript-security 2",
+            "client\nremote x 1194\n--plugin /tmp/e.so",
+            "client\nremote x 1194\nredirect-gateway def1",
+            "client\nremote x 1194\nlearn-address /tmp/x",
+        ] {
+            assert!(
+                reject_dangerous_vpn(bad, "openvpn").is_err(),
+                "should reject: {bad}"
+            );
+        }
+        // A plain client config with none of them passes.
+        assert!(reject_dangerous_vpn("client\nremote vpn.example.com 1194\nproto udp", "openvpn").is_ok());
+        // WireGuard has no script hooks — not gated by this check.
+        assert!(reject_dangerous_vpn(WG, "wireguard").is_ok());
+    }
 
     #[test]
     fn masks_wireguard_secrets() {

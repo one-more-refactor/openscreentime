@@ -144,6 +144,42 @@ pub fn set_owner_only_600(path: &Path) {
     }
 }
 
+/// Write a SECRET file that is never world-readable, even for an instant.
+///
+/// `std::fs::write` + a later chmod leaves a `0644` window on first creation
+/// (in a `0755` state dir a child can `open()` it and lift the TOTP secret /
+/// recovery-code MACs), so instead: create a sibling temp `0600` from the
+/// outset, write, fsync-free rename into place (atomic on the same fs). The
+/// content is on disk only under the final name, only ever mode 0600.
+pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("tmp.new");
+        // create_new fails if a stale temp exists (or is a symlink) — clear it.
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(body)?;
+        f.sync_all().ok();
+        drop(f);
+        std::fs::rename(&tmp, path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, body)?;
+        set_owner_only_600(path);
+        Ok(())
+    }
+}
+
 /// Process-wide runtime context threaded through every module.
 #[derive(Debug, Clone)]
 pub struct AgentCtx {
