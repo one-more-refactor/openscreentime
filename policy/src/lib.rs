@@ -199,10 +199,15 @@ impl AgeBracket {
     }
 
     /// Seconds of wind-down countdown before a hard stop (0 = stop at once).
+    /// Even the youngest get a short heads-up now — an abrupt freeze mid-play
+    /// produces reactance, not learning; the transition is the teachable moment
+    /// (a "nearly done, save your spot" beat), so no bracket gets zero.
     pub fn wind_down_secs(&self) -> u32 {
         match self {
             AgeBracket::YoungerTeen | AgeBracket::OlderTeen => 120,
-            _ => 0,
+            AgeBracket::Kid => 60,
+            AgeBracket::Little => 30,
+            AgeBracket::Adult => 0,
         }
     }
 }

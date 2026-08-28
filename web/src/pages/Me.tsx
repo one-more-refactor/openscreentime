@@ -187,6 +187,20 @@ function Blocked({ today, catalog, theme }: { today: MeToday; catalog: Catalog |
 // Shown once per browser; the full version lives in docs/TRANSPARENCY.md and
 // as the device's first-run intro.
 
+/** The two transparency points, worded per look — shared by the first-visit
+ * card and the standing "what can they see?" link so they never drift. */
+function transparencyPoints(theme: Theme): [string, string] {
+  if (theme === "playful")
+    return [
+      "Your grown-ups can see how long you've been on the computer and which apps were open — like a clock, not a camera.",
+      "They can NOT read your messages, see your screen, or watch what you type. Ever.",
+    ];
+  return [
+    "Your parents can see: your minutes, which apps and sites your computer used, and the moments the rules kicked in.",
+    "They can NOT read messages, see your screen, record keystrokes, or open a remote shell — that last one doesn't even exist in this software.",
+  ];
+}
+
 function FirstVisit({ theme }: { theme: Theme }) {
   const KEY = "ost-intro-seen";
   const [seen, setSeen] = useState(() => {
@@ -205,22 +219,63 @@ function FirstVisit({ theme }: { theme: Theme }) {
     }
     setSeen(true);
   };
+  const [a, b] = transparencyPoints(theme);
   return (
     <section className="me-section me-intro">
       <h2 className="me-h2">{theme === "playful" ? "What this is" : "Before anything else"}</h2>
-      <p className="me-intro-p">
-        {theme === "playful"
-          ? "Your grown-ups can see how long you've been on the computer and which apps were open — like a clock, not a camera."
-          : "Your parents can see: your minutes, which apps and sites your computer used, and the moments the rules kicked in."}
-      </p>
-      <p className="me-intro-p">
-        {theme === "playful"
-          ? "They can NOT read your messages, see your screen, or watch what you type. Ever."
-          : "They can NOT read messages, see your screen, record keystrokes, or open a remote shell — that last one doesn't even exist in this software."}
-      </p>
+      <p className="me-intro-p">{a}</p>
+      <p className="me-intro-p">{b}</p>
       <button className="me-link" onClick={dismiss}>
         Okay, got it
       </button>
+    </section>
+  );
+}
+
+/** A permanent, low-key way to re-check what's visible — trust is ongoing, not
+ * a one-time dismissed card (the first-visit intro is gone after one tap). */
+function WhatCanTheySee({ theme }: { theme: Theme }) {
+  const [a, b] = transparencyPoints(theme);
+  return (
+    <details className="me-see">
+      <summary className="me-link">What can they see?</summary>
+      <p className="me-intro-p" style={{ marginTop: "0.6rem" }}>{a}</p>
+      <p className="me-intro-p">{b}</p>
+    </details>
+  );
+}
+
+/** One optional, once-a-day reflective touch — reflection is what converts
+ * "here's your data" into behaviour change. Never a notification (the person
+ * chose to open their page), shown at most once/day, dismissed forever. */
+function Reflection({ theme }: { theme: Theme }) {
+  const KEY = () => `ost-reflect-${new Date().toISOString().slice(0, 10)}`;
+  const [done, setDone] = useState(() => {
+    try {
+      return localStorage.getItem(KEY()) === "1";
+    } catch {
+      return true;
+    }
+  });
+  if (done || theme === "plain") return null; // adults get the quiet version elsewhere
+  const answer = () => {
+    try {
+      localStorage.setItem(KEY(), "1");
+    } catch {
+      /* ignore */
+    }
+    setDone(true);
+  };
+  return (
+    <section className="me-section me-reflect">
+      <p className="me-reflect-q">
+        {theme === "playful" ? "Happy with your day so far?" : "How do you feel about today so far?"}
+      </p>
+      <div className="me-ask-row">
+        <button className="me-ask-pill" onClick={answer}>Good</button>
+        <button className="me-ask-pill" onClick={answer}>Okay</button>
+        <button className="me-ask-pill" onClick={answer}>Too much</button>
+      </div>
     </section>
   );
 }
@@ -596,6 +651,7 @@ export function Me() {
               void api.getMeHistory().then(setHistory).catch(() => {});
             }}
           />
+          {member && <Reflection theme={theme} />}
           {history && history.days.length > 0 && (
             <Week history={history} today={today} theme={theme} />
           )}
@@ -611,6 +667,7 @@ export function Me() {
       <footer className="me-foot">
         {member ? (
           <>
+            {today && <WhatCanTheySee theme={theme} />}
             <Wordmark size={0.8} />
             <button className="me-link" onClick={() => void signOut()}>Sign out</button>
           </>

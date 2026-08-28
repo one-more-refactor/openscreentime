@@ -338,18 +338,33 @@ export function Family() {
   };
   const sortedChildren = [...children].sort((a, b) => needsScore(a) - needsScore(b));
 
+  // The 3-second answer to "is everyone ok?" — the one honest sentence the
+  // Devices page already nails, brought to the page families actually open.
+  const verdict = (): string => {
+    if (children.length === 0) return "No one set up yet.";
+    const asking = children.filter((c) => c.pending_requests > 0);
+    const paused = children.filter((c) => c.locked);
+    const spent = children.filter((c) => !c.locked && minutesLeft(c) === 0);
+    const parts: string[] = [];
+    if (asking.length)
+      parts.push(
+        asking.length === 1
+          ? `${asking[0].name} asked for more time`
+          : `${asking.length} asked for more time`,
+      );
+    if (paused.length)
+      parts.push(paused.length === 1 ? `${paused[0].name} is paused` : `${paused.length} paused`);
+    if (spent.length && !paused.length)
+      parts.push(spent.length === 1 ? `${spent[0].name} is out of time` : `${spent.length} out of time`);
+    return parts.length ? parts.join(" · ") : "Everyone's within limits today.";
+  };
+
   return (
     <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>
       <PageHead
         eyebrow="Family"
         title={greeting}
-        sub={
-          loading && children.length === 0
-            ? "\u00a0"
-            : children.length === 0
-              ? "No children set up yet."
-              : `${children.length} ${children.length === 1 ? "child" : "children"} today`
-        }
+        sub={loading && children.length === 0 ? "\u00a0" : verdict()}
         actions={
           <Link to="/add" className="focusable ph-action">
             + Add a child
