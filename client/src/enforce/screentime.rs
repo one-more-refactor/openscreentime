@@ -289,6 +289,19 @@ pub fn is_frozen(username: &str) -> Option<bool> {
     std::fs::read_to_string(path).ok().map(|s| s.trim() == "1")
 }
 
+/// Whether this host can actually freeze a user — cgroup v2 unified with
+/// per-user systemd slices. On cgroup v1 / hybrid / a non-systemd init / many
+/// containers / WSL-without-systemd, `cgroup.freeze` does not exist, so a
+/// screen-time "lock" would silently do nothing. Callers surface this as a
+/// degraded gap rather than reporting a healthy lock over an unfrozen session.
+pub fn freezer_usable() -> bool {
+    // The unified v2 hierarchy exposes `cgroup.controllers` at the mount root;
+    // systemd puts each login under `user.slice/user-<uid>.slice`, where the
+    // per-cgroup `cgroup.freeze` file lives. Both present ⇒ we can freeze.
+    std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+        && std::path::Path::new("/sys/fs/cgroup/user.slice").exists()
+}
+
 /// Freeze all processes of a user via the cgroup v2 freezer. Reversible.
 ///
 /// `hard` controls the fallback when the freezer is unavailable: an admin

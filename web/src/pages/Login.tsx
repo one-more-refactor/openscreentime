@@ -93,8 +93,8 @@ export function Login() {
               Check your computer.
             </p>
             <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              A notification is asking whether this is you. Approve it only if
-              it shows this code:
+              A notification on your computer is showing three numbers. Tap the
+              one that matches this:
             </p>
             <p
               style={{

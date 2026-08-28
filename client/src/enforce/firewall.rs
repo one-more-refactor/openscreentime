@@ -70,12 +70,44 @@ const DOH_RESOLVERS_V6: &[&str] = &[
 const TOR_PORTS: &str = "9001, 9030, 9050, 9051, 9150";
 
 /// Render the full `nft -f` ruleset for the policy.
+/// The uid the local dnsmasq runs as, discovered from `/proc` — used to let
+/// only the resolver (and root) reach the upstream on :53 under `force_dns`.
+/// `None` when no dnsmasq is running or its owner can't be read.
+pub fn dnsmasq_uid() -> Option<u32> {
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if comm.trim() != "dnsmasq" {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            continue;
+        };
+        if let Some(uid) = status
+            .lines()
+            .find(|l| l.starts_with("Uid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|u| u.parse::<u32>().ok())
+        {
+            return Some(uid);
+        }
+    }
+    None
+}
+
 pub fn render_ruleset(
     fw: &FirewallPolicy,
     lockdown: &NetworkLockdown,
     dns_upstream: &str,
     server: Option<&str>,
     vpn: &VpnPlan,
+    dnsmasq_uid: Option<u32>,
 ) -> String {
     let mut s = String::new();
     s.push_str("# Managed by openscreentime — do not edit.\n");
@@ -155,6 +187,26 @@ pub fn render_ruleset(
     }
     if lockdown.force_dns {
         s.push_str("    # force_dns: plaintext DNS only to our own upstream\n");
+        // Close the "dig @upstream" bypass: only the local resolver process
+        // (and root) may talk :53 directly to the public upstream — a child
+        // querying it straight would otherwise get real IPs for every
+        // catalog/custom block, which live only in the local sinkhole. When
+        // the resolver's uid can't be determined we skip this (never risk
+        // dropping the resolver's own forwards); the block is then friction,
+        // not a wall, exactly as docs/TAMPER.md says.
+        if let Some(uid) = dnsmasq_uid {
+            let fam = if dns_upstream.parse::<std::net::Ipv6Addr>().is_ok() {
+                "ip6"
+            } else {
+                "ip"
+            };
+            s.push_str(&format!(
+                "    {fam} daddr {dns_upstream} udp dport 53 meta skuid != {{ 0, {uid} }} drop\n"
+            ));
+            s.push_str(&format!(
+                "    {fam} daddr {dns_upstream} tcp dport 53 meta skuid != {{ 0, {uid} }} drop\n"
+            ));
+        }
         // The `ip daddr` match only sees IPv4 packets, so the other family
         // must be dropped wholesale on port 53 — otherwise any v6 resolver is
         // a complete bypass. Loopback (::1 / 127.0.0.1 → dnsmasq) is already
@@ -263,7 +315,9 @@ pub fn apply(
     server: Option<&str>,
     vpn: &VpnPlan,
 ) -> Result<()> {
-    let body = render_ruleset(fw, lockdown, dns_upstream, server, vpn);
+    // Discovered fresh each apply: the resolver may have (re)started.
+    let resolver_uid = if lockdown.force_dns { dnsmasq_uid() } else { None };
+    let body = render_ruleset(fw, lockdown, dns_upstream, server, vpn, resolver_uid);
     // Atomic replace: `add table` (idempotent — creates if absent) then
     // `delete table` then the fresh definition, all in ONE `nft -f` transaction.
     // nft applies the file all-or-nothing, so a malformed rule (e.g. a bad
@@ -316,6 +370,7 @@ mod tests {
             "1.1.1.2",
             Some("203.0.113.10"),
             &VpnPlan::default(),
+            None,
         );
         assert!(r.contains("hook input priority 0; policy drop"));
         assert!(r.contains("hook output priority 0; policy drop"));
@@ -339,7 +394,7 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r.contains("tcp dport 853 drop"));
         assert!(r.contains("udp dport 853 drop"));
     }
@@ -350,9 +405,32 @@ mod tests {
             force_dns: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r.contains("ip daddr != 1.1.1.2 udp dport 53 drop"));
         assert!(r.contains("ip daddr != 1.1.1.2 tcp dport 53 drop"));
+        // With no resolver uid known, direct :53 to the upstream stays open
+        // (we never risk dropping the resolver's own forwards).
+        assert!(!r.contains("skuid"));
+    }
+
+    #[test]
+    fn force_dns_restricts_direct_upstream_53_to_the_resolver() {
+        // When the resolver uid is known, a child's `dig @upstream` is dropped
+        // while dnsmasq (that uid) and root keep forwarding.
+        let lockdown = NetworkLockdown {
+            force_dns: true,
+            ..Default::default()
+        };
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            Some(65534),
+        );
+        assert!(r.contains("ip daddr 1.1.1.2 udp dport 53 meta skuid != { 0, 65534 } drop"));
+        assert!(r.contains("ip daddr 1.1.1.2 tcp dport 53 meta skuid != { 0, 65534 } drop"));
     }
 
     #[test]
@@ -361,7 +439,7 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r.contains("ip daddr 8.8.8.8 tcp dport 443 drop"));
         assert!(r.contains("ip daddr 9.9.9.9 udp dport 443 drop"));
 
@@ -378,7 +456,7 @@ mod tests {
             force_dns: true,
             ..Default::default()
         };
-        let r2 = render_ruleset(&fw_basic(), &fd, "1.1.1.2", None, &VpnPlan::default());
+        let r2 = render_ruleset(&fw_basic(), &fd, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r2.contains("ip daddr != 1.1.1.2 udp dport 53 drop"));
         assert!(!r2.contains("ip daddr 1.1.1.2 udp dport 53 drop\n"));
     }
@@ -391,7 +469,7 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "9.9.9.9", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "9.9.9.9", None, &VpnPlan::default(), None);
         for ip in [
             "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
         ] {
@@ -416,7 +494,7 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         // force_dns: a v4 upstream means NO v6 destination is ever legitimate
         // on port 53 (loopback is accepted earlier in the chain).
         assert!(r.contains("meta nfproto ipv6 udp dport 53 drop"));
@@ -444,6 +522,7 @@ mod tests {
             "1.1.1.2",
             None,
             &VpnPlan::default(),
+            None,
         );
         assert_eq!(r.matches("meta l4proto ipv6-icmp accept").count(), 2);
     }
@@ -463,6 +542,7 @@ mod tests {
             "2606:4700:4700::1113",
             Some("2001:db8::7"),
             &VpnPlan::default(),
+            None,
         );
         assert!(r.contains("ip6 daddr 2606:4700:4700::1113 accept"));
         assert!(r.contains("ip6 daddr 2001:db8::7 accept"));
@@ -478,7 +558,7 @@ mod tests {
             block_vpn: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r.contains("udp dport 51820 drop"));
         assert!(r.contains("udp dport 1194 drop"));
         assert!(r.contains("tcp dport 1194 drop"));
@@ -492,7 +572,7 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         assert!(r.contains("tcp dport { 9001, 9030, 9050, 9051, 9150 } drop"));
     }
 
@@ -511,7 +591,7 @@ mod tests {
                 proto: "udp",
             }],
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &vpn);
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &vpn, None);
         let iface_pos = r.find("oifname \"openscreentime\" accept").unwrap();
         let ep_pos = r
             .find("ip daddr 203.0.113.7 udp dport 51820 accept")
@@ -540,6 +620,7 @@ mod tests {
             "1.1.1.2",
             None,
             &vpn,
+            None,
         );
         // Hostnames can't be nft-matched — the port itself is accepted.
         assert!(r.contains("udp dport 1194 accept"));
@@ -553,7 +634,7 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default());
+        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
         let drop_pos = r.find("tcp dport 853 drop").unwrap();
         let accept_pos = r.find("ip daddr 1.1.1.2 accept").unwrap();
         assert!(

@@ -714,7 +714,7 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
 
     // Channel the hub uses to push frames to this agent.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    st.hub.register_agent(device_id, tx).await;
+    let conn_token = st.hub.register_agent(device_id, tx).await;
 
     // Mark online. `locked` is a separate column now, so nothing to preserve.
     let _ = sqlx::query("UPDATE devices SET status = 'online', last_seen = now() WHERE id = $1")
@@ -765,8 +765,10 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
     }
 
     writer.abort();
-    st.hub.unregister_agent(device_id).await;
-    // The socket is gone: offline, immediately. Only if nothing else has
+    // Evict only our own connection; a reconnect that already replaced us keeps
+    // its live channel. `unregister` no-ops if we're not the current entry.
+    st.hub.unregister_agent(device_id, conn_token).await;
+    // The socket is gone: offline, immediately — but only if nothing else has
     // re-registered this device in the meantime (a reconnect that raced us).
     if !st.hub.is_online(device_id).await {
         let _ = sqlx::query("UPDATE devices SET status = 'offline' WHERE id = $1")
