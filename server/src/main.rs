@@ -116,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         let db = state.db.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut sweeps: u64 = 0;
             loop {
                 tick.tick().await;
                 match sqlx::query(
@@ -129,6 +130,23 @@ async fn main() -> anyhow::Result<()> {
                         tracing::debug!(swept = res.rows_affected(), "offline sweep");
                     }
                     Err(e) => tracing::warn!(error = %e, "offline sweep failed"),
+                }
+                // Retention: usage_slices and the event log grow forever
+                // otherwise. Prune once an hour (every 120 sweeps) — attribution
+                // is a rolling ~2-week signal and the event feed is an audit
+                // trail, not an archive.
+                sweeps += 1;
+                if sweeps % 120 == 0 {
+                    let _ = sqlx::query(
+                        "DELETE FROM usage_slices WHERE hour < now() - interval '21 days'",
+                    )
+                    .execute(&db)
+                    .await;
+                    let _ = sqlx::query(
+                        "DELETE FROM events WHERE created_at < now() - interval '90 days'",
+                    )
+                    .execute(&db)
+                    .await;
                 }
             }
         });

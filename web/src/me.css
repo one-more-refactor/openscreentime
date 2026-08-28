@@ -345,3 +345,11 @@
 .me-goal-line strong { color: var(--me-ink); }
 .me-goal-streak { color: var(--me-ink-3); }
 .theme-playful .me-goal-line { font-weight: 700; }
+
+/* ---- standing transparency link + reflection ----------------------------- */
+.me-see { margin-top: 1.25rem; }
+.me-see summary { cursor: pointer; }
+.me-reflect { text-align: center; }
+.me-reflect-q { margin: 0 0 0.6rem; font-size: 1rem; color: var(--me-ink); }
+.theme-playful .me-reflect-q { font-weight: 800; }
+.me-reflect .me-ask-row { justify-content: center; }

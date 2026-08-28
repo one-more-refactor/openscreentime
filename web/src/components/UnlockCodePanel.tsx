@@ -242,7 +242,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
       <Modal
         open={!!fresh}
         onClose={() => setFresh(null)}
-        title="RECOVERY CODES"
+        title="Recovery codes"
         footer={
           <>
             <Button variant="ghost" onClick={() => window.print()}>
@@ -254,7 +254,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
             >
               COPY ALL
             </Button>
-            <Button onClick={() => setFresh(null)}>I'VE SAVED THEM</Button>
+            <Button onClick={() => setFresh(null)}>I've saved them</Button>
           </>
         }
       >
@@ -278,7 +278,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
       <Modal
         open={confirmGenerate}
         onClose={() => setConfirmGenerate(false)}
-        title="NEW RECOVERY CODES"
+        title="New recovery codes"
         danger
         footer={
           <>
@@ -301,7 +301,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
       <Modal
         open={confirmReplace}
         onClose={() => setConfirmReplace(false)}
-        title="REPLACE UNLOCK CODE"
+        title="Replace unlock code"
         danger
         footer={
           <>

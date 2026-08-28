@@ -65,6 +65,15 @@ pub async fn ingest(
     .into_iter()
     .collect();
 
+    // Collect the valid rows, then upsert them in ONE statement via UNNEST —
+    // the old per-slice loop held one of only ~10 pool connections for up to
+    // 500 serial round-trips, which a few reconnecting long-offline devices
+    // could saturate.
+    let mut os = Vec::new();
+    let mut hours = Vec::new();
+    let mut kinds = Vec::new();
+    let mut keys = Vec::new();
+    let mut amounts = Vec::new();
     for s in &req.slices {
         if !matches!(s.kind.as_str(), "app" | "site") || s.amount <= 0 || s.amount > 86_400 {
             continue;
@@ -81,19 +90,28 @@ pub async fn ingest(
         if key.is_empty() {
             continue;
         }
+        os.push(s.os_username.clone());
+        hours.push(s.hour);
+        kinds.push(s.kind.clone());
+        keys.push(key);
+        amounts.push(s.amount);
+    }
+    if !keys.is_empty() {
         sqlx::query(
             "INSERT INTO usage_slices (device_id, tenant_id, os_username, hour, kind, key, amount)
-             VALUES ($1, $2, $3, date_trunc('hour', $4::timestamptz), $5, $6, $7)
+             SELECT $1, $2, u.os, date_trunc('hour', u.hour), u.kind, u.key, u.amount
+               FROM UNNEST($3::text[], $4::timestamptz[], $5::text[], $6::text[], $7::bigint[])
+                 AS u(os, hour, kind, key, amount)
              ON CONFLICT (device_id, os_username, hour, kind, key)
              DO UPDATE SET amount = usage_slices.amount + EXCLUDED.amount",
         )
         .bind(agent.device_id)
         .bind(agent.tenant_id)
-        .bind(&s.os_username)
-        .bind(s.hour)
-        .bind(&s.kind)
-        .bind(&key)
-        .bind(s.amount)
+        .bind(&os)
+        .bind(&hours)
+        .bind(&kinds)
+        .bind(&keys)
+        .bind(&amounts)
         .execute(&st.db)
         .await?;
     }
