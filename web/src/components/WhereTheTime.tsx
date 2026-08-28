@@ -112,6 +112,12 @@ export function WhereTheTime({ accountId }: { accountId?: string }) {
           shows everyone's.
         </p>
       )}
+      {data.sites_hidden_shared && (
+        <p className="wt-note">
+          Website activity is hidden here because this is a shared computer — it would show
+          everyone's browsing, not just yours.
+        </p>
+      )}
     </section>
   );
 }

@@ -114,6 +114,11 @@ pub async fn where_for_account(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
     account_id: Uuid,
+    // When the viewer IS this person (their own /me), device-wide site activity
+    // on a SHARED computer leaks siblings'/parents' browsing to them — so it's
+    // suppressed there. A parent viewing a child is authorized to see the
+    // device's activity, so they pass `false`.
+    hide_shared_sites: bool,
 ) -> AppResult<Value> {
     // Apps: the person's own OS logins, summed across their devices.
     let apps: Vec<(String, i64)> = sqlx::query_as(
@@ -132,18 +137,33 @@ pub async fn where_for_account(
 
     // Sites: device-wide on the machines this person uses (resolver traffic
     // has no user — the UI labels it as the computer's).
-    let sites: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT us.key, SUM(us.amount)::bigint
-           FROM usage_slices us
-          WHERE us.tenant_id = $2 AND us.kind = 'site' AND us.os_username = ''
-            AND us.hour >= date_trunc('day', now())
-            AND us.device_id IN (SELECT device_id FROM device_users WHERE account_id = $1)
-          GROUP BY us.key ORDER BY 2 DESC LIMIT 12",
+    // Is any device this person uses shared with a DIFFERENT account?
+    let shared: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+           SELECT 1 FROM device_users other
+            WHERE other.account_id <> $1
+              AND other.device_id IN (SELECT device_id FROM device_users WHERE account_id = $1))",
     )
     .bind(account_id)
-    .bind(tenant_id)
-    .fetch_all(db)
+    .fetch_one(db)
     .await?;
+    let sites_hidden = hide_shared_sites && shared;
+    let sites: Vec<(String, i64)> = if sites_hidden {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT us.key, SUM(us.amount)::bigint
+               FROM usage_slices us
+              WHERE us.tenant_id = $2 AND us.kind = 'site' AND us.os_username = ''
+                AND us.hour >= date_trunc('day', now())
+                AND us.device_id IN (SELECT device_id FROM device_users WHERE account_id = $1)
+              GROUP BY us.key ORDER BY 2 DESC LIMIT 12",
+        )
+        .bind(account_id)
+        .bind(tenant_id)
+        .fetch_all(db)
+        .await?
+    };
 
     // The day's curve: the person's own app-SECONDS per hour (only — mixing in
     // site lookup COUNTS made the intensity unit-soup, where 200 DNS hits
@@ -166,6 +186,8 @@ pub async fn where_for_account(
         "apps": apps.into_iter().map(|(k, s)| json!({ "key": k, "seconds": s })).collect::<Vec<_>>(),
         "sites": sites.into_iter().map(|(k, n)| json!({ "key": k, "hits": n })).collect::<Vec<_>>(),
         "hours": hours.into_iter().map(|(h, a)| json!({ "hour": h, "amount": a })).collect::<Vec<_>>(),
+        // The web shows a "sites hidden — shared computer" note instead of a leak.
+        "sites_hidden_shared": sites_hidden,
     }))
 }
 
@@ -189,13 +211,13 @@ pub async fn where_api(
             .await?;
     owned.ok_or_else(|| AppError::NotFound("no such person".into()))?;
     Ok(Json(
-        where_for_account(&st.db, admin.tenant_id, q.account_id).await?,
+        where_for_account(&st.db, admin.tenant_id, q.account_id, false).await?,
     ))
 }
 
 /// `GET /api/me/where` — the person's own view (member-allowed).
 pub async fn me_where(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     Ok(Json(
-        where_for_account(&st.db, admin.tenant_id, admin.admin_id).await?,
+        where_for_account(&st.db, admin.tenant_id, admin.admin_id, true).await?,
     ))
 }
