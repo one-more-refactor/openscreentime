@@ -20,8 +20,17 @@ Everything the agent sends the server is one of these, and nothing else:
 - **Device status**: online/offline, public IP, agent version, hostname.
 - **The list of OS user accounts on this machine** (usernames, display names, UIDs) — so
   policy can be applied per person.
-- **Screen time totals**: minutes used today, per OS user. Not per app, not per window —
-  just "logged into an active local session, not idle."
+- **Screen time totals**: minutes used today, per OS user. Just "logged into an active
+  local session, not idle."
+- **Where the time went** (added in 0.6): a rough picture of your day — which of a fixed
+  list of well-known apps were *open* (in minutes, per OS user; "open," not "focused" — the
+  agent can't tell which window is in front), and which **websites your computer looked up**,
+  as a count of DNS requests per registrable domain (e.g. "youtube.com ×40"), bucketed by
+  hour. This is **activity, not history**: it's the domain names your machine asked its
+  resolver about — not the pages, not the URLs, not the contents, and it's counts, not a
+  timeline of visits. The site counts are **per device, not per person**, so on a shared
+  computer they mix everyone's lookups together. You see the exact same picture of your own
+  day, on your own page, that a parent sees.
 - **Lock/unlock events**: when the device was locked or unlocked, and by what (admin
   command, screen-time expiry, PIN override, offline lockdown).
 - **Policy changes**: when a new policy was applied and its version.
@@ -48,10 +57,10 @@ somewhere else, not planned, not collected and just "not shown to you":
 - **No camera or microphone access.** The agent has no code that touches either.
 - **No message or file contents.** The agent doesn't read your browser, chat apps, or
   documents.
-- **No per-site browsing history sent to the server.** DNS filtering happens locally (a
-  dnsmasq config the agent generates and reloads) — every query is either allowed and
-  forwarded or answered with NXDOMAIN, on your machine, on the spot. The agent does not
-  log which domains you requested and does not ship a query log anywhere.
+- **No full browsing history, no page contents, no keystrokes.** The agent never sees the
+  pages you open, what's on them, or what you type into them. DNS filtering happens locally
+  (a dnsmasq config the agent generates and reloads) — every query is either allowed and
+  forwarded or answered with NXDOMAIN, on your machine, on the spot.
 
 - **No remote shell.** Earlier versions of OpenScreenTime let a parent open a root shell on this
   device (always disclosed to you while it was live). That capability has been **removed

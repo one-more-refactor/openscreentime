@@ -5,17 +5,23 @@ time, and reading what the system is telling you. It assumes the server is alrea
 see [`docs/DEPLOY.md`](DEPLOY.md) for standing it up. This document is about the product, not
 the infrastructure.
 
-The short version of what this product is: **default-deny, honestly reported.** Nothing is
-allowed until you allow it, and the console never tells you something happened when it only
-queued. Where there's a real limitation — an offline device you can't lock instantly, a kid
-with root who can ultimately unplug the machine — this guide says so instead of pretending
-otherwise.
+The short version of what this product is (as of the 0.6 "passive turn"):
+**everything works unless you block it — and what you block is really blocked, honestly
+reported.** It's a calm, glanceable family screen-time app, not a lockdown cage: the internet
+is open by default, you *add* the blocks you want (whole categories or single apps/sites), and
+those are enforced for real (DNS sinkhole + firewall). The console never tells you something
+happened when it only queued. Where there's a real limitation — an offline device you can't
+pause instantly, a determined kid who can route around DNS-level blocking, a computer with root
+who can ultimately unplug the machine — this guide says so instead of pretending otherwise.
 
 ## First login & passkeys
 
-OpenScreenTime is passkey-only — no passwords, anywhere. The first time anyone opens the console,
-the **FIRST ADMIN** tab on the login page is open: enter an email and register a passkey, and
-the tenant is bootstrapped around that account. The instant that first admin exists, the
+The everyday way in is your **name**: type it, and your own already-set-up computer shows a
+prompt to approve the sign-in (no password, no code to type — you tap the number that matches
+the one in your browser). The **first** parent, on a brand-new server, has no computer to
+approve yet, so they set up with a passkey: open the console, choose *First parent*, enter an
+email and register a passkey, and the household is bootstrapped around that account. The instant
+that first admin exists, the
 registration endpoints start refusing new accounts (`403 registration_closed`) — a public
 OpenScreenTime URL can't be hijacked by whoever finds it first. If you need a second parent to have
 their own admin login later, the existing admin sets `OST_OPEN_REGISTRATION=1` on the
@@ -48,11 +54,6 @@ ENROLL COMMAND** (only available while the device is still `pending`) to generat
 token with a new 24-hour window. Once a device has actually enrolled it holds its own bearer
 token and this option disappears — a re-enroll at that point means deleting and re-adding the
 device.
-
-OpenScreenTime can also find things for you: **LAN DISCOVERY** on the Devices page lets an online
-device scan its local subnet (ARP + a light port sweep) for other hosts. Results show IP, MAC,
-and open ports (the hostname/vendor columns exist but aren't populated yet), each with an
-**ENROLL →** shortcut that pre-fills the add-device name. Scans only run when you trigger them — nothing scans in the background.
 
 ## Understanding the device list
 
@@ -102,43 +103,38 @@ access and root, no software lock is unbypassable — only expensive and detecta
 promise is deterrence plus real-time alerting, not magic. See `docs/TAMPER.md` for the full
 threat model.
 
-## Profiles & presets
+## Age brackets & rules
 
-**Profiles** define policy — DNS, firewall, screen time, gamification — and are assigned per
-Linux user account on a device (so a shared family computer works correctly; each login gets
-its own limits). Every tenant starts with three presets, editable but not deletable, plus
-whatever custom profiles you create.
+Everyone you add has an **age bracket** — Little (0–6), Kid (6–12), Younger teen (12–16),
+Older teen (16–18), Adult (18+) — chosen from their birthdate (with an override for the
+mature 11-year-old). The bracket sets their starting rules and how much they run themselves;
+you adjust any of it afterward. Rules are tracked per Linux user account on a device, so a
+shared family computer just works — each login gets its own limits.
 
-**Kids** — locked down:
-- DNS allowlist only: `wikipedia.org`, `khanacademy.org`, `pbskids.org`, `scratch.mit.edu`,
-  `duolingo.com`. Safe search forced on.
-- Screen time: **60 minutes/day**, allowed windows 15:00–19:00 on weekdays and 09:00–19:00 on
-  weekends. Bedtime hard-block 20:00–07:00.
-- Full network lockdown: DNS forced, DoH/DoT/Tor/VPN all blocked. Offline hard-lockdown after
-  **7 days** with no server contact.
-- Earn-time on: "Read for 20 min" and "Finish chores" each worth 15 minutes. Lockout challenge
-  is a math problem.
+The network is **open for every bracket**; the difference is which categories come
+pre-blocked and how the limits are set:
 
-**Teen** — trusted but guarded:
-- DNS allowlist: `*.wikipedia.org`, `github.com`, `google.com`, `youtube.com`, `duolingo.com`,
-  `*.edu`.
-- Screen time: **180 minutes/day**, windows 07:00–21:00 weekdays / 08:00–22:00 weekends.
-  Bedtime 22:30–06:30.
-- Lighter lockdown: DoH/DoT/Tor blocked, VPN and forced-DNS left off. No offline
-  hard-lockdown (`offline_lockdown_days: 0`).
-- Earn-time on: "Finish homework" worth 20 minutes. Lockout challenge is a 60-second wait, not
-  a puzzle — less friction, since the trust model here is different.
+**Little / Kid** — the internet works, but adult content, gambling, dating, and VPN/proxy
+sites are blocked from the start (add or remove any of that yourself). A daily limit and a
+bedtime are on; the youngest bracket can't send requests and just gets a plain hard stop,
+the Kid bracket can ask for time and earn it. Anti-bypass on (forced DNS, DoH/DoT/Tor
+blocked) so the blocks you set actually hold.
 
-**Default** — baseline for anyone not yet assigned a real profile: DNS allows everything
-(`*`) with safe search on, no screen-time limit, no gamification. This exists so a
-newly-discovered OS user on an enrolled device isn't silently blocked before you've had a
-chance to decide what they should get — assign Kids or Teen (or a custom profile) as soon as
-you notice them.
+**Younger / Older teen** — same open network with a lighter pre-block set (adult, gambling,
+proxies), their own goals and stats, requests to you, and a short wind-down before a stop.
+Older teens are mostly self-set with your visibility.
 
-Every profile is edited through the same zero-trust form: DNS allow/block lists, firewall
-ports, an anti-bypass "Network Lockdown" section (force DNS, block DoH/DoT/Tor/VPN, and an
-offline-lockdown-after-N-days setting), screen time with day/time windows and bedtime,
-gamification (earn tasks, lockout challenge type, streak nudges), and the parent PIN. Presets
+**Adult** — fully private self-tracking. No parent, no external enforcement, nothing
+pre-blocked; they can also be the hub for others.
+
+Nothing is blocked by an allowlist any more, and the pre-0.6 "Approved sites only" posture
+is gone — if you have an old profile still using it, its page offers to open it back up.
+
+You edit the rules on each person's page: **Apps & categories** (tap to block a whole
+category or a single app — nothing is blocked until you do), **Websites** (block a site by
+name), a daily-limit slider, allowed hours and bedtime, safe search, earning time back, and
+what the hard stop feels like. There's also a one-slider **Protection** level (Off → Safe
+search → Protected → Strict) if you'd rather not tune each field. Presets
 can be edited in place; custom profiles can be duplicated from any existing one and deleted
 once nothing is assigned to them.
 
@@ -167,7 +163,7 @@ headless agent (no GUI), that offer is auto-filed as a pending earn request the 
 lockout fires, so the request is already waiting for you by the time anyone asks.
 
 **Granting extra time today**, no request needed: on the device detail page, each user has
-**GRANT TIME** buttons for +15 / +30 / +60 minutes. This credits the ledger immediately and
+**+15 min** / **+30 min** give-time buttons. This credits the ledger immediately and
 pushes a live update to the agent — the toast says "applies within ~10s," which is the
 enforcement tick interval, so it's not instant but it's fast. Grants larger than 240 minutes
 are rejected by the server as a sanity check.
@@ -206,17 +202,23 @@ device, you have to set one.
 
 ## DNS & network filtering, honestly
 
-Every profile is default-deny for both DNS and firewall — nothing resolves or connects unless
-you've explicitly allowed it. What the child sees when they hit something blocked, today, is
-whatever their browser shows for a domain that doesn't resolve — an NXDOMAIN, "can't reach this
+The network is open by default; only the categories, apps, and sites you block are filtered
+(the family DNS resolver plus a local sinkhole). What the child sees when they hit something
+blocked is whatever their browser shows for a domain that doesn't resolve — "can't reach this
 site," "server not found," depending on the browser. **There is no OpenScreenTime-branded explainer
-page yet.** It looks like the site is broken or offline, not like a filter. If you're
-troubleshooting "the internet doesn't work" complaints, this is the first thing to check —
-have them try a site that should be allowed, or check the allowlist on their profile.
+page yet.** It looks like the site is broken, not like a filter. If you're troubleshooting "the
+internet doesn't work" complaints, first check whether the site is one you blocked — and note
+that on a captive-portal or public-DNS-blocking network (some cafés/schools) filtering
+temporarily relaxes itself so the device can still get online, which the console shows as a
+"filtering relaxed" note rather than pretending everything's fine.
 
-The **Network Lockdown** toggles on a profile (Force DNS, Block DoH, Block DoT, Block Tor,
-Block VPN) close off the common ways a technically capable kid gets around the filter above —
-each is a real firewall rule, not a suggestion. They're on by default in the Kids preset and
+Whenever you block anything, the anti-bypass rules (force DNS, block DoH/DoT/Tor) turn on
+automatically so the block actually holds — closing the common ways a technically capable kid
+routes around DNS filtering. Be honest with yourself about the ceiling, though: because the
+network is open, blocking lives at the DNS layer, and a determined kid with another way to
+resolve a name (a hand-configured DoH endpoint, a hotspot) can still get around it — you'll
+usually see the blocked category briefly reappear in "Where the time went" when that happens.
+These rules are on for the managed brackets and
 mostly off in Teen, reflecting the different trust levels those two presets are built around.
 
 ## The events feed
@@ -254,7 +256,7 @@ things can cause it, roughly in order of likelihood:
   it and reports the stop attempt, but a sufficiently determined and privileged user can still
   win a given round.
 - The server itself was unreachable from the device's side for a long stretch — if the
-  profile's `offline_lockdown_days` is set (7 days on the Kids preset, off by default on Teen),
+  profile's `offline_lockdown_days` is set (off by default in every preset; opt in per profile),
   the device will have locked *itself* down once that threshold passed, which is visible as an
   `offline_hard_lockdown` event once it reconnects.
 

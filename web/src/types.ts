@@ -510,6 +510,8 @@ export interface WhereData {
   sites: { key: string; hits: number }[];
   /** raw UTC hour rows; the client buckets them into local hours */
   hours: { hour: string; amount: number }[];
+  /** the site list was withheld on a member's own view of a shared computer */
+  sites_hidden_shared?: boolean;
 }
 
 // ---- Unlock codes (per device, owned by the server) ---------------------------
