@@ -48,13 +48,33 @@ fn challenge_of(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// A 4-digit match code shown in BOTH the browser and the approving device's
-/// prompt. The human approves only if they match — so an attacker who
-/// triggers the prompt for a name they know cannot get it approved, because
-/// their browser shows a different number than the victim's device does.
+/// The 4-digit code shown in the BROWSER only. The approving device shows this
+/// code among two decoys and the human taps the one their browser shows
+/// (number-matching, like Google's sign-in prompt). A cold-call attacker who
+/// triggers the prompt for a name they know never sees the victim's browser,
+/// so they cannot tell the victim which number to tap — a stray tap is 1-in-3,
+/// rate-limited, and alerted. (The earlier "show the same code on both" design
+/// only defended a victim-initiated login, not this unsolicited case.)
 fn gen_match_code() -> String {
     let n: u16 = rand::thread_rng().gen_range(0..10_000);
     format!("{n:04}")
+}
+
+/// The real code plus two distinct decoys, shuffled — what the device shows.
+fn code_choices(real: &str) -> Vec<String> {
+    let mut rng = rand::thread_rng();
+    let mut out = vec![real.to_string()];
+    while out.len() < 3 {
+        let c = format!("{:04}", rng.gen_range(0..10_000));
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    // Fisher-Yates on 3 elements.
+    for i in (1..out.len()).rev() {
+        out.swap(i, rng.gen_range(0..=i));
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -158,7 +178,9 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
                 "request_id": request_id,
                 "username": display_name,
                 "os_users": os_users,
-                "match_code": match_code,
+                // The device shows these three; the browser shows the real one.
+                // The device is NOT told which is real.
+                "codes": code_choices(&match_code),
                 "expires_in_secs": REQUEST_MINUTES * 60,
             }),
         )
@@ -249,6 +271,32 @@ pub async fn finish(
     let role = role.ok_or_else(|| AppError::Unauthorized("no such account any more".into()))?;
 
     let token = create_session(&st.db, account_id, tenant_id).await?;
+
+    // A new session on your account is security-relevant: phone it out (the
+    // alert worker drains critical events), so a takeover can never be silent.
+    let display: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM admins WHERE id = $1")
+            .bind(account_id)
+            .fetch_optional(&st.db)
+            .await?;
+    let _ = crate::events::insert(
+        &st.db,
+        tenant_id,
+        None,
+        None,
+        "account_login",
+        "critical",
+        json!({
+            "message": format!(
+                "New web sign-in as {} — if this wasn't you, change your passkey.",
+                display.unwrap_or_else(|| "someone".into())
+            ),
+            "account_id": account_id,
+            "via": "device_approval",
+        }),
+    )
+    .await;
+
     Ok((
         jar.add(session_cookie(token, st.cookie_secure)),
         Json(json!({ "status": "approved", "role": role })),
@@ -259,42 +307,48 @@ pub async fn finish(
 pub struct DecisionReq {
     #[serde(default)]
     pub request_id: Uuid,
+    /// The number the human tapped (number-matching). `None`/empty = "not me".
+    /// Approval happens only if this equals the request's real `match_code`.
     #[serde(default)]
-    pub approve: bool,
+    pub code: Option<String>,
     /// Which OS login answered (for the audit trail).
     #[serde(default)]
     pub os_username: String,
 }
 
 /// `POST /agent/login-decision` — the human at the machine answered. Only a
-/// device the target account actually uses may answer, and only once.
+/// device the target account actually uses may answer, and only once. The
+/// server — not the device — decides approve vs deny by matching the tapped
+/// code against the real one, so a device that guessed wrong (or a cold-call
+/// victim who tapped a random number) is denied.
 pub async fn decision(
     State(st): State<AppState>,
     agent: AgentAuth,
     Json(req): Json<DecisionReq>,
 ) -> AppResult<Json<Value>> {
-    let updated: Option<Uuid> = sqlx::query_scalar(
+    let tapped = req.code.as_deref().unwrap_or("").trim().to_string();
+    let updated: Option<(Uuid, bool)> = sqlx::query_as(
         "UPDATE login_requests lr
-            SET status = CASE WHEN $3 THEN 'approved' ELSE 'denied' END,
+            SET status = CASE WHEN lr.match_code = $3 AND $3 <> '' THEN 'approved' ELSE 'denied' END,
                 approved_device_id = $2
           WHERE lr.id = $1 AND lr.status = 'pending' AND lr.expires_at > now()
             AND lr.tenant_id = $4
             AND EXISTS (SELECT 1 FROM device_users du
                          WHERE du.device_id = $2 AND du.account_id = lr.account_id)
-        RETURNING lr.id",
+        RETURNING lr.id, (lr.match_code = $3 AND $3 <> '')",
     )
     .bind(req.request_id)
     .bind(agent.device_id)
-    .bind(req.approve)
+    .bind(&tapped)
     .bind(agent.tenant_id)
     .fetch_optional(&st.db)
     .await?;
 
-    if updated.is_none() {
+    let Some((_, approved)) = updated else {
         return Err(AppError::NotFound(
             "that sign-in request is gone or not this device's to answer".into(),
         ));
-    }
+    };
 
     crate::events::insert(
         &st.db,
@@ -305,13 +359,13 @@ pub async fn decision(
         "info",
         json!({
             "request_id": req.request_id,
-            "approved": req.approve,
+            "approved": approved,
             "by_os_user": req.os_username,
         }),
     )
     .await?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "approved": approved })))
 }
 
 #[cfg(test)]
@@ -333,6 +387,23 @@ mod tests {
             let c = gen_match_code();
             assert_eq!(c.len(), 4);
             assert!(c.chars().all(|ch| ch.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn code_choices_hold_the_real_code_among_distinct_decoys() {
+        for _ in 0..100 {
+            let real = gen_match_code();
+            let cs = code_choices(&real);
+            assert_eq!(cs.len(), 3);
+            assert!(cs.contains(&real), "the real code must be offered");
+            // All three distinct — no accidental duplicate that would make the
+            // decoy trivially guessable.
+            let mut uniq = cs.clone();
+            uniq.sort();
+            uniq.dedup();
+            assert_eq!(uniq.len(), 3);
+            assert!(cs.iter().all(|c| c.len() == 4 && c.chars().all(|d| d.is_ascii_digit())));
         }
     }
 }

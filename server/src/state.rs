@@ -129,22 +129,43 @@ pub struct AuthChallenge {
 }
 
 /// Hub of live agent WebSocket connections.
+///
+/// Each connection carries a unique token, so a socket's teardown only evicts
+/// its OWN entry. Without it, a reconnect (sleep/wake, a blip, a server-restart
+/// reconnect storm) that re-registered first would be deleted by the OLD
+/// socket's teardown — and the device flipped offline while its new, live
+/// channel was dropped, so a queued unlock was never delivered.
 #[derive(Default)]
 pub struct Hub {
-    /// device_id -> sender that writes JSON frames to that agent's socket.
-    agents: RwLock<HashMap<Uuid, mpsc::UnboundedSender<serde_json::Value>>>,
+    /// device_id -> (connection token, sender to that agent's socket).
+    agents: RwLock<HashMap<Uuid, (u64, mpsc::UnboundedSender<serde_json::Value>)>>,
+    next_token: std::sync::atomic::AtomicU64,
 }
 
 impl Hub {
+    /// Register a connection; returns its token to pass back to `unregister`.
     pub async fn register_agent(
         &self,
         device_id: Uuid,
         tx: mpsc::UnboundedSender<serde_json::Value>,
-    ) {
-        self.agents.write().await.insert(device_id, tx);
+    ) -> u64 {
+        let token = self
+            .next_token
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.agents.write().await.insert(device_id, (token, tx));
+        token
     }
 
-    pub async fn unregister_agent(&self, device_id: Uuid) {
+    /// Evict ONLY if the current entry is still this connection's.
+    pub async fn unregister_agent(&self, device_id: Uuid, token: u64) {
+        let mut map = self.agents.write().await;
+        if map.get(&device_id).map(|(t, _)| *t) == Some(token) {
+            map.remove(&device_id);
+        }
+    }
+
+    /// Evict unconditionally — for when the device itself is gone (deleted).
+    pub async fn force_unregister(&self, device_id: Uuid) {
         self.agents.write().await.remove(&device_id);
     }
 
@@ -154,7 +175,7 @@ impl Hub {
 
     /// Push a JSON frame to a connected agent. Returns true if delivered.
     pub async fn push(&self, device_id: Uuid, frame: serde_json::Value) -> bool {
-        if let Some(tx) = self.agents.read().await.get(&device_id) {
+        if let Some((_, tx)) = self.agents.read().await.get(&device_id) {
             tx.send(frame).is_ok()
         } else {
             false

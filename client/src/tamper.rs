@@ -156,6 +156,19 @@ pub fn reassert_all(exec: &Exec) -> Vec<Event> {
 /// Guard against NetworkManager disconnect of a managed connection. Skeleton:
 /// probe current connectivity; a real build subscribes to NM D-Bus
 /// `StateChanged` / `DeviceRemoved` signals and re-activates the connection.
+/// Is the device actually on a network right now? A default route means "the
+/// local network is up, we just can't reach OUR server" — the only case in
+/// which counting toward an offline hard-lockdown is legitimate. No route (or
+/// no `ip`) means the box is simply offline (holiday, dead router, no wifi) or
+/// we can't tell — and we must NOT freeze the family for that, so this returns
+/// false, erring toward never punishing an innocent outage.
+pub fn local_network_up(exec: &Exec) -> bool {
+    match exec.try_probe("ip", &["route", "show", "default"]) {
+        Some(out) => out.lines().any(|l| l.contains("default")),
+        None => false,
+    }
+}
+
 pub fn nm_guard_probe(exec: &Exec) -> Option<Event> {
     let state = exec.probe("nmcli", &["-t", "-f", "STATE", "general"]);
     if state.trim() == "disconnected" {

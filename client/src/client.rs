@@ -167,16 +167,18 @@ impl ServerClient {
     }
 
     /// POST /agent/login-decision — the human at this machine answered a
-    /// web sign-in prompt (CONTRACT-0.6 client-first login).
+    /// web sign-in prompt (CONTRACT-0.6 client-first login). `code` is the
+    /// number they tapped (number-matching); `None` = "not me". The server
+    /// decides approve vs deny by matching it to the real code.
     pub async fn post_login_decision(
         &self,
         request_id: &str,
-        approve: bool,
+        code: Option<&str>,
         os_username: &str,
     ) -> Result<()> {
         let body = json!({
             "request_id": request_id,
-            "approve": approve,
+            "code": code,
             "os_username": os_username,
         });
         self.http

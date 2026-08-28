@@ -540,7 +540,7 @@ pub async fn delete_device(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound("device not found".into()));
     }
-    st.hub.unregister_agent(id).await;
+    st.hub.force_unregister(id).await;
     Ok(Json(json!({ "ok": true })))
 }
 

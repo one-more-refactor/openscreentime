@@ -326,6 +326,13 @@ pub struct Agent {
     attrib_ticks: u32,
     /// Once-per-day dedupe for enforcement probe findings (kind[/user] → day).
     probe_reported: HashMap<String, chrono::NaiveDate>,
+    /// Filtering temporarily relaxed because the family DNS upstream is
+    /// unreachable (captive portal, a network that blocks public DNS) — so a
+    /// kid isn't bricked off wifi entirely. Reported as a degraded gap.
+    dns_relaxed: bool,
+    /// Consecutive ticks the upstream has been unreachable while a block was in
+    /// force — relax only after this is sustained, so a blip doesn't flap.
+    dns_unreach_ticks: u32,
 }
 
 /// One outstanding "approve this web sign-in?" prompt.
@@ -338,9 +345,16 @@ struct PendingLogin {
     /// The OS logins on this device that belong to that person; only their
     /// sessions see the prompt, and only their decision files are honored.
     os_users: Vec<String>,
-    /// The 4-digit code shown in the browser; the human approves only if the
-    /// prompt's code matches it (anti-phishing).
-    match_code: String,
+    /// Three 4-digit codes to show the human (number-matching); the browser
+    /// shows the one real code and the human taps the match. The device is not
+    /// told which is real — the server decides on the tapped value.
+    codes: Vec<String>,
+    /// The number the human tapped, once read from the decision file — held in
+    /// MEMORY so a transient POST failure is retried from here, never
+    /// re-written back into the child-owned runtime dir (that write followed a
+    /// child-planted symlink → root file write; the retry-via-file is gone).
+    /// `Some("")` = "not me" (deny); `Some(code)` = tapped that number.
+    decision: Option<String>,
     expires: chrono::DateTime<chrono::Utc>,
 }
 
@@ -365,6 +379,19 @@ const _: () = assert!(
     "EVENT_BATCH_MAX must be within the server's MAX_EVENTS or every event \
      post 400s and the retry buffer can never drain"
 );
+
+/// Can we reach the family DNS upstream right now? A 1-second TCP connect to
+/// its :53 — resolvers accept TCP, root's socket is allowed past force_dns, and
+/// a fast timeout keeps the tick snappy. Used only to decide whether to relax
+/// filtering on a network that can't reach it (captive portal / public-DNS
+/// block), never as a security signal.
+fn upstream_reachable(upstream: &str) -> bool {
+    let Ok(ip) = upstream.parse::<std::net::IpAddr>() else {
+        return true; // not an IP we can probe — don't relax on that basis
+    };
+    let addr = std::net::SocketAddr::new(ip, 53);
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok()
+}
 
 /// The per-user on-demand earn-request marker. The kid's tray drops a file here
 /// (in its own `/run/user/<uid>`, which only that user and root can touch); the
@@ -515,6 +542,8 @@ impl Agent {
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
             probe_reported: HashMap::new(),
+            dns_relaxed: false,
+            dns_unreach_ticks: 0,
         })
     }
 
@@ -583,12 +612,22 @@ impl Agent {
             .collect();
         let locked =
             lock_intent && (present.is_empty() || present.iter().all(|u| frozen_users.contains(u)));
+        // A host that can't freeze isn't enforcing screen time even with no
+        // network gaps — surface it as a gap so the console isn't a green lie.
+        let mut gaps = self.standing_gaps.clone();
+        let screen_time_active = self
+            .policies
+            .values()
+            .any(|p| p.screen_time.enabled && p.screen_time.daily_limit_minutes > 0);
+        if screen_time_active && !self.exec.dry_run() && !screentime::freezer_usable() {
+            gaps.push("screen_time_no_freezer".to_string());
+        }
         DeviceState {
             locked,
             lock_intent,
             frozen_users,
-            enforcing: !self.policies.is_empty() && self.standing_gaps.is_empty(),
-            gaps: self.standing_gaps.clone(),
+            enforcing: !self.policies.is_empty() && gaps.is_empty(),
+            gaps,
             agent_version: crate::client::AGENT_VERSION.to_string(),
             active_users: self.active_users.clone(),
         }
@@ -682,8 +721,16 @@ impl Agent {
     fn offline_hard_lockdown_check(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         let days = self.offline_lockdown_days();
-        let engaged =
-            days > 0 && (chrono::Utc::now() - self.last_contact_wall).num_days() >= i64::from(days);
+        // Only a device that is ONLINE but can't reach OUR server should count
+        // down to a hard-lockdown (a real "someone cut it off from us" signal).
+        // A laptop that's simply off the network for a week — a holiday, a dead
+        // router, no wifi — must not freeze the whole family; that's an innocent
+        // outage, not tampering. Without this, one self-hosted-server outage
+        // (ISP/VPS/cert) would strand every kid's device at once.
+        let local_net_up = tamper::local_network_up(&self.exec);
+        let engaged = days > 0
+            && local_net_up
+            && (chrono::Utc::now() - self.last_contact_wall).num_days() >= i64::from(days);
         if engaged && !self.offline_hard_lockdown {
             events.push(tamper::tamper_event(
                 "offline_hard_lockdown",
@@ -956,12 +1003,71 @@ impl Agent {
         // plaintext DNS through our resolver, and drop DoT + the known DoH
         // providers. (DoH to an arbitrary IP pinned by hand still costs more
         // than it should — see docs/TAMPER.md, which says so honestly.)
-        if !base.blocks.is_empty() || !base.dns.blocklist.is_empty() {
+        if (!base.blocks.is_empty() || !base.dns.blocklist.is_empty()) && !self.dns_relaxed {
             base.lockdown.force_dns = true;
             base.lockdown.block_doh = true;
             base.lockdown.block_dot = true;
         }
         base
+    }
+
+    /// Whether the effective policy wants to force DNS (i.e. has any block).
+    fn wants_force_dns(&self) -> bool {
+        self.policies.values().any(|p| {
+            !p.blocks.is_empty() || !p.dns.blocklist.is_empty()
+        })
+    }
+
+    /// Keep DNS from bricking a device off a captive-portal / public-DNS-
+    /// blocking network. If a block is in force but the family upstream can't
+    /// be reached for a sustained stretch, relax the force-DNS posture and say
+    /// so (degraded); restore it the moment the upstream answers again.
+    /// Returns events + whether the relaxed state flipped (⇒ re-apply network).
+    fn update_dns_reachability(&mut self) -> (Vec<Event>, bool) {
+        let mut events = Vec::new();
+        if self.exec.dry_run() || !self.wants_force_dns() {
+            // Nothing to force; make sure we're not stuck relaxed.
+            if self.dns_relaxed {
+                self.dns_relaxed = false;
+                self.dns_unreach_ticks = 0;
+                return (events, true);
+            }
+            return (events, false);
+        }
+        let upstream = self
+            .effective_network_policy()
+            .dns
+            .upstream;
+        let reachable = upstream_reachable(&upstream);
+        let mut flipped = false;
+        if reachable {
+            self.dns_unreach_ticks = 0;
+            if self.dns_relaxed {
+                self.dns_relaxed = false;
+                flipped = true;
+                events.push(tamper::tamper_event(
+                    "dns_filter_restored",
+                    SEV_INFO,
+                    "family DNS is reachable again — filtering restored",
+                ));
+            }
+        } else {
+            self.dns_unreach_ticks = self.dns_unreach_ticks.saturating_add(1);
+            // ~30s of sustained unreachability before relaxing.
+            if self.dns_unreach_ticks >= 3 && !self.dns_relaxed {
+                self.dns_relaxed = true;
+                flipped = true;
+                events.push(Event::new(
+                    EV_ENFORCEMENT_DEGRADED,
+                    SEV_WARN,
+                    json!({
+                        "kind": "dns_upstream_unreachable",
+                        "message": "couldn't reach the family DNS — filtering temporarily relaxed so this computer can get online"
+                    }),
+                ));
+            }
+        }
+        (events, flipped)
     }
 
     /// The periodic enforcement tick: screen-time accounting + lockout + tamper
@@ -994,6 +1100,25 @@ impl Agent {
             }
         }
         self.expected_wall = Some(now + chrono::Duration::from_std(TICK).unwrap_or_default());
+
+        // Keep DNS filtering from bricking a captive-portal / public-DNS-
+        // blocking network; re-apply the (relaxed or restored) policy on a flip.
+        let (dns_events, dns_flipped) = self.update_dns_reachability();
+        events.extend(dns_events);
+        if dns_flipped && !self.exec.dry_run() {
+            let effective = self.effective_network_policy();
+            let server_host = crate::client::server_host(&self.cfg.server_url);
+            if let Ok((gaps, report)) = enforce::apply_network_policy(
+                self.ctx.clone(),
+                &self.exec,
+                server_host.as_deref(),
+                &effective,
+                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
+            ) {
+                events.extend(degraded_events(&gaps));
+                events.extend(vpn_report_event(report));
+            }
+        }
 
         // Tamper re-assertion (resolv.conf / nft drift, NM disconnect).
         events.extend(tamper::reassert_all(&self.exec));
@@ -1329,43 +1454,77 @@ impl Agent {
                 done.push(p.id.clone());
                 continue;
             }
+            // The request id is interpolated into a filesystem path, so it must
+            // be an opaque token — never a traversal or a weird name.
+            if !p
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            {
+                done.push(p.id.clone());
+                continue;
+            }
             for u in &p.os_users {
                 let Some(uid) = crate::sysusers::uid_of(u) else {
                     continue;
                 };
-                let path = std::path::PathBuf::from(format!(
-                    "/run/user/{uid}/openscreentime/login_decision_{}",
-                    p.id
-                ));
-                let Ok(raw) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let _ = std::fs::remove_file(&path);
-                let approve = raw.trim() == "approve";
-                match self.client.post_login_decision(&p.id, approve, u).await {
-                    Ok(()) => {
-                        self.notify_user(
-                            Some(u),
-                            if approve { "Signed in" } else { "Blocked" },
-                            if approve {
-                                "The web session is open."
-                            } else {
-                                "That sign-in was refused."
-                            },
-                            !approve,
-                        );
-                        done.push(p.id.clone());
-                    }
-                    Err(e) => {
-                        // A transient POST failure must not swallow the human's
-                        // decision: re-drop the file and keep the prompt so the
-                        // next tick retries until the prompt expires.
-                        tracing::warn!("login decision for {} failed, will retry: {e}", p.id);
+                // The verdict lives in memory once read. If we already have it
+                // (a prior tick read the file but the POST failed), retry the
+                // POST — we do NOT touch the child-owned file again.
+                let tapped = match &p.decision {
+                    Some(d) => d.clone(),
+                    None => {
                         let path = std::path::PathBuf::from(format!(
                             "/run/user/{uid}/openscreentime/login_decision_{}",
                             p.id
                         ));
-                        let _ = std::fs::write(&path, raw.trim());
+                        // O_NOFOLLOW: the runtime dir is owned by the child, so
+                        // a symlink there must never be followed by this root
+                        // read. A symlink or missing file simply means "no
+                        // answer yet". The file is deleted (also O_NOFOLLOW via
+                        // remove_file, which does not follow the final
+                        // component) the moment we have the verdict.
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let Ok(mut f) = std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_NOFOLLOW)
+                            .open(&path)
+                        else {
+                            continue;
+                        };
+                        use std::io::Read;
+                        let mut raw = String::new();
+                        if f.take(64).read_to_string(&mut raw).is_err() {
+                            continue;
+                        }
+                        let _ = std::fs::remove_file(&path);
+                        // The tapped number, or "deny"/empty for "not me". Only
+                        // digits are kept; the server matches it to the real code.
+                        let d: String = raw.trim().chars().filter(|c| c.is_ascii_digit()).collect();
+                        // Record in memory so a POST failure retries from here.
+                        if let Some(m) = self.pending_logins.iter_mut().find(|x| x.id == p.id) {
+                            m.decision = Some(d.clone());
+                        }
+                        d
+                    }
+                };
+                // The agent never judges: it forwards the tapped code and the
+                // server decides approve vs deny by matching it.
+                let code_opt = if tapped.is_empty() { None } else { Some(tapped.as_str()) };
+                match self.client.post_login_decision(&p.id, code_opt, u).await {
+                    Ok(()) => {
+                        self.notify_user(
+                            Some(u),
+                            "Answered",
+                            "Your answer was sent. If it was you, the web session opens.",
+                            false,
+                        );
+                        done.push(p.id.clone());
+                    }
+                    Err(e) => {
+                        // Transient: the verdict is safe in memory; next tick
+                        // re-POSTs it. Nothing is written to disk.
+                        tracing::warn!("login decision for {} failed, will retry: {e}", p.id);
                     }
                 }
                 break;
@@ -1403,6 +1562,27 @@ impl Agent {
                 json!({ "kind": key, "message": msg }),
             ))
         };
+
+        // 0. Can this host freeze at all? On cgroup v1 / non-systemd / many
+        // containers the freezer is absent, so a screen-time lock silently
+        // no-ops — and `is_frozen` returns None, not Some(false), so check #1
+        // below can't see it. If any user is actually screen-time managed here,
+        // that's a degraded state the console must show, not a green lie.
+        let screen_time_active = self
+            .policies
+            .values()
+            .any(|p| p.screen_time.enabled && p.screen_time.daily_limit_minutes > 0);
+        if screen_time_active && !screentime::freezer_usable() {
+            if let Some(ev) = report(
+                &mut self.probe_reported,
+                "screen_time_no_freezer".to_string(),
+                "this computer can't actually stop a session (no cgroup2 freezer) — \
+                 screen-time limits are not being enforced here"
+                    .to_string(),
+            ) {
+                events.push(ev);
+            }
+        }
 
         // 1. Frozen means frozen.
         for user in self.frozen.clone() {
@@ -1722,7 +1902,7 @@ impl Agent {
                 .map(|l| json!({
                     "id": l.id,
                     "username": l.username,
-                    "match_code": l.match_code,
+                    "codes": l.codes,
                     "expires_at": l.expires.to_rfc3339(),
                 }))
                 .collect::<Vec<_>>());
@@ -1879,13 +2059,17 @@ impl Agent {
                     .get("expires_in_secs")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(120);
-                let match_code = cmd
+                let codes: Vec<String> = cmd
                     .payload
-                    .get("match_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("----")
-                    .to_string();
-                if request_id.is_empty() || os_users.is_empty() {
+                    .get("codes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if request_id.is_empty() || os_users.is_empty() || codes.is_empty() {
                     return (ack_failed(&cmd.id, "bad login_approve payload"), events);
                 }
                 for u in &os_users {
@@ -1893,8 +2077,8 @@ impl Agent {
                         Some(u),
                         "Sign-in request",
                         &format!(
-                            "{username} is signing in on the web. Approve ONLY if the \
-                             screen shows {match_code}."
+                            "{username} is signing in on the web. If it's you, tap the \
+                             number shown in your browser — otherwise tap Not me."
                         ),
                         false,
                     );
@@ -1904,7 +2088,8 @@ impl Agent {
                     id: request_id,
                     username,
                     os_users: os_users.clone(),
-                    match_code,
+                    codes,
+                    decision: None,
                     expires: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
                 });
                 // Snappy: the tray polls the snapshot every 5 s — publish now

@@ -66,8 +66,9 @@ struct LoginRequest {
     id: String,
     #[serde(default)]
     username: String,
+    /// Three numbers; the human taps the one shown in their browser.
     #[serde(default)]
-    match_code: String,
+    codes: Vec<String>,
     #[serde(default)]
     expires_at: String,
 }
@@ -341,28 +342,32 @@ fn prompt_login(req: LoginRequest) {
             }
             let _ = std::fs::write(dir.join(format!("login_decision_{}", req.id)), verdict);
         };
-        let shown = notify_rust::Notification::new()
-            .appname("OpenScreenTime")
-            .summary(&format!("Sign-in request — code {}", req.match_code))
+        // Number-matching: the browser shows one of these three; the human taps
+        // the match. Tapping the wrong one (or Not me) is a deny server-side.
+        let mut n = notify_rust::Notification::new();
+        n.appname("OpenScreenTime")
+            .summary("Sign-in request")
             .body(&format!(
-                "{} is signing in on the web. Approve ONLY if the web page shows {}.",
-                req.username, req.match_code
+                "{} is signing in on the web. If it's you, tap the number shown in your browser.",
+                req.username
             ))
             .icon("security-high")
-            .action("approve", &format!("It's me — {}", req.match_code))
-            .action("deny", "Not me — block")
             .urgency(notify_rust::Urgency::Critical)
-            // Time-bounded so a long-expired prompt doesn't linger clickable
-            // (the server rejects a stale approval anyway, but a dead button
-            // is a bad prompt). The approval window is ~2 minutes.
-            .timeout(notify_rust::Timeout::Milliseconds(150_000))
-            .show();
-        match shown {
-            Ok(handle) => handle.wait_for_action(|action| match action {
-                "approve" => decide("approve"),
-                "deny" => decide("deny"),
-                // "__closed" / anything else: no decision — let it expire.
-                _ => {}
+            .timeout(notify_rust::Timeout::Milliseconds(150_000));
+        for c in req.codes.iter().take(3) {
+            n.action(c, c);
+        }
+        n.action("deny", "Not me");
+        match n.show() {
+            Ok(handle) => handle.wait_for_action(|action| {
+                // The action key IS the tapped number (or "deny"). Forward it
+                // verbatim; the server matches it to the real code.
+                if action == "deny" {
+                    decide("deny");
+                } else if action.chars().all(|c| c.is_ascii_digit()) && !action.is_empty() {
+                    decide(action);
+                }
+                // "__closed"/anything else: no decision — let it expire.
             }),
             Err(e) => tracing::debug!("sign-in prompt failed to show: {e}"),
         }
