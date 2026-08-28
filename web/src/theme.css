@@ -344,7 +344,7 @@
 .rail-child-asks {
   font-family: var(--font-mono);
   font-size: 0.625rem;
-  color: var(--accent);
+  color: var(--fg-display); background: var(--surface-2); border-radius: 999px; padding: 0.05rem 0.35rem;
   flex: none;
 }
 .rail-child-left {
@@ -473,7 +473,7 @@
   );
 }
 
-.fam-waiting { margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--accent); }
+.fam-waiting { margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--fg-dim); font-weight: 500; }
 .fam-time-label { margin: 0; font-size: 0.9rem; color: var(--fg-dim); }
 .fam-time-label strong { color: var(--fg-display); font-weight: 500; font-variant-numeric: tabular-nums; }
 .fam-time-none { margin: 0; font-size: 0.9rem; color: var(--fg-faint); }

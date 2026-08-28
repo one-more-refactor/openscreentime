@@ -360,6 +360,88 @@ function Schedule({ today, theme }: { today: MeToday; theme: Theme }) {
   );
 }
 
+// ---- the goal: the shift from an imposed limit to a target you own ----------
+// A goal is YOURS — distinct from the parent cap. The whole feedback loop
+// (week, streak, "less than usual — nice") points at it. Little kids don't set
+// their own (a parent does, on the child page); teens and adults do, here.
+
+const GOAL_CHOICES = [30, 45, 60, 90, 120, 180, 240];
+
+function GoalControl({
+  goal,
+  streak,
+  theme,
+  onSet,
+}: {
+  goal: number | null | undefined;
+  streak: number;
+  theme: Theme;
+  onSet: (m: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Little kids (playful) don't self-set — the parent does; show it read-only.
+  const canSet = theme !== "playful";
+
+  async function pick(m: number) {
+    setBusy(true);
+    try {
+      await api.setMyGoal(m);
+      onSet(m);
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="me-section me-goal">
+      <h2 className="me-h2">{theme === "playful" ? "Your goal" : "My goal"}</h2>
+      {goal ? (
+        <p className="me-goal-line">
+          Aiming for <strong>{fmt(goal)}{goal < 60 ? " min" : ""}</strong> a day
+          {streak > 0 && (
+            <span className="me-goal-streak"> · met it {streak} day{streak === 1 ? "" : "s"} running</span>
+          )}
+          {canSet && (
+            <button className="me-link" style={{ marginLeft: "0.5rem" }} onClick={() => setOpen((o) => !o)}>
+              change
+            </button>
+          )}
+        </p>
+      ) : canSet ? (
+        <button className="me-link" onClick={() => setOpen(true)}>
+          Set a daily goal for yourself
+        </button>
+      ) : (
+        <p className="me-goal-line" style={{ color: "var(--me-ink-3)" }}>
+          No goal set yet — a grown-up can pick one with you.
+        </p>
+      )}
+      {open && canSet && (
+        <div className="me-ask-row" style={{ marginTop: "0.6rem" }}>
+          {GOAL_CHOICES.map((m) => (
+            <button
+              key={m}
+              className="me-ask-pill"
+              data-on={goal === m}
+              disabled={busy}
+              onClick={() => void pick(m)}
+            >
+              {fmt(m)}{m < 60 ? " min" : ""}
+            </button>
+          ))}
+          {goal != null && (
+            <button className="me-ask-pill" disabled={busy} onClick={() => void pick(0)}>
+              clear
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Devices({ today, theme }: { today: MeToday; theme: Theme }) {
   if (today.devices.length === 0) return null;
   return (
@@ -505,6 +587,15 @@ export function Me() {
             </section>
           )}
 
+          <GoalControl
+            goal={today.goal_minutes ?? history?.goal_minutes}
+            streak={history?.goal_streak ?? 0}
+            theme={theme}
+            onSet={(m) => {
+              setToday((t) => (t ? { ...t, goal_minutes: m || null } : t));
+              void api.getMeHistory().then(setHistory).catch(() => {});
+            }}
+          />
           {history && history.days.length > 0 && (
             <Week history={history} today={today} theme={theme} />
           )}

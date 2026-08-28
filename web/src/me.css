@@ -339,3 +339,9 @@
 }
 .me-intro-p { margin: 0 0 0.6rem; font-size: 0.95rem; color: var(--me-ink-2); }
 .me-intro-p:first-of-type { color: var(--me-ink); }
+
+/* ---- the goal: a target you own ------------------------------------------ */
+.me-goal-line { margin: 0; font-size: 0.95rem; color: var(--me-ink-2); }
+.me-goal-line strong { color: var(--me-ink); }
+.me-goal-streak { color: var(--me-ink-3); }
+.theme-playful .me-goal-line { font-weight: 700; }

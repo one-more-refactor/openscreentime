@@ -802,6 +802,15 @@ export async function getMeToday(): Promise<MeToday> {
   return read<MeToday>("/api/me/today", () => mockMeToday());
 }
 
+/** Set (or clear, with 0) the signed-in person's OWN daily goal. */
+export async function setMyGoal(minutes: number): Promise<void> {
+  if (usingMock) return;
+  return request<void>("/api/me/goal", {
+    method: "POST",
+    body: JSON.stringify({ minutes }),
+  });
+}
+
 /** Where today went — the parent's view of a person (`accountId`), or your
  * own when omitted. */
 export async function getWhere(accountId?: string): Promise<WhereData> {
@@ -850,6 +859,8 @@ export async function getMeHistory(): Promise<MeHistory> {
         { name: "Living Room PC", used_minutes: 31 },
         { name: "Studio Laptop", used_minutes: 16 },
       ],
+      goal_minutes: 120,
+      goal_streak: 4,
     };
   });
 }

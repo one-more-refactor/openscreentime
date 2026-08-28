@@ -942,6 +942,7 @@ export function mockMeToday(): MeToday {
     pending_request: mockPendingAsk,
     bedtime: profile?.policy.screen_time.bedtime ?? null,
     windows: profile?.policy.screen_time.schedule ?? [],
+    goal_minutes: 120,
   };
 }
 
