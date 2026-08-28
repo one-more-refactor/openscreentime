@@ -28,8 +28,10 @@ fn save_cache_to(policy: &Policy, path: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let body = serde_json::to_string_pretty(policy).context("serializing policy cache")?;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    crate::config::set_owner_only_600(path);
+    // 0600 from creation — the cache carries the parent-code TOTP secret and
+    // recovery-code MACs; a write-then-chmod left a world-readable window.
+    crate::config::write_private(path, body.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -66,9 +68,10 @@ fn save_bundle_cache_to(bundle: &PolicyBundle, path: &std::path::Path) -> Result
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let body = serde_json::to_string_pretty(bundle).context("serializing policy bundle cache")?;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    // The bundle carries VPN private keys — same 0600 root-only treatment.
-    crate::config::set_owner_only_600(path);
+    // The bundle carries the parent-code secret and VPN private keys — 0600
+    // from creation, never a world-readable window.
+    crate::config::write_private(path, body.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

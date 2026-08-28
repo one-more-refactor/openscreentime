@@ -455,9 +455,20 @@ pub mod gui {
         if !std::path::Path::new(&runtime_dir).is_dir() {
             return None;
         }
+        // The overlay runs as ROOT. It must NOT inherit the child's $HOME:
+        // egui/fontconfig/Mesa/GTK read config and can load shared objects
+        // from ~/.config, ~/.fonts.conf, ~/.drirc, GL/GTK module paths — a
+        // clean route to running attacker code inside a privileged process.
+        // Point HOME and the XDG config/cache at a root-owned dir the child
+        // can't touch; keep only XDG_RUNTIME_DIR (for the wayland socket).
+        let safe_home = "/var/lib/openscreentime/overlay-home";
+        let _ = std::fs::create_dir_all(safe_home);
         let mut env = vec![
             ("XDG_RUNTIME_DIR".to_string(), runtime_dir.clone()),
-            ("HOME".to_string(), format!("/home/{user}")),
+            ("HOME".to_string(), safe_home.to_string()),
+            ("XDG_CONFIG_HOME".to_string(), format!("{safe_home}/config")),
+            ("XDG_CACHE_HOME".to_string(), format!("{safe_home}/cache")),
+            ("XDG_DATA_HOME".to_string(), format!("{safe_home}/data")),
         ];
 
         // Wayland first — the default on GNOME, which is what this ships against.
@@ -517,6 +528,11 @@ pub mod gui {
             // single most useful line when an overlay does not appear, and
             // discarding it is why this failed silently for so long.
             .stderr(std::process::Stdio::inherit());
+        // Start from a clean environment (drop root's inherited vars too), then
+        // set only the fixed-safe set + the session's display — so nothing the
+        // child controls reaches the privileged renderer via the environment.
+        cmd.env_clear();
+        cmd.env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
         for (k, v) in env {
             cmd.env(k, v);
         }

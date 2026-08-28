@@ -160,6 +160,11 @@ fn sensitive(path: &str) -> bool {
         // at least as powerful as an unlock code.
         || path.ends_with("/assign-account")
         || path.ends_with("/enroll-token")
+        // A VPN config is applied verbatim on the device and reshapes its
+        // routing — creating/editing/activating one is takeover-adjacent, so
+        // it may not ride ordinary session trust.
+        || path.starts_with("/api/vpn-profiles")
+        || path.ends_with("/vpn")
         || (path.starts_with("/api/devices/")
             && (path.ends_with("/unlock-code")
                 || path.ends_with("/unlock-code/rotate")

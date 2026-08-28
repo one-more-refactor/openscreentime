@@ -59,13 +59,20 @@ async fn call(client: &reqwest::Client, token: &str, method: &str, body: Value) 
                 tracing::warn!(method, "telegram api said no: {v}");
                 None
             }
-            Err(e) => {
-                tracing::warn!(method, "telegram api bad json: {e}");
+            Err(_) => {
+                // Never interpolate the reqwest error: its Display carries the
+                // request URL, which for Telegram embeds the bot token.
+                tracing::warn!(method, "telegram api response wasn't valid JSON");
                 None
             }
         },
         Err(e) => {
-            tracing::warn!(method, "telegram api unreachable: {e}");
+            tracing::warn!(
+                method,
+                timeout = e.is_timeout(),
+                connect = e.is_connect(),
+                "telegram api unreachable"
+            );
             None
         }
     }

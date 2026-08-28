@@ -124,12 +124,12 @@ impl State {
             let _ = std::fs::create_dir_all(dir);
         }
         match serde_json::to_string(self) {
+            // 0600 from creation — this holds the TOTP secret; a write-then-
+            // chmod left it briefly world-readable in the 0755 state dir.
             Ok(body) => {
-                if let Err(e) = std::fs::write(path, body) {
+                if let Err(e) = crate::config::write_private(path, body.as_bytes()) {
                     // warn, not debug: losing this is how a code becomes replayable.
                     tracing::warn!("could not persist parent-code state: {e}");
-                } else {
-                    crate::config::set_owner_only_600(path);
                 }
             }
             Err(e) => tracing::warn!("could not serialize parent-code state: {e}"),
