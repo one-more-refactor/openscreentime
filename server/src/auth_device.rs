@@ -86,7 +86,10 @@ pub struct StartReq {
 }
 
 /// `POST /api/auth/device/start` — name in, approval prompts out.
-pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> AppResult<Json<Value>> {
+pub async fn start(
+    State(st): State<AppState>,
+    Json(req): Json<StartReq>,
+) -> AppResult<Json<Value>> {
     let name = req.username.trim();
     if name.is_empty() || req.code_challenge.len() < 20 {
         return Err(AppError::BadRequest("who is signing in?".into()));
@@ -253,15 +256,15 @@ pub async fn finish(
     // Single-use, atomically: exactly one concurrent finish() wins the row and
     // mints a session; the rest see zero rows and fail. Deletes-after-select
     // let two polls both mint a session from one approval.
-    let consumed = sqlx::query(
-        "DELETE FROM login_requests WHERE id = $1 AND status = 'approved'",
-    )
-    .bind(req.request_id)
-    .execute(&st.db)
-    .await?
-    .rows_affected();
+    let consumed = sqlx::query("DELETE FROM login_requests WHERE id = $1 AND status = 'approved'")
+        .bind(req.request_id)
+        .execute(&st.db)
+        .await?
+        .rows_affected();
     if consumed == 0 {
-        return Err(AppError::Unauthorized("that sign-in was already used".into()));
+        return Err(AppError::Unauthorized(
+            "that sign-in was already used".into(),
+        ));
     }
 
     let role: Option<String> =
@@ -405,7 +408,9 @@ mod tests {
             uniq.sort();
             uniq.dedup();
             assert_eq!(uniq.len(), 3);
-            assert!(cs.iter().all(|c| c.len() == 4 && c.chars().all(|d| d.is_ascii_digit())));
+            assert!(cs
+                .iter()
+                .all(|c| c.len() == 4 && c.chars().all(|d| d.is_ascii_digit())));
         }
     }
 }
