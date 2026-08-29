@@ -113,8 +113,14 @@ impl AlertConfig {
                     if self.tg_env_chat.as_deref() == Some(chat_id.to_string().as_str()) {
                         continue;
                     }
-                    crate::telegram::send_message(client, token, chat_id, text, tg_keyboard.clone())
-                        .await;
+                    crate::telegram::send_message(
+                        client,
+                        token,
+                        chat_id,
+                        text,
+                        tg_keyboard.clone(),
+                    )
+                    .await;
                 }
             }
         }

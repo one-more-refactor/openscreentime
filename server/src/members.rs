@@ -50,8 +50,8 @@ pub type AccountRow = (
     Option<Uuid>,      // profile_id
     DateTime<Utc>,     // created_at
     Option<String>,    // avatar (emoji; NULL = monogram) — appended last so
-                       //   the positional accesses above it never renumber
-    Option<i32>,       // goal_minutes (person-set; NULL = none)
+    //   the positional accesses above it never renumber
+    Option<i32>, // goal_minutes (person-set; NULL = none)
 );
 
 pub fn bracket_of(r: &AccountRow) -> AgeBracket {

@@ -651,7 +651,10 @@ mod tests {
             );
         }
         // A plain client config with none of them passes.
-        assert!(reject_dangerous_vpn("client\nremote vpn.example.com 1194\nproto udp", "openvpn").is_ok());
+        assert!(
+            reject_dangerous_vpn("client\nremote vpn.example.com 1194\nproto udp", "openvpn")
+                .is_ok()
+        );
         // WireGuard has no script hooks — not gated by this check.
         assert!(reject_dangerous_vpn(WG, "wireguard").is_ok());
     }
