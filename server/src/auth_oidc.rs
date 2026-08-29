@@ -169,13 +169,23 @@ impl Oidc {
     }
 }
 
-/// GET /api/auth/config — public; tells the login page whether SSO exists.
+/// GET /api/auth/config — public; tells the entry page whether SSO exists and
+/// whether this is a fresh install (no account yet) so it can show the
+/// first-run registration flow instead of login.
 pub async fn auth_config(State(st): State<AppState>) -> Json<Value> {
     let (enabled, name) = match &st.oidc {
         Some(o) => (true, o.name.clone()),
         None => (false, "SSO".to_string()),
     };
-    Json(json!({ "auth": { "oidc": enabled, "oidc_name": name } }))
+    // needs_setup: no admin exists yet → the console should show registration.
+    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
+        .fetch_one(&st.db)
+        .await
+        .unwrap_or(1);
+    Json(json!({
+        "needs_setup": admins == 0,
+        "auth": { "oidc": enabled, "oidc_name": name },
+    }))
 }
 
 /// GET /api/auth/oidc/start — 302 to the provider's authorize URL.
@@ -288,9 +298,10 @@ pub async fn callback(
         return Ok(fail(jar, "sso_failed"));
     }
 
-    // Email match: any tenant (admins.email is globally unique).
+    // SSO keys the verified email as the account username (identity moved off the
+    // email column, which is being retired). Match case-insensitively.
     let existing: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT id, tenant_id FROM admins WHERE email = $1")
+        sqlx::query_as("SELECT id, tenant_id FROM admins WHERE lower(username) = lower($1)")
             .bind(&email)
             .fetch_optional(&st.db)
             .await?;

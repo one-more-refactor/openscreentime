@@ -112,7 +112,7 @@ const ADMIN_BOOTSTRAP_LOCK: i64 = 0x5E17_0001;
 /// which intentionally allows additional orgs, passes `false`.
 pub async fn create_tenant_with_admin(
     db: &sqlx::PgPool,
-    email: &str,
+    username: &str,
     display_name: &str,
     require_first: bool,
 ) -> AppResult<(Uuid, Uuid)> {
@@ -158,11 +158,11 @@ pub async fn create_tenant_with_admin(
     }
 
     let admin_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO admins (tenant_id, email, display_name, role, age_bracket)
+        "INSERT INTO admins (tenant_id, username, display_name, role, age_bracket)
          VALUES ($1, $2, $3, 'owner', 'adult') RETURNING id",
     )
     .bind(tenant_id)
-    .bind(email)
+    .bind(username)
     .bind(display_name)
     .fetch_one(&mut *tx)
     .await
@@ -172,14 +172,51 @@ pub async fn create_tenant_with_admin(
     Ok((tenant_id, admin_id))
 }
 
-/// Look up an admin id + tenant id by email.
-async fn find_admin(db: &sqlx::PgPool, email: &str) -> AppResult<Option<(Uuid, Uuid, String)>> {
-    let row: Option<(Uuid, Uuid, String)> =
-        sqlx::query_as("SELECT id, tenant_id, display_name FROM admins WHERE email = $1")
-            .bind(email)
+/// Look up an admin id + tenant id by username (case-insensitive).
+async fn find_admin(db: &sqlx::PgPool, username: &str) -> AppResult<Option<(Uuid, Uuid, String)>> {
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT id, tenant_id, display_name FROM admins WHERE lower(username) = lower($1)",
+    )
+    .bind(username)
+    .fetch_optional(db)
+    .await?;
+    Ok(row)
+}
+
+/// Refuse to mint a session for a blocked account (the parent Danger-Zone
+/// action). The `AuthAdmin` extractor already rejects blocked accounts on every
+/// authenticated call; this stops the login ceremony one step earlier.
+pub async fn reject_if_blocked(db: &sqlx::PgPool, admin_id: Uuid) -> AppResult<()> {
+    let blocked: Option<Option<DateTime<Utc>>> =
+        sqlx::query_scalar("SELECT blocked_at FROM admins WHERE id = $1")
+            .bind(admin_id)
             .fetch_optional(db)
             .await?;
-    Ok(row)
+    if blocked.flatten().is_some() {
+        return Err(AppError::Unauthorized("account is blocked".into()));
+    }
+    Ok(())
+}
+
+/// Normalize + validate an account username: 3–32 chars of `a–z 0–9 . _ -`,
+/// lower-cased. This is the login identity (globally unique, case-insensitive) —
+/// there is no email any more.
+fn normalize_username(raw: &str) -> AppResult<String> {
+    let u = raw.trim().to_ascii_lowercase();
+    if u.chars().count() < 3 || u.chars().count() > 32 {
+        return Err(AppError::BadRequest(
+            "username must be 3–32 characters".into(),
+        ));
+    }
+    if !u
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(AppError::BadRequest(
+            "username may use only a–z, 0–9, dot, underscore, hyphen".into(),
+        ));
+    }
+    Ok(u)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,19 +247,19 @@ fn open_registration() -> bool {
 async fn ensure_registration_allowed(
     st: &AppState,
     jar: &CookieJar,
-    email: &str,
+    username: &str,
 ) -> AppResult<bool> {
     // Existing admin adding another passkey to their own account? Authorized to
     // graft onto that existing account (this is the whole point of the flow).
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
-        let session_email: Option<String> = sqlx::query_scalar(
-            "SELECT a.email FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+        let session_username: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT a.username FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
              WHERE s.token_hash = $1 AND s.expires_at > now()",
         )
         .bind(hash_token(cookie.value()))
         .fetch_optional(&st.db)
         .await?;
-        if session_email.as_deref() == Some(email) {
+        if session_username.flatten().as_deref() == Some(username) {
             return Ok(true);
         }
     }
@@ -242,8 +279,10 @@ async fn ensure_registration_allowed(
 
 #[derive(Deserialize)]
 pub struct RegisterStartReq {
-    pub email: String,
-    pub display_name: String,
+    pub username: String,
+    /// Optional friendly name; defaults to the username. No email anywhere.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 pub async fn register_start(
@@ -251,20 +290,25 @@ pub async fn register_start(
     jar: CookieJar,
     Json(req): Json<RegisterStartReq>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
-    if req.email.trim().is_empty() {
-        return Err(AppError::BadRequest("email required".into()));
-    }
-    let may_graft = ensure_registration_allowed(&st, &jar, &req.email).await?;
+    let username = normalize_username(&req.username)?;
+    let display_name = req
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&username)
+        .to_string();
+    let may_graft = ensure_registration_allowed(&st, &jar, &username).await?;
 
-    // A new user id for a brand-new admin; if the email already exists we reuse
-    // its admin id so a second passkey attaches to the same account — but only
-    // when the caller is authorized to touch that existing account. Otherwise
-    // refuse, so open-registration can't be used to graft onto (take over) an
-    // existing admin.
-    let existing = find_admin(&st.db, &req.email).await?;
+    // A new user id for a brand-new admin; if the username already exists we
+    // reuse its admin id so a second passkey attaches to the same account — but
+    // only when the caller is authorized to touch that existing account.
+    // Otherwise refuse, so open-registration can't be used to graft onto (take
+    // over) an existing admin.
+    let existing = find_admin(&st.db, &username).await?;
     if existing.is_some() && !may_graft {
         return Err(AppError::Conflict(
-            "an account with this email already exists".into(),
+            "that username is already taken".into(),
         ));
     }
     let user_id = existing
@@ -272,9 +316,10 @@ pub async fn register_start(
         .map(|(id, _, _)| *id)
         .unwrap_or_else(Uuid::new_v4);
 
+    // WebAuthn identity: user.name = username, user.displayName = display name.
     let (ccr, reg) = st
         .webauthn
-        .start_passkey_registration(user_id, &req.email, &req.display_name, None)
+        .start_passkey_registration(user_id, &username, &display_name, None)
         .map_err(|e| AppError::BadRequest(format!("webauthn: {e}")))?;
 
     let key = gen_token();
@@ -284,8 +329,8 @@ pub async fn register_start(
         states.insert(
             key.clone(),
             RegChallenge {
-                email: req.email,
-                display_name: req.display_name,
+                username,
+                display_name,
                 reg,
                 created: std::time::Instant::now(),
             },
@@ -298,7 +343,7 @@ pub async fn register_start(
 
 #[derive(Deserialize)]
 pub struct RegisterFinishReq {
-    pub email: String,
+    pub username: String,
     pub credential: RegisterPublicKeyCredential,
 }
 
@@ -307,9 +352,10 @@ pub async fn register_finish(
     jar: CookieJar,
     Json(req): Json<RegisterFinishReq>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
+    let username = normalize_username(&req.username)?;
     // Re-checked here (not just in start): the two calls aren't atomic, and the
     // finish must never mint a session after the first admin appeared in between.
-    let may_graft = ensure_registration_allowed(&st, &jar, &req.email).await?;
+    let may_graft = ensure_registration_allowed(&st, &jar, &username).await?;
 
     let key = jar
         .get(REG_COOKIE)
@@ -322,8 +368,8 @@ pub async fn register_finish(
         .remove(&key)
         .ok_or_else(|| AppError::BadRequest("registration expired".into()))?;
 
-    if challenge.email != req.email {
-        return Err(AppError::BadRequest("email mismatch".into()));
+    if challenge.username != username {
+        return Err(AppError::BadRequest("username mismatch".into()));
     }
 
     let passkey: Passkey = st
@@ -333,20 +379,18 @@ pub async fn register_finish(
 
     // Ensure the admin (and tenant + presets) exist. Grafting a passkey onto an
     // existing account is only allowed for the authorized self-add path; without
-    // that authorization a matching email must not attach (account-takeover
+    // that authorization a matching username must not attach (account-takeover
     // guard, mirroring register_start).
-    let existing = find_admin(&st.db, &req.email).await?;
+    let existing = find_admin(&st.db, &username).await?;
     if existing.is_some() && !may_graft {
-        return Err(AppError::Conflict(
-            "an account with this email already exists".into(),
-        ));
+        return Err(AppError::Conflict("that username is already taken".into()));
     }
     let (tenant_id, admin_id) = match existing {
         Some((admin_id, tenant_id, _)) => (tenant_id, admin_id),
         None => {
             create_tenant_with_admin(
                 &st.db,
-                &req.email,
+                &username,
                 &challenge.display_name,
                 !open_registration(),
             )
@@ -384,7 +428,7 @@ pub async fn register_finish(
 
 #[derive(Deserialize)]
 pub struct LoginStartReq {
-    pub email: String,
+    pub username: String,
 }
 
 pub async fn login_start(
@@ -392,9 +436,10 @@ pub async fn login_start(
     jar: CookieJar,
     Json(req): Json<LoginStartReq>,
 ) -> AppResult<(CookieJar, Json<Value>)> {
-    let (admin_id, tenant_id, _) = find_admin(&st.db, &req.email)
+    let (admin_id, tenant_id, _) = find_admin(&st.db, req.username.trim())
         .await?
         .ok_or_else(|| AppError::Unauthorized("unknown account".into()))?;
+    reject_if_blocked(&st.db, admin_id).await?;
 
     let passkeys = load_passkeys(&st.db, admin_id).await?;
     if passkeys.is_empty() {
@@ -554,7 +599,7 @@ pub async fn delete_passkey(
 
 async fn admin_json(db: &sqlx::PgPool, admin_id: Uuid) -> AppResult<Value> {
     let row: (Uuid, Uuid, Option<String>, String, String, String) = sqlx::query_as(
-        "SELECT id, tenant_id, email, display_name, role, age_bracket FROM admins WHERE id = $1",
+        "SELECT id, tenant_id, username, display_name, role, age_bracket FROM admins WHERE id = $1",
     )
     .bind(admin_id)
     .fetch_one(db)
@@ -562,7 +607,7 @@ async fn admin_json(db: &sqlx::PgPool, admin_id: Uuid) -> AppResult<Value> {
     Ok(json!({
         "id": row.0,
         "tenant_id": row.1,
-        "email": row.2,
+        "username": row.2,
         "display_name": row.3,
         "role": row.4,
         "age_bracket": row.5,

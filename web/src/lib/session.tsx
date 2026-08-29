@@ -17,14 +17,14 @@ interface SessionState {
   loading: boolean;
   mock: boolean;
   refresh: () => Promise<void>;
-  login: (email: string) => Promise<void>;
+  login: (username: string) => Promise<void>;
   /**
    * Client-first login (CONTRACT-0.6): ask by name, the person's own computer
    * approves. `onPrompted` fires once with the device names being asked.
    * Resolves when the approval lands; throws on deny/timeout.
    */
   deviceLogin: (username: string, onPrompted?: (matchCode: string) => void) => Promise<void>;
-  register: (email: string, displayName: string) => Promise<void>;
+  register: (username: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -90,8 +90,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const login = useCallback(
-    async (email: string) => {
-      await auth.login(email);
+    async (username: string) => {
+      await auth.login(username);
       await refresh();
     },
     [refresh],
@@ -130,8 +130,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const register = useCallback(
-    async (email: string, displayName: string) => {
-      await auth.register(email, displayName);
+    async (username: string, displayName?: string) => {
+      await auth.register(username, displayName);
       await refresh();
     },
     [refresh],

@@ -556,6 +556,19 @@
 
 .ch-section { margin-bottom: 3rem; }
 
+/* ---- danger zone (destructive, parent-only) ------------------------------ */
+.ch-danger { border-top: 1px solid var(--crit); padding-top: 1.4rem; }
+.ch-danger-h { color: var(--crit); }
+.ch-danger-lede { margin: -0.4rem 0 1.1rem; }
+.ch-danger-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 0.9rem 0; border-top: 1px solid var(--line);
+}
+.ch-danger-row:first-of-type { border-top: 0; }
+.ch-danger-what { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.ch-danger-what strong { font-weight: 600; }
+.ch-danger-codes { margin: 0 0 0.8rem; display: grid; gap: 0.6rem; }
+
 /* ---- the rules (parenting options) --------------------------------------- */
 .rl { display: grid; }
 .rl-row {

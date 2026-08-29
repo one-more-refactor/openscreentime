@@ -271,6 +271,8 @@ export interface FamilyChild {
   devices: ChildDevice[];
   /** earn requests waiting on a parent */
   pending_requests: number;
+  /** blocked via the Danger Zone: login cut, devices locked */
+  blocked?: boolean;
 }
 
 export interface FamilyResponse {
@@ -337,7 +339,8 @@ export interface Event {
 export interface Admin {
   id: string;
   tenant_id: string;
-  email: string;
+  /** Login identity (globally unique, lowercase). Null for kids who don't log in. */
+  username: string | null;
   display_name: string;
   created_at: string;
 }
@@ -569,7 +572,7 @@ export interface Me {
 
 // ---- Two-factor / step-up ("reading is free, changing needs a factor") -----
 
-export type SecondFactorMethod = "totp" | "email" | "telegram";
+export type SecondFactorMethod = "totp" | "telegram";
 
 /** Error code the server returns from a mutation with no valid step-up grant. */
 export const STEP_UP_REQUIRED = "step_up_required";
@@ -577,8 +580,8 @@ export const STEP_UP_REQUIRED = "step_up_required";
 export interface TwoFactorStatus {
   /** An authenticator-app secret is enrolled and confirmed. */
   totp_enrolled: boolean;
-  /** The account has an email a code can be sent to. */
-  email_available: boolean;
+  /** @deprecated email step-up retired; kept optional during transition. */
+  email_available?: boolean;
   /** A Telegram chat is paired — one tap on the phone is a factor. */
   telegram_available?: boolean;
 }
@@ -665,6 +668,8 @@ export interface EarnRequest {
 export interface AuthConfig {
   oidc: boolean;
   oidc_name: string;
+  /** No account exists yet → the entry page shows first-run registration. */
+  needs_setup: boolean;
 }
 
 // ---- API error -------------------------------------------------------------

@@ -14,7 +14,7 @@
 // the devices report, `lock_pending` a pause still on its way.
 // ============================================================================
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import * as api from "../api";
 import {
   AGE_BRACKETS,
@@ -35,6 +35,8 @@ import {
 } from "../components/SecuritySlider";
 import { Moments } from "../components/Moments";
 import { WhereTheTime } from "../components/WhereTheTime";
+import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { Button } from "../components/Button";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Avatar } from "./Family";
@@ -187,8 +189,10 @@ function Identity({
 
 export function ChildDetail() {
   const { key = "" } = useParams();
+  const navigate = useNavigate();
   const { guard } = useConfirm();
   const fam = useFamily();
+  const [showCode, setShowCode] = useState(false);
   const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -357,6 +361,30 @@ export function ChildDetail() {
     );
   }
 
+  // ── Danger zone ───────────────────────────────────────────────────────────
+  const blocked = !!child?.blocked;
+
+  function toggleBlock() {
+    void change(
+      blocked
+        ? `${name} is unblocked. Resume their devices when you're ready.`
+        : `${name} is blocked — every device of theirs is locking now.`,
+      () => (blocked ? api.unblockMember(child!.account_id) : api.blockMember(child!.account_id)),
+      "Could not change the block",
+    );
+  }
+
+  function removeChild() {
+    void change(
+      `${name} was removed.`,
+      async () => {
+        await api.deleteMember(child!.account_id);
+        navigate("/");
+      },
+      "Could not remove them",
+    );
+  }
+
   return (
     <div className="ch-wrap">
       <PageHead
@@ -499,6 +527,63 @@ export function ChildDetail() {
       <Moments
         events={events.filter((e) => e.device_user_id === null || deviceUserIds.has(e.device_user_id))}
       />
+
+      <section className="ch-section ch-danger">
+        <h2 className="ch-h2 ch-danger-h">Danger zone</h2>
+        <p className="fam-quiet ch-danger-lede">
+          Held by OpenScreenTime itself — no app to install, no third party. Use these when you have to.
+        </p>
+
+        <div className="ch-danger-row">
+          <div className="ch-danger-what">
+            <strong>Parent code</strong>
+            <span className="fam-quiet">
+              A rotating code that always unlocks {name}&rsquo;s device. Read it here, type it on the device.
+            </span>
+          </div>
+          <Button variant="ghost" onClick={() => setShowCode((s) => !s)}>
+            {showCode ? "Hide code" : "See parent code"}
+          </Button>
+        </div>
+        {showCode &&
+          (childDevices.some((d) => d.full) ? (
+            <div className="ch-danger-codes">
+              {childDevices
+                .filter((d) => d.full)
+                .map((d) => (
+                  <UnlockCodePanel key={d.id} device={d.full!} autoShow />
+                ))}
+            </div>
+          ) : (
+            <p className="fam-quiet">No set-up device yet — a code appears once {name} has one.</p>
+          ))}
+
+        <div className="ch-danger-row">
+          <div className="ch-danger-what">
+            <strong>{blocked ? "Account blocked" : "Block account"}</strong>
+            <span className="fam-quiet">
+              {blocked
+                ? `${name} can’t sign in and their devices are locked.`
+                : `Cut ${name}’s sign-in and lock every device right now.`}
+            </span>
+          </div>
+          <Button variant="danger" disabled={busy} onClick={toggleBlock}>
+            {blocked ? "Unblock" : "Block account"}
+          </Button>
+        </div>
+
+        <div className="ch-danger-row">
+          <div className="ch-danger-what">
+            <strong>Remove {name}</strong>
+            <span className="fam-quiet">
+              Deletes their account and rules. Their logins stay on the devices, unmanaged.
+            </span>
+          </div>
+          <Button variant="danger" disabled={busy} onClick={removeChild}>
+            Remove child
+          </Button>
+        </div>
+      </section>
     </div>
   );
 }

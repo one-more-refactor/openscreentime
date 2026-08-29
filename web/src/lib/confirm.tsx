@@ -29,7 +29,6 @@ import {
   getChangeMode,
   getTwoFactorStatus,
   lockChangeMode,
-  startEmailStepUp,
   startTelegramStepUp,
   verifyStepUp,
 } from "../api";
@@ -131,7 +130,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       try {
         setStatus(await getTwoFactorStatus());
       } catch {
-        setStatus({ totp_enrolled: false, email_available: true });
+        setStatus({ totp_enrolled: false });
       }
       setOpen(true);
     }
@@ -231,7 +230,6 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
   const telegram = status?.telegram_available ?? false;
   const [method, setMethod] = useState<SecondFactorMethod>("totp");
   const [code, setCode] = useState("");
-  const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The phone path: a tap sent, and a poll waiting for it to land.
@@ -241,9 +239,8 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
   // one tap on the phone beats typing any code.
   useEffect(() => {
     if (!open) return;
-    setMethod(telegram ? "telegram" : totp ? "totp" : "email");
+    setMethod(telegram ? "telegram" : "totp");
     setCode("");
-    setSent(false);
     setTapSent(false);
     setError(null);
     setBusy(false);
@@ -274,19 +271,6 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
     return () => clearInterval(t);
   }, [open, tapSent, onVerified]);
 
-  async function sendEmail() {
-    setBusy(true);
-    setError(null);
-    try {
-      await startEmailStepUp();
-      setSent(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not send a code.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function verify(full: string) {
     setBusy(true);
     setError(null);
@@ -300,17 +284,6 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
       setBusy(false);
     }
   }
-
-  const emailMethod = (status?.email_available ?? false) && (
-    <MethodTab
-      active={method === "email"}
-      label="Email a code"
-      onClick={() => {
-        setMethod("email");
-        setError(null);
-      }}
-    />
-  );
 
   return (
     <Modal
@@ -329,7 +302,7 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
           stays confirmed for 15 minutes.
         </p>
 
-        {(totp || telegram || (status?.email_available ?? false)) && (
+        {(totp || telegram) && (
           <div className="seg">
             {telegram && (
               <MethodTab
@@ -351,7 +324,6 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
                 }}
               />
             )}
-            {emailMethod}
           </div>
         )}
 
@@ -383,17 +355,13 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
               {busy ? "Sending…" : "Send a tap to my phone"}
             </Button>
           )
-        ) : method === "email" && !sent ? (
-          <Button variant="ghost" onClick={() => void sendEmail()} disabled={busy}>
-            {busy ? "Sending…" : "Send a code to my email"}
-          </Button>
         ) : (
           <div className="cr-wrap">
             <CodeRing
               value={code}
               disabled={busy}
               error={!!error}
-              aria-label={method === "totp" ? "Code from your authenticator" : "Code from your email"}
+              aria-label="Code from your authenticator"
               onChange={(v) => {
                 setCode(v);
                 if (error) setError(null);
@@ -401,12 +369,7 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
               onComplete={(full) => void verify(full)}
             />
             <p className="cr-note" data-error={!!error} role={error ? "alert" : undefined}>
-              {busy
-                ? "Checking…"
-                : (error ??
-                  (method === "totp"
-                    ? "The 6 digits from your authenticator"
-                    : "The 6 digits we emailed you"))}
+              {busy ? "Checking…" : (error ?? "The 6 digits from your authenticator")}
             </p>
           </div>
         )}

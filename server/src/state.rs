@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use chrono::{DateTime, Utc};
 use axum_extra::extract::cookie::CookieJar;
 use sqlx::PgPool;
 use tokio::sync::{mpsc, RwLock};
@@ -114,7 +115,7 @@ pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Server-side WebAuthn registration challenge, keyed by a temp cookie.
 pub struct RegChallenge {
-    pub email: String,
+    pub username: String,
     pub display_name: String,
     pub reg: PasskeyRegistration,
     pub created: std::time::Instant,
@@ -236,8 +237,8 @@ impl FromRequestParts<AppState> for AuthAdmin {
         // The step-up flow rotates this token (docs/AUTH.md); the superseded
         // hash stays valid for a short grace so a request already in flight
         // with the old cookie — or a second tab — does not get thrown out.
-        let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-            "SELECT s.admin_id, s.tenant_id, a.role FROM admin_sessions s
+        let row: Option<(Uuid, Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT s.admin_id, s.tenant_id, a.role, a.blocked_at FROM admin_sessions s
              JOIN admins a ON a.id = s.admin_id
              WHERE (s.token_hash = $1
                     OR (s.prev_token_hash = $1 AND s.prev_valid_until > now()))
@@ -248,7 +249,11 @@ impl FromRequestParts<AppState> for AuthAdmin {
         .await?;
 
         match row {
-            Some((admin_id, tenant_id, role)) => Ok(AuthAdmin {
+            // A blocked account is inert even if it still holds a session cookie.
+            Some((_, _, _, Some(_blocked))) => {
+                Err(AppError::Unauthorized("account is blocked".into()))
+            }
+            Some((admin_id, tenant_id, role, None)) => Ok(AuthAdmin {
                 admin_id,
                 tenant_id,
                 role,

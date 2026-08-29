@@ -267,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/auth/stepup/telegram/start",
             post(telegram::verify_start),
         )
-        .route("/api/auth/stepup/email/start", post(stepup::email_start))
+        // Email step-up retired: no email codes anywhere (username + passkey only).
         .route("/api/auth/stepup/verify", post(stepup::verify))
         // --- Change mode (the grant, made visible/endable/extendable) -------
         .route("/api/auth/stepup", get(stepup::change_mode_status))
@@ -364,6 +364,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/members/{id}",
             axum::routing::patch(members::patch_member).delete(members::delete_member),
         )
+        .route("/api/members/{id}/block", post(members::block_member))
+        .route("/api/members/{id}/unblock", post(members::unblock_member))
         // --- Family (the whole home screen in one request) -----------------
         .route("/api/family", get(family::get_family))
         // --- Events --------------------------------------------------------

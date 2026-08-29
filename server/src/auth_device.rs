@@ -114,8 +114,10 @@ pub async fn start(State(st): State<AppState>, Json(req): Json<StartReq>) -> App
         "SELECT DISTINCT a.id, a.tenant_id, a.display_name
            FROM admins a
            LEFT JOIN device_users du ON du.account_id = a.id
-          WHERE lower(a.display_name) = lower($1)
-             OR lower(du.os_username) = lower($1)",
+          WHERE (lower(a.username) = lower($1)
+              OR lower(a.display_name) = lower($1)
+              OR lower(du.os_username) = lower($1))
+            AND a.blocked_at IS NULL",
     )
     .bind(name)
     .fetch_all(&st.db)

@@ -93,7 +93,7 @@ function You() {
           <div className="rl-what">
             <p className="rl-name">{me?.account?.display_name ?? me?.admin.display_name ?? "—"}</p>
             <p className="rl-value">
-              {me?.account?.email ?? me?.admin.email ?? "—"} ·{" "}
+              {me?.admin.username ?? me?.account?.email ?? "—"} ·{" "}
               {me?.household?.name ?? me?.tenant.name ?? "your household"}
             </p>
           </div>
@@ -483,8 +483,12 @@ function Passkeys() {
   async function add() {
     if (!me) return;
     setStatus(null);
+    if (!me.admin.username) {
+      setStatus("This account has no username to attach a passkey to.");
+      return;
+    }
     try {
-      await auth.register(me.admin.email, me.admin.display_name);
+      await auth.register(me.admin.username, me.admin.display_name);
       await refresh();
       passkeys.reload();
       setStatus("Passkey added.");
