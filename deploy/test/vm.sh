@@ -33,13 +33,18 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 work="${OST_VM_DIR:-$here/.vm}"
-img="$work/noble.qcow2"
+img="$work/arch-cloudimg.qcow2"
 overlay="$work/overlay.qcow2"
 seed="$work/seed.iso"
 pidfile="$work/qemu.pid"
 sshkey="$work/id_ed25519"
 ssh_port=2222
-IMG_URL="https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+# Arch, not Ubuntu, on purpose: the agent is built against the host's (rolling)
+# glibc, which is newer than any Ubuntu LTS ships — an Ubuntu VM can't run the
+# host binary and the musl route needs an extra cross-compiler. An Arch cloud
+# image matches the host glibc exactly (the ordinary release build just runs)
+# and is the representative target for the kids' Linux laptops anyway.
+IMG_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1"; MISSING=1; }; }
 preflight() {
@@ -84,14 +89,14 @@ EOF
 #cloud-config
 users:
   - name: mia
-    groups: [sudo]
+    groups: [wheel]
     shell: /bin/bash
     lock_passwd: false
     plain_text_passwd: mia
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys: ["$pub"]
   - name: rescue
-    groups: [sudo]
+    groups: [wheel]
     shell: /bin/bash
     lock_passwd: false
     plain_text_passwd: rescue
@@ -100,7 +105,7 @@ users:
 ssh_pwauth: true
 package_update: false
 runcmd:
-  - [ systemctl, enable, --now, ssh ]
+  - [ bash, -c, "systemctl enable --now sshd 2>/dev/null || systemctl enable --now ssh 2>/dev/null || true" ]
 EOF
     if command -v cloud-localds >/dev/null 2>&1; then
         cloud-localds "$seed" "$work/user-data" "$work/meta-data"
@@ -157,16 +162,20 @@ ssh_as() {
 cmd_install() {
     local token="${1:-}"
     [ -n "$token" ] || { echo "usage: vm.sh install <enroll-token>"; exit 1; }
-    # musl static build runs on Ubuntu regardless of glibc version.
-    local bin="$root/client/target/x86_64-unknown-linux-musl/release/openscreentime"
-    if [ ! -x "$bin" ]; then
-        echo "==> building the musl agent (rustup target add x86_64-unknown-linux-musl if this fails)"
-        ( cd "$root/client" && cargo build --release --target x86_64-unknown-linux-musl )
-    fi
+    # Ordinary release build — the Arch VM's glibc matches the host's, so it
+    # just runs. The desktop (gui/tray) features aren't needed to prove the
+    # freeze; the headless build locks via cgroup + a wall broadcast.
+    local bin="$root/client/target/release/openscreentime"
+    echo "==> building the agent (release)"
+    ( cd "$root/client" && cargo build --release )
     echo "==> copying agent into the VM and enrolling against http://10.0.2.2:8080"
     scp -q -i "$sshkey" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -P "$ssh_port" "$bin" rescue@localhost:/tmp/openscreentime
-    ssh_as rescue "sudo install -m0755 /tmp/openscreentime /usr/local/bin/openscreentime \
+    # dnsmasq + nftables so DNS/firewall enforcement works too (the freeze test
+    # needs neither — cgroup2 + logind are already there — but this makes the
+    # full loop testable). Best-effort; a missing resolver just degrades.
+    ssh_as rescue "sudo pacman -Sy --noconfirm --needed nftables dnsmasq >/dev/null 2>&1 || true; \
+        sudo install -m0755 /tmp/openscreentime /usr/local/bin/openscreentime \
         && sudo openscreentime enroll --server http://10.0.2.2:8080 --token '$token' \
         && sudo openscreentime install-service \
         && sudo openscreentime status"
