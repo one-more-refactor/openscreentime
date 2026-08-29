@@ -140,29 +140,29 @@ async function read<T>(path: string, fallback: () => T, init?: RequestInit): Pro
 export const auth = {
   // webauthn-rs serializes challenges wrapped in `{ publicKey: {...} }`;
   // @simplewebauthn/browser wants the inner options object.
-  async registerStart(email: string, display_name: string) {
+  async registerStart(username: string, display_name?: string) {
     const res = await request<{
       publicKey: PublicKeyCredentialCreationOptionsJSON;
     }>("/api/auth/register/start", {
       method: "POST",
-      body: JSON.stringify({ email, display_name }),
+      body: JSON.stringify({ username, display_name }),
     });
     return res.publicKey;
   },
 
-  async registerFinish(email: string, credential: RegistrationResponseJSON) {
+  async registerFinish(username: string, credential: RegistrationResponseJSON) {
     return request<{ admin: Me["admin"] }>("/api/auth/register/finish", {
       method: "POST",
-      body: JSON.stringify({ email, credential }),
+      body: JSON.stringify({ username, credential }),
     });
   },
 
-  async loginStart(email: string) {
+  async loginStart(username: string) {
     const res = await request<{
       publicKey: PublicKeyCredentialRequestOptionsJSON;
     }>("/api/auth/login/start", {
       method: "POST",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ username }),
     });
     return res.publicKey;
   },
@@ -191,27 +191,28 @@ export const auth = {
     });
   },
 
-  /** Full register ceremony: start → browser prompt → finish. */
-  async register(email: string, display_name: string) {
-    const options = await this.registerStart(email, display_name);
+  /** Full register ceremony: start → browser prompt → finish. Passkey only. */
+  async register(username: string, display_name?: string) {
+    const options = await this.registerStart(username, display_name);
     const credential = await startRegistration({ optionsJSON: options });
-    return this.registerFinish(email, credential);
+    return this.registerFinish(username, credential);
   },
 
   /** Full login ceremony: start → browser prompt → finish. */
-  async login(email: string) {
-    const options = await this.loginStart(email);
+  async login(username: string) {
+    const options = await this.loginStart(username);
     const credential = await startAuthentication({ optionsJSON: options });
     return this.loginFinish(credential);
   },
 };
 
-/** GET /api/auth/config — public; reports whether OIDC SSO is available. */
+/** GET /api/auth/config — public; reports SSO availability + first-run state. */
 export async function getAuthConfig(): Promise<AuthConfig> {
-  const res = await read<{ auth: AuthConfig }>("/api/auth/config", () => ({
-    auth: { oidc: true, oidc_name: "Authentik" },
-  }));
-  return res.auth;
+  const res = await read<{ needs_setup?: boolean; auth: Omit<AuthConfig, "needs_setup"> }>(
+    "/api/auth/config",
+    () => ({ needs_setup: false, auth: { oidc: true, oidc_name: "Authentik" } }),
+  );
+  return { ...res.auth, needs_setup: res.needs_setup ?? false };
 }
 
 // ---- Session ---------------------------------------------------------------
@@ -792,6 +793,18 @@ export async function updateMember(id: string, patch: MemberPatch): Promise<Acco
 export async function deleteMember(id: string): Promise<void> {
   if (usingMock) return mockDeleteMember(id);
   await request<unknown>(`/api/members/${id}`, { method: "DELETE" });
+}
+
+/** Danger zone: block a child — cuts their login and locks their devices now. */
+export async function blockMember(id: string): Promise<void> {
+  if (usingMock) return;
+  await request<unknown>(`/api/members/${id}/block`, { method: "POST" });
+}
+
+/** Danger zone: lift a block (devices stay locked until the parent resumes). */
+export async function unblockMember(id: string): Promise<void> {
+  if (usingMock) return;
+  await request<unknown>(`/api/members/${id}/unblock`, { method: "POST" });
 }
 
 // ---- The person's own page ---------------------------------------------------

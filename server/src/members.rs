@@ -577,6 +577,89 @@ pub async fn delete_member(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/members/{id}/block` — members only. A parent Danger-Zone action:
+/// blocks the account (it can no longer authenticate; live sessions are cut) and
+/// locks every device the child uses so their screens stop right away.
+pub async fn block_member(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    require_hub(&admin)?;
+    let row = get_account(&st.db, id, admin.tenant_id).await?;
+    if row.4 != "member" {
+        return Err(AppError::BadRequest("only members can be blocked".into()));
+    }
+    sqlx::query(
+        "UPDATE admins SET blocked_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND blocked_at IS NULL",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&st.db)
+    .await?;
+    // Cut any live console sessions the child holds.
+    sqlx::query("DELETE FROM admin_sessions WHERE admin_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+    // Lock every device this child uses (same command path as a manual lock).
+    let devices: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT du.device_id FROM device_users du
+         JOIN devices d ON d.id = du.device_id
+         WHERE du.account_id = $1 AND d.tenant_id = $2",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?;
+    for (device_id,) in &devices {
+        let _ = crate::agent::enqueue_command(&st, *device_id, "lock", json!({})).await;
+    }
+    events::insert(
+        &st.db,
+        admin.tenant_id,
+        None,
+        None,
+        "member",
+        "warn",
+        json!({ "action": "blocked", "account_id": id, "display_name": row.2,
+                "devices_locked": devices.len(), "by": admin.admin_id }),
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true, "blocked": true })))
+}
+
+/// `POST /api/members/{id}/unblock` — clears the block. Devices are NOT
+/// auto-unlocked; the parent lifts those deliberately.
+pub async fn unblock_member(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    require_hub(&admin)?;
+    let row = get_account(&st.db, id, admin.tenant_id).await?;
+    if row.4 != "member" {
+        return Err(AppError::BadRequest("only members can be unblocked".into()));
+    }
+    sqlx::query("UPDATE admins SET blocked_at = NULL WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(admin.tenant_id)
+        .execute(&st.db)
+        .await?;
+    events::insert(
+        &st.db,
+        admin.tenant_id,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "unblocked", "account_id": id, "display_name": row.2, "by": admin.admin_id }),
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true, "blocked": false })))
+}
+
 // ── /api/me ─────────────────────────────────────────────────────────────────
 
 /// `GET /api/me` → account + household, plus the deprecated `admin`/`tenant`

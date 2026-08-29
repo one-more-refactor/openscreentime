@@ -187,6 +187,17 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     }
 
     children.sort_by_key(|c| c.account.2.to_lowercase());
+    // Blocked members (Danger-Zone action) — surfaced so the console shows the
+    // state. Kept out of the shared ACCOUNT_COLS tuple to avoid churning arity.
+    let blocked_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM admins WHERE tenant_id = $1 AND blocked_at IS NOT NULL",
+    )
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
+
     let children: Vec<Value> = children
         .into_iter()
         .map(|c| {
@@ -222,6 +233,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             v["blocked_apps"] = json!(blocked_apps);
             v["can_ask"] = json!(bracket.can_request_time());
             v["managed"] = json!(bracket.is_managed());
+            v["blocked"] = json!(blocked_ids.contains(&c.account.0));
             v
         })
         .collect();

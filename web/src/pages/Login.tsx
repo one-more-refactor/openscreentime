@@ -1,44 +1,66 @@
 // ============================================================================
-// LOGIN — the front door, kept small on purpose (CONTRACT-0.6 §2).
+// LOGIN / FIRST-RUN REGISTRATION — the front door, kept small on purpose.
 //
-// The primary way in: type your name, and your own computer asks "is this
-// you?" — one click on its notification signs this browser in. No email, no
-// password, no code. The PKCE verifier stays in this tab; the approval is
-// worthless anywhere else.
+// Fresh install (no account yet): a single passkey-only registration — pick a
+// username, create your passkey. That is the ONLY option; there is no email,
+// no password, no code, and nothing third-party.
 //
-// Everything else — the first parent's registration, the passkey fallback for
-// phones and unmanaged browsers — lives behind one quiet disclosure. SSO is
-// deliberately absent from the UI for now (the server still speaks it).
+// Otherwise (login): type your username and your own computer asks "is this
+// you?" — one tap on its notification signs this browser in (the client-code /
+// number-match flow). Beneath it, a small "Log in with passkey" for phones and
+// unmanaged browsers. SSO stays available when the server has it configured.
 // ============================================================================
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { ApiError } from "../api";
-import { isEmail } from "../lib/validate";
+import { ApiError, getAuthConfig } from "../api";
+import type { AuthConfig } from "../types";
 import { Wordmark, PasskeyButton, TextInput, Button } from "../components";
 
 type Phase = "idle" | "waiting";
+
+const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
 
 export function Login() {
   const { login, register, deviceLogin, mock } = useSession();
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const [name, setName] = useState("");
+
+  const [config, setConfig] = useState<AuthConfig | null>(null);
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [userError, setUserError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [matchCode, setMatchCode] = useState("");
   const [error, setError] = useState<string | null>(() =>
     params.get("error") ? "Sign-in failed — try again." : null,
   );
 
-  // The fallback drawer: passkey sign-in, or the first parent registering.
-  const [fallbackOpen, setFallbackOpen] = useState(false);
-  const [fallbackMode, setFallbackMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [emailError, setEmailError] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getAuthConfig()
+      .then((c) => alive && setConfig(c))
+      .catch(() => alive && setConfig({ oidc: false, oidc_name: "SSO", needs_setup: false }));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
+  const registering = config?.needs_setup === true;
+
+  function validUsername(): string | null {
+    const u = username.trim().toLowerCase();
+    if (!USERNAME_RE.test(u)) {
+      setUserError("3–32 characters: a–z, 0–9, dot, underscore, hyphen.");
+      return null;
+    }
+    setUserError(null);
+    return u;
+  }
+
+  // LOGIN: type your username → your own computer approves (number match).
   async function runDeviceLogin() {
-    const who = name.trim();
+    const who = username.trim();
     if (!who) return;
     setError(null);
     setPhase("waiting");
@@ -52,27 +74,43 @@ export function Login() {
     }
   }
 
-  async function runPasskey() {
-    if (!isEmail(email)) {
-      setEmailError("Enter the email on the account, e.g. parent@example.com.");
+  // LOGIN fallback: passkey for this username.
+  async function runPasskeyLogin() {
+    const who = username.trim();
+    if (!who) {
+      setUserError("Enter your username first.");
       return;
     }
-    setEmailError(null);
     setError(null);
     try {
-      if (fallbackMode === "login") await login(email.trim());
-      else await register(email.trim(), displayName.trim() || email.trim());
+      await login(who);
+      navigate("/", { replace: true });
+    } catch (e) {
+      setError(
+        e instanceof Error && e.message ? e.message : "The passkey didn't match — try again.",
+      );
+    }
+  }
+
+  // FIRST-RUN: passkey-only account creation.
+  async function runRegister() {
+    const u = validUsername();
+    if (!u) return;
+    setError(null);
+    try {
+      await register(u, displayName.trim() || undefined);
       navigate("/", { replace: true });
     } catch (e) {
       if (e instanceof ApiError && e.code === "registration_closed") {
-        setError(
-          "Registration is closed on this server — an admin already exists. " +
-            "Sign in instead, or ask the existing admin for access.",
-        );
+        setError("An account already exists on this server — sign in instead.");
+        return;
+      }
+      if (e instanceof ApiError && e.status === 409) {
+        setUserError("That username is taken — pick another.");
         return;
       }
       setError(
-        e instanceof Error && e.message ? e.message : "The passkey ceremony failed — try again.",
+        e instanceof Error && e.message ? e.message : "Creating your passkey failed — try again.",
       );
     }
   }
@@ -89,12 +127,10 @@ export function Login() {
 
         {phase === "waiting" ? (
           <div className="flex flex-col gap-4" role="status" aria-live="polite">
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>
-              Check your computer.
-            </p>
+            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Check your computer.</p>
             <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              A notification on your computer is showing three numbers. Tap the
-              one that matches this:
+              A notification on your computer is showing three numbers. Tap the one that matches
+              this:
             </p>
             <p
               style={{
@@ -113,23 +149,87 @@ export function Login() {
               Cancel
             </Button>
           </div>
+        ) : registering ? (
+          // ---- First-run registration: passkey only, the only option. ----
+          <div className="flex flex-col gap-4">
+            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create the first account.</p>
+            <TextInput
+              label="Username"
+              value={username}
+              autoComplete="username webauthn"
+              onChange={(e) => {
+                setUsername(e.target.value);
+                if (userError) setUserError(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && void runRegister()}
+              placeholder="e.g. dad"
+              aria-invalid={!!userError}
+              hint={userError ?? "This is how you'll sign in. No email, ever."}
+            />
+            <TextInput
+              label="Display name (optional)"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Parent"
+            />
+            <PasskeyButton label="Create account" onActivate={runRegister} disabled={!username.trim()} />
+          </div>
         ) : (
+          // ---- Login: username → your computer approves; passkey beneath. ----
           <div className="flex flex-col gap-4">
             <TextInput
-              label="Your name"
-              value={name}
-              autoComplete="username"
-              onChange={(e) => setName(e.target.value)}
+              label="Username"
+              value={username}
+              autoComplete="username webauthn"
+              onChange={(e) => {
+                setUsername(e.target.value);
+                if (userError) setUserError(null);
+              }}
               onKeyDown={(e) => e.key === "Enter" && void runDeviceLogin()}
-              placeholder="e.g. Mia"
+              placeholder="e.g. dad"
+              aria-invalid={!!userError}
+              hint={userError ?? undefined}
             />
-            <Button onClick={() => void runDeviceLogin()} disabled={!name.trim()}>
+            <Button onClick={() => void runDeviceLogin()} disabled={!username.trim()}>
               Continue
             </Button>
             <p className="text-xs" style={{ color: "var(--fg-faint)" }}>
-              Your own computer approves the sign-in — nothing to type, nothing
-              to remember.
+              Your own computer approves the sign-in — nothing to type, nothing to remember.
             </p>
+            <button
+              type="button"
+              className="focusable text-xs"
+              style={{
+                color: "var(--fg-faint)",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: "0.25rem 0",
+                textAlign: "left",
+              }}
+              onClick={() => void runPasskeyLogin()}
+            >
+              Log in with passkey →
+            </button>
+            {config?.oidc && (
+              <button
+                type="button"
+                className="focusable text-xs"
+                style={{
+                  color: "var(--fg-faint)",
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: "0.25rem 0",
+                  textAlign: "left",
+                }}
+                onClick={() => {
+                  window.location.href = "/api/auth/oidc/start";
+                }}
+              >
+                Sign in with {config.oidc_name} →
+              </button>
+            )}
           </div>
         )}
 
@@ -146,73 +246,9 @@ export function Login() {
         )}
 
         {mock && (
-          <Button
-            variant="ghost"
-            onClick={() => navigate("/devices", { replace: true })}
-          >
+          <Button variant="ghost" onClick={() => navigate("/devices", { replace: true })}>
             Enter design review (skip auth) →
           </Button>
-        )}
-
-        {phase === "idle" && (
-          <div className="mt-10">
-            <button
-              type="button"
-              className="focusable text-xs"
-              style={{ color: "var(--fg-faint)", background: "none", border: "none", cursor: "pointer", padding: 0 }}
-              onClick={() => setFallbackOpen((o) => !o)}
-              aria-expanded={fallbackOpen}
-            >
-              {fallbackOpen ? "▾" : "▸"} No computer nearby? Passkey &amp; first-time setup
-            </button>
-
-            {fallbackOpen && (
-              <div className="mt-4 flex flex-col gap-4">
-                <div className="seg">
-                  {(["login", "register"] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => {
-                        setFallbackMode(m);
-                        setError(null);
-                      }}
-                      className="focusable seg-btn"
-                      data-on={fallbackMode === m}
-                    >
-                      {m === "login" ? "Passkey" : "First parent"}
-                    </button>
-                  ))}
-                </div>
-                <TextInput
-                  label="Email"
-                  type="email"
-                  autoComplete="username webauthn"
-                  value={email}
-                  onChange={(e) => {
-                    setEmail(e.target.value);
-                    if (emailError) setEmailError(null);
-                  }}
-                  placeholder="parent@home.lan"
-                  aria-invalid={!!emailError}
-                  hint={emailError ?? undefined}
-                />
-                {fallbackMode === "register" && (
-                  <TextInput
-                    label="Display name"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="Parent"
-                  />
-                )}
-                <PasskeyButton
-                  label={fallbackMode === "login" ? "Continue with passkey" : "Create your passkey"}
-                  onActivate={runPasskey}
-                  disabled={!email}
-                />
-              </div>
-            )}
-          </div>
         )}
       </div>
     </div>

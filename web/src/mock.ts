@@ -383,7 +383,7 @@ export const mockEvents: Event[] = [
 const mockAdmin: Admin = {
   id: "a-1",
   tenant_id: TENANT_ID,
-  email: "parent@home.lan",
+  username: "parent",
   display_name: "Parent",
   created_at: "2026-06-01T10:00:00Z",
 };

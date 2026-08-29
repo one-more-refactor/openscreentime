@@ -49,8 +49,6 @@ use crate::state::{AppState, AuthAdmin, SESSION_COOKIE};
 /// read an unlock code to a child or rotate a device's keys, short enough
 /// that a walked-away-from console is not a standing permission.
 const GRANT_MINUTES: i64 = 15;
-/// Emailed codes are single-use and short-lived.
-const EMAIL_CODE_MINUTES: i64 = 10;
 /// Wrong second factors before the account has to wait.
 const MAX_FAILS: i32 = 5;
 /// The first lockout; it doubles from there, capped.
@@ -131,7 +129,6 @@ fn exempt(path: &str) -> bool {
         || path == "/api/auth/logout"
         || path == "/api/auth/voucher"
         || path == "/api/auth/stepup/verify"
-        || path == "/api/auth/stepup/email/start"
         || path == "/api/auth/stepup/telegram/start"
         // Locking change mode early must never itself need change mode.
         || path == "/api/auth/stepup/lock"
@@ -347,7 +344,6 @@ pub async fn status(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<J
 
     Ok(Json(json!({
         "totp_enrolled": confirmed.flatten().is_some(),
-        "email_available": email_sender_configured(),
         "telegram_available": telegram.is_some(),
         "locked_until": locked,
     })))
@@ -460,59 +456,8 @@ pub async fn totp_confirm(
     Ok((jar, Json(json!({ "ok": true, "expires_at": expires }))))
 }
 
-// ── emailed codes ───────────────────────────────────────────────────────────
-
-fn email_sender_configured() -> bool {
-    // Dev builds emit the code to the server log, which is a real (if blunt)
-    // delivery channel for a homelab. Prod points this at a webhook.
-    std::env::var("OST_STEPUP_WEBHOOK").is_ok()
-        || cfg!(debug_assertions)
-        || std::env::var("OST_STEPUP_LOG_CODES").is_ok()
-}
-
-/// `POST /api/auth/stepup/email/start` — mint a single-use code and send it.
-pub async fn email_start(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
-    if let Some(t) = locked_until(&st, admin.admin_id).await? {
-        return Err(AppError::RateLimited(format!(
-            "too many attempts — try again at {t}"
-        )));
-    }
-
-    let code: String = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000));
-    sqlx::query(
-        "INSERT INTO stepup_email_codes (admin_id, code_hash, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3))",
-    )
-    .bind(admin.admin_id)
-    .bind(hash_token(&code))
-    // make_interval's `mins` is an integer; only `secs` is double precision.
-    .bind(EMAIL_CODE_MINUTES as i32)
-    .execute(&st.db)
-    .await?;
-
-    let email: Option<String> = sqlx::query_scalar("SELECT email FROM admins WHERE id = $1")
-        .bind(admin.admin_id)
-        .fetch_one(&st.db)
-        .await?;
-    let Some(email) = email else {
-        return Err(AppError::BadRequest(
-            "this account has no email — use an authenticator app".into(),
-        ));
-    };
-
-    if let Ok(hook) = std::env::var("OST_STEPUP_WEBHOOK") {
-        // Fire-and-forget: a slow or broken notifier must not hold the request
-        // open, and the code is already valid either way.
-        let body = json!({ "email": email, "code": code, "kind": "stepup" });
-        tokio::spawn(async move {
-            let _ = reqwest::Client::new().post(hook).json(&body).send().await;
-        });
-    } else {
-        tracing::warn!(target: "stepup", "step-up code for {email}: {code}");
-    }
-
-    Ok(Json(json!({ "ok": true })))
-}
+// Emailed step-up codes were retired: OpenScreenTime holds no email and calls no
+// third-party mailer. The remaining second factors are TOTP and Telegram.
 
 // ── verification ────────────────────────────────────────────────────────────
 
@@ -544,7 +489,6 @@ pub async fn verify(
 
     let ok = match req.method.as_str() {
         "totp" => verify_totp(&st, admin.admin_id, &code).await?,
-        "email" => verify_email(&st, admin.admin_id, &code).await?,
         other => {
             return Err(AppError::BadRequest(format!("unknown factor: {other}")));
         }
@@ -667,38 +611,6 @@ async fn verify_totp(st: &AppState, admin_id: Uuid, code: &str) -> AppResult<boo
         }
     }
     Ok(false)
-}
-
-async fn verify_email(st: &AppState, admin_id: Uuid, code: &str) -> AppResult<bool> {
-    let hash = hash_token(code);
-    let id: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE stepup_email_codes SET consumed_at = now()
-          WHERE id = (SELECT id FROM stepup_email_codes
-                       WHERE admin_id = $1 AND code_hash = $2
-                         AND consumed_at IS NULL AND expires_at > now()
-                       ORDER BY created_at DESC LIMIT 1)
-        RETURNING id",
-    )
-    .bind(admin_id)
-    .bind(&hash)
-    .fetch_optional(&st.db)
-    .await?;
-
-    if id.is_none() {
-        // Charge the attempt against every live code so brute force burns them.
-        sqlx::query(
-            "UPDATE stepup_email_codes SET attempts = attempts + 1
-              WHERE admin_id = $1 AND consumed_at IS NULL AND expires_at > now()",
-        )
-        .bind(admin_id)
-        .execute(&st.db)
-        .await?;
-        sqlx::query("DELETE FROM stepup_email_codes WHERE attempts >= $1")
-            .bind(MAX_FAILS)
-            .execute(&st.db)
-            .await?;
-    }
-    Ok(id.is_some())
 }
 
 // ── device-voucher autologin ────────────────────────────────────────────────
