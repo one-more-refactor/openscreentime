@@ -119,16 +119,30 @@ enforcement on your workstation. Three tiers, cheapest first:
   # register a parent + add a device on the console, copy the enroll token
   vm.sh install <token>       # build + copy + enroll + install the hardened service
   # give mia's Kid profile a 1-minute daily limit in the console
-  vm.sh seat                  # mia autologin on tty1 (a real seat) + accelerate the agent
-  vm.sh watch                 # mia's cgroup.freeze flips to 1 after a short countdown
+  vm.sh seat                  # give mia a real GRAPHICAL local seat (Weston) + accelerate the agent
+  vm.sh view                  # watch mia's SCREEN in your browser (noVNC) — see the overlay land
+  vm.sh watch                 # (text) poll mia's cgroup.freeze until it flips
+  vm.sh relock [accel]        # reset to a clean slate and re-arm, to watch the lock again
   vm.sh thaw                  # rescue path: stop the agent + unfreeze
+  vm.sh shot [file]           # headless screenshot (QMP screendump → PNG), for eyeballing/CI
   ```
-  Two gotchas the harness encodes so you don't trip on them: (1) the agent only counts **local
-  seat** sessions (`loginctl Active=yes && Remote=no`) as screen time — an SSH login is `Remote`
-  and never accrues, so you need `vm.sh seat`, not `vm.sh ssh`, to drive a lock; (2) the lock is
+  `install` builds the agent with `--features gui`, so the lock is the real fullscreen egui
+  **overlay** ("Time's up", a "SCREEN PAUSES IN Ns" countdown, the unlock-code field), not the
+  headless `wall` broadcast. `up` boots with a VNC display (localhost only) + a QMP socket; `seat`
+  starts a Weston (Wayland, pixman/CPU renderer — GL hangs on the emulated GPU) session for mia via
+  a systemd service (seatd + linger, not a login shell — see `deploy/test/seat-setup.sh` for why);
+  `view` serves a bundled noVNC client that points at QEMU's built-in VNC-over-websocket. Set
+  mia's Kid daily limit small in the console first (e.g. 1 min).
+
+  Gotchas the harness encodes so you don't trip on them: (1) the agent only counts **local seat**
+  sessions (`loginctl Active=yes && Remote=no`) as screen time — an SSH login is `Remote` and never
+  accrues, so `vm.sh seat` (a Weston seat), not `vm.sh ssh`, drives a lock; (2) the lock is
   **sticky** — hitting the daily limit locks mia for the day, and dropping back under budget does
-  *not* auto-thaw (that takes an unlock code / earn-time grant, or `vm.sh thaw`). Keep tamper at
-  Level 1 while testing.
+  *not* auto-thaw (that takes an unlock code / earn-time grant, or `vm.sh thaw`); (3) the agent
+  re-reads policy only on (re)start, so a live console/DB limit change needs an agent restart —
+  `vm.sh relock` does that as part of resetting for another watch. The software-rendered desktop is
+  heavy, so an occasional `ssh` step returns 255 under load — just re-run it. Keep tamper at Level 1
+  while testing.
 
 For the child **UI** with zero risk (no agent, no device), run the console in mock mode:
 `cd web && VITE_USE_MOCK=1 bun run dev` renders all three `/me` looks from sample data.

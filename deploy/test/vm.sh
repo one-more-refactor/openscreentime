@@ -29,9 +29,11 @@
 #   deploy/test/vm.sh up                 # fetch image + boot the VM (background)
 #   deploy/test/vm.sh ssh                # shell in as the managed user `mia` (Remote — no usage)
 #   deploy/test/vm.sh rescue             # shell in as `rescue` (your way back)
-#   deploy/test/vm.sh install <token>    # copy the built agent in + enroll + service
-#   deploy/test/vm.sh seat [accel]       # give mia a LOCAL tty1 login + accel the agent (default 60)
-#   deploy/test/vm.sh watch              # poll mia's cgroup freeze state until it flips
+#   deploy/test/vm.sh install <token>    # build (--features gui) + copy + enroll + service
+#   deploy/test/vm.sh seat [accel]       # give mia a GRAPHICAL Weston login + accel the agent (default 60)
+#   deploy/test/vm.sh view               # watch mia's SCREEN in your browser (noVNC)
+#   deploy/test/vm.sh unview             # stop the browser viewer server
+#   deploy/test/vm.sh watch              # poll mia's cgroup freeze state until it flips (text)
 #   deploy/test/vm.sh thaw               # rescue path: stop the agent + unfreeze mia
 #   deploy/test/vm.sh console            # attach to the serial console (Ctrl-a x to quit)
 #   deploy/test/vm.sh reset              # wipe the overlay disk (rollback)
@@ -51,6 +53,11 @@ seed="$work/seed.iso"
 pidfile="$work/qemu.pid"
 sshkey="$work/id_ed25519"
 ssh_port=28022   # a high, uncontended host port (2222 is often taken by tunnels/bastions)
+vnc_display=0    # QEMU VNC on 127.0.0.1:5900 (= 5900 + display), localhost-only
+ws_port=5700     # QEMU's BUILT-IN VNC-over-websocket — noVNC connects straight here
+novnc_port=6080  # local static server for the in-browser noVNC client
+mem=3072         # a Wayland compositor + software GL wants more than the headless 2G
+novnc_dir="$work/novnc"
 # Arch, not Ubuntu, on purpose: the agent is built against the host's (rolling)
 # glibc, which is newer than any Ubuntu LTS ships — an Ubuntu VM can't run the
 # host binary and the musl route needs an extra cross-compiler. An Arch cloud
@@ -145,11 +152,13 @@ cmd_up() {
     build_seed
     local accel=(); [ -e /dev/kvm ] && accel=(-enable-kvm -cpu host)
     echo "==> booting VM (serial log: $work/console.log)"
-    qemu-system-x86_64 "${accel[@]}" -m 2048 -smp 2 \
+    qemu-system-x86_64 "${accel[@]}" -m "$mem" -smp 2 \
         -drive "file=$overlay,if=virtio" \
         -drive "file=$seed,if=virtio,format=raw" \
         -netdev "user,id=n0,hostfwd=tcp::$ssh_port-:22" -device virtio-net,netdev=n0 \
-        -display none -serial "file:$work/console.log" -monitor none \
+        -vga std -vnc "127.0.0.1:$vnc_display,websocket=$ws_port" \
+        -serial "file:$work/console.log" -monitor none \
+        -qmp "unix:$work/qmp.sock,server,nowait" \
         -pidfile "$pidfile" -daemonize
     echo "==> waiting for SSH (cloud-init runs on first boot, ~40-90s)…"
     for _ in $(seq 1 60); do
@@ -167,19 +176,23 @@ cmd_up() {
 
 ssh_as() {
     local user="$1"; shift
+    # No ServerAliveInterval: under the software-rendered desktop's load a brief
+    # stall would trip it and return 255 mid-command. A generous connect timeout
+    # is enough; callers that must not miss retry.
     ssh -q -i "$sshkey" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=4 -p "$ssh_port" "$user@localhost" "$@"
+        -o ConnectTimeout=20 -p "$ssh_port" "$user@localhost" "$@"
 }
 
 cmd_install() {
     local token="${1:-}"
     [ -n "$token" ] || { echo "usage: vm.sh install <enroll-token>"; exit 1; }
-    # Ordinary release build — the Arch VM's glibc matches the host's, so it
-    # just runs. The desktop (gui/tray) features aren't needed to prove the
-    # freeze; the headless build locks via cgroup + a wall broadcast.
+    # Built with --features gui: the Arch VM's glibc matches the host's, so it
+    # just runs. gui adds the real fullscreen egui lockout OVERLAY (in place of
+    # the headless `wall` text broadcast) — which is the whole point of watching
+    # this over VNC. It still locks via the cgroup freezer underneath.
     local bin="$root/client/target/release/openscreentime"
-    echo "==> building the agent (release)"
-    ( cd "$root/client" && cargo build --release )
+    echo "==> building the agent (release, --features gui)"
+    ( cd "$root/client" && cargo build --release --features gui )
     # The host server (10.0.2.2 from inside QEMU user-net) is plain http, which
     # the agent refuses UNLESS the host is loopback or `.local` — a deliberate
     # anti-downgrade guard. Give it a `.local` alias so the dev URL is honoured
@@ -215,24 +228,21 @@ cmd_install() {
 EOF
 }
 
-# Give mia a LOCAL seat login (tty1 autologin → loginctl Active=yes, Remote=no,
-# Seat=seat0) — the only kind of session the agent counts as screen time — and
-# accelerate the agent's clock so the daily budget is reachable in seconds.
+# Give mia a real GRAPHICAL local seat: autologin on tty1 → a Weston (Wayland)
+# session. That does three things at once — it is a LOCAL seat (Active=yes,
+# Remote=no) so the agent counts it as screen time; it puts a /run/user/1000/
+# wayland-0 socket where the lockout overlay looks for it; and it renders a
+# desktop QEMU's VGA scans out, so VNC/noVNC shows it. Also accelerates the
+# agent's clock so the daily budget is reachable in seconds.
 cmd_seat() {
     local accel="${1:-60}"
-    echo "==> mia: tty1 autologin (local seat) + agent --time-accel $accel"
-    ssh_as rescue "set -e
-        sudo mkdir -p /etc/systemd/system/getty@tty1.service.d /etc/systemd/system/openscreentime-agent.service.d
-        printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin mia --noclear %%I 38400 linux\n' \
-            | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
-        printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/openscreentime --time-accel $accel run\n' \
-            | sudo tee /etc/systemd/system/openscreentime-agent.service.d/accel.conf >/dev/null
-        sudo systemctl daemon-reload
-        sudo systemctl restart getty@tty1
-        sudo systemctl restart openscreentime-agent.service
-        sleep 2
-        echo -n 'mia local seat: '; loginctl list-sessions --no-legend | awk '\$3==\"mia\" && \$4==\"seat0\" {print \"session \"\$1\" on \"\$4}'"
-    echo "==> now: deploy/test/vm.sh watch"
+    echo "==> mia: graphical (Weston) autologin on tty1 + agent --time-accel $accel"
+    # Robust over SSH: stage a real script and run it, rather than fight nested
+    # shell quoting for the heredocs it writes.
+    scp -q -i "$sshkey" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -P "$ssh_port" "$here/seat-setup.sh" rescue@localhost:/tmp/seat-setup.sh
+    ssh_as rescue "sudo bash /tmp/seat-setup.sh $accel"
+    echo "==> watch it in the browser:  deploy/test/vm.sh view"
 }
 
 # Poll mia's cgroup-v2 freezer until it flips (or ~2 min elapse).
@@ -265,6 +275,90 @@ cmd_thaw() {
         echo "  sudo systemctl unmask openscreentime-agent.service && sudo systemctl start openscreentime-agent.service openscreentime-watchdog.timer"'
 }
 
+# Watch the VM's SCREEN in a browser. QEMU already serves the framebuffer as a
+# VNC-over-websocket on 127.0.0.1:$ws_port (see cmd_up); noVNC is the static
+# HTML/JS client. We just serve the noVNC directory over http and hand you a URL
+# that points its websocket at QEMU. Nothing is exposed off localhost.
+cmd_view() {
+    [ -f "$novnc_dir/vnc.html" ] || { echo "noVNC assets missing at $novnc_dir (git clone https://github.com/novnc/noVNC.git \"$novnc_dir\")"; exit 1; }
+    if [ -f "$work/novnc.pid" ] && kill -0 "$(cat "$work/novnc.pid")" 2>/dev/null; then
+        echo "noVNC server already running (pid $(cat "$work/novnc.pid"))."
+    else
+        ( cd "$novnc_dir" && python3 -m http.server "$novnc_port" --bind 127.0.0.1 >"$work/novnc.log" 2>&1 & echo $! >"$work/novnc.pid" )
+        sleep 1
+    fi
+    local url="http://localhost:$novnc_port/vnc.html?host=localhost&port=$ws_port&resize=scale&autoconnect=1"
+    echo "==> open this in your browser:"
+    echo "      $url"
+    echo "    (mia's Weston desktop; the lockout overlay appears fullscreen when the limit hits.)"
+    echo "    stop the viewer server later with: vm.sh unview"
+    command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 &
+    true
+}
+
+cmd_unview() {
+    [ -f "$work/novnc.pid" ] && kill "$(cat "$work/novnc.pid")" 2>/dev/null && rm -f "$work/novnc.pid" && echo "noVNC server stopped." || echo "noVNC server not running."
+}
+
+# Grab a still of the VM's screen via QMP screendump (a headless screenshot —
+# handy for eyeballing/CI without a browser). QEMU writes PPM; we convert to PNG
+# if a converter is around, else leave the .ppm. Absolute path — QEMU resolves
+# the filename against its own cwd, not yours.
+cmd_shot() {
+    local out; out="$(readlink -f "${1:-$work/screen.png}")"
+    [ -S "$work/qmp.sock" ] || { echo "no QMP socket — is the VM up (with the current vm.sh)?"; exit 1; }
+    local ppm="$work/.shot.ppm"; rm -f "$ppm"
+    python3 - "$work/qmp.sock" "$ppm" <<'PY'
+import socket, json, sys
+sock_path, out = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX); s.connect(sock_path); f = s.makefile("rwb")
+def cmd(o): f.write((json.dumps(o)+"\n").encode()); f.flush()
+f.readline()                                   # greeting
+cmd({"execute":"qmp_capabilities"}); f.readline()
+cmd({"execute":"screendump","arguments":{"filename":out}})
+for _ in range(80):
+    line = f.readline()
+    if not line: break
+    try: msg = json.loads(line)
+    except: continue
+    if "error" in msg: sys.exit("QMP error: %s" % msg["error"]);
+    if "return" in msg: break
+PY
+    if command -v magick >/dev/null 2>&1; then magick "$ppm" "$out" && rm -f "$ppm"
+    elif command -v convert >/dev/null 2>&1; then convert "$ppm" "$out" && rm -f "$ppm"
+    elif command -v ffmpeg >/dev/null 2>&1; then ffmpeg -y -loglevel error -i "$ppm" "$out" && rm -f "$ppm"
+    else out="${out%.png}.ppm"; mv "$ppm" "$out"; fi
+    echo "wrote $out"
+}
+
+# Reset for a fresh, watchable lock: clear the persisted usage ledger + freeze
+# state, thaw mia (which un-suspends her Weston too), kill any leftover overlay,
+# and re-arm the agent at $accel. Then you can watch the desktop → "Time's up"
+# overlay transition again from a clean slate. mia's daily budget comes from the
+# console/DB — set her Kid limit small first (e.g. 1 min), and note the agent
+# only re-reads policy on (re)start, which this does.
+cmd_relock() {
+    local accel="${1:-10}"
+    # Discrete, tolerant steps. Every ssh_as gets `|| true` at the LOCAL level:
+    # the script runs under `set -e`, and SSH itself can return 255 under the
+    # software-rendered desktop's load even when the remote command succeeded.
+    ssh_as rescue "sudo systemctl unmask openscreentime-agent.service 2>/dev/null; sudo systemctl stop openscreentime-agent.service openscreentime-watchdog.timer 2>/dev/null; true" || true
+    ssh_as rescue "sudo pkill -f __lockout 2>/dev/null; echo 0 | sudo tee /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice/cgroup.freeze >/dev/null 2>&1; true" || true
+    ssh_as rescue "sudo rm -f /var/lib/openscreentime/usage_ledger.json /var/lib/openscreentime/freeze_state.json; true" || true
+    ssh_as rescue "printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/openscreentime --time-accel $accel run\n' | sudo tee /etc/systemd/system/openscreentime-agent.service.d/accel.conf >/dev/null; sudo systemctl daemon-reload" || true
+    # Start + verify with a couple retries — SSH can 255 under the VM's load.
+    local ok=""
+    for _ in 1 2 3; do
+        ssh_as rescue "sudo systemctl start openscreentime-agent.service openscreentime-watchdog.timer" >/dev/null 2>&1 || true
+        if [ "$(ssh_as rescue 'systemctl is-active openscreentime-agent.service' 2>/dev/null)" = active ]; then ok=1; break; fi
+        sleep 2
+    done
+    if [ -n "$ok" ]; then echo "==> clean slate — agent re-armed, accel=$accel."
+    else echo "==> agent did NOT come active (SSH flaked under load) — just run: vm.sh relock $accel"; fi
+    echo "    Watch in the browser (vm.sh view); the 'Time's up' overlay lands once mia's"
+    echo "    accelerated screen time passes her daily limit."
+}
+
 case "${1:-}" in
     up)      cmd_up ;;
     ssh)     shift; ssh_as mia "$@" ;;
@@ -273,8 +367,12 @@ case "${1:-}" in
     seat)    shift; cmd_seat "$@" ;;
     watch)   cmd_watch ;;
     thaw)    cmd_thaw ;;
+    view)    cmd_view ;;
+    unview)  cmd_unview ;;
+    shot)    shift; cmd_shot "$@" ;;
+    relock)  shift; cmd_relock "$@" ;;
     console) exec tail -f "$work/console.log" ;;
     reset)   rm -f "$overlay"; echo "overlay wiped — next 'up' boots a pristine VM." ;;
     down)    [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" && echo "VM stopped." || echo "not running." ;;
-    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -52 ;;
+    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -54 ;;
 esac
