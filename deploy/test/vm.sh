@@ -287,7 +287,9 @@ cmd_view() {
         ( cd "$novnc_dir" && python3 -m http.server "$novnc_port" --bind 127.0.0.1 >"$work/novnc.log" 2>&1 & echo $! >"$work/novnc.pid" )
         sleep 1
     fi
-    local url="http://localhost:$novnc_port/vnc.html?host=localhost&port=$ws_port&resize=scale&autoconnect=1"
+    # path= MUST be empty: QEMU serves the raw VNC websocket at the root, while
+    # noVNC otherwise defaults the path to `websockify` and QEMU 404s that.
+    local url="http://localhost:$novnc_port/vnc.html?host=localhost&port=$ws_port&path=&resize=scale&autoconnect=1"
     echo "==> open this in your browser:"
     echo "      $url"
     echo "    (mia's Weston desktop; the lockout overlay appears fullscreen when the limit hits.)"
