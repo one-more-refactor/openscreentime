@@ -307,9 +307,7 @@ pub async fn register_start(
     // over) an existing admin.
     let existing = find_admin(&st.db, &username).await?;
     if existing.is_some() && !may_graft {
-        return Err(AppError::Conflict(
-            "that username is already taken".into(),
-        ));
+        return Err(AppError::Conflict("that username is already taken".into()));
     }
     let user_id = existing
         .as_ref()
