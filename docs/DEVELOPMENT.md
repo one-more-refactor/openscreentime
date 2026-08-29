@@ -94,18 +94,29 @@ Always build from within `client/`. Feature flags (`client/Cargo.toml`):
 
 ### Testing an agent without a real host
 The agent enforces on the host (nftables, DNS, cgroup freezer), so don't run real
-enforcement on your workstation. Two safe options:
+enforcement on your workstation. Three tiers, cheapest first:
+
 - **`--dry-run`** — the agent logs every action it *would* take (`WOULD RUN: nft …`,
   `WOULD WRITE /etc/resolv.conf …`) and touches nothing. Safe as non-root, anywhere.
-- **A throwaway container as root** — exercises the *full* loop (enroll → policy pull →
-  enforcement decisions → heartbeat → events) in isolation. `enroll` needs the tenant to
-  have a `default` preset profile, or it 404s:
+- **A throwaway container as root** — exercises the *full protocol* (enroll → policy pull →
+  DNS/firewall decisions → heartbeat → events). But a container usually has **no cgroup-v2
+  freezer**, so it can't prove the *lock* — the agent will report `screen_time_no_freezer`.
+  Good for the network/DNS half. `enroll` needs the tenant to have a `default` preset, or 404s:
   ```bash
   podman run --rm --network host -v "$PWD/client/target/debug/openscreentime":/usr/local/bin/openscreentime:ro \
     docker.io/library/archlinux bash -c '
       ost enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
       ost --dry-run --time-accel 60 run'
   ```
+- **A disposable Ubuntu VM** — the only way to prove the real cgroup-v2 freeze on a genuine
+  systemd seat, safely. `deploy/test/vm.sh` boots one on an overlay disk (instant rollback via
+  `vm.sh reset`), with a managed `mia` user and an unmanaged `rescue` user so a lock can never
+  strand you. `vm.sh up` → register a parent + add a device on the console →
+  `vm.sh install <enroll-token>` → follow its printed steps to watch the freeze bite and
+  recover with `openscreentime unlock`. Keep tamper at Level 1 while testing.
+
+For the child **UI** with zero risk (no agent, no device), run the console in mock mode:
+`cd web && VITE_USE_MOCK=1 bun run dev` renders all three `/me` looks from sample data.
 
 ## Repo conventions
 - Rust: `cargo fmt` + `cargo clippy` clean. Errors via `anyhow`/`thiserror`. Async on Tokio.
