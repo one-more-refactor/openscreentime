@@ -25,3 +25,4 @@ build/
 .claude/
 deploy/test/.bin/
 deploy/test/.vm/
+deploy/test/.gnome/
