@@ -248,15 +248,21 @@ cmd_watch() {
         echo "(still 0 — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny?)"'
 }
 
-# The guaranteed rescue: stop the (unmanaged-of) agent and thaw mia. Because the
-# agent is stopped it cannot re-freeze; rescue is never enrolled, so this always
-# works even if mia is fully locked out.
+# The guaranteed rescue. The agent is Restart=always AND has a watchdog timer
+# that re-starts it, so a plain `stop` doesn't hold — it re-freezes mia within
+# seconds. The durable move is to stop the watchdog and MASK the agent (so no
+# restart can bring it back), then thaw. rescue is never enrolled, so this works
+# even when mia is fully locked out.
 cmd_thaw() {
     ssh_as rescue 'uid=$(id -u mia); f=/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.freeze
-        sudo systemctl stop openscreentime-agent.service
+        sudo systemctl stop openscreentime-watchdog.timer 2>/dev/null || true
+        sudo systemctl mask --now openscreentime-agent.service >/dev/null 2>&1 || sudo systemctl stop openscreentime-agent.service
+        sleep 1
         echo 0 | sudo tee "$f" >/dev/null 2>&1 || true
+        sleep 3   # prove it stays down (the watchdog would have re-frozen by now)
         echo "agent=$(systemctl is-active openscreentime-agent.service) freeze=$(cat "$f" 2>/dev/null || echo n/a)"
-        echo "mia is thawed. Re-arm with: sudo systemctl start openscreentime-agent.service"'
+        echo "mia is thawed and the agent is masked. Re-arm with:"
+        echo "  sudo systemctl unmask openscreentime-agent.service && sudo systemctl start openscreentime-agent.service openscreentime-watchdog.timer"'
 }
 
 case "${1:-}" in
