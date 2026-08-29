@@ -108,12 +108,27 @@ enforcement on your workstation. Three tiers, cheapest first:
       ost enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
       ost --dry-run --time-accel 60 run'
   ```
-- **A disposable Ubuntu VM** — the only way to prove the real cgroup-v2 freeze on a genuine
+- **A disposable Arch VM** — the only way to prove the real cgroup-v2 freeze on a genuine
   systemd seat, safely. `deploy/test/vm.sh` boots one on an overlay disk (instant rollback via
   `vm.sh reset`), with a managed `mia` user and an unmanaged `rescue` user so a lock can never
-  strand you. `vm.sh up` → register a parent + add a device on the console →
-  `vm.sh install <enroll-token>` → follow its printed steps to watch the freeze bite and
-  recover with `openscreentime unlock`. Keep tamper at Level 1 while testing.
+  strand you. It's an Arch (not Ubuntu) cloud image on purpose: the agent is built against the
+  host's rolling glibc, newer than any Ubuntu LTS ships, so an Arch guest runs the ordinary
+  release binary while an Ubuntu one can't. The loop:
+  ```
+  vm.sh up                    # boot (SSH forwarded on :28022; host reachable inside as ost-host.local:8080)
+  # register a parent + add a device on the console, copy the enroll token
+  vm.sh install <token>       # build + copy + enroll + install the hardened service
+  # give mia's Kid profile a 1-minute daily limit in the console
+  vm.sh seat                  # mia autologin on tty1 (a real seat) + accelerate the agent
+  vm.sh watch                 # mia's cgroup.freeze flips to 1 after a short countdown
+  vm.sh thaw                  # rescue path: stop the agent + unfreeze
+  ```
+  Two gotchas the harness encodes so you don't trip on them: (1) the agent only counts **local
+  seat** sessions (`loginctl Active=yes && Remote=no`) as screen time — an SSH login is `Remote`
+  and never accrues, so you need `vm.sh seat`, not `vm.sh ssh`, to drive a lock; (2) the lock is
+  **sticky** — hitting the daily limit locks mia for the day, and dropping back under budget does
+  *not* auto-thaw (that takes an unlock code / earn-time grant, or `vm.sh thaw`). Keep tamper at
+  Level 1 while testing.
 
 For the child **UI** with zero risk (no agent, no device), run the console in mock mode:
 `cd web && VITE_USE_MOCK=1 bun run dev` renders all three `/me` looks from sample data.

@@ -1,33 +1,45 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Test-drive the managed-laptop agent in a DISPOSABLE Ubuntu VM (QEMU/KVM).
+# Test-drive the managed-laptop agent in a DISPOSABLE Arch VM (QEMU/KVM).
 #
 # A container can't prove the real lock — the cgroup-v2 freezer is usually
 # absent or read-only inside one (the agent now reports `screen_time_no_freezer`
 # there). Only a real systemd + cgroup-v2 machine actually freezes a session,
-# so this boots a throwaway Ubuntu cloud image where you can watch it happen
-# and never risk your own desktop.
+# so this boots a throwaway Arch cloud image where you can watch it happen
+# and never risk your own desktop. (Arch, not Ubuntu: the agent is built against
+# the host's rolling glibc, newer than any Ubuntu LTS ships — see IMG_URL below.)
 #
 # THE SAFETY MODEL — you cannot brick anything permanent:
 #   * The VM runs on an OVERLAY disk backed by the pristine cloud image. Reset
 #     is `vm.sh reset` (deletes the overlay) — an instant, total rollback.
 #   * Two users: `mia` is the MANAGED child; `rescue` is NEVER enrolled and has
 #     sudo. If a lock freezes mia's session, `vm.sh rescue` SSHes in as rescue
-#     and you run `sudo openscreentime unlock` or `sudo systemctl stop`.
+#     and you run `vm.sh thaw` (stops the agent + unfreezes) or an unlock code.
 #   * Keep tamper at Level 1 (the default) while testing — never pass
 #     --tamper-max, which disables TTY switching and the systemctl-stop escape.
 #   * Nothing here ever touches the HOST's cgroups, nft, or DNS.
 #
+# WHY A LOCAL SEAT, NOT SSH: the agent only counts screen time for LOCAL seat
+# sessions (loginctl Active=yes AND Remote=no). An SSH login is Remote=yes and
+# never accrues usage — so `vm.sh ssh` will NOT drive mia toward a lock. Use
+# `vm.sh seat` to give mia a real tty1 autologin (a seat0 session) and to
+# accelerate the agent's clock, which is what actually makes the lock bite.
+#
 # USAGE:
 #   deploy/test/vm.sh up                 # fetch image + boot the VM (background)
-#   deploy/test/vm.sh ssh                # shell in as the managed user `mia`
+#   deploy/test/vm.sh ssh                # shell in as the managed user `mia` (Remote — no usage)
 #   deploy/test/vm.sh rescue             # shell in as `rescue` (your way back)
 #   deploy/test/vm.sh install <token>    # copy the built agent in + enroll + service
+#   deploy/test/vm.sh seat [accel]       # give mia a LOCAL tty1 login + accel the agent (default 60)
+#   deploy/test/vm.sh watch              # poll mia's cgroup freeze state until it flips
+#   deploy/test/vm.sh thaw               # rescue path: stop the agent + unfreeze mia
 #   deploy/test/vm.sh console            # attach to the serial console (Ctrl-a x to quit)
 #   deploy/test/vm.sh reset              # wipe the overlay disk (rollback)
 #   deploy/test/vm.sh down               # power off the VM
 #
-# The VM reaches your local test server at http://10.0.2.2:8080 (host loopback).
+# The VM reaches your local test server at http://10.0.2.2:8080 (host loopback,
+# aliased to ost-host.local inside the VM so the agent's https-or-.local guard
+# accepts the plain-http dev server).
 # ============================================================================
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +50,7 @@ overlay="$work/overlay.qcow2"
 seed="$work/seed.iso"
 pidfile="$work/qemu.pid"
 sshkey="$work/id_ed25519"
-ssh_port=2222
+ssh_port=28022   # a high, uncontended host port (2222 is often taken by tunnels/bastions)
 # Arch, not Ubuntu, on purpose: the agent is built against the host's (rolling)
 # glibc, which is newer than any Ubuntu LTS ships — an Ubuntu VM can't run the
 # host binary and the musl route needs an extra cross-compiler. An Arch cloud
@@ -124,7 +136,7 @@ cmd_up() {
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "VM already running (pid $(cat "$pidfile"))."; return
     fi
-    [ -f "$img" ] || { echo "==> fetching Ubuntu 24.04 cloud image (~600 MB, once)"; wget -qO "$img" "$IMG_URL"; }
+    [ -f "$img" ] || { echo "==> fetching Arch Linux cloud image (~530 MB, once)"; wget -qO "$img" "$IMG_URL"; }
     if [ ! -f "$overlay" ]; then
         echo "==> creating disposable overlay disk (base image stays pristine)"
         qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$overlay" 20G
@@ -137,7 +149,7 @@ cmd_up() {
         -drive "file=$overlay,if=virtio" \
         -drive "file=$seed,if=virtio,format=raw" \
         -netdev "user,id=n0,hostfwd=tcp::$ssh_port-:22" -device virtio-net,netdev=n0 \
-        -nographic -serial "file:$work/console.log" \
+        -display none -serial "file:$work/console.log" -monitor none \
         -pidfile "$pidfile" -daemonize
     echo "==> waiting for SSH (cloud-init runs on first boot, ~40-90s)…"
     for _ in $(seq 1 60); do
@@ -168,42 +180,95 @@ cmd_install() {
     local bin="$root/client/target/release/openscreentime"
     echo "==> building the agent (release)"
     ( cd "$root/client" && cargo build --release )
-    echo "==> copying agent into the VM and enrolling against http://10.0.2.2:8080"
+    # The host server (10.0.2.2 from inside QEMU user-net) is plain http, which
+    # the agent refuses UNLESS the host is loopback or `.local` — a deliberate
+    # anti-downgrade guard. Give it a `.local` alias so the dev URL is honoured
+    # without weakening the check.
+    local server="http://ost-host.local:8080"
+    echo "==> copying agent into the VM and enrolling against $server (→ 10.0.2.2)"
     scp -q -i "$sshkey" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -P "$ssh_port" "$bin" rescue@localhost:/tmp/openscreentime
     # dnsmasq + nftables so DNS/firewall enforcement works too (the freeze test
     # needs neither — cgroup2 + logind are already there — but this makes the
     # full loop testable). Best-effort; a missing resolver just degrades.
-    ssh_as rescue "sudo pacman -Sy --noconfirm --needed nftables dnsmasq >/dev/null 2>&1 || true; \
+    ssh_as rescue "grep -q ost-host.local /etc/hosts || echo '10.0.2.2 ost-host.local' | sudo tee -a /etc/hosts >/dev/null; \
+        sudo pacman -Sy --noconfirm --needed nftables dnsmasq >/dev/null 2>&1 || true; \
         sudo install -m0755 /tmp/openscreentime /usr/local/bin/openscreentime \
-        && sudo openscreentime enroll --server http://10.0.2.2:8080 --token '$token' \
+        && sudo openscreentime enroll --server $server --token '$token' \
         && sudo openscreentime install-service \
         && sudo openscreentime status"
     cat <<EOF
 
 ==> enrolled. To watch the lock actually bite:
-    1. In the console, assign the child a Kid profile with a tiny daily limit.
-    2. deploy/test/vm.sh ssh          # log in AS mia (creates a real seat)
-       mia\$ yes > /dev/null &        # something to freeze
-    3. Speed it up: the agent honours --time-accel, so re-run the service with
-       'sudo systemctl edit openscreentime' adding
-       ExecStart= …/openscreentime --time-accel 60 run   (1 real sec = 1 sim min),
-       or just wait out the real limit.
-    4. When the limit hits, mia's session freezes. Prove it from rescue:
-       deploy/test/vm.sh rescue
-       rescue\$ cat /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice/cgroup.freeze  # -> 1
-    5. Recover: rescue\$ sudo openscreentime unlock   (enter the code from the
-       console → Settings → Unlock codes), or sudo systemctl stop openscreentime.
+    1. In the console, give mia's Kid profile a tiny daily limit (e.g. 1 min).
+       (SSH does NOT count as screen time — the agent ignores Remote sessions —
+        so mia needs a real LOCAL seat, which the next step sets up.)
+    2. deploy/test/vm.sh seat          # mia autologin on tty1 (a seat0 session)
+                                       # + accelerate the agent (1 real sec = 1 sim min)
+    3. deploy/test/vm.sh watch         # poll mia's freezer; it flips to 1 when the
+                                       # limit is hit (after a short on-screen countdown).
+    4. Recover — the lock is STICKY (hitting the daily limit locks mia for the
+       day; being back "under budget" does NOT auto-thaw — that needs an unlock
+       grant). The guaranteed way back, since rescue is unmanaged:
+         deploy/test/vm.sh thaw        # stop the agent + write 0 to the freezer
+       Or the real UX: an unlock code / earn-time grant from the console.
 EOF
+}
+
+# Give mia a LOCAL seat login (tty1 autologin → loginctl Active=yes, Remote=no,
+# Seat=seat0) — the only kind of session the agent counts as screen time — and
+# accelerate the agent's clock so the daily budget is reachable in seconds.
+cmd_seat() {
+    local accel="${1:-60}"
+    echo "==> mia: tty1 autologin (local seat) + agent --time-accel $accel"
+    ssh_as rescue "set -e
+        sudo mkdir -p /etc/systemd/system/getty@tty1.service.d /etc/systemd/system/openscreentime-agent.service.d
+        printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin mia --noclear %%I 38400 linux\n' \
+            | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
+        printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/openscreentime --time-accel $accel run\n' \
+            | sudo tee /etc/systemd/system/openscreentime-agent.service.d/accel.conf >/dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl restart getty@tty1
+        sudo systemctl restart openscreentime-agent.service
+        sleep 2
+        echo -n 'mia local seat: '; loginctl list-sessions --no-legend | awk '\$3==\"mia\" && \$4==\"seat0\" {print \"session \"\$1\" on \"\$4}'"
+    echo "==> now: deploy/test/vm.sh watch"
+}
+
+# Poll mia's cgroup-v2 freezer until it flips (or ~2 min elapse).
+cmd_watch() {
+    ssh_as rescue 'uid=$(id -u mia); f=/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.freeze
+        echo "watching $f (Ctrl-C to stop)"
+        for i in $(seq 1 60); do
+            v=$(cat "$f" 2>/dev/null || echo "?")
+            printf "t=%3ds freeze=%s\n" "$((i*2))" "$v"
+            [ "$v" = "1" ] && { echo ">>> FROZEN — mia'"'"'s whole seat is suspended. Recover: vm.sh thaw"; exit 0; }
+            sleep 2
+        done
+        echo "(still 0 — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny?)"'
+}
+
+# The guaranteed rescue: stop the (unmanaged-of) agent and thaw mia. Because the
+# agent is stopped it cannot re-freeze; rescue is never enrolled, so this always
+# works even if mia is fully locked out.
+cmd_thaw() {
+    ssh_as rescue 'uid=$(id -u mia); f=/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.freeze
+        sudo systemctl stop openscreentime-agent.service
+        echo 0 | sudo tee "$f" >/dev/null 2>&1 || true
+        echo "agent=$(systemctl is-active openscreentime-agent.service) freeze=$(cat "$f" 2>/dev/null || echo n/a)"
+        echo "mia is thawed. Re-arm with: sudo systemctl start openscreentime-agent.service"'
 }
 
 case "${1:-}" in
     up)      cmd_up ;;
-    ssh)     ssh_as mia ;;
-    rescue)  ssh_as rescue ;;
+    ssh)     shift; ssh_as mia "$@" ;;
+    rescue)  shift; ssh_as rescue "$@" ;;
     install) shift; cmd_install "$@" ;;
+    seat)    shift; cmd_seat "$@" ;;
+    watch)   cmd_watch ;;
+    thaw)    cmd_thaw ;;
     console) exec tail -f "$work/console.log" ;;
     reset)   rm -f "$overlay"; echo "overlay wiped — next 'up' boots a pristine VM." ;;
     down)    [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" && echo "VM stopped." || echo "not running." ;;
-    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -40 ;;
+    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -52 ;;
 esac
