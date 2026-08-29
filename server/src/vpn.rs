@@ -166,10 +166,20 @@ const OVPN_FORBIDDEN: &[&str] = &[
     "client-connect",
     "client-disconnect",
     "learn-address",
+    "tls-crypt-v2-verify", // a script hook — exec, like tls-verify
     "script-security",
     "plugin",
     "redirect-gateway",
     "redirect-private",
+    // Routing overrides — the LAN-pivot surface. `redirect-gateway` alone
+    // wasn't enough: `route 0.0.0.0 128.0.0.0` replicates a full tunnel, and a
+    // targeted `route`/`dhcp-option` can bridge a device onto an attacker's
+    // network or hand it an attacker resolver. OpenVPN here is exec- and
+    // routing-locked; use WireGuard (AllowedIPs) for a config that needs to
+    // shape routing.
+    "route",
+    "route-nopull",
+    "dhcp-option",
 ];
 
 /// Reject an OpenVPN config that carries an exec-hook or routing-override
@@ -631,6 +641,9 @@ mod tests {
             "client\nremote x 1194\n--plugin /tmp/e.so",
             "client\nremote x 1194\nredirect-gateway def1",
             "client\nremote x 1194\nlearn-address /tmp/x",
+            "client\nremote x 1194\nroute 0.0.0.0 128.0.0.0",
+            "client\nremote x 1194\ndhcp-option DNS 10.0.0.1",
+            "client\nremote x 1194\ntls-crypt-v2-verify /tmp/x",
         ] {
             assert!(
                 reject_dangerous_vpn(bad, "openvpn").is_err(),
