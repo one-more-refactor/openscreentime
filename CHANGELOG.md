@@ -18,12 +18,18 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
-**Headline: trust lives at login, and the bot grows hands.** The change-mode
-ceremony is gone: prove it's you when you sign in — with a passkey, SSO, or
-the installed client on your own computer, parent and child alike — and then
-just use the console. A paired Telegram bot brings alerts, one-tap chore
-approvals, and one-tap confirm checks to your phone. And the "My screen time"
-page finally tells you what you did.
+## [0.6.0] - 2026-09-11
+
+**Headline: your name is your key, and the whole thing got red-teamed.** Sign
+in with a username and a passkey — no email, anywhere. Every child's page gets
+"Keys to the house" (the parent code that always opens their device, held by
+OpenScreenTime itself) and a calm Danger zone. A multi-angle audit — brand,
+privacy, child psychology and three security red teams — ran against the tree
+and its findings are in: two criticals closed, a locked laptop can no longer
+be bricked by a dead server, and what a parent can see now scales with a
+child's age. Plus everything that had accumulated since 0.5: trust lives at
+login, the Telegram bot grows hands, and "My screen time" tells you what you
+did.
 
 - **Trust at login (web + server).** A session born from a completed login is
   trusted and mutates freely — no armed window, no veil, no lock in the rail,
@@ -54,6 +60,54 @@ page finally tells you what you did.
   broken pinned-mode re-render is fixed at the store.
 - **Language.** Modal titles and login stop shouting (sentence case);
   the sample household is neutral.
+- **Username + passkey, no email (server + web).** Registration is a
+  username and a passkey — the only option, on a fresh install. Login is
+  your username → your own computer approves, with "Log in with passkey"
+  beneath. Email is retired from the account model and from step-up (TOTP and
+  Telegram remain). SSO admins from before 0.6 still match on their retained
+  email. Migration `0024`.
+- **Keys to the house + Danger zone (web + server).** The rotating parent
+  code sits in a calm "Keys to the house" on each child's page. "Block
+  account" pauses a child: they can still open their own page and read why,
+  their devices lock after a two-minute save-your-work window, and every
+  change is refused until a parent lifts it. "Remove child" now erases their
+  usage, ledger and events. Migration `0025`.
+- **Security — server.** WireGuard `PostUp`/`PreUp` hooks are rejected like
+  OpenVPN's (wg-quick ran them as root on every device). A number-match
+  sign-in can only be approved from the target account's own login on that
+  computer. Sign-in no longer reveals whether a username exists. Heartbeat
+  arrays are capped; enroll tokens are hashed at rest (a never-enrolled
+  device's pending token must be regenerated).
+- **Security — agent.** A parent code at the device clears every whole-device
+  lock for good, and `ost unlock` — plus the new root-only `ost recover` — is
+  honored by the running agent, so a server that dies while a laptop is
+  locked no longer bricks it. The freeze is re-asserted every probe; a
+  clock set forward can't mint a fresh budget; bedtime applies to SSH-only
+  sessions; a lock refuses to engage when the device has no offline way back.
+- **Privacy.** What the hub can see scales with age: apps and sites for
+  younger kids, apps only for older teens, nothing for adults and
+  self-managed people. Removing a child erases their history.
+- **One voice, everywhere.** The first-run intro, the lockout overlay, tray
+  notifications and the web overlay all speak sentence case — "Stop — time's
+  up for today", the README's own words. DESIGN.md describes the build again;
+  the ring is paired with the wordmark (and an OG card); contrast, one focus
+  ring and 40 px tap targets throughout. CI is green.
+- **Pre-release audit, five lenses (server + agent + web).** An agent can no
+  longer name-link an OS login to a parent, and a device may vouch for or
+  approve a parent's sign-in only when it is that parent's own declared
+  computer (root on a shared kid laptop used to be a parent session). First-run
+  registration needs the one-time setup code `deploy/setup.sh` writes to
+  `.env` and prints. Decoy sign-in requests now poll exactly like real ones.
+  Unmatched `/api` paths are honest 404s, every response carries baseline
+  security headers, and the rate limiter trusts the reverse proxy by default.
+  On the device, the DNS query log is root-only, and SSH sessions count as
+  screen time (they were a loophole).
+- **Grandparent-proof (web).** "Remove child" and "Block account" ask first —
+  Remove wants the name typed. Section headings and every button are readable
+  sentence-case sans. The confirm dialog says what to do when nothing is set
+  up yet. "Pause everything" no longer cancels on a drifting thumb, "Resume"
+  is ink instead of red, a configured block isn't painted red at rest, and
+  light mode gets its three planes back.
 
 ## [0.5.0] — 2026-08-23
 

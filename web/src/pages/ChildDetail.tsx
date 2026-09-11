@@ -36,6 +36,7 @@ import {
 import { Moments } from "../components/Moments";
 import { WhereTheTime } from "../components/WhereTheTime";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { Modal } from "../components";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Avatar } from "./Family";
@@ -192,6 +193,9 @@ export function ChildDetail() {
   const { guard } = useConfirm();
   const fam = useFamily();
   const [showCode, setShowCode] = useState(false);
+  const [confirmBlock, setConfirmBlock] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [typedName, setTypedName] = useState("");
   const [events, setEvents] = useState<Event[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -554,6 +558,10 @@ export function ChildDetail() {
                 .map((d) => (
                   <UnlockCodePanel key={d.id} device={d.full!} autoShow />
                 ))}
+              <ol className="ch-keys-steps">
+                <li>On {name}&rsquo;s computer the black screen asks for an unlock code — type these six digits there.</li>
+                <li>If the number changes while you type, just use the new one. That&rsquo;s fine.</li>
+              </ol>
             </div>
           ) : (
             <p className="fam-quiet">No set-up device yet — a code appears once {name} has one.</p>
@@ -573,7 +581,13 @@ export function ChildDetail() {
                 : `Pauses ${name}: their devices lock after a two-minute save-your-work window, and they see why on their own page.`}
             </span>
           </div>
-          <button type="button" className="ch-btn" data-danger disabled={busy} onClick={toggleBlock}>
+          <button
+            type="button"
+            className="ch-btn"
+            data-danger
+            disabled={busy}
+            onClick={() => (blocked ? toggleBlock() : setConfirmBlock(true))}
+          >
             {blocked ? "Unblock" : "Block account"}
           </button>
         </div>
@@ -584,11 +598,93 @@ export function ChildDetail() {
               Deletes their account, rules and usage history. Their logins stay on the devices, unmanaged.
             </span>
           </div>
-          <button type="button" className="ch-btn" data-danger disabled={busy} onClick={removeChild}>
+          <button
+            type="button"
+            className="ch-btn"
+            data-danger
+            disabled={busy}
+            onClick={() => {
+              setTypedName("");
+              setConfirmRemove(true);
+            }}
+          >
             Remove child
           </button>
         </div>
       </section>
+
+      {/* Nothing here fires on one tap: these are the only two irreversible
+          things on the page, dressed like every other button. */}
+      <Modal
+        open={confirmBlock}
+        onClose={() => setConfirmBlock(false)}
+        title={`Block ${name}?`}
+        danger
+        footer={
+          <>
+            <button type="button" className="ch-btn" onClick={() => setConfirmBlock(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="ch-btn"
+              data-danger
+              disabled={busy}
+              onClick={() => {
+                setConfirmBlock(false);
+                toggleBlock();
+              }}
+            >
+              Block {name}
+            </button>
+          </>
+        }
+      >
+        <p>
+          {name}&rsquo;s computers will lock in two minutes — they get a save-your-work warning first,
+          and their own page tells them a parent paused things. You can unblock here any time.
+        </p>
+      </Modal>
+      <Modal
+        open={confirmRemove}
+        onClose={() => setConfirmRemove(false)}
+        title={`Remove ${name}?`}
+        danger
+        footer={
+          <>
+            <button type="button" className="ch-btn" onClick={() => setConfirmRemove(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="ch-btn"
+              data-danger
+              disabled={busy || typedName.trim() !== name}
+              onClick={() => {
+                setConfirmRemove(false);
+                removeChild();
+              }}
+            >
+              Remove {name}
+            </button>
+          </>
+        }
+      >
+        <p>
+          This deletes {name}&rsquo;s account, their rules and everything you can see about their day.
+          It cannot be undone. Their logins stay on the computers, unmanaged.
+        </p>
+        <label className="ch-confirm">
+          <span className="fam-quiet">Type <strong>{name}</strong> to confirm</span>
+          <input
+            className="ch-confirm-input"
+            value={typedName}
+            onChange={(e) => setTypedName(e.target.value)}
+            autoComplete="off"
+            autoFocus
+          />
+        </label>
+      </Modal>
     </div>
   );
 }

@@ -298,7 +298,7 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
     >
       <div className="flex flex-col gap-4">
         <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-          This touches the keys to your household. Enter a code once — it
+          Before we show the keys to your household, we need to be sure it's you. Enter a code once — it
           stays confirmed for 15 minutes.
         </p>
 
@@ -313,6 +313,12 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
                   setError(null);
                 }}
               />
+            )}
+            {!totp && !telegram && (
+              <p className="cf-nofactor">
+                You haven&rsquo;t set up a way to confirm yet. Add your phone or an authenticator
+                under <a href="/settings">Settings → Security &amp; access</a>, then come back here.
+              </p>
             )}
             {totp && (
               <MethodTab

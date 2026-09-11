@@ -147,6 +147,15 @@ function Trouble({ devices }: { devices: Device[] }) {
   );
 }
 
+/** "Kid · Kids" and "Little · Default" read as stutter; only show a profile
+ *  name that actually says something beyond the bracket. */
+function profileWorthShowing(bracket: FamilyChild["age_bracket"], profile: string | null): boolean {
+  if (!profile) return false;
+  const norm = (s: string) => s.toLowerCase().replace(/s$/, "");
+  if (norm(profile) === "default") return false;
+  return norm(profile) !== norm(BRACKET_LABEL[bracket] ?? bracket);
+}
+
 const BRACKET_LABEL: Record<FamilyChild["age_bracket"], string> = {
   little: "Little",
   kid: "Kid",
@@ -184,7 +193,7 @@ function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
         <p className="fam-name">{child.name}</p>
         <p className="fam-meta">
           {BRACKET_LABEL[child.age_bracket] ?? child.age_bracket}
-          {child.profile_name && ` · ${child.profile_name}`}
+          {profileWorthShowing(child.age_bracket, child.profile_name) && ` · ${child.profile_name}`}
           {child.devices.length > 1 && ` · ${child.devices.length} devices`}
         </p>
         <TimeBar child={child} />

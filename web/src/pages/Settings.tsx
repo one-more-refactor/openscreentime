@@ -547,7 +547,7 @@ function Passkeys() {
         </div>
       ))}
       <div style={{ maxWidth: "16rem" }}>
-        <PasskeyButton label="+ ADD PASSKEY" onActivate={add} />
+        <PasskeyButton label="+ Add passkey" onActivate={add} />
       </div>
 
       <Modal
@@ -561,7 +561,7 @@ function Passkeys() {
               CANCEL
             </Button>
             <Button variant="danger" disabled={busy} onClick={() => void remove()}>
-              {busy ? "REMOVING…" : "REMOVE PASSKEY"}
+              {busy ? "Removing…" : "Remove passkey"}
             </Button>
           </>
         }
@@ -661,7 +661,7 @@ function ParentAccess() {
         open={!!minted}
         onClose={() => setMinted(null)}
         title="Pairing token"
-        footer={<Button onClick={() => setMinted(null)}>DONE</Button>}
+        footer={<Button onClick={() => setMinted(null)}>Done</Button>}
       >
         <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--fg-dim)" }}>
           Copy this now — it's shown only once. Paste it into the companion for{" "}

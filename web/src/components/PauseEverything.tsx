@@ -157,20 +157,19 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
     ? "Every screen in the house is frozen."
     : phase === "holding"
       ? "Keep holding…"
-      : `Freezes ${devices.length} ${devices.length === 1 ? "screen" : "screens"} at once. Hold to confirm.`;
+      : `Freezes ${devices.length} ${devices.length === 1 ? "screen" : "screens"} at once. Press and hold the button for a second.`;
 
   return (
     <div className="pause-wrap" data-paused={allPaused} data-busy={busy}>
       <button
         type="button"
-        className="focusable pause-btn"
+        className="focusable pause-btn pause-hold"
         data-phase={phase}
         aria-label={label}
         aria-pressed={allPaused}
         disabled={busy}
         onPointerDown={beginHold}
         onPointerUp={endHold}
-        onPointerLeave={endHold}
         onPointerCancel={endHold}
         // Keyboard: space/enter can't express a hold, so they commit directly.
         // Requiring a held key would make the control unusable without a mouse.

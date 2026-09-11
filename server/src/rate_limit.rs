@@ -57,7 +57,11 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn from_env() -> Self {
-        let trust_proxy = std::env::var("OST_TRUST_PROXY").map(|v| v == "1") == Ok(true);
+        // Default ON: the supported layout is behind a reverse proxy, and with
+        // this off every visitor shares one bucket keyed by the proxy's own
+        // address — ten requests a minute from anyone 429s the whole household.
+        // Set OST_TRUST_PROXY=0 only when the port is published with no proxy.
+        let trust_proxy = std::env::var("OST_TRUST_PROXY").map(|v| v.trim() == "0") != Ok(true);
         RateLimiter {
             trust_proxy,
             buckets: Mutex::new(HashMap::new()),

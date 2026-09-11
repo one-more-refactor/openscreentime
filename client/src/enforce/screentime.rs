@@ -129,6 +129,15 @@ impl UsageTracker {
     /// device is on a network, and None when it's genuinely offline.
     pub fn set_day_ceiling(&mut self, ceiling: Option<chrono::NaiveDate>) {
         self.day_ceiling = ceiling;
+        // An offline boot with the RTC set forward rolled the counters onto a
+        // future day; when the server's clock says otherwise, pull the
+        // accounting day back to the ceiling WITHOUT clearing — the budget
+        // that was spent stays spent.
+        if let (Some(c), Some(d)) = (ceiling, self.day) {
+            if d > c {
+                self.day = Some(c);
+            }
+        }
     }
 
     /// True when the wall clock is ahead of the ceiling — i.e. it's being clamped.
@@ -291,12 +300,20 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
     // spawned one `loginctl show-session` PER session every 10 s tick — a few
     // hundred logins stalled the enforcement tick for everyone. One call for
     // all of them, capped.
+    // Seated (local) sessions are inspected first so a flood of decoy SSH
+    // sessions can never push the real graphical seat past the cap.
     const MAX_SESSIONS: usize = 64;
-    let sessions: Vec<&str> = listing
+    let mut rows: Vec<(&str, bool)> = listing
         .lines()
-        .filter_map(|l| l.split_whitespace().next())
-        .take(MAX_SESSIONS)
+        .filter_map(|l| {
+            let c: Vec<&str> = l.split_whitespace().collect();
+            // columns: SESSION UID USER SEAT ...
+            c.first()
+                .map(|id| (*id, c.get(3).is_some_and(|s| *s != "-")))
+        })
         .collect();
+    rows.sort_by_key(|(_, seated)| !*seated);
+    let sessions: Vec<&str> = rows.iter().map(|(id, _)| *id).take(MAX_SESSIONS).collect();
     if sessions.is_empty() {
         return Vec::new();
     }
@@ -317,8 +334,12 @@ pub fn active_seat_users(exec: &Exec) -> Vec<String> {
                 remote = v.trim() == "yes";
             }
         }
+        // A remote (SSH) session is that person using this computer just as
+        // much as a seat is — it used to be exempt, which made `ssh localhost`
+        // an unlimited-screen-time loophole. `Remote` is now informational.
+        let _ = remote;
         if let Some(user) = name {
-            if active && !remote && !user.is_empty() && !users.contains(&user) {
+            if active && !user.is_empty() && !users.contains(&user) {
                 users.push(user);
             }
         }

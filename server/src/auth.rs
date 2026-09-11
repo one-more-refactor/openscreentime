@@ -186,7 +186,7 @@ async fn find_admin(db: &sqlx::PgPool, username: &str) -> AppResult<Option<(Uuid
 /// Normalize + validate an account username: 3–32 chars of `a–z 0–9 . _ -`,
 /// lower-cased. This is the login identity (globally unique, case-insensitive) —
 /// there is no email any more.
-fn normalize_username(raw: &str) -> AppResult<String> {
+pub(crate) fn normalize_username(raw: &str) -> AppResult<String> {
     let u = raw.trim().to_ascii_lowercase();
     if u.chars().count() < 3 || u.chars().count() > 32 {
         return Err(AppError::BadRequest(
@@ -233,19 +233,36 @@ async fn ensure_registration_allowed(
     st: &AppState,
     jar: &CookieJar,
     username: &str,
+    setup_token: Option<&str>,
 ) -> AppResult<bool> {
     // Existing admin adding another passkey to their own account? Authorized to
-    // graft onto that existing account (this is the whole point of the flow).
+    // graft onto that existing account (this is the whole point of the flow) —
+    // but a new permanent credential is the most durable persistence primitive
+    // there is, so it needs a live confirm window, and a paused account may not.
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
-        let session_username: Option<Option<String>> = sqlx::query_scalar(
-            "SELECT a.username FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
-             WHERE s.token_hash = $1 AND s.expires_at > now()",
+        type SessionRow = (Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+        let row: Option<SessionRow> = sqlx::query_as(
+            "SELECT a.username, s.stepup_until, a.blocked_at
+               FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+              WHERE s.token_hash = $1 AND s.expires_at > now()",
         )
         .bind(hash_token(cookie.value()))
         .fetch_optional(&st.db)
         .await?;
-        if session_username.flatten().as_deref() == Some(username) {
-            return Ok(true);
+        if let Some((session_username, stepup_until, blocked_at)) = row {
+            if session_username.as_deref() == Some(username) {
+                if blocked_at.is_some() {
+                    return Err(AppError::ForbiddenForMember(
+                        "this account is paused — a parent has to lift it first".into(),
+                    ));
+                }
+                if stepup_until.is_none_or(|t| t <= Utc::now()) {
+                    return Err(AppError::StepUpRequired(
+                        "confirm it's you to add a passkey".into(),
+                    ));
+                }
+                return Ok(true);
+            }
         }
     }
     if open_registration() {
@@ -255,11 +272,42 @@ async fn ensure_registration_allowed(
         .fetch_one(&st.db)
         .await?;
     if admins == 0 {
-        return Ok(false); // first boot: bootstrap the first (new) admin
+        // First boot: bootstrap the first (new) admin — but only with the
+        // setup code deploy/setup.sh wrote into .env and printed. A fresh
+        // internet-facing install otherwise belongs to whoever finds it first
+        // (certificate-transparency scanners find a new https host in minutes).
+        // Unset (a local dev checkout) = open, loudly.
+        match crate::state::configured("OST_BOOTSTRAP_TOKEN") {
+            Some(expected) => {
+                let given = setup_token.unwrap_or("").trim();
+                if !constant_time_eq(given.as_bytes(), expected.trim().as_bytes()) {
+                    return Err(AppError::Unauthorized(
+                        "the setup code is wrong — it's in .env as OST_BOOTSTRAP_TOKEN and \
+                         deploy/setup.sh printed it"
+                            .into(),
+                    ));
+                }
+            }
+            None => tracing::warn!(
+                "first-run registration is OPEN: OST_BOOTSTRAP_TOKEN is not set — fine for a \
+                 local checkout, not for anything reachable from the internet"
+            ),
+        }
+        return Ok(false);
     }
     Err(AppError::RegistrationClosed(
         "registration is closed on this server — an admin already exists".into(),
     ))
+}
+
+/// Length-safe constant-time byte comparison (no timing oracle on the setup
+/// code or anything else compared here).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
 }
 
 #[derive(Deserialize)]
@@ -268,6 +316,9 @@ pub struct RegisterStartReq {
     /// Optional friendly name; defaults to the username. No email anywhere.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// First-run only: the setup code from deploy/setup.sh (OST_BOOTSTRAP_TOKEN).
+    #[serde(default)]
+    pub setup_token: Option<String>,
 }
 
 pub async fn register_start(
@@ -283,7 +334,8 @@ pub async fn register_start(
         .filter(|s| !s.is_empty())
         .unwrap_or(&username)
         .to_string();
-    let may_graft = ensure_registration_allowed(&st, &jar, &username).await?;
+    let may_graft =
+        ensure_registration_allowed(&st, &jar, &username, req.setup_token.as_deref()).await?;
 
     // A new user id for a brand-new admin; if the username already exists we
     // reuse its admin id so a second passkey attaches to the same account — but
@@ -328,6 +380,8 @@ pub async fn register_start(
 pub struct RegisterFinishReq {
     pub username: String,
     pub credential: RegisterPublicKeyCredential,
+    #[serde(default)]
+    pub setup_token: Option<String>,
 }
 
 pub async fn register_finish(
@@ -338,7 +392,8 @@ pub async fn register_finish(
     let username = normalize_username(&req.username)?;
     // Re-checked here (not just in start): the two calls aren't atomic, and the
     // finish must never mint a session after the first admin appeared in between.
-    let may_graft = ensure_registration_allowed(&st, &jar, &username).await?;
+    let may_graft =
+        ensure_registration_allowed(&st, &jar, &username, req.setup_token.as_deref()).await?;
 
     let key = jar
         .get(REG_COOKIE)

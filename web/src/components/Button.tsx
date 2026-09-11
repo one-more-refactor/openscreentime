@@ -13,11 +13,11 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 // and the same press (scale 0.97) as every other control in the console.
 // `danger` = accent-red — reserved for locked/tamper/destructive actions.
 const base =
-  "focusable inline-flex items-center justify-center gap-2 border font-mono uppercase tracking-label rounded transition-[color,border-color,background-color,transform] duration-150 active:scale-[0.97] disabled:active:scale-100 disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
+  "focusable inline-flex items-center justify-center gap-2 border font-sans rounded-full transition-[color,border-color,background-color,transform] duration-150 active:scale-[0.97] disabled:active:scale-100 disabled:opacity-40 disabled:cursor-not-allowed select-none whitespace-nowrap";
 
 const sizes: Record<Size, string> = {
-  sm: "text-[0.625rem] px-2.5 py-1",
-  md: "text-[0.625rem] px-3.5 py-2",
+  sm: "text-[0.8rem] px-3 py-1.5 min-h-[32px]",
+  md: "text-[0.9rem] px-4 py-2 min-h-[40px]",
 };
 
 const variants: Record<Variant, string> = {

@@ -286,7 +286,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
               CANCEL
             </Button>
             <Button variant="danger" disabled={busy} onClick={() => void generate()}>
-              {busy ? "MAKING…" : "MAKE NEW CODES"}
+              {busy ? "Making…" : "Make new codes"}
             </Button>
           </>
         }
@@ -309,7 +309,7 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
               CANCEL
             </Button>
             <Button variant="danger" disabled={busy} onClick={() => void replace()}>
-              {busy ? "REPLACING…" : "REPLACE"}
+              {busy ? "Replacing…" : "Replace"}
             </Button>
           </>
         }

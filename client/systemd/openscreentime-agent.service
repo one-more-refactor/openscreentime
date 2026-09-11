@@ -53,6 +53,8 @@ ProtectSystem=strict
 ReadWritePaths=/etc/openscreentime /var/lib/openscreentime /run/openscreentime /etc/resolv.conf -/etc/sentinel -/var/lib/sentinel -/run/sentinel -/etc/polkit-1/rules.d -/etc/systemd/logind.conf.d -/etc/dnsmasq.d -/etc/wireguard -/etc/openvpn/client -/usr/local/bin -/etc/sudoers.d
 RuntimeDirectory=openscreentime
 StateDirectory=openscreentime
+# Ledger, freeze state, the DNS query log: nothing in here is a child's to read.
+StateDirectoryMode=0750
 # ProtectHome is intentionally OFF: the agent must watch user sessions/cgroups.
 ProtectHome=false
 # NoNewPrivileges is intentionally OFF: enforcement shells out to nft/resolvectl/chattr.

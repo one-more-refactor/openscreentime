@@ -99,22 +99,12 @@ pub async fn start(
     // response shape and timing don't distinguish a known name from an
     // unknown one (the login page must not be a username/device oracle).
     let match_code = gen_match_code();
-    let uniform = |code: &str| {
-        // A decoy request_id that indexes no row: the browser polls, gets
-        // "pending" until the window closes, then "nobody approved". Identical
-        // to a real request that no one approves.
-        Json(json!({
-            "request_id": Uuid::new_v4(),
-            "match_code": code,
-            "expires_in_secs": REQUEST_MINUTES * 60,
-        }))
-    };
 
     // The account behind the name: a display name, or an OS login on an
     // enrolled device. Distinct accounts; ambiguity resolves to a decoy (never
     // a distinguishable "which household are you in" answer).
-    let accounts: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT DISTINCT a.id, a.tenant_id, a.display_name
+    let accounts: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT a.id, a.tenant_id, a.display_name, a.role
            FROM admins a
            LEFT JOIN device_users du ON du.account_id = a.id
           WHERE lower(a.username) = lower($1)
@@ -125,29 +115,36 @@ pub async fn start(
     .fetch_all(&st.db)
     .await?;
 
-    let (account_id, tenant_id, display_name) = match accounts.as_slice() {
+    let (account_id, tenant_id, display_name, role) = match accounts.as_slice() {
         [one] => one.clone(),
         // Unknown or ambiguous → a decoy that never approves. Uniform.
-        _ => return Ok(uniform(&match_code)),
+        _ => return Ok(decoy(&st, &match_code).await),
     };
 
     // Every online device that person actually uses, with the OS logins that
     // are theirs on it — the agent prompts only those sessions.
+    // A hub account (owner/parent) is only ever approved from a device
+    // declared as THEIRS; a member from any device they use. Same rule as
+    // the device voucher, for the same reason: root on a shared kid laptop
+    // must not be able to approve a parent.
+    let is_member = role == "member";
     let targets: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT d.id, du.os_username
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2 AND d.status = 'online'",
+          WHERE du.account_id = $1 AND d.tenant_id = $2 AND d.status = 'online'
+            AND ($3 OR d.owner_account_id = $1)",
     )
     .bind(account_id)
     .bind(tenant_id)
+    .bind(is_member)
     .fetch_all(&st.db)
     .await?;
 
     if targets.is_empty() {
         // No awake device → a decoy, same shape. The browser's own copy tells
         // the human to use their passkey when nothing answers.
-        return Ok(uniform(&match_code));
+        return Ok(decoy(&st, &match_code).await);
     }
 
     let request_id: Uuid = sqlx::query_scalar(
@@ -222,7 +219,26 @@ pub async fn finish(
     .fetch_optional(&st.db)
     .await?;
     let Some((tenant_id, account_id, challenge, status, expires_at)) = row else {
-        return Err(AppError::NotFound("that sign-in request is gone".into()));
+        // A decoy: pending for the window a real request would be, then the
+        // same "nobody approved" a real one gives. Never a distinguishable 404.
+        let decoy_age = st
+            .decoy_logins
+            .read()
+            .await
+            .get(&req.request_id)
+            .map(|t| t.elapsed());
+        return match decoy_age {
+            Some(age) if age < std::time::Duration::from_secs((REQUEST_MINUTES as u64) * 60) => {
+                Ok((jar, Json(json!({ "status": "pending" }))))
+            }
+            Some(_) => {
+                st.decoy_logins.write().await.remove(&req.request_id);
+                Err(AppError::Unauthorized(
+                    "nobody approved in time — try again".into(),
+                ))
+            }
+            None => Err(AppError::NotFound("that sign-in request is gone".into())),
+        };
     };
 
     if expires_at < Utc::now() {
@@ -325,6 +341,26 @@ pub struct DecisionReq {
 /// server — not the device — decides approve vs deny by matching the tapped
 /// code against the real one, so a device that guessed wrong (or a cold-call
 /// victim who tapped a random number) is denied.
+/// A decoy request_id for an unknown/ambiguous name or nobody online. It is
+/// REGISTERED (in memory, same TTL as a real request) so `finish` answers
+/// "pending" and then "nobody approved" exactly like a real one — a bare random
+/// id 404'd there, which told a stranger both that the name resolves and that
+/// the person is at a keyboard right now.
+async fn decoy(st: &AppState, code: &str) -> Json<Value> {
+    let id = Uuid::new_v4();
+    {
+        let mut d = st.decoy_logins.write().await;
+        let ttl = std::time::Duration::from_secs((REQUEST_MINUTES as u64) * 60 + 60);
+        d.retain(|_, t| t.elapsed() < ttl);
+        d.insert(id, std::time::Instant::now());
+    }
+    Json(json!({
+        "request_id": id,
+        "match_code": code,
+        "expires_in_secs": REQUEST_MINUTES * 60,
+    }))
+}
+
 pub async fn decision(
     State(st): State<AppState>,
     agent: AgentAuth,
@@ -350,6 +386,11 @@ pub async fn decision(
             AND EXISTS (SELECT 1 FROM device_users du
                          WHERE du.device_id = $2 AND du.account_id = lr.account_id
                            AND lower(du.os_username) = lower($5))
+            AND EXISTS (SELECT 1 FROM admins a
+                         WHERE a.id = lr.account_id
+                           AND (a.role = 'member'
+                                OR EXISTS (SELECT 1 FROM devices d
+                                            WHERE d.id = $2 AND d.owner_account_id = a.id)))
         RETURNING lr.id, (lr.match_code = $3 AND $3 <> '')",
     )
     .bind(req.request_id)
