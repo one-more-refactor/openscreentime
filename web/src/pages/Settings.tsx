@@ -408,8 +408,8 @@ function TwoFactor() {
           {twofa.loading
             ? "Checking…"
             : enrolled
-              ? "Authenticator app connected · email codes as backup"
-              : "Email codes only — an authenticator app is stronger"}
+              ? "Authenticator app connected"
+              : "No authenticator yet — set one up to protect the keys"}
         </p>
         {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
       </div>
@@ -435,7 +435,7 @@ function TwoFactor() {
           <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
             Add this secret to your authenticator app (Google Authenticator, Aegis, 1Password …),
             then enter the 6-digit code it shows for{" "}
-            <span style={{ color: "var(--fg)" }}>{me?.account?.email ?? "your account"}</span>.
+            <span style={{ color: "var(--fg)" }}>{me?.account?.display_name ?? "your account"}</span>.
           </p>
           {enrolling && (
             <div className="tf-enrol">
