@@ -10,6 +10,9 @@ import { Devices } from "./pages/Devices";
 import { AddChild } from "./pages/AddChild";
 import { Settings } from "./pages/Settings";
 import { Me } from "./pages/Me";
+import { Enroll2FA } from "./pages/Enroll2FA";
+import { useEffect, useState } from "react";
+import * as api from "./api";
 import { StatusLed } from "./components";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -42,6 +45,55 @@ function MemberGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * First-login second-factor gate. A hub account (owner/parent) with no factor
+ * enrolled is sent through a one-time setup on the way in, so the step-up
+ * "type the 6 digits" prompt is never a dead end for a factor nobody set up.
+ * Members are exempt (their page needs no step-up). Dismissible for the session
+ * only — the console never hard-locks you out of itself.
+ */
+function TwoFactorGate({ children }: { children: React.ReactNode }) {
+  const { me } = useSession();
+  const isHub = !!me && me.account?.role !== "member";
+  const [need, setNeed] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    if (!isHub) {
+      setNeed(false);
+      return;
+    }
+    let deferred = false;
+    try {
+      deferred = sessionStorage.getItem("ost-2fa-defer") === "1";
+    } catch {
+      /* ignore */
+    }
+    if (deferred) {
+      setNeed(false);
+      return;
+    }
+    api
+      .getTwoFactorStatus()
+      .then((s) => alive && setNeed(!s.totp_enrolled && !s.telegram_available))
+      .catch(() => alive && setNeed(false)); // never block on a status hiccup
+    return () => {
+      alive = false;
+    };
+  }, [isHub]);
+
+  if (need === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center gap-3">
+        <StatusLed tone="ok" pulse />
+        <span className="label">Loading…</span>
+      </div>
+    );
+  }
+  if (need) return <Enroll2FA who={me?.account?.display_name} onDone={() => setNeed(false)} />;
+  return <>{children}</>;
+}
+
 export function App() {
   return (
     <SessionProvider>
@@ -53,7 +105,9 @@ export function App() {
             <RequireAuth>
               <ConfirmProvider>
                 <MemberGate>
-                  <Shell />
+                  <TwoFactorGate>
+                    <Shell />
+                  </TwoFactorGate>
                 </MemberGate>
               </ConfirmProvider>
             </RequireAuth>
