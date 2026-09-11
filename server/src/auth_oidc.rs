@@ -169,6 +169,26 @@ impl Oidc {
     }
 }
 
+/// First-boot bootstrap via SSO: a normalized username from the email's local
+/// part (the passkey path can mint/match it), and the verified email kept on
+/// the row so the next SSO login finds the account again.
+async fn bootstrap_sso_admin(
+    db: &sqlx::PgPool,
+    email: &str,
+    display_name: &str,
+) -> AppResult<(Uuid, Uuid)> {
+    let local = email.split('@').next().unwrap_or("user");
+    let username = crate::auth::normalize_username(local)
+        .unwrap_or_else(|_| format!("user-{}", &gen_token()[..8]));
+    let (tenant_id, admin_id) = create_tenant_with_admin(db, &username, display_name, true).await?;
+    sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
+        .bind(email)
+        .bind(admin_id)
+        .execute(db)
+        .await?;
+    Ok((tenant_id, admin_id))
+}
+
 /// GET /api/auth/config — public; tells the entry page whether SSO exists and
 /// whether this is a fresh install (no account yet) so it can show the
 /// first-run registration flow instead of login.
@@ -324,8 +344,7 @@ pub async fn callback(
                 .name
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| email.split('@').next().unwrap_or("Admin").to_string());
-            let (tenant_id, admin_id) =
-                create_tenant_with_admin(&st.db, &email, &display_name, true).await?;
+            let (tenant_id, admin_id) = bootstrap_sso_admin(&st.db, &email, &display_name).await?;
             (admin_id, tenant_id)
         }
     };

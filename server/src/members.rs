@@ -214,12 +214,17 @@ pub async fn link_os_user(
     let account: AccountRow = match linked {
         Some(id) => get_account(db, id, tenant_id).await?,
         None => {
-            // 2. Name match.
+            // 2. Name match — MEMBERS ONLY. The agent declares these names, and a
+            //    rooted device that could name-link an OS user to a parent would
+            //    then hold a login that can vouch for (or approve) a parent
+            //    session. Hub accounts get linked only by an admin's hand
+            //    (assign-account) or the device's declared owner below.
             let by_name: Option<AccountRow> = sqlx::query_as(&format!(
                 "SELECT {ACCOUNT_COLS} FROM admins
                   WHERE tenant_id = $1
+                    AND role = 'member'
                     AND (lower(display_name) = lower($2) OR lower(display_name) = lower($3))
-                  ORDER BY (role = 'member') DESC, created_at LIMIT 1"
+                  ORDER BY created_at LIMIT 1"
             ))
             .bind(tenant_id)
             .bind(display)

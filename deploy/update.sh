@@ -55,13 +55,19 @@ echo "==> building images (server + web, see Containerfile)"
 echo "==> recreating the server container with the new image"
 "${compose_bin}" "${compose_args[@]}" -f compose.yaml up -d
 
-# OST_PORT lives in .env; default to 8080 if it's unset there.
+# OST_PORT / OST_BIND_ADDR live in .env; default to 8080 on loopback. The
+# health poll must hit the address the port is actually published on — a
+# server bound to its LAN IP for a reverse proxy (as DEPLOY.md recommends)
+# is NOT reachable on 127.0.0.1, and polling there would "fail" a healthy
+# deploy and trigger the rollback below.
 port="$(grep -E '^OST_PORT=' .env | tail -n1 | cut -d= -f2-)"
 port="${port:-8080}"
+bind="$(grep -E '^OST_BIND_ADDR=' .env | tail -n1 | cut -d= -f2-)"
+bind="${bind:-127.0.0.1}"
 
-echo "==> waiting for the server to report healthy on 127.0.0.1:${port}"
+echo "==> waiting for the server to report healthy on ${bind}:${port}"
 
-health_url="http://127.0.0.1:${port}/health"
+health_url="http://${bind}:${port}/health"
 healthy=""
 for _ in $(seq 1 90); do
     if command -v curl >/dev/null 2>&1; then

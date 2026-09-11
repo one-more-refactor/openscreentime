@@ -128,7 +128,7 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
       familyChanged();
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
-      setStatus(e instanceof Error ? e.message : "That didn't work");
+      setStatus(e instanceof Error ? e.message : "That didn't work — the computer may be off; it catches up when it's back");
       setStatusTone("crit");
     } finally {
       setBusy(false);

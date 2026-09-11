@@ -667,6 +667,25 @@ pub async fn mint_voucher(
             "{os_username} on this computer isn't linked to anyone on the household yet"
         )));
     };
+    // "Your own computer approves the sign-in" means exactly that for a
+    // parent: only a device DECLARED as theirs may vouch for a hub account.
+    // Otherwise root on a shared kid laptop that hosts (or invents) a parent's
+    // login mints a parent session. Members may be vouched for from any
+    // device they use.
+    let (role, own_device): (String, bool) = sqlx::query_as(
+        "SELECT a.role,
+                EXISTS (SELECT 1 FROM devices d WHERE d.id = $2 AND d.owner_account_id = a.id)
+           FROM admins a WHERE a.id = $1",
+    )
+    .bind(account_id)
+    .bind(agent.device_id)
+    .fetch_one(&st.db)
+    .await?;
+    if role != "member" && !own_device {
+        return Err(AppError::NoAccount(format!(
+            "{os_username} is a parent — only their own computer can sign them in this way"
+        )));
+    }
 
     let voucher = gen_token();
     sqlx::query(

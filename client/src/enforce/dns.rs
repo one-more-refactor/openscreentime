@@ -288,6 +288,21 @@ pub fn apply(
     // dnsmasq is what actually serves the allowlist. There is no equivalent
     // systemd-resolved path implemented, so a failure here is not something a
     // cache flush papers over — it means nothing is filtering.
+    // The query log is every user's browsing on this computer. dnsmasq would
+    // create it 0644 — world-readable by every sibling; make it root-only
+    // first (append-open, never truncate an existing log).
+    if !exec.dry_run() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(crate::attrib::DNSQ_LOG);
+        let _ = std::fs::set_permissions(
+            crate::attrib::DNSQ_LOG,
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
     if let Err(e) = exec.run("systemctl", &["restart", "dnsmasq"]) {
         tracing::error!("dnsmasq restart failed: {e}");
     }

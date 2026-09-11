@@ -198,6 +198,10 @@ pub struct AppState {
     pub oidc: Option<Arc<crate::auth_oidc::Oidc>>,
     pub rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     pub hub: Arc<Hub>,
+    /// Decoy device-login request ids (unknown name / nobody online) with the
+    /// instant they were issued, so `finish` can answer "pending" for the same
+    /// window a real one would — a 404 there was an account-and-presence oracle.
+    pub decoy_logins: Arc<RwLock<HashMap<uuid::Uuid, std::time::Instant>>>,
 }
 
 /// Extractor: an authenticated admin. Carries tenant_id so every downstream
@@ -259,13 +263,9 @@ impl FromRequestParts<AppState> for AuthAdmin {
                 role,
                 blocked: blocked_at.is_some(),
             }),
-            None => {
-                // Opportunistic lazy cleanup of expired sessions.
-                let _ = sqlx::query("DELETE FROM admin_sessions WHERE expires_at < now()")
-                    .execute(&state.db)
-                    .await;
-                Err(AppError::Unauthorized("no session".into()))
-            }
+            // No cleanup here: a DELETE per garbage cookie was a write-amplifier
+            // anyone could drive at HTTP speed; the hourly sweep in main does it.
+            None => Err(AppError::Unauthorized("no session".into())),
         }
     }
 }

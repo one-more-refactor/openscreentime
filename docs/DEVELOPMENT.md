@@ -134,9 +134,10 @@ enforcement on your workstation. Three tiers, cheapest first:
   `view` serves a bundled noVNC client that points at QEMU's built-in VNC-over-websocket. Set
   mia's Kid daily limit small in the console first (e.g. 1 min).
 
-  Gotchas the harness encodes so you don't trip on them: (1) the agent only counts **local seat**
-  sessions (`loginctl Active=yes && Remote=no`) as screen time — an SSH login is `Remote` and never
-  accrues, so `vm.sh seat` (a Weston seat), not `vm.sh ssh`, drives a lock; (2) the lock is
+  Gotchas the harness encodes so you don't trip on them: (1) the agent counts every **active**
+  session of a managed user as screen time — a local seat or an SSH login alike (SSH used to be
+  exempt, which was a loophole); `vm.sh seat` gives mia a real graphical seat so the overlay has
+  somewhere to draw; (2) the lock is
   **sticky** — hitting the daily limit locks mia for the day, and dropping back under budget does
   *not* auto-thaw (that takes an unlock code / earn-time grant, or `vm.sh thaw`); (3) the agent
   re-reads policy only on (re)start, so a live console/DB limit change needs an agent restart —

@@ -34,9 +34,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    http::{header, HeaderValue, Method},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware,
-    routing::{delete, get, post, put},
+    routing::{any, delete, get, post, put},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -46,6 +46,29 @@ use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
 use crate::state::{AppState, Hub};
+
+async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": { "code": "not_found", "message": "no such route" } })),
+    )
+}
+
+/// Baseline browser hardening on every response. No CSP yet (the SPA inlines
+/// styles); these three are free and close framing/sniffing/referrer leaks.
+async fn security_headers(mut resp: axum::response::Response) -> axum::response::Response {
+    let h = resp.headers_mut();
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        "referrer-policy",
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    resp
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -106,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         oidc,
         rate_limiter: Arc::new(rate_limit::RateLimiter::from_env()),
         hub: Arc::new(Hub::default()),
+        decoy_logins: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     };
 
     // Offline sweeper: agents on the WS bus flip to offline the moment the
@@ -137,6 +161,13 @@ async fn main() -> anyhow::Result<()> {
                 // trail, not an archive.
                 sweeps += 1;
                 if sweeps.is_multiple_of(120) {
+                    for q in [
+                        "DELETE FROM admin_sessions WHERE expires_at < now()",
+                        "DELETE FROM device_vouchers WHERE expires_at < now() - interval '1 hour'",
+                        "DELETE FROM login_requests WHERE expires_at < now() - interval '1 hour'",
+                    ] {
+                        let _ = sqlx::query(q).execute(&db).await;
+                    }
                     let _ = sqlx::query(
                         "DELETE FROM usage_slices WHERE hour < now() - interval '21 days'",
                     )
@@ -403,6 +434,12 @@ async fn main() -> anyhow::Result<()> {
     // shadows those routes since fallbacks only run on unmatched requests.
     // No-op (API-only) if OST_WEB_DIR isn't present, e.g. plain `cargo
     // run` in dev without a web build.
+    // An unmatched /api or /agent path must be a real 404, not the SPA shell
+    // rewritten to 200 — otherwise a route that silently stops existing looks
+    // healthy to a monitor. Static routes win over these wildcards.
+    let app = app
+        .route("/api/{*rest}", any(api_not_found))
+        .route("/agent/{*rest}", any(api_not_found));
     let app = match static_web::web_dir() {
         Some(dir) => {
             use tower_http::services::{ServeDir, ServeFile};
@@ -417,7 +454,10 @@ async fn main() -> anyhow::Result<()> {
         None => app,
     };
 
-    let app = app.layer(cors).layer(TraceLayer::new_for_http());
+    let app = app
+        .layer(middleware::map_response(security_headers))
+        .layer(cors)
+        .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("OpenScreenTime server listening on {bind_addr}");

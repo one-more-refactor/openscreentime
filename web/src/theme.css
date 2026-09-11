@@ -95,7 +95,7 @@
 
   --dot-color: rgba(0, 0, 0, 0.12);
 
-  --rail: #ffffff;
+  --rail: #efefed; /* recedes; cards (#fff) advance — three planes in light too */
   --elev-1: 0 1px 2px rgba(24, 22, 18, 0.06), 0 1px 0 rgba(24, 22, 18, 0.03);
   --elev-2: 0 18px 40px -18px rgba(24, 22, 18, 0.28), 0 3px 8px rgba(24, 22, 18, 0.07);
 }
@@ -117,7 +117,7 @@
     --crit: #b3151c;
     --idle: #999999;
     --dot-color: rgba(0, 0, 0, 0.12);
-    --rail: #ffffff;
+    --rail: #efefed; /* recedes; cards (#fff) advance — three planes in light too */
     --elev-1: 0 1px 2px rgba(24, 22, 18, 0.06), 0 1px 0 rgba(24, 22, 18, 0.03);
     --elev-2: 0 18px 40px -18px rgba(24, 22, 18, 0.28), 0 3px 8px rgba(24, 22, 18, 0.07);
   }
@@ -471,8 +471,8 @@
     to right,
     transparent 0,
     transparent calc(100% / var(--segs, 8) - 2px),
-    var(--bg) calc(100% / var(--segs, 8) - 2px),
-    var(--bg) calc(100% / var(--segs, 8))
+    var(--surface) calc(100% / var(--segs, 8) - 2px),
+    var(--surface) calc(100% / var(--segs, 8))
   );
 }
 
@@ -526,14 +526,12 @@
 .ch-big[data-spent="true"] { color: var(--accent); }
 .ch-big-unit {
   margin: 0.6rem 0 1.5rem; color: var(--fg-dim);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.95rem;
 }
 .ch-bar { height: 0.5rem; max-width: 26rem; margin: 0 auto; }
 .ch-bar-note {
-  margin: 0.6rem 0 0; color: var(--fg-faint);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  margin: 0.6rem 0 0; color: var(--fg-dim);
+  font-family: var(--font-sans); font-size: 0.85rem;
 }
 
 .ch-actions { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 3rem; }
@@ -555,7 +553,8 @@
 /* The hard stop reads as ink; while paused, resuming is the loud action. */
 .ch-btn-pause { background: var(--fg-display); color: var(--bg); border-color: var(--fg-display); }
 .ch-btn-pause:hover:not(:disabled) { background: var(--fg); border-color: var(--fg); }
-.ch-btn-pause[data-paused="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* "Resume" is the restorative action — ink, never red. Red marks the condition, not the exit. */
+.ch-btn-pause[data-paused="true"] { background: var(--fg-display); border-color: var(--fg-display); color: var(--bg); }
 .ch-btn-pause[data-paused="true"]:hover:not(:disabled) { background: var(--crit); border-color: var(--crit); }
 
 .ch-section { margin-bottom: 3rem; }
@@ -621,10 +620,12 @@
   color: var(--fg-faint); flex: 1;
 }
 .rl-app-input { max-width: 14rem; border-radius: 999px; padding: 0.45rem 0.9rem; font-size: 0.9rem; }
+/* Section headings are read, not scanned as data: sans, sentence case, real
+   ink. (Mono caps stay for genuine data refs — timestamps, ids — only.) */
 .ch-h2 {
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--fg-faint); margin: 0 0 0.75rem; font-weight: 400;
+  font-family: var(--font-sans); font-size: 0.95rem; font-weight: 600;
+  text-transform: none; letter-spacing: 0;
+  color: var(--fg); margin: 0 0 0.75rem;
 }
 .ch-reqs, .ch-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .ch-req, .ch-device {
@@ -1301,7 +1302,7 @@ body[data-leaving="true"] .shell {
 .ph-lead { flex: none; }
 .ph-main { flex: 1; min-width: 0; }
 .ph-eyebrow {
-  margin: 0 0 0.5rem; color: var(--fg-faint);
+  margin: 0 0 0.5rem; color: var(--fg-dim);
   font-family: var(--font-mono); font-size: 0.6875rem;
   text-transform: uppercase; letter-spacing: 0.08em;
 }
@@ -1316,8 +1317,7 @@ body[data-leaving="true"] .shell {
   display: inline-flex; align-items: center;
   padding: 0.5rem 0.95rem; border: 1px solid var(--line-2); border-radius: 999px;
   color: var(--fg); text-decoration: none; background: var(--surface);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.9rem; min-height: 40px;
   box-shadow: var(--elev-1);
   transition: background var(--dur-tick) var(--ease), transform var(--dur-tick) var(--ease),
     box-shadow var(--dur-tick) var(--ease);
@@ -1470,3 +1470,16 @@ body[data-leaving="true"] .shell {
    40px row, not faint 12px text a tired parent can't find. */
 .login-link { min-height: 40px; display: inline-flex; align-items: center; color: var(--fg-dim); }
 .login-link:hover { color: var(--fg); }
+
+/* The remove-child confirmation: type the name, no accidental taps. */
+.ch-confirm { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 1rem; }
+.ch-confirm-input {
+  font: inherit; padding: 0.55rem 0.8rem; border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg);
+}
+.ch-confirm-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ch-keys-steps { margin: 0.6rem 0 0; padding-left: 1.2rem; color: var(--fg-dim); font-size: 0.9rem; display: grid; gap: 0.25rem; }
+.cf-nofactor { margin: 0 0 1rem; padding: 0.8rem 1rem; border-radius: 12px; background: var(--surface-2); font-size: 0.95rem; }
+.cf-nofactor a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+
+.pause-hold { touch-action: none; } /* a drifting thumb must not cancel the hold */

@@ -69,7 +69,7 @@
   font-family: var(--font-mono); font-size: 0.5625rem;
   text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint);
 }
-.apps-tile[data-on="true"] .apps-tile-state { color: var(--accent); }
+.apps-tile[data-on="true"] .apps-tile-state { color: var(--fg-faint); }
 .apps-more { margin-top: 0.75rem; }
 .apps-more summary {
   cursor: pointer; font-size: 0.875rem; color: var(--fg-dim); list-style: none;

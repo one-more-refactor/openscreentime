@@ -1378,6 +1378,12 @@ impl Agent {
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
             let is_active = active.contains(&user);
             let currently_frozen = self.frozen.contains(&user);
+            // Frozen means frozen — every tick. The probe re-asserts too, but
+            // only every ~60 s; a thawed slice would otherwise run for up to a
+            // minute before it noticed.
+            if currently_frozen && screentime::is_frozen(&user) == Some(false) {
+                let _ = screentime::freeze_user(&self.exec, &user, true, false);
+            }
 
             // 1) Consume verified unlocks FIRST — every tick, every user,
             // frozen or not. (The old code only consulted the override on the

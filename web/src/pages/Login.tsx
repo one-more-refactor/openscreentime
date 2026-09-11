@@ -33,7 +33,7 @@ export function Login() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [matchCode, setMatchCode] = useState("");
   const [error, setError] = useState<string | null>(() =>
-    params.get("error") ? "Sign-in failed — try again." : null,
+    params.get("error") ? "Sign-in failed. If your computer never asked, use “Log in with passkey” below." : null,
   );
 
   useEffect(() => {
@@ -68,7 +68,7 @@ export function Login() {
       await deviceLogin(who, setMatchCode);
       navigate("/", { replace: true });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "That didn't work — try again.");
+      setError(e instanceof Error ? e.message : "That didn't work. Check the username, or use “Log in with passkey” below.");
       setPhase("idle");
       setMatchCode("");
     }
@@ -110,7 +110,7 @@ export function Login() {
         return;
       }
       setError(
-        e instanceof Error && e.message ? e.message : "Creating your passkey failed — try again.",
+        e instanceof Error && e.message ? e.message : "Creating your passkey failed. Try once more — and if your browser never asked, check that passkeys are allowed for this site.",
       );
     }
   }
