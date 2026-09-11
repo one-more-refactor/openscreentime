@@ -423,11 +423,13 @@ pub async fn login_start(
 ) -> AppResult<(CookieJar, Json<Value>)> {
     let (admin_id, tenant_id, _) = find_admin(&st.db, req.username.trim())
         .await?
-        .ok_or_else(|| AppError::Unauthorized("unknown account".into()))?;
+        .ok_or_else(|| AppError::Unauthorized("sign-in failed".into()))?;
 
     let passkeys = load_passkeys(&st.db, admin_id).await?;
     if passkeys.is_empty() {
-        return Err(AppError::Unauthorized("no passkeys registered".into()));
+        // Same words as an unknown username: a valid name with no passkey
+        // must not read differently from a name that doesn't exist.
+        return Err(AppError::Unauthorized("sign-in failed".into()));
     }
 
     let (rcr, auth) = st

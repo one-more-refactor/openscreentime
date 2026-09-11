@@ -301,7 +301,10 @@ pub async fn callback(
     // SSO keys the verified email as the account username (identity moved off the
     // email column, which is being retired). Match case-insensitively.
     let existing: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT id, tenant_id FROM admins WHERE lower(username) = lower($1)")
+        sqlx::query_as(
+            "SELECT id, tenant_id FROM admins
+              WHERE lower(username) = lower($1) OR lower(email) = lower($1)",
+        )
             .bind(&email)
             .fetch_optional(&st.db)
             .await?;

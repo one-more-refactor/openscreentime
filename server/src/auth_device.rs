@@ -328,20 +328,32 @@ pub async fn decision(
     Json(req): Json<DecisionReq>,
 ) -> AppResult<Json<Value>> {
     let tapped = req.code.as_deref().unwrap_or("").trim().to_string();
+    let answerer = req.os_username.trim().to_string();
+    // Number-matching only proves anything if the person who TAPPED is not the
+    // person who STARTED the flow — and `start` is unauthenticated and hands
+    // the starter the real code. On a shared family computer a child could
+    // start a sign-in as the parent, then tap the right code from their own
+    // login. So the answer must come from an OS login that belongs to the
+    // target account on this device: not merely "some login on this device
+    // is theirs", but "the login that answered is theirs". A missing answerer
+    // is treated as "not me".
     let updated: Option<(Uuid, bool)> = sqlx::query_as(
         "UPDATE login_requests lr
             SET status = CASE WHEN lr.match_code = $3 AND $3 <> '' THEN 'approved' ELSE 'denied' END,
                 approved_device_id = $2
           WHERE lr.id = $1 AND lr.status = 'pending' AND lr.expires_at > now()
             AND lr.tenant_id = $4
+            AND $5 <> ''
             AND EXISTS (SELECT 1 FROM device_users du
-                         WHERE du.device_id = $2 AND du.account_id = lr.account_id)
+                         WHERE du.device_id = $2 AND du.account_id = lr.account_id
+                           AND lower(du.os_username) = lower($5))
         RETURNING lr.id, (lr.match_code = $3 AND $3 <> '')",
     )
     .bind(req.request_id)
     .bind(agent.device_id)
     .bind(&tapped)
     .bind(agent.tenant_id)
+    .bind(&answerer)
     .fetch_optional(&st.db)
     .await?;
 
@@ -366,7 +378,9 @@ pub async fn decision(
     )
     .await?;
 
-    Ok(Json(json!({ "ok": true, "approved": approved })))
+    // No verdict back to the device: whether the tap matched is the browser's
+    // to learn (it polls `finish`), never a hint to whoever holds the device.
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[cfg(test)]
