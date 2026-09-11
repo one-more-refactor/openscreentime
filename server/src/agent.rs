@@ -189,13 +189,17 @@ pub async fn enroll(
     State(st): State<AppState>,
     Json(req): Json<EnrollReq>,
 ) -> AppResult<Json<Value>> {
+    if req.os_users.len() > MAX_OS_USERS {
+        return Err(AppError::BadRequest("too many os_users".into()));
+    }
     // Consume the one-time enroll token. An expired token is rejected exactly
     // like a consumed one (24 h TTL; the admin can regenerate while pending).
     let row: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT id, tenant_id FROM devices WHERE enroll_token = $1
            AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now())",
     )
-    .bind(&req.enroll_token)
+    // Stored hashed (like device/parent/voucher tokens); compare the hash.
+    .bind(hash_token(&req.enroll_token))
     .fetch_optional(&st.db)
     .await?;
     let (device_id, tenant_id) =
@@ -392,11 +396,20 @@ async fn apply_state(db: &sqlx::PgPool, device_id: Uuid, state: &Value) {
     .await;
 }
 
+/// Bounds on per-request arrays from a device. usage::ingest already caps at
+/// 500 and batches; the heartbeat/enroll paths were uncapped and serial — an
+/// authenticated device could pin a pool connection through ~200k round-trips.
+const MAX_HEARTBEAT_USAGE: usize = 500;
+const MAX_OS_USERS: usize = 100;
+
 pub async fn heartbeat(
     State(st): State<AppState>,
     agent: AgentAuth,
     Json(req): Json<HeartbeatReq>,
 ) -> AppResult<Json<Value>> {
+    if req.usage.len() > MAX_HEARTBEAT_USAGE || req.os_users.len() > MAX_OS_USERS {
+        return Err(AppError::BadRequest("heartbeat too large".into()));
+    }
     // A heartbeat is life: the device is online. `locked` is its own column
     // and is only ever written from the agent's `state` frame or a lock ack.
     let _ = req.status;

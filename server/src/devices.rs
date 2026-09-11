@@ -439,7 +439,7 @@ pub async fn create_device(
     )
     .bind(admin.tenant_id)
     .bind(req.name.trim())
-    .bind(&enroll_token)
+    .bind(crate::auth::hash_token(&enroll_token))
     .bind(&secret)
     .bind(req.account_id)
     .fetch_one(&st.db)
@@ -473,7 +473,7 @@ pub async fn regen_enroll_token(
         "UPDATE devices SET enroll_token = $1, enroll_token_expires_at = now() + interval '24 hours'
          WHERE id = $2 AND tenant_id = $3",
     )
-    .bind(&enroll_token)
+    .bind(crate::auth::hash_token(&enroll_token))
     .bind(id)
     .bind(admin.tenant_id)
     .execute(&st.db)
