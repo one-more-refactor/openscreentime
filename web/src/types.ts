@@ -271,7 +271,7 @@ export interface FamilyChild {
   devices: ChildDevice[];
   /** earn requests waiting on a parent */
   pending_requests: number;
-  /** blocked via the Danger Zone: login cut, devices locked */
+  /** paused via the Danger Zone: can read their own page, can't change anything; devices locked */
   blocked?: boolean;
 }
 
@@ -409,6 +409,8 @@ export interface Account {
   id: string;
   household_id: string;
   display_name: string;
+  /** paused by a parent: may read their own page, can't change anything */
+  blocked?: boolean;
   /** parent-picked emoji face; null = the deterministic monogram */
   avatar?: string | null;
   /** Members young enough not to log in may have no email. */

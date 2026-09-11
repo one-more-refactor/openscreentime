@@ -202,11 +202,12 @@ pub async fn require_step_up(
     };
 
     let hash = hash_token(cookie.value());
-    let row: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
-        "SELECT stepup_until, trusted FROM admin_sessions
-         WHERE (token_hash = $1
-                OR (prev_token_hash = $1 AND prev_valid_until > now()))
-           AND expires_at > now()",
+    let row: Option<(Option<DateTime<Utc>>, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT s.stepup_until, s.trusted, a.blocked_at FROM admin_sessions s
+         JOIN admins a ON a.id = s.admin_id
+         WHERE (s.token_hash = $1
+                OR (s.prev_token_hash = $1 AND s.prev_valid_until > now()))
+           AND s.expires_at > now()",
     )
     .bind(&hash)
     .fetch_optional(&st.db)
@@ -215,7 +216,13 @@ pub async fn require_step_up(
     match row {
         // Unknown session: let the handler's extractor produce the 401.
         None => Ok(next.run(req).await),
-        Some((until, trusted)) => {
+        // A paused (blocked) account may read its own page, never change
+        // anything — enforced here, at the one layer every /api mutation
+        // crosses, so no handler can forget it.
+        Some((_, _, Some(_paused))) => Err(AppError::ForbiddenForMember(
+            "this account is paused — a parent has to lift it first".into(),
+        )),
+        Some((until, trusted, None)) => {
             if needs_confirm && !until.is_some_and(|t| t > Utc::now()) {
                 return Err(AppError::StepUpRequired(
                     "confirm it's you to touch the keys".into(),

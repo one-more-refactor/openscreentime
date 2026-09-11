@@ -36,7 +36,6 @@ import {
 import { Moments } from "../components/Moments";
 import { WhereTheTime } from "../components/WhereTheTime";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
-import { Button } from "../components/Button";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Avatar } from "./Family";
@@ -528,26 +527,28 @@ export function ChildDetail() {
         events={events.filter((e) => e.device_user_id === null || deviceUserIds.has(e.device_user_id))}
       />
 
-      <section className="ch-section ch-danger">
-        <h2 className="ch-h2 ch-danger-h">Danger zone</h2>
-        <p className="fam-quiet ch-danger-lede">
-          Held by OpenScreenTime itself — no app to install, no third party. Use these when you have to.
+      {/* Keys to the house: the everyday way back in. Held by OpenScreenTime
+          itself — no app to install, no third party — and calm on purpose:
+          this is the control a stressed parent reaches for, not a hazard. */}
+      <section className="ch-section ch-keys">
+        <h2 className="ch-h2">Keys to the house</h2>
+        <p className="fam-quiet ch-keys-lede">
+          Held by OpenScreenTime itself — no app to install, no third party.
         </p>
-
-        <div className="ch-danger-row">
-          <div className="ch-danger-what">
+        <div className="ch-row-action">
+          <div className="ch-row-what">
             <strong>Parent code</strong>
             <span className="fam-quiet">
               A rotating code that always unlocks {name}&rsquo;s device. Read it here, type it on the device.
             </span>
           </div>
-          <Button variant="ghost" onClick={() => setShowCode((s) => !s)}>
+          <button type="button" className="ch-btn" onClick={() => setShowCode((s) => !s)}>
             {showCode ? "Hide code" : "See parent code"}
-          </Button>
+          </button>
         </div>
         {showCode &&
           (childDevices.some((d) => d.full) ? (
-            <div className="ch-danger-codes">
+            <div className="ch-keys-codes">
               {childDevices
                 .filter((d) => d.full)
                 .map((d) => (
@@ -557,31 +558,35 @@ export function ChildDetail() {
           ) : (
             <p className="fam-quiet">No set-up device yet — a code appears once {name} has one.</p>
           ))}
+      </section>
 
-        <div className="ch-danger-row">
-          <div className="ch-danger-what">
-            <strong>{blocked ? "Account blocked" : "Block account"}</strong>
+      {/* Danger zone: monochrome at rest — red is an interrupt, not a resting
+          decoration — and turns red only when you reach for it. */}
+      <section className="ch-section ch-danger">
+        <h2 className="ch-h2 ch-danger-h">Danger zone</h2>
+        <div className="ch-row-action">
+          <div className="ch-row-what">
+            <strong>{blocked ? `${name}’s account is paused` : "Block account"}</strong>
             <span className="fam-quiet">
               {blocked
-                ? `${name} can’t sign in and their devices are locked.`
-                : `Cut ${name}’s sign-in and lock every device right now.`}
+                ? `${name} can look but not change anything, and their devices are locked. Unblock, then resume their devices.`
+                : `Pauses ${name}: their devices lock after a two-minute save-your-work window, and they see why on their own page.`}
             </span>
           </div>
-          <Button variant="danger" disabled={busy} onClick={toggleBlock}>
+          <button type="button" className="ch-btn" data-danger disabled={busy} onClick={toggleBlock}>
             {blocked ? "Unblock" : "Block account"}
-          </Button>
+          </button>
         </div>
-
-        <div className="ch-danger-row">
-          <div className="ch-danger-what">
+        <div className="ch-row-action">
+          <div className="ch-row-what">
             <strong>Remove {name}</strong>
             <span className="fam-quiet">
               Deletes their account and rules. Their logins stay on the devices, unmanaged.
             </span>
           </div>
-          <Button variant="danger" disabled={busy} onClick={removeChild}>
+          <button type="button" className="ch-btn" data-danger disabled={busy} onClick={removeChild}>
             Remove child
-          </Button>
+          </button>
         </div>
       </section>
     </div>
