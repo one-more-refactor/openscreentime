@@ -598,12 +598,12 @@ pub async fn block_member(
     .bind(admin.tenant_id)
     .execute(&st.db)
     .await?;
-    // Cut any live console sessions the child holds.
-    sqlx::query("DELETE FROM admin_sessions WHERE admin_id = $1")
-        .bind(id)
-        .execute(&st.db)
-        .await?;
-    // Lock every device this child uses (same command path as a manual lock).
+    // Sessions are deliberately KEPT: a paused child can still open their own
+    // page and read an honest reason ("a parent paused your devices"), instead
+    // of a dead login with no explanation. They can't change anything — the
+    // step-up layer refuses every mutation for a paused account.
+    // Lock every device this child uses (same command path as a manual lock),
+    // with a save-your-work window rather than an instant cut.
     let devices: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT DISTINCT du.device_id FROM device_users du
          JOIN devices d ON d.id = du.device_id
@@ -614,7 +614,13 @@ pub async fn block_member(
     .fetch_all(&st.db)
     .await?;
     for (device_id,) in &devices {
-        let _ = crate::agent::enqueue_command(&st, *device_id, "lock", json!({})).await;
+        let _ = crate::agent::enqueue_command(
+            &st,
+            *device_id,
+            "lock",
+            json!({ "reason": "paused_by_parent", "grace_secs": 120 }),
+        )
+        .await;
     }
     events::insert(
         &st.db,
@@ -671,7 +677,8 @@ pub async fn me(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<
             .bind(admin.tenant_id)
             .fetch_one(&st.db)
             .await?;
-    let account = account_json(&row);
+    let mut account = account_json(&row);
+    account["blocked"] = json!(admin.blocked);
     Ok(Json(json!({
         "account": account,
         "household": { "id": tenant.0, "name": tenant.1, "created_at": tenant.2 },

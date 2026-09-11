@@ -556,18 +556,32 @@
 
 .ch-section { margin-bottom: 3rem; }
 
-/* ---- danger zone (destructive, parent-only) ------------------------------ */
-.ch-danger { border-top: 1px solid var(--crit); padding-top: 1.4rem; }
-.ch-danger-h { color: var(--crit); }
-.ch-danger-lede { margin: -0.4rem 0 1.1rem; }
-.ch-danger-row {
+/* ---- keys to the house + danger zone ------------------------------------- */
+/* One row grammar for both: a plain sans row with the page's own pill button.
+   The danger zone is monochrome at REST — red is an interrupt, absent on a
+   healthy day — and only its buttons go red when reached for. */
+.ch-row-action {
   display: flex; align-items: center; justify-content: space-between;
   gap: 1rem; padding: 0.9rem 0; border-top: 1px solid var(--line);
 }
-.ch-danger-row:first-of-type { border-top: 0; }
-.ch-danger-what { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-.ch-danger-what strong { font-weight: 600; }
-.ch-danger-codes { margin: 0 0 0.8rem; display: grid; gap: 0.6rem; }
+.ch-row-action:first-of-type { border-top: 0; }
+.ch-row-what { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.ch-row-what strong { font-weight: 600; }
+.ch-keys-lede { margin: -0.4rem 0 0.6rem; }
+.ch-keys-codes { margin: 0 0 0.8rem; display: grid; gap: 0.6rem; }
+.ch-danger { border-top: 1px solid var(--line); padding-top: 1.4rem; }
+.ch-danger-h { color: var(--fg-dim); }
+.ch-btn[data-danger]:hover:not(:disabled),
+.ch-btn[data-danger]:focus-visible {
+  color: var(--crit); border-color: var(--crit); background: transparent;
+}
+.ch-btn[data-danger]:active:not(:disabled) { background: color-mix(in srgb, var(--crit) 12%, transparent); }
+
+/* Paused-by-a-parent notice on the child's own page: calm, factual, no red. */
+.me-paused {
+  margin: 0 0 1.25rem; padding: 0.8rem 1rem; border-radius: 12px;
+  background: var(--surface-2); color: var(--fg); font-size: 0.95rem;
+}
 
 /* ---- the rules (parenting options) --------------------------------------- */
 .rl { display: grid; }

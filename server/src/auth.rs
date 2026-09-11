@@ -183,21 +183,6 @@ async fn find_admin(db: &sqlx::PgPool, username: &str) -> AppResult<Option<(Uuid
     Ok(row)
 }
 
-/// Refuse to mint a session for a blocked account (the parent Danger-Zone
-/// action). The `AuthAdmin` extractor already rejects blocked accounts on every
-/// authenticated call; this stops the login ceremony one step earlier.
-pub async fn reject_if_blocked(db: &sqlx::PgPool, admin_id: Uuid) -> AppResult<()> {
-    let blocked: Option<Option<DateTime<Utc>>> =
-        sqlx::query_scalar("SELECT blocked_at FROM admins WHERE id = $1")
-            .bind(admin_id)
-            .fetch_optional(db)
-            .await?;
-    if blocked.flatten().is_some() {
-        return Err(AppError::Unauthorized("account is blocked".into()));
-    }
-    Ok(())
-}
-
 /// Normalize + validate an account username: 3–32 chars of `a–z 0–9 . _ -`,
 /// lower-cased. This is the login identity (globally unique, case-insensitive) —
 /// there is no email any more.
@@ -439,7 +424,6 @@ pub async fn login_start(
     let (admin_id, tenant_id, _) = find_admin(&st.db, req.username.trim())
         .await?
         .ok_or_else(|| AppError::Unauthorized("unknown account".into()))?;
-    reject_if_blocked(&st.db, admin_id).await?;
 
     let passkeys = load_passkeys(&st.db, admin_id).await?;
     if passkeys.is_empty() {

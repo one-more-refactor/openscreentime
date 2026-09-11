@@ -577,6 +577,12 @@ export function Me() {
         {!member && <p className="me-sub">Your own day, private to you.</p>}
       </header>
 
+      {me?.account.blocked && (
+        <p className="me-paused" role="status">
+          A parent paused your devices. Nothing here is broken — talk to them, and it comes back.
+        </p>
+      )}
+
       {error && (
         <p className="me-err">
           {error}{" "}

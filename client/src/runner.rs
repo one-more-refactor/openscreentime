@@ -325,6 +325,9 @@ pub struct Agent {
     /// The `ost unlock` recovery marker last honored (unix secs), so a marker
     /// left by a previous boot isn't re-applied, and a fresh one is applied once.
     last_local_recovery: Option<u64>,
+    /// A console "pause" may carry a save-your-work window: the overlay shows
+    /// at once, the freeze lands when this instant passes. None = immediate.
+    device_lock_grace_until: Option<Instant>,
     /// Confirmation gate that separates a real, sustained evasion attempt from a
     /// transient blip before escalating to `tamper_lockdown`.
     tamper_monitor: tamper::TamperMonitor,
@@ -569,6 +572,7 @@ impl Agent {
             offline_hard_lockdown: false,
             tamper_lockdown: carried.tamper_lockdown,
             last_local_recovery: read_local_recovery_marker(),
+            device_lock_grace_until: None,
             tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
@@ -753,6 +757,7 @@ impl Agent {
             self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
         self.device_locked = false;
         save_device_locked(false);
+        self.device_lock_grace_until = None;
         self.offline_hard_lockdown = false;
         self.tamper_lockdown = false;
         // A parent at the machine counts as contact for the days-scale clock.
@@ -1444,8 +1449,14 @@ impl Agent {
                 self.maybe_warn(&user, &policy);
             }
 
+            // An admin lock with a save-your-work window isn't effective until
+            // the window closes; the other whole-device locks are immediate.
+            let admin_lock_effective = self.device_locked
+                && self
+                    .device_lock_grace_until
+                    .is_none_or(|t| Instant::now() >= t);
             let effective_device_locked =
-                (self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown)
+                (admin_lock_effective || self.offline_hard_lockdown || self.tamper_lockdown)
                     && !in_grace;
             match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
                 FreezeAction::Freeze => {
@@ -2064,22 +2075,38 @@ impl Agent {
             CMD_LOCK => {
                 self.device_locked = true;
                 save_device_locked(true);
+                // A pause from the console can carry a save-your-work window
+                // (block-account sends one): the overlay appears now, the
+                // freeze lands when the window closes — see
+                // effective_device_locked. No window = the old instant lock.
+                let grace = cmd
+                    .payload
+                    .get("grace_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.device_lock_grace_until =
+                    (grace > 0).then(|| Instant::now() + Duration::from_secs(grace));
+                let detail = if grace > 0 {
+                    format!(
+                        "A parent paused this computer. Save your work — it pauses in {} min.",
+                        grace.div_ceil(60)
+                    )
+                } else {
+                    "A parent paused this computer.".to_string()
+                };
                 for user in self.policies.keys().cloned().collect::<Vec<_>>() {
                     let keys = self
                         .policies
                         .get(&user)
                         .map(|p| self.parent_keys(p))
                         .unwrap_or_default();
-                    let spec = LockSpec::from_lockout(
-                        &Default::default(),
-                        "Paused",
-                        "A parent paused this computer.",
-                        &user,
-                        keys,
-                    );
+                    let spec =
+                        LockSpec::from_lockout(&Default::default(), "Paused", &detail, &user, keys);
                     lockout::present(&self.exec, &spec);
-                    let _ = screentime::freeze_user(&self.exec, &user, true, true);
-                    self.frozen.insert(user);
+                    if grace == 0 {
+                        let _ = screentime::freeze_user(&self.exec, &user, true, true);
+                        self.frozen.insert(user);
+                    }
                 }
                 if !self.exec.dry_run() {
                     self.persist_freeze_state();
@@ -2094,6 +2121,7 @@ impl Agent {
             CMD_UNLOCK => {
                 self.device_locked = false;
                 save_device_locked(false);
+                self.device_lock_grace_until = None;
                 // An admin unlock also lifts a confirmed-evasion lockdown.
                 self.tamper_lockdown = false;
                 for user in self.frozen.drain().collect::<Vec<_>>() {

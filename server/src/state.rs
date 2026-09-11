@@ -211,6 +211,10 @@ pub struct AuthAdmin {
     /// layer (`members::guard_member`) uses it; handlers that care about the
     /// hub-vs-person distinction read `is_hub()`.
     pub role: String,
+    /// Paused by a parent (Danger Zone "block"). The account can still sign in
+    /// and READ its own page — so a child sees an honest reason instead of a
+    /// dead login — but every mutation is refused by the step-up layer.
+    pub blocked: bool,
 }
 
 impl AuthAdmin {
@@ -249,14 +253,11 @@ impl FromRequestParts<AppState> for AuthAdmin {
         .await?;
 
         match row {
-            // A blocked account is inert even if it still holds a session cookie.
-            Some((_, _, _, Some(_blocked))) => {
-                Err(AppError::Unauthorized("account is blocked".into()))
-            }
-            Some((admin_id, tenant_id, role, None)) => Ok(AuthAdmin {
+            Some((admin_id, tenant_id, role, blocked_at)) => Ok(AuthAdmin {
                 admin_id,
                 tenant_id,
                 role,
+                blocked: blocked_at.is_some(),
             }),
             None => {
                 // Opportunistic lazy cleanup of expired sessions.
