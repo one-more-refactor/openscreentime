@@ -127,6 +127,12 @@ enum Cmd {
     Tray,
     /// Parent recovery: verify the unlock code (read it off the OpenScreenTime
     /// console, or use a recovery code) and suspend enforcement for a while
+    /// The guaranteed way back when the agent itself is the problem: persist a
+    /// local recovery (the live agent clears its lock, a reboot won't reload
+    /// it), stop the watchdog, mask the agent, tear enforcement down. Root
+    /// only, no code — root at the machine is the authority. Prints how to
+    /// re-arm.
+    Recover,
     /// (nft table + resolv.conf pin torn down, users un-frozen). Works
     /// offline. Requires root.
     Unlock {
@@ -298,6 +304,7 @@ async fn main() -> Result<()> {
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
+        Cmd::Recover => unlock::recover(&ctx).await,
         Cmd::Unlock { code, pin, minutes } => {
             let code = match code.or(pin) {
                 Some(p) => {

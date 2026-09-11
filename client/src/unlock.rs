@@ -82,6 +82,26 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
     Ok(())
 }
 
+/// `openscreentime recover` — see `Cmd::Recover`. A plain `systemctl stop` was
+/// undone within seconds by Restart=always + the watchdog timer, and a manual
+/// unfreeze re-froze on the next tick; this does the whole thing once.
+pub async fn recover(ctx: &Arc<AgentCtx>) -> Result<()> {
+    ctx.require_root_for_enforcement()?;
+    crate::runner::record_local_recovery();
+    let exec = Exec::new(ctx.clone());
+    let _ = exec.run("systemctl", &["stop", crate::service::WATCHDOG_TIMER_UNIT]);
+    let _ = exec.run("systemctl", &["mask", "--now", crate::service::AGENT_UNIT]);
+    let policy = policy::load_cache().unwrap_or_default();
+    suspend_enforcement(&exec, &policy)?;
+    tracing::warn!(
+        "ADMIN RECOVERY: agent masked, watchdog stopped, enforcement torn down. Re-arm with: \
+         systemctl unmask {agent} && systemctl start {agent} {timer}",
+        agent = crate::service::AGENT_UNIT,
+        timer = crate::service::WATCHDOG_TIMER_UNIT
+    );
+    Ok(())
+}
+
 /// Tear down the enforcement surface: nft table, resolv.conf pin, frozen users.
 fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     let _ = policy; // reserved: nothing else to key the teardown on today.

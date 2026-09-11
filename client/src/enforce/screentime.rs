@@ -59,6 +59,9 @@ impl LockReason {
 /// [`ledger_path`] so it survives an agent restart.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UsageTracker {
+    /// Runtime-only: see `set_day_ceiling`. Never persisted.
+    #[serde(skip)]
+    day_ceiling: Option<chrono::NaiveDate>,
     day: Option<NaiveDate>,
     used_secs: HashMap<String, u32>,
     earned_secs: HashMap<String, u32>,
@@ -108,8 +111,33 @@ impl UsageTracker {
     /// `self.day != today` and wipe the counters — an instant free-time cheat.
     /// Now a backward jump keeps the existing day and its accumulated usage;
     /// the clock jump itself is separately surfaced as a tamper event.
-    fn roll_day(&mut self) {
+    /// The accounting day, capped by a server-confirmed ceiling when one is
+    /// set (see `set_day_ceiling`): a clock set FORWARD while the device is on
+    /// a network but hasn't heard from our server must not mint a fresh daily
+    /// budget. Backward jumps were already defended; this closes the other
+    /// direction without punishing a genuinely offline week (no ceiling then).
+    fn effective_today(&self) -> chrono::NaiveDate {
         let today = Local::now().date_naive();
+        match self.day_ceiling {
+            Some(c) if today > c => c,
+            _ => today,
+        }
+    }
+
+    /// Set (or clear) the day ceiling: the latest day the counters may roll
+    /// to. The runner passes "last server-confirmed day + 1" while the
+    /// device is on a network, and None when it's genuinely offline.
+    pub fn set_day_ceiling(&mut self, ceiling: Option<chrono::NaiveDate>) {
+        self.day_ceiling = ceiling;
+    }
+
+    /// True when the wall clock is ahead of the ceiling — i.e. it's being clamped.
+    pub fn clock_ahead_of_ceiling(&self) -> bool {
+        matches!(self.day_ceiling, Some(c) if Local::now().date_naive() > c)
+    }
+
+    fn roll_day(&mut self) {
+        let today = self.effective_today();
         let advanced = match self.day {
             Some(d) => today > d,
             None => true,
@@ -129,7 +157,7 @@ impl UsageTracker {
     /// readers report 0 for the new day rather than yesterday's stale totals.
     fn counters_current(&self) -> bool {
         match self.day {
-            Some(d) => Local::now().date_naive() <= d,
+            Some(d) => self.effective_today() <= d,
             None => false,
         }
     }
@@ -259,23 +287,40 @@ pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) 
 /// idle state.
 pub fn active_seat_users(exec: &Exec) -> Vec<String> {
     let listing = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
+    // Bounded: a managed user can open sessions without sudo, and the old code
+    // spawned one `loginctl show-session` PER session every 10 s tick — a few
+    // hundred logins stalled the enforcement tick for everyone. One call for
+    // all of them, capped.
+    const MAX_SESSIONS: usize = 64;
+    let sessions: Vec<&str> = listing
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .take(MAX_SESSIONS)
+        .collect();
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    let mut args: Vec<&str> = vec!["show-session"];
+    args.extend(sessions.iter().copied());
+    args.extend(["-p", "Name", "-p", "Active", "-p", "Remote"]);
+    let state = exec.probe("loginctl", &args);
     let mut users = Vec::new();
-    for line in listing.lines() {
-        // columns: SESSION UID USER SEAT TTY  (seat present => local)
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 3 {
-            continue;
+    // One block per session, blank-line separated; keys in loginctl's order.
+    for block in state.split("\n\n") {
+        let (mut name, mut active, mut remote) = (None, false, false);
+        for line in block.lines() {
+            if let Some(v) = line.strip_prefix("Name=") {
+                name = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("Active=") {
+                active = v.trim() == "yes";
+            } else if let Some(v) = line.strip_prefix("Remote=") {
+                remote = v.trim() == "yes";
+            }
         }
-        let session = cols[0];
-        let user = cols[2];
-        let state = exec.probe(
-            "loginctl",
-            &["show-session", session, "-p", "Active", "-p", "Remote"],
-        );
-        let active = state.contains("Active=yes");
-        let remote = state.contains("Remote=yes");
-        if active && !remote && !users.contains(&user.to_string()) {
-            users.push(user.to_string());
+        if let Some(user) = name {
+            if active && !remote && !user.is_empty() && !users.contains(&user) {
+                users.push(user);
+            }
         }
     }
     users
