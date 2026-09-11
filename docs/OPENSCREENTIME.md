@@ -14,7 +14,7 @@ the hub for anyone they manage. It earns daily use by being genuinely useful and
 glanceable, **not by nagging**. Where it can, it removes friction from the
 healthy choice instead of policing the unhealthy one.
 
-"OpenScreenTime" — intimidating, surveillance-flavored — is gone from everything
+The old name, "Sentinel" — intimidating, surveillance-flavored — is gone from everything
 user-facing.
 
 ## Principles (the feeling)
@@ -144,7 +144,7 @@ The new enforcement model is where the red-team screen-time fixes land:
 
 ## Build order
 
-1. **Rebrand** OpenScreenTime → OpenScreenTime across the web console (name, copy,
+1. **Rebrand** Sentinel → OpenScreenTime across the web console (name, copy,
    metadata). Safe, visible, first.
 2. **Auth / user-management rework** — everyone has an account; sign in via
    passkey *or* device-voucher autologin; rotating 7-day tokens; step-up 2FA

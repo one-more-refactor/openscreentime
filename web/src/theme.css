@@ -567,6 +567,7 @@
 .ch-row-action:first-of-type { border-top: 0; }
 .ch-row-what { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
 .ch-row-what strong { font-weight: 600; }
+.ch-row-action .ch-btn { white-space: nowrap; flex: none; }
 .ch-keys-lede { margin: -0.4rem 0 0.6rem; }
 .ch-keys-codes { margin: 0 0 0.8rem; display: grid; gap: 0.6rem; }
 .ch-danger { border-top: 1px solid var(--line); padding-top: 1.4rem; }

@@ -11,40 +11,7 @@ approve a request from wherever you are. It stays silent unless a human has
 to act, and it runs entirely on **your** hardware — no cloud, no accounts,
 no telemetry.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/ci.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=CI&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/ci.yml)
-&nbsp;[![Build](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/build.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=Build&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/build.yml)
-&nbsp;[![Release](https://img.shields.io/github/v/release/one-more-refactor/openscreentime?style=flat-square&logo=github&logoColor=white&color=0a0a0a&label=Release)](https://github.com/one-more-refactor/openscreentime/releases/latest)
-&nbsp;[![GHCR](https://img.shields.io/badge/ghcr.io-openscreentime-0a0a0a?style=flat-square&logo=github&logoColor=white)](https://github.com/one-more-refactor/openscreentime/pkgs/container/openscreentime)
-
-![Rust](https://img.shields.io/badge/Rust-1.85+-0a0a0a?style=flat-square&logo=rust&logoColor=white)
-&nbsp;![Postgres](https://img.shields.io/badge/Postgres-16-0a0a0a?style=flat-square&logo=postgresql&logoColor=white)
-&nbsp;![Self-hosted](https://img.shields.io/badge/self--hosted-rootless%20Podman-0a0a0a?style=flat-square)
-&nbsp;![Auth](https://img.shields.io/badge/sign--in-passkey%20%2F%20your%20device-0a0a0a?style=flat-square)
-&nbsp;![Status](https://img.shields.io/badge/status-alpha-d71921?style=flat-square)
-
 </div>
-
----
-
-> ## ⚠️ Alpha — work in progress
->
-> OpenScreenTime is early software under active development. It is public so it
-> can be read and picked apart, not because it is finished. **Every release is an
-> alpha pre-release**, and there is no stable version.
->
-> What that means in practice:
->
-> - **Breaking changes land without a migration path.** The product was called
->   Sentinel until 0.4.0; upgrading a device enrolled under the old name still
->   leaves things behind — a stale VPN tunnel, a stale `dnsmasq` include that
->   keeps serving the old allowlist, and a recovery account (`sentinel-admin`)
->   that loses its polkit exemption. See [`CHANGELOG.md`](CHANGELOG.md).
-> - **Nobody has audited this but its author.** It enforces real limits and
->   tamper lockdowns on real machines; read [`docs/TAMPER.md`](docs/TAMPER.md)
->   before raising the tamper level on a device you actually need.
-> - Interfaces, database schema and the agent/server protocol are all still moving.
->
-> Run it on hardware you can physically recover, and keep a root shell you trust.
 
 ---
 
@@ -109,6 +76,42 @@ for little kids, requests and earned time for kids, goals plus a wind-down for
 teens — and an adult with no kids at all can run it purely for themselves:
 fully private self-tracking, no parent, no external enforcement, on their own
 server.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/ci.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=CI&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/ci.yml)
+&nbsp;[![Build](https://img.shields.io/github/actions/workflow/status/one-more-refactor/openscreentime/build.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=Build&color=0a0a0a)](https://github.com/one-more-refactor/openscreentime/actions/workflows/build.yml)
+&nbsp;[![Release](https://img.shields.io/github/v/release/one-more-refactor/openscreentime?style=flat-square&logo=github&logoColor=white&color=0a0a0a&label=Release)](https://github.com/one-more-refactor/openscreentime/releases/latest)
+&nbsp;[![GHCR](https://img.shields.io/badge/ghcr.io-openscreentime-0a0a0a?style=flat-square&logo=github&logoColor=white)](https://github.com/one-more-refactor/openscreentime/pkgs/container/openscreentime)
+
+![Rust](https://img.shields.io/badge/Rust-1.85+-0a0a0a?style=flat-square&logo=rust&logoColor=white)
+&nbsp;![Postgres](https://img.shields.io/badge/Postgres-16-0a0a0a?style=flat-square&logo=postgresql&logoColor=white)
+&nbsp;![Self-hosted](https://img.shields.io/badge/self--hosted-rootless%20Podman-0a0a0a?style=flat-square)
+&nbsp;![Auth](https://img.shields.io/badge/sign--in-passkey%20%2F%20your%20device-0a0a0a?style=flat-square)
+&nbsp;![Status](https://img.shields.io/badge/status-alpha-d71921?style=flat-square)
+
+---
+
+> ## ⚠️ Alpha — work in progress
+>
+> OpenScreenTime is early software under active development. It is public so it
+> can be read and picked apart, not because it is finished. **Every release is an
+> alpha pre-release**, and there is no stable version.
+>
+> What that means in practice:
+>
+> - **Breaking changes land without a migration path.** The product was called
+>   Sentinel until 0.4.0; upgrading a device enrolled under the old name still
+>   leaves things behind — a stale VPN tunnel, a stale `dnsmasq` include that
+>   keeps serving the old allowlist, and a recovery account (`sentinel-admin`)
+>   that loses its polkit exemption. See [`CHANGELOG.md`](CHANGELOG.md).
+> - **Nobody has audited this but its author.** It enforces real limits and
+>   tamper lockdowns on real machines; read [`docs/TAMPER.md`](docs/TAMPER.md)
+>   before raising the tamper level on a device you actually need.
+> - Interfaces, database schema and the agent/server protocol are all still moving.
+>
+> Run it on hardware you can physically recover, and keep a root shell you trust.
+
+
+---
 
 ## Under the hood
 

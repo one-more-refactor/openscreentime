@@ -310,12 +310,12 @@ fn request_more_time() {
     let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::debug!("could not create runtime dir for earn request: {e}");
-        notify("COULDN'T SEND", "Try again in a moment", false);
+        notify("Couldn't send", "Try again in a moment", false);
         return;
     }
     if let Err(e) = std::fs::write(dir.join("earn_request"), b"1") {
         tracing::debug!("could not write earn-request marker: {e}");
-        notify("COULDN'T SEND", "Try again in a moment", false);
+        notify("Couldn't send", "Try again in a moment", false);
         return;
     }
     notify(
@@ -413,8 +413,8 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
             }
         }
         match (p.frozen, n.frozen) {
-            (false, true) => notify("TIME'S UP", "EARN MORE OR ASK A PARENT", true),
-            (true, false) => notify("YOU'RE BACK", "HAVE FUN", false),
+            (false, true) => notify("Time's up", "Earn more or ask a parent", true),
+            (true, false) => notify("You're back", "Have fun", false),
             _ => {}
         }
     }
@@ -428,17 +428,17 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
                 true,
             );
         } else if next.connection == "online" {
-            notify("BACK ONLINE", "CONNECTION TO THE SERVER RESTORED", false);
+            notify("Back online", "Connection to the server restored", false);
         }
     }
     match (prev.device_locked, next.device_locked) {
-        (false, true) => notify("DEVICE LOCKED", "A PARENT LOCKED THIS DEVICE", true),
-        (true, false) => notify("DEVICE UNLOCKED", "THIS DEVICE IS UNLOCKED AGAIN", false),
+        (false, true) => notify("Device paused", "A parent paused this device", true),
+        (true, false) => notify("Device resumed", "This device is unlocked again", false),
         _ => {}
     }
     match (prev.offline_hard_lockdown, next.offline_hard_lockdown) {
-        (false, true) => notify("LOCKDOWN ACTIVE", "THE DEVICE IS IN OFFLINE LOCKDOWN", true),
-        (true, false) => notify("LOCKDOWN LIFTED", "NORMAL USE HAS RESUMED", false),
+        (false, true) => notify("Lockdown active", "The device is in offline lockdown", true),
+        (true, false) => notify("Lockdown lifted", "Normal use has resumed", false),
         _ => {}
     }
     match (prev.tamper_lockdown, next.tamper_lockdown) {
@@ -447,7 +447,7 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
             "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (UNLOCK CODE OPENS IT)",
             true,
         ),
-        (true, false) => notify("TAMPER LOCK LIFTED", "NORMAL USE HAS RESUMED", false),
+        (true, false) => notify("Tamper lock lifted", "Normal use has resumed", false),
         _ => {}
     }
 }

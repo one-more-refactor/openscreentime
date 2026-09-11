@@ -37,7 +37,7 @@ export function LockOverlay({
   preview = true,
 }: Props) {
   const headline =
-    mode === "locked" ? "LOCKED" : mode === "earn" ? "EARN MORE TIME" : "TIME'S UP";
+    mode === "locked" ? "Locked" : mode === "earn" ? "Earn more time" : "Time's up";
 
   const challengeCopy: Record<UnlockChallenge, string> = {
     math: "SOLVE A PROBLEM TO CONTINUE",

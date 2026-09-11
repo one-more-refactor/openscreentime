@@ -119,7 +119,7 @@ export function AddChild() {
               className="add-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Vali"
+              placeholder="e.g. Robin"
               autoFocus
               autoComplete="off"
             />
