@@ -247,7 +247,7 @@ export function ChildDetail() {
     return (
       <div className="ch-wrap">
         <Link to="/" className="ch-back">← Family</Link>
-        <p className="fam-quiet">Loading…</p>
+        <p className="fam-quiet wait-text">Loading…</p>
       </div>
     );
 

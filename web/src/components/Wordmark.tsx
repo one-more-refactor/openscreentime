@@ -27,6 +27,21 @@ export function Wordmark({ size = 1.0625, color = "var(--fg)", className = "" }:
       }}
       aria-label="OpenScreenTime"
     >
+      {/* the marque: the activity ring, sized to the x-height, a day mostly ahead */}
+      <svg
+        viewBox="0 0 64 64"
+        aria-hidden="true"
+        style={{ width: "0.95em", height: "0.95em", marginRight: "0.4em", alignSelf: "center" }}
+      >
+        <circle cx="32" cy="32" r="22" fill="none" stroke="var(--line-2)" strokeWidth="9" />
+        <path
+          d="M 32 10 A 22 22 0 1 1 12.95 43"
+          fill="none"
+          stroke="var(--ok)"
+          strokeWidth="9"
+          strokeLinecap="round"
+        />
+      </svg>
       <span style={{ fontWeight: 400, color: "var(--fg-dim)" }}>Open</span>
       <span style={{ fontWeight: 600 }}>ScreenTime</span>
     </span>

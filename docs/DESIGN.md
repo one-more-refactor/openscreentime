@@ -1,93 +1,112 @@
-# Design System — "Nothing"-style
+# Design System
 
-The control center should feel like Nothing OS: stark monochrome, generous negative space,
-dot-matrix typography, precise thin lines, and a single restrained accent. Function-first,
-gadget-like, quietly confident. No gradients-as-decoration, no drop-shadow soup, no rounded
-candy. Think engineering blueprint meets consumer product.
+OpenScreenTime keeps Nothing's *restraint* — hierarchy in grayscale, hairlines
+before boxes, one red that means "interrupt" and is absent on a healthy day —
+and drops its *volume*. Since 0.6 the product is **warm, not loud**: sentence
+case for everything a human reads, a humanist sans for content, monospace only
+for small labels and data. Dot-matrix type, ALL-CAPS copy and the LED aesthetic
+are retired (they read as surveillance, the exact thing the brand escapes).
 
-## Tokens (Tailwind theme + CSS variables)
+The canonical values live in `web/src/theme.css` (its header states the rules)
+and `web/src/me.css` (the child's page). This document explains them; when the
+two disagree, the CSS is right and this file needs fixing.
+
+## Tokens (`web/src/theme.css`)
 
 ```css
-:root {
-  /* surfaces — near-pure monochrome */
-  --bg:        #0a0a0a;   /* app background (dark is the primary theme) */
-  --surface:   #141414;   /* cards / panels */
-  --surface-2: #1c1c1c;   /* raised / hover */
-  --line:      #2a2a2a;   /* hairline borders */
-  --line-2:    #3a3a3a;
+:root, :root[data-theme="dark"] {
+  /* surfaces — OLED black, elevation by surface step */
+  --bg: #000000;  --surface: #111111;  --surface-2: #1a1a1a;
+  --line: #222222;  --line-2: #333333;  --rail: #0a0a0a;
 
-  /* ink */
-  --fg:        #fafafa;   /* primary text */
-  --fg-dim:    #9a9a9a;   /* secondary */
-  --fg-faint:  #5a5a5a;   /* tertiary / disabled */
+  /* ink — the four-level grayscale hierarchy (display / primary / secondary / faint) */
+  --fg-display: #ffffff;  --fg: #e8e8e8;  --fg-dim: #999999;  --fg-faint: #7a7a7a;
 
-  /* the one accent — Nothing red */
-  --accent:    #d71921;
-  --accent-dim:#7a0f13;
+  /* the ONE accent — an urgent interrupt only (blocked, tamper, time-up, a destructive
+     action being taken). Never decoration, never a resting section header. */
+  --accent: #d71921;  --accent-subtle: rgba(215,25,33,.15);
 
-  /* status LEDs */
-  --ok:        #37d67a;   /* online */
-  --warn:      #f2c94c;   /* attention */
-  --crit:      #d71921;   /* locked / tamper (reuses accent) */
-  --idle:      #5a5a5a;   /* offline */
+  /* data status — encoded in the value, never as a row background */
+  --ok: #4a9e5c;  --warn: #d4a843;  --crit: #d71921;  --idle: #666666;
 
-  --radius: 4px;          /* small, hard-ish corners only */
+  /* shape: cards ≤16px, buttons are pills; "technical" corners are 6px */
+  --radius: 12px;  --radius-sm: 6px;
+
+  /* the one focus ring */
+  --focus: var(--fg-dim);
+
+  /* motion: percussive chrome, living data, one easing — no spring, no bounce */
+  --ease: cubic-bezier(.25,.1,.25,1);  --dur-tick: 180ms;  --dur-data: 400ms;
+
+  /* depth is ambient and tokenised: resting vs floating/hover */
+  --elev-1 … --elev-2  (see theme.css — an inset top edge stands in for a shadow on black)
 }
 ```
 
-A light theme mirrors these (white surfaces, black ink, same accent). Dark is default.
+Light mode redefines the same names (warm off-white `#f5f5f4`, black ink, status
+colours re-derived for contrast: `--ok #2e7d46`, `--warn #8a6300`, `--crit #b3151c`).
+`--fg-faint` is tuned to still pass AA at label sizes in both modes; it is for
+metadata and hairlines, not body copy.
 
 ## Typography
 
-- **Display / numerals / labels:** a dot-matrix / LED face. Ship a self-hosted font resembling
-  Nothing's *NDot* — use **"Nothing You Could Do"** ✗ (no). Instead bundle a dotted font such as
-  a monospace like **Space Mono** for body and a dotted display face for headings and big
-  numbers. If a dot-matrix font isn't available at build time, fall back to `ui-monospace,
-  "Space Mono", monospace` and render section headers in `uppercase` with wide `letter-spacing`.
-- **Everything structural is monospace and uppercase** with `letter-spacing: 0.08em` for labels.
-- Big status numbers (screen-time remaining, device counts) are oversized dot/LED numerals.
+- **Content:** Space Grotesk (`--font-sans`), sentence case, weights 400/600.
+- **Labels & data:** Space Mono (`--font-mono`), small, uppercase, `letter-spacing .08em`,
+  tabular numerals. This is the *tertiary* voice — captions, refs, timestamps — never a
+  headline and never a sentence a person is meant to read.
+- **The child's page** adds Nunito for the "playful" look (see below).
+- Max three sizes and two weights per screen. Numbers *mean* something (a count, minutes
+  left); they never pose.
 
 ## Motifs
 
-- **Dot grid.** Subtle repeating dot pattern as texture on empty panels
-  (`radial-gradient(var(--line) 1px, transparent 1px)` at ~16px spacing).
-- **Hairlines, then depth.** 1px `--line` borders everywhere; separation is the hairline.
-  Depth is ambient and tokenised — `--elev-1` for a resting card, `--elev-2` for anything
-  floating (modal, drawer) or hovered — never an ad-hoc shadow. The dark theme has no light to
-  cast a shadow in, so its tokens use a faint inset top edge and a surface step instead; the
-  rail is its own plane (`--rail`). Interactive cards lift 1px on hover; every button presses.
-- **LED indicators.** Small filled circles with a soft glow for status (online/offline/locked).
-- **Glyph / pixel icons.** Simple, monoline or pixel-style icons. No filled emoji.
-- **Mono captions** under controls, like device labels on hardware.
-- **Red is rare.** Accent only for: destructive actions, locked/tamper state, the active nav item.
+- **Hierarchy is grayscale, not boxes.** The most important thing on a screen is never
+  boxed. Containers use the lightest sufficient tool: spacing → hairline → border → surface.
+- **Dot grid** as a background texture only (`.dotgrid`, 0.1–0.2 opacity), never over content.
+- **Elevation, not shadow soup:** `--elev-1` rests, `--elev-2` floats or is hovered.
+- **Status dots are flat** — no glow, no blur.
+- **Time bars are segmented: one cell = 15 minutes** — a diagram that carries meaning.
+- **The activity ring** is the product's one mark (`AvatarRing`, the favicon, the wordmark's
+  marque): most of a day still ahead.
+- **Red is an interrupt.** Locked, tamper, time-up, and the moment a destructive action is
+  *taken* (hover/active/confirm). A calm day shows no red at all — including the Danger
+  Zone, which is monochrome at rest.
+- Glyphs are monoline SVG. The parent-picked "faces" are the one deliberate exception —
+  emoji, chosen for warmth; they are identity, not iconography.
 
-## Components the web app needs
+## Components (`web/src/components`)
 
-- `StatusLed` — colored dot + label (online/offline/locked/pending).
-- `Panel` — bordered card with optional dot-grid background and a mono uppercase header.
-- `Stat` — oversized dot-numeral with a mono caption (e.g. `07` DEVICES).
-- `DeviceCard` — name, StatusLed, last-seen, per-user chips, quick actions (lock/unlock).
-- `PolicyEditor` — structured form over the Policy jsonb (DNS allowlist, screen-time schedule,
-  gamification toggles). Zero-trust framing: "BLOCKED BY DEFAULT — add exceptions below."
-- `PasskeyButton` — the login/register affordance.
-- `Toggle`, `TextInput`, `TagInput` (for DNS allowlists), `TimeRange`, `Button` (variants:
-  `primary` mono outline, `danger` red).
-- `EventFeed` — audit log with severity LEDs.
-- `LockOverlay` preview — a mock of the full-screen host interruption for design reference.
+- `Wordmark` — the lockup: ring marque + "Open" (dim) "ScreenTime" (600). Rail, login, README.
+- `Button` / `.ch-btn` — pill, sans, sentence case; `primary` (ink-filled), secondary
+  (hairline), `danger` (hairline that turns `--crit` only when reached for), `ghost`.
+  Direction of travel: one button grammar everywhere (the mono-caps `Button` variant is
+  legacy and should converge on the pill).
+- `AvatarRing` — the ring around a person; the family grid's unit.
+- `SecuritySlider` — the protection presets.
+- `UnlockCodePanel` — the rotating per-device unlock ("parent") code with its countdown ring.
+- `Moments` — the day's story, not a log: only moments that mattered.
+- `WhereTheTime` — apps, sites (age-gated), the day's curve.
+- `TextInput`, `Toggle`, `TagInput`, `PasskeyButton`, `LockOverlay` (a preview of the
+  device's overlay for design reference).
 
 ## Layout
 
-- Left rail: wordmark (`OpenScreenTime` wordmark), nav (DEVICES / PROFILES / EVENTS / SETTINGS),
-  admin identity + logout at the bottom.
-- Main: page header (mono uppercase + count Stat), content grid of `Panel`s.
-- Density: airy. Big margins. Content max-width ~1200px.
+- Left rail: the wordmark, then **Family / Devices / Settings**, the household's day at a
+  glance (each person's ring), and identity + sign-out at the bottom. The rail is its own
+  plane (`--rail`).
+- Pages are stacked sections with a sentence-case `h2`; airy, content max-width ~1200px,
+  designed to be read on a phone.
+- Loading is a quiet breathe (`.wait-text` / the structural skeletons), never a spinner
+  or a toast.
 
 ## Host-side full-screen interruption (agent GUI)
 
-The Duolingo-style lockout/nudge screen rendered by the **agent** must share this language:
-black background, dot grid, one big dot-numeral countdown or streak flame drawn in monochrome,
-a single accent-red action, mono uppercase copy ("TIME'S UP", "EARN 15 MIN — READ FOR 20").
-Keep it calm and game-like, not punitive.
+The overlay the **agent** draws on the child's screen shares this language and, crucially,
+this *voice*: black, sentence case, one fact, one next step. The words come from the
+lock reason itself so every surface says the same thing — **"Stop — time's up for today"**,
+**"Goodnight — screens are off until morning"**, **"Not now"**, and for a parent's pause
+**"Paused — a parent paused this computer. Save your work — it pauses in 2 min."** A
+wind-down countdown precedes the stop for every age. Calm, not punitive.
 
 ## The person's own page (`/me`) — three looks (0.4)
 

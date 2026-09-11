@@ -193,14 +193,14 @@ export function Login() {
             <Button onClick={() => void runDeviceLogin()} disabled={!username.trim()}>
               Continue
             </Button>
-            <p className="text-xs" style={{ color: "var(--fg-faint)" }}>
+            <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
               Your own computer approves the sign-in — nothing to type, nothing to remember.
             </p>
             <button
               type="button"
-              className="focusable text-xs"
+              className="focusable text-xs login-link"
               style={{
-                color: "var(--fg-faint)",
+                color: "var(--fg-dim)",
                 background: "none",
                 border: "none",
                 cursor: "pointer",
@@ -214,9 +214,9 @@ export function Login() {
             {config?.oidc && (
               <button
                 type="button"
-                className="focusable text-xs"
+                className="focusable text-xs login-link"
                 style={{
-                  color: "var(--fg-faint)",
+                  color: "var(--fg-dim)",
                   background: "none",
                   border: "none",
                   cursor: "pointer",
