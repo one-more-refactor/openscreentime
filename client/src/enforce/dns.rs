@@ -159,7 +159,10 @@ pub fn render_dnsmasq(
     let upstream = if dns.upstream.parse::<std::net::IpAddr>().is_ok() {
         dns.upstream.as_str()
     } else {
-        tracing::warn!("ignoring non-IP DNS upstream {:?}; using 1.1.1.3", dns.upstream);
+        tracing::warn!(
+            "ignoring non-IP DNS upstream {:?}; using 1.1.1.3",
+            dns.upstream
+        );
         "1.1.1.3"
     };
     // A domain safe to interpolate into a resolver directive — same discipline
@@ -388,8 +391,14 @@ mod tests {
         };
         let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
         assert!(!conf.contains("conf-file"), "no injected directive");
-        assert!(!conf.contains("log-facility=/tmp/x"), "no injected upstream directive");
-        assert!(conf.contains("server=1.1.1.3"), "malformed upstream → safe fallback");
+        assert!(
+            !conf.contains("log-facility=/tmp/x"),
+            "no injected upstream directive"
+        );
+        assert!(
+            conf.contains("server=1.1.1.3"),
+            "malformed upstream → safe fallback"
+        );
         // The clean sibling entry still applies.
         assert!(conf.contains("address=/ok.example/0.0.0.0"));
     }

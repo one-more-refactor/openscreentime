@@ -47,9 +47,7 @@ pub struct Attrib {
 }
 
 fn hour_now() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:00:00Z")
-        .to_string()
+    chrono::Utc::now().format("%Y-%m-%dT%H:00:00Z").to_string()
 }
 
 /// Registrable-domain approximation: the last two labels, or three when the
@@ -116,7 +114,11 @@ impl Attrib {
             return;
         };
         for entry in dir.flatten() {
-            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
                 continue;
             };
             let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
@@ -262,7 +264,10 @@ mod tests {
     fn dnsmasq_extra_lines_parse() {
         let line = "Aug 27 14:12:33 dnsmasq[123]: 4711 127.0.0.1/5353 query[A] www.youtube.com from 127.0.0.1";
         assert_eq!(queried_name(line), Some("www.youtube.com"));
-        assert_eq!(queried_name("Aug 27 dnsmasq[1]: reply youtube.com is 1.2.3.4"), None);
+        assert_eq!(
+            queried_name("Aug 27 dnsmasq[1]: reply youtube.com is 1.2.3.4"),
+            None
+        );
     }
 
     #[test]

@@ -213,7 +213,12 @@ fn reject_dangerous_vpn(config: &str, kind: &str) -> AppResult<()> {
                 continue;
             }
             // `Key = value` — wg-quick matches keys case-insensitively.
-            let key = line.split('=').next().unwrap_or("").trim().to_ascii_lowercase();
+            let key = line
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             if WG_FORBIDDEN.contains(&key.as_str()) {
                 return Err(AppError::BadRequest(format!(
                     "this WireGuard config uses '{key}', which wg-quick runs as root on the \
@@ -682,7 +687,10 @@ mod tests {
             "SaveConfig = true",
         ] {
             let bad = format!("{base}{hook}\n[Peer]\nPublicKey = p\nAllowedIPs = 0.0.0.0/0");
-            assert!(reject_dangerous_vpn(&bad, "wireguard").is_err(), "should reject: {hook}");
+            assert!(
+                reject_dangerous_vpn(&bad, "wireguard").is_err(),
+                "should reject: {hook}"
+            );
         }
         // A plain full-tunnel WireGuard config passes.
         let ok = format!("{base}DNS = 1.1.1.1\n[Peer]\nPublicKey = p\nEndpoint = x:51820\nAllowedIPs = 0.0.0.0/0");
@@ -708,7 +716,10 @@ mod tests {
             );
         }
         // A plain client config with none of them passes.
-        assert!(reject_dangerous_vpn("client\nremote vpn.example.com 1194\nproto udp", "openvpn").is_ok());
+        assert!(
+            reject_dangerous_vpn("client\nremote vpn.example.com 1194\nproto udp", "openvpn")
+                .is_ok()
+        );
         // WireGuard has no script hooks — not gated by this check.
         assert!(reject_dangerous_vpn(WG, "wireguard").is_ok());
     }

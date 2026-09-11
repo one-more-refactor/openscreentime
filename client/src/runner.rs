@@ -761,8 +761,7 @@ impl Agent {
     /// the next tick would re-engage it on the same stale last-contact.
     fn local_recovery(&mut self, source: &str) -> Vec<Event> {
         let mut events = Vec::new();
-        let was_locked =
-            self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
+        let was_locked = self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
         self.device_locked = false;
         save_device_locked(false);
         self.device_lock_grace_until = None;
@@ -1067,9 +1066,7 @@ impl Agent {
             .iter()
             .min_by(|(ua, pa), (ub, pb)| {
                 let managed = |p: &Policy| !p.screen_time.enabled; // false (managed) sorts first
-                managed(pa)
-                    .cmp(&managed(pb))
-                    .then_with(|| ua.cmp(ub))
+                managed(pa).cmp(&managed(pb)).then_with(|| ua.cmp(ub))
             })
             .map(|(_, p)| p.clone())
             .unwrap_or_default();
@@ -1085,8 +1082,12 @@ impl Agent {
         let mut blocklist: Vec<String> = base.dns.blocklist.clone();
         for p in self.policies.values() {
             blocks.apps.extend(p.blocks.apps.iter().cloned());
-            blocks.categories.extend(p.blocks.categories.iter().cloned());
-            blocks.custom_domains.extend(p.blocks.custom_domains.iter().cloned());
+            blocks
+                .categories
+                .extend(p.blocks.categories.iter().cloned());
+            blocks
+                .custom_domains
+                .extend(p.blocks.custom_domains.iter().cloned());
             blocklist.extend(p.dns.blocklist.iter().cloned());
             // Any user who needs it turns it on for the shared host.
             base.dns.safe_search |= p.dns.safe_search;
@@ -1128,9 +1129,9 @@ impl Agent {
 
     /// Whether the effective policy wants to force DNS (i.e. has any block).
     fn wants_force_dns(&self) -> bool {
-        self.policies.values().any(|p| {
-            !p.blocks.is_empty() || !p.dns.blocklist.is_empty()
-        })
+        self.policies
+            .values()
+            .any(|p| !p.blocks.is_empty() || !p.dns.blocklist.is_empty())
     }
 
     /// Keep DNS from bricking a device off a captive-portal / public-DNS-
@@ -1149,10 +1150,7 @@ impl Agent {
             }
             return (events, false);
         }
-        let upstream = self
-            .effective_network_policy()
-            .dns
-            .upstream;
+        let upstream = self.effective_network_policy().dns.upstream;
         let reachable = upstream_reachable(&upstream);
         let mut flipped = false;
         if reachable {
@@ -1490,8 +1488,14 @@ impl Agent {
             // seat: an SSH-only login (Remote=yes, never a "seat") used to
             // escape them entirely. Evaluate those for every policy user.
             let has_clock_rule = policy.screen_time.enabled
-                && (policy.screen_time.bedtime.is_some() || !policy.screen_time.schedule.is_empty());
-            let lock = if should_evaluate_screen_time(in_grace, is_active, currently_frozen, has_clock_rule) {
+                && (policy.screen_time.bedtime.is_some()
+                    || !policy.screen_time.schedule.is_empty());
+            let lock = if should_evaluate_screen_time(
+                in_grace,
+                is_active,
+                currently_frozen,
+                has_clock_rule,
+            ) {
                 screentime::evaluate(&policy, &self.tracker, &user)
             } else {
                 None
@@ -1658,7 +1662,11 @@ impl Agent {
                 };
                 // The agent never judges: it forwards the tapped code and the
                 // server decides approve vs deny by matching it.
-                let code_opt = if tapped.is_empty() { None } else { Some(tapped.as_str()) };
+                let code_opt = if tapped.is_empty() {
+                    None
+                } else {
+                    Some(tapped.as_str())
+                };
                 match self.client.post_login_decision(&p.id, code_opt, u).await {
                     Ok(()) => {
                         self.notify_user(
@@ -1745,12 +1753,16 @@ impl Agent {
                 if let Some(ev) = report(
                     &mut self.probe_reported,
                     format!("freeze_ineffective:{user}"),
-                    format!("{user} was found running while they should be stopped — stopped again"),
+                    format!(
+                        "{user} was found running while they should be stopped — stopped again"
+                    ),
                 ) {
                     self.notify_user(
                         None,
                         "A stop isn't holding",
-                        &format!("{user}'s screen should be stopped but isn't — check the console."),
+                        &format!(
+                            "{user}'s screen should be stopped but isn't — check the console."
+                        ),
                         true,
                     );
                     events.push(ev);
@@ -1766,10 +1778,11 @@ impl Agent {
                 .first()
                 .cloned()
                 .or_else(|| {
-                    p.dns
-                        .blocklist
-                        .first()
-                        .map(|d| d.trim_start_matches("*.").trim_start_matches('.').to_string())
+                    p.dns.blocklist.first().map(|d| {
+                        d.trim_start_matches("*.")
+                            .trim_start_matches('.')
+                            .to_string()
+                    })
                 })
         });
         if let Some(domain) = probe_domain.filter(|d| !d.is_empty()) {
@@ -1792,7 +1805,9 @@ impl Agent {
                     if let Some(ev) = report(
                         &mut self.probe_reported,
                         "sinkhole_ineffective".to_string(),
-                        format!("blocked domain {domain} still resolves — the DNS block is not biting"),
+                        format!(
+                            "blocked domain {domain} still resolves — the DNS block is not biting"
+                        ),
                     ) {
                         events.push(ev);
                     }
