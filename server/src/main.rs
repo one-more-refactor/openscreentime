@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                 // is a rolling ~2-week signal and the event feed is an audit
                 // trail, not an archive.
                 sweeps += 1;
-                if sweeps % 120 == 0 {
+                if sweeps.is_multiple_of(120) {
                     let _ = sqlx::query(
                         "DELETE FROM usage_slices WHERE hour < now() - interval '21 days'",
                     )

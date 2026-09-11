@@ -202,7 +202,9 @@ pub async fn require_step_up(
     };
 
     let hash = hash_token(cookie.value());
-    let row: Option<(Option<DateTime<Utc>>, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+    /// (stepup_until, trusted, blocked_at) for the session's account.
+    type SessionGate = (Option<DateTime<Utc>>, bool, Option<DateTime<Utc>>);
+    let row: Option<SessionGate> = sqlx::query_as(
         "SELECT s.stepup_until, s.trusted, a.blocked_at FROM admin_sessions s
          JOIN admins a ON a.id = s.admin_id
          WHERE (s.token_hash = $1
@@ -223,7 +225,7 @@ pub async fn require_step_up(
             "this account is paused — a parent has to lift it first".into(),
         )),
         Some((until, trusted, None)) => {
-            if needs_confirm && !until.is_some_and(|t| t > Utc::now()) {
+            if needs_confirm && until.is_none_or(|t| t <= Utc::now()) {
                 return Err(AppError::StepUpRequired(
                     "confirm it's you to touch the keys".into(),
                 ));

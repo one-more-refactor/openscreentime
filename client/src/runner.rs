@@ -1637,7 +1637,7 @@ impl Agent {
                         // remove_file, which does not follow the final
                         // component) the moment we have the verdict.
                         use std::os::unix::fs::OpenOptionsExt;
-                        let Ok(mut f) = std::fs::OpenOptions::new()
+                        let Ok(f) = std::fs::OpenOptions::new()
                             .read(true)
                             .custom_flags(libc::O_NOFOLLOW)
                             .open(&path)
@@ -1706,7 +1706,7 @@ impl Agent {
             return events;
         }
         let today = chrono::Local::now().date_naive();
-        let mut report = |me: &mut HashMap<String, chrono::NaiveDate>, key: String, msg: String| {
+        let report = |me: &mut HashMap<String, chrono::NaiveDate>, key: String, msg: String| {
             if me.get(&key) == Some(&today) {
                 return None;
             }
