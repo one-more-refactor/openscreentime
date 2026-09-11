@@ -55,10 +55,10 @@ impl ParentKeys {
 /// (`openscreentime __lockout <b64 json>`) without stalling the tick loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockSpec {
-    pub headline: String,           // "Stop", "Goodnight" — sentence case, never shouted
-    pub detail: String,             // "Time's up for today — 60 of 60 minutes used."
+    pub headline: String, // "Stop", "Goodnight" — sentence case, never shouted
+    pub detail: String,   // "Time's up for today — 60 of 60 minutes used."
     pub big_number: Option<String>, // countdown / streak numeral
-    pub action: String,             // the single accent-red CTA
+    pub action: String,   // the single accent-red CTA
     pub challenge: challenge::Challenge,
     pub for_user: String,
     /// When set, the overlay shows a live "SCREEN PAUSES IN Ns" countdown from

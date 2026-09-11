@@ -316,7 +316,11 @@ pub fn apply(
     vpn: &VpnPlan,
 ) -> Result<()> {
     // Discovered fresh each apply: the resolver may have (re)started.
-    let resolver_uid = if lockdown.force_dns { dnsmasq_uid() } else { None };
+    let resolver_uid = if lockdown.force_dns {
+        dnsmasq_uid()
+    } else {
+        None
+    };
     let body = render_ruleset(fw, lockdown, dns_upstream, server, vpn, resolver_uid);
     // Atomic replace: `add table` (idempotent — creates if absent) then
     // `delete table` then the fresh definition, all in ONE `nft -f` transaction.
@@ -394,7 +398,14 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         assert!(r.contains("tcp dport 853 drop"));
         assert!(r.contains("udp dport 853 drop"));
     }
@@ -405,7 +416,14 @@ mod tests {
             force_dns: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         assert!(r.contains("ip daddr != 1.1.1.2 udp dport 53 drop"));
         assert!(r.contains("ip daddr != 1.1.1.2 tcp dport 53 drop"));
         // With no resolver uid known, direct :53 to the upstream stays open
@@ -439,7 +457,14 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         assert!(r.contains("ip daddr 8.8.8.8 tcp dport 443 drop"));
         assert!(r.contains("ip daddr 9.9.9.9 udp dport 443 drop"));
 
@@ -469,7 +494,14 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "9.9.9.9", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "9.9.9.9",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         for ip in [
             "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
         ] {
@@ -494,7 +526,14 @@ mod tests {
             block_doh: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         // force_dns: a v4 upstream means NO v6 destination is ever legitimate
         // on port 53 (loopback is accepted earlier in the chain).
         assert!(r.contains("meta nfproto ipv6 udp dport 53 drop"));
@@ -558,7 +597,14 @@ mod tests {
             block_vpn: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         assert!(r.contains("udp dport 51820 drop"));
         assert!(r.contains("udp dport 1194 drop"));
         assert!(r.contains("tcp dport 1194 drop"));
@@ -572,7 +618,14 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         assert!(r.contains("tcp dport { 9001, 9030, 9050, 9051, 9150 } drop"));
     }
 
@@ -634,7 +687,14 @@ mod tests {
             block_dot: true,
             ..Default::default()
         };
-        let r = render_ruleset(&fw_basic(), &lockdown, "1.1.1.2", None, &VpnPlan::default(), None);
+        let r = render_ruleset(
+            &fw_basic(),
+            &lockdown,
+            "1.1.1.2",
+            None,
+            &VpnPlan::default(),
+            None,
+        );
         let drop_pos = r.find("tcp dport 853 drop").unwrap();
         let accept_pos = r.find("ip daddr 1.1.1.2 accept").unwrap();
         assert!(

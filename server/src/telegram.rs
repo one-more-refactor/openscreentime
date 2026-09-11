@@ -497,7 +497,9 @@ pub async fn verify_start(
     )
     .await;
 
-    Ok(Json(json!({ "ok": true, "expires_in_seconds": VERIFY_MINUTES * 60 })))
+    Ok(Json(
+        json!({ "ok": true, "expires_in_seconds": VERIFY_MINUTES * 60 }),
+    ))
 }
 
 #[cfg(test)]
@@ -509,10 +511,10 @@ mod tests {
         let id = Uuid::nil();
         let kb = earn_keyboard(id);
         let row = kb.pointer("/inline_keyboard/0").unwrap();
-        assert!(row[0]["callback_data"]
+        assert!(row[0]["callback_data"].as_str().unwrap().ends_with(":yes"));
+        assert!(row[1]["callback_data"]
             .as_str()
             .unwrap()
-            .ends_with(":yes"));
-        assert!(row[1]["callback_data"].as_str().unwrap().contains(&id.to_string()));
+            .contains(&id.to_string()));
     }
 }

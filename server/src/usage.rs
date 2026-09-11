@@ -18,9 +18,9 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use openscreentime_policy::AgeBracket;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use openscreentime_policy::AgeBracket;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -147,9 +147,21 @@ pub struct Exposure {
 }
 
 impl Exposure {
-    pub const SELF: Exposure = Exposure { apps: true, sites: true, hide_shared_sites: true };
-    pub const HUB_FULL: Exposure = Exposure { apps: true, sites: true, hide_shared_sites: false };
-    pub const HUB_APPS_ONLY: Exposure = Exposure { apps: true, sites: false, hide_shared_sites: false };
+    pub const SELF: Exposure = Exposure {
+        apps: true,
+        sites: true,
+        hide_shared_sites: true,
+    };
+    pub const HUB_FULL: Exposure = Exposure {
+        apps: true,
+        sites: true,
+        hide_shared_sites: false,
+    };
+    pub const HUB_APPS_ONLY: Exposure = Exposure {
+        apps: true,
+        sites: false,
+        hide_shared_sites: false,
+    };
 }
 
 pub async fn where_for_account(
@@ -255,7 +267,8 @@ pub async fn where_api(
     .bind(admin.tenant_id)
     .fetch_optional(&st.db)
     .await?;
-    let (bracket, self_managed) = target.ok_or_else(|| AppError::NotFound("no such person".into()))?;
+    let (bracket, self_managed) =
+        target.ok_or_else(|| AppError::NotFound("no such person".into()))?;
     let exposure = if q.account_id == admin.admin_id {
         Exposure::SELF
     } else {
@@ -275,10 +288,14 @@ pub async fn where_api(
             Exposure::HUB_FULL
         }
     };
-    Ok(Json(where_for_account(&st.db, admin.tenant_id, q.account_id, exposure).await?))
+    Ok(Json(
+        where_for_account(&st.db, admin.tenant_id, q.account_id, exposure).await?,
+    ))
 }
 
 /// `GET /api/me/where` — the person's own view (member-allowed).
 pub async fn me_where(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
-    Ok(Json(where_for_account(&st.db, admin.tenant_id, admin.admin_id, Exposure::SELF).await?))
+    Ok(Json(
+        where_for_account(&st.db, admin.tenant_id, admin.admin_id, Exposure::SELF).await?,
+    ))
 }
