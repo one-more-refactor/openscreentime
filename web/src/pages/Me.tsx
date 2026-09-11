@@ -668,7 +668,7 @@ export function Me() {
         </>
       )}
 
-      {!today && !error && <p className="me-wait">…</p>}
+      {!today && !error && <p className="me-wait wait-text">…</p>}
 
       <footer className="me-foot">
         {member ? (

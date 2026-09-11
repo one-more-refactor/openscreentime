@@ -45,7 +45,7 @@
   --me-ink-3: #b39b7d;
   --me-track: #ffe6b8;
   --me-fill: #ffb020;
-  --me-stop: #ff5a5f;
+  --me-stop: color-mix(in srgb, var(--accent) 78%, #fff); /* a warmer tint of the one interrupt red, not a second hue */
   --me-go: #58cc02;
   --me-go-ink: #ffffff;
   --me-night: #30326b;

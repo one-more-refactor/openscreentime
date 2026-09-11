@@ -33,11 +33,14 @@
   --fg-display: #ffffff;
   --fg: #e8e8e8;
   --fg-dim: #999999;
-  --fg-faint: #666666;
+  --fg-faint: #7a7a7a; /* 4.6:1 on #000 — the smallest mono labels still pass AA */
 
   /* the one accent — urgent interrupt ONLY (blocked, tamper, time-up) */
   --accent: #d71921;
   --accent-subtle: rgba(215, 25, 33, 0.15);
+
+  /* the one focus ring — every :focus-visible uses this, nothing else */
+  --focus: var(--fg-dim);
 
   /* data status — encoded into values themselves, never row backgrounds */
   --ok: #4a9e5c;
@@ -82,7 +85,7 @@
   --fg-display: #000000;
   --fg: #1a1a1a;
   --fg-dim: #666666;
-  --fg-faint: #999999;
+  --fg-faint: #767676; /* 4.5:1 on the warm off-white */
 
   /* status colors re-derived for light contrast (dark values wash out) */
   --ok: #2e7d46;
@@ -108,7 +111,7 @@
     --fg-display: #000000;
     --fg: #1a1a1a;
     --fg-dim: #666666;
-    --fg-faint: #999999;
+    --fg-faint: #767676;
     --ok: #2e7d46;
     --warn: #8a6300;
     --crit: #b3151c;
@@ -259,7 +262,7 @@
 
   /* Focus ring — square, visible, mechanical. */
   .focusable:focus-visible {
-    outline: 2px solid var(--fg-dim);
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
 }
@@ -428,7 +431,7 @@
 }
 .fam-card:hover { border-color: var(--line-2); transform: translateY(-1px); box-shadow: var(--elev-2); }
 .fam-card:active { transform: scale(0.985); box-shadow: var(--elev-1); }
-.fam-card:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.fam-card:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 .fam-avatar {
   flex: none; border-radius: 50%;
@@ -535,6 +538,7 @@
 
 .ch-actions { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 3rem; }
 .ch-btn {
+  min-height: 40px; /* a thumb target on the phone this is meant to be read on */
   padding: 0.55rem 1.1rem; border: 1px solid var(--line-2); border-radius: 999px;
   background: transparent; color: var(--fg); font-size: 0.9rem;
   font-family: var(--font-sans); cursor: pointer;
@@ -840,7 +844,7 @@
 }
 .fs-range:active::-webkit-slider-thumb { transform: scale(1.25); }
 .fs-range:active::-moz-range-thumb { transform: scale(1.25); }
-.fs-range:focus-visible { outline: 2px solid var(--fg-dim); outline-offset: 2px; border-radius: 4px; }
+.fs-range:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
 
 /* Entrance — content rises in once, quietly. Staggered by section order. */
 @keyframes rise {
@@ -900,7 +904,7 @@
 .chip-x {
   border: none; background: none; cursor: pointer;
   color: var(--fg-faint); font-size: 0.8rem; line-height: 1;
-  padding: 0.15rem 0.35rem; border-radius: 999px;
+  min-width: 2rem; min-height: 2rem; padding: 0.4rem 0.5rem; border-radius: 999px;
   transition: color var(--dur-tick) var(--ease);
 }
 .chip-x:hover { color: var(--accent); }
@@ -1214,6 +1218,7 @@
    jump when the data lands. These are structural placeholders that breathe
    once, quietly, and never pretend to be content.
    ========================================================================== */
+.wait-text { animation: wait-breathe 1.8s var(--ease) infinite; }
 @keyframes wait-breathe {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 0.25; }
@@ -1460,3 +1465,8 @@ body[data-leaving="true"] .shell {
 @media (prefers-reduced-motion: reduce) {
   .login-wait-bar::after { animation: none; width: 100%; opacity: 0.4; }
 }
+
+/* Login's secondary actions ("Log in with passkey", SSO): readable ink and a
+   40px row, not faint 12px text a tired parent can't find. */
+.login-link { min-height: 40px; display: inline-flex; align-items: center; color: var(--fg-dim); }
+.login-link:hover { color: var(--fg); }
