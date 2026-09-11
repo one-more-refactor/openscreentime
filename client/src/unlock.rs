@@ -61,6 +61,10 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
 
     let exec = Exec::new(ctx.clone());
     suspend_enforcement(&exec, &policy)?;
+    // This process has no view of the running agent's in-memory lock. Persist
+    // the recovery so the live agent clears its whole-device lock on the next
+    // tick and a reboot doesn't reload it — otherwise it re-freezes in ~10 s.
+    crate::runner::record_local_recovery();
 
     if minutes > 0 {
         spawn_resume(minutes * 60).unwrap_or_else(|e| {

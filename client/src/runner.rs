@@ -128,6 +128,41 @@ fn save_device_locked(locked: bool) {
     }
 }
 
+/// A parent standing at the device with a valid code, or running `ost unlock`,
+/// is an authority a dead server cannot override. `ost unlock` runs in a
+/// SEPARATE process, so it records the recovery here and the live agent honors
+/// it on its next tick. Without this, the running agent's in-memory
+/// `device_locked` re-froze the machine every 30 minutes for as long as the
+/// server stayed unreachable — a permanent brick hiding behind the promise
+/// that "the parent PIN always unlocks". Root-only state dir: a child cannot
+/// forge the marker.
+fn local_recovery_marker_path() -> std::path::PathBuf {
+    crate::paths::state("local_recovery")
+}
+
+fn read_local_recovery_marker() -> Option<u64> {
+    std::fs::read_to_string(local_recovery_marker_path())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Called by `ost unlock` (a separate process): clear the persisted lock so a
+/// reboot doesn't reload it, and leave a marker the live agent picks up.
+pub fn record_local_recovery() {
+    save_device_locked(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = local_recovery_marker_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(path, now.to_string()) {
+        tracing::warn!("could not record local recovery: {e}");
+    }
+}
+
 /// Where the rest of the reboot-surviving enforcement state lives. The freeze
 /// set, the save-your-work countdowns and the daily challenge-unlock counter
 /// used to be memory-only, so holding the power button was a complete reset:
@@ -287,6 +322,9 @@ pub struct Agent {
     /// `TamperMonitor`) has locked the device down. Freezes all users like an
     /// admin lock; cleared by an admin unlock or a parent PIN at the machine.
     tamper_lockdown: bool,
+    /// The `ost unlock` recovery marker last honored (unix secs), so a marker
+    /// left by a previous boot isn't re-applied, and a fresh one is applied once.
+    last_local_recovery: Option<u64>,
     /// Confirmation gate that separates a real, sustained evasion attempt from a
     /// transient blip before escalating to `tamper_lockdown`.
     tamper_monitor: tamper::TamperMonitor,
@@ -530,6 +568,7 @@ impl Agent {
             last_contact_saved: Instant::now(),
             offline_hard_lockdown: false,
             tamper_lockdown: carried.tamper_lockdown,
+            last_local_recovery: read_local_recovery_marker(),
             tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
@@ -699,6 +738,43 @@ impl Agent {
             self.last_contact_saved = Instant::now();
             save_last_contact_wall(self.last_contact_wall);
         }
+    }
+
+    /// A parent has proven themselves AT the device (valid code in the overlay
+    /// or file-drop, or `ost unlock`). That is the authority the whole-device
+    /// locks defer to, so clear every one of them persistently — the admin
+    /// lock, the offline hard-lockdown and the confirmed-evasion lockdown — not
+    /// just a 30-minute grace that let the lock reassert itself for as long as
+    /// the server stayed dead. Resets the hard-lockdown clock too, otherwise
+    /// the next tick would re-engage it on the same stale last-contact.
+    fn local_recovery(&mut self, source: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        let was_locked =
+            self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
+        self.device_locked = false;
+        save_device_locked(false);
+        self.offline_hard_lockdown = false;
+        self.tamper_lockdown = false;
+        // A parent at the machine counts as contact for the days-scale clock.
+        self.last_contact_wall = chrono::Utc::now();
+        save_last_contact_wall(self.last_contact_wall);
+        for user in self.frozen.drain().collect::<Vec<_>>() {
+            let _ = screentime::freeze_user(&self.exec, &user, false, false);
+        }
+        self.pending_freeze.clear();
+        self.resumed_frozen.clear();
+        if !self.exec.dry_run() {
+            self.persist_freeze_state();
+        }
+        if was_locked {
+            tracing::warn!("whole-device lock cleared locally via {source}");
+            events.push(Event::new(
+                EV_UNLOCK,
+                SEV_INFO,
+                json!({ "source": "local_recovery", "via": source }),
+            ));
+        }
+        events
     }
 
     /// The device-wide offline hard-lockdown threshold: the strictest (smallest
@@ -1153,6 +1229,13 @@ impl Agent {
         // policy once we've gone too long without hearing from the server.
         events.extend(self.offline_grace_check());
         // …and the days-scale escalation on top of it (policy-configurable).
+        // `ost unlock` ran in another process: honor its recovery marker once.
+        if let Some(ts) = read_local_recovery_marker() {
+            if self.last_local_recovery != Some(ts) {
+                self.last_local_recovery = Some(ts);
+                events.extend(self.local_recovery("ost unlock"));
+            }
+        }
         events.extend(self.offline_hard_lockdown_check());
         if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
             events.push(ev);
@@ -1302,20 +1385,11 @@ impl Agent {
                     user.clone(),
                     Instant::now() + Duration::from_secs(u64::from(mins) * 60),
                 );
-                // A parent standing at the machine with the code has handled the
-                // situation — clear a confirmed-evasion lockdown so the device
-                // isn't stuck locked after they've dealt with it.
-                if self.tamper_lockdown {
-                    self.tamper_lockdown = false;
-                    tracing::info!("tamper lockdown cleared by unlock code at the device");
-                }
-                self.pending_freeze.remove(&user);
-                if currently_frozen {
-                    if let Err(e) = screentime::freeze_user(&self.exec, &user, false, false) {
-                        tracing::warn!("unfreeze {user} (verified unlock) failed: {e}");
-                    }
-                    self.frozen.remove(&user);
-                }
+                // A parent standing at the machine with a valid code is the
+                // authority every whole-device lock defers to: clear them ALL
+                // persistently (admin lock, offline hard-lockdown, evasion
+                // lockdown) — not just this user, not just for 30 minutes.
+                events.extend(self.local_recovery(source));
                 events.push(tamper::tamper_event(
                     "parent_pin_override",
                     SEV_INFO,
