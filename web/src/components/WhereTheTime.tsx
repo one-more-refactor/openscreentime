@@ -118,6 +118,11 @@ export function WhereTheTime({ accountId }: { accountId?: string }) {
           everyone's browsing, not just yours.
         </p>
       )}
+      {data.sites_hidden_age && (
+        <p className="wt-note">
+          Website activity isn't shown for their age — at this point their browsing is their own.
+        </p>
+      )}
     </section>
   );
 }

@@ -581,7 +581,7 @@ export function ChildDetail() {
           <div className="ch-row-what">
             <strong>Remove {name}</strong>
             <span className="fam-quiet">
-              Deletes their account and rules. Their logins stay on the devices, unmanaged.
+              Deletes their account, rules and usage history. Their logins stay on the devices, unmanaged.
             </span>
           </div>
           <button type="button" className="ch-btn" data-danger disabled={busy} onClick={removeChild}>

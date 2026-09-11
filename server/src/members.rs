@@ -549,6 +549,25 @@ pub async fn delete_member(
             "only members can be removed here; parents leave through Settings".into(),
         ));
     }
+    // Erase, don't orphan: their OS-login rows survive (SET NULL) and used to
+    // keep every usage slice, ledger day, earn request and event they ever
+    // generated — a departing or aging-out teen's behavioural history lingered
+    // forever, and "remove" was not a right-to-erasure. Device-wide site
+    // activity (os_username = '') belongs to the computer, not the person,
+    // and stays.
+    for q in [
+        "DELETE FROM usage_slices us USING device_users du
+          WHERE du.account_id = $1 AND du.device_id = us.device_id
+            AND du.os_username = us.os_username",
+        "DELETE FROM screen_time_ledger
+          WHERE device_user_id IN (SELECT id FROM device_users WHERE account_id = $1)",
+        "DELETE FROM earn_requests
+          WHERE device_user_id IN (SELECT id FROM device_users WHERE account_id = $1)",
+        "DELETE FROM events
+          WHERE device_user_id IN (SELECT id FROM device_users WHERE account_id = $1)",
+    ] {
+        sqlx::query(q).bind(id).execute(&st.db).await?;
+    }
     sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(admin.tenant_id)

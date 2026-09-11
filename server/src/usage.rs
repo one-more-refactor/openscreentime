@@ -20,6 +20,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use openscreentime_policy::AgeBracket;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -128,16 +129,36 @@ pub async fn ingest(
 /// per-device UTC offset; deferred deliberately — this is a soft attribution
 /// signal, not the enforced budget. The web still buckets the hour curve into
 /// the viewer's local time, so the strip reads correctly within the window.
+/// What a "where does the time go" view is allowed to contain. Exposure is a
+/// decision about the VIEWER and the PERSON, made by the caller:
+///   * a person looking at themselves sees everything — except device-wide
+///     site activity on a SHARED computer (that would leak siblings'/parents'
+///     browsing to them);
+///   * the hub looking at a little/kid/younger-teen sees apps + sites;
+///   * the hub looking at an older teen sees apps, not sites — autonomy and a
+///     private informational space are supposed to widen with age;
+///   * adults and self-managed people are not the hub's to look at at all
+///     (refused before this is ever called).
+#[derive(Clone, Copy, Debug)]
+pub struct Exposure {
+    pub apps: bool,
+    pub sites: bool,
+    pub hide_shared_sites: bool,
+}
+
+impl Exposure {
+    pub const SELF: Exposure = Exposure { apps: true, sites: true, hide_shared_sites: true };
+    pub const HUB_FULL: Exposure = Exposure { apps: true, sites: true, hide_shared_sites: false };
+    pub const HUB_APPS_ONLY: Exposure = Exposure { apps: true, sites: false, hide_shared_sites: false };
+}
+
 pub async fn where_for_account(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
     account_id: Uuid,
-    // When the viewer IS this person (their own /me), device-wide site activity
-    // on a SHARED computer leaks siblings'/parents' browsing to them — so it's
-    // suppressed there. A parent viewing a child is authorized to see the
-    // device's activity, so they pass `false`.
-    hide_shared_sites: bool,
+    exposure: Exposure,
 ) -> AppResult<Value> {
+    let hide_shared_sites = exposure.hide_shared_sites;
     // Apps: the person's own OS logins, summed across their devices.
     let apps: Vec<(String, i64)> = sqlx::query_as(
         "SELECT us.key, SUM(us.amount)::bigint
@@ -166,7 +187,8 @@ pub async fn where_for_account(
     .fetch_one(db)
     .await?;
     let sites_hidden = hide_shared_sites && shared;
-    let sites: Vec<(String, i64)> = if sites_hidden {
+    let sites_hidden_age = !exposure.sites;
+    let sites: Vec<(String, i64)> = if sites_hidden || sites_hidden_age {
         Vec::new()
     } else {
         sqlx::query_as(
@@ -200,12 +222,16 @@ pub async fn where_for_account(
     .fetch_all(db)
     .await?;
 
+    let apps = if exposure.apps { apps } else { Vec::new() };
+    let hours = if exposure.apps { hours } else { Vec::new() };
     Ok(json!({
         "apps": apps.into_iter().map(|(k, s)| json!({ "key": k, "seconds": s })).collect::<Vec<_>>(),
         "sites": sites.into_iter().map(|(k, n)| json!({ "key": k, "hits": n })).collect::<Vec<_>>(),
         "hours": hours.into_iter().map(|(h, a)| json!({ "hour": h, "amount": a })).collect::<Vec<_>>(),
         // The web shows a "sites hidden — shared computer" note instead of a leak.
         "sites_hidden_shared": sites_hidden,
+        // …and "not shown for their age" for an older teen.
+        "sites_hidden_age": sites_hidden_age,
     }))
 }
 
@@ -220,22 +246,39 @@ pub async fn where_api(
     admin: AuthAdmin,
     Query(q): Query<WhereQuery>,
 ) -> AppResult<Json<Value>> {
-    // Scope: the account must be of this tenant.
-    let owned: Option<i32> =
-        sqlx::query_scalar("SELECT 1 FROM admins WHERE id = $1 AND tenant_id = $2")
-            .bind(q.account_id)
-            .bind(admin.tenant_id)
-            .fetch_optional(&st.db)
-            .await?;
-    owned.ok_or_else(|| AppError::NotFound("no such person".into()))?;
-    Ok(Json(
-        where_for_account(&st.db, admin.tenant_id, q.account_id, false).await?,
-    ))
+    // Scope: the account must be of this tenant — and what the hub may see of
+    // it depends on how old the person is (see `Exposure`).
+    let target: Option<(String, bool)> = sqlx::query_as(
+        "SELECT age_bracket, self_managed FROM admins WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(q.account_id)
+    .bind(admin.tenant_id)
+    .fetch_optional(&st.db)
+    .await?;
+    let (bracket, self_managed) = target.ok_or_else(|| AppError::NotFound("no such person".into()))?;
+    let exposure = if q.account_id == admin.admin_id {
+        Exposure::SELF
+    } else {
+        let bracket = AgeBracket::parse(&bracket).unwrap_or(AgeBracket::Adult);
+        if !bracket.is_managed() || self_managed {
+            // One adult in the household must not be able to pull another
+            // adult's activity, co-parent or not; and a self-managed teen has
+            // opted out of the hub's eyes. Their day is their own.
+            return Err(AppError::ForbiddenForMember(
+                "their day is their own — adults and self-managed people aren't tracked by the hub"
+                    .into(),
+            ));
+        }
+        if matches!(bracket, AgeBracket::OlderTeen) {
+            Exposure::HUB_APPS_ONLY
+        } else {
+            Exposure::HUB_FULL
+        }
+    };
+    Ok(Json(where_for_account(&st.db, admin.tenant_id, q.account_id, exposure).await?))
 }
 
 /// `GET /api/me/where` — the person's own view (member-allowed).
 pub async fn me_where(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
-    Ok(Json(
-        where_for_account(&st.db, admin.tenant_id, admin.admin_id, true).await?,
-    ))
+    Ok(Json(where_for_account(&st.db, admin.tenant_id, admin.admin_id, Exposure::SELF).await?))
 }

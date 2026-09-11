@@ -525,6 +525,8 @@ export interface WhereData {
   hours: { hour: string; amount: number }[];
   /** the site list was withheld on a member's own view of a shared computer */
   sites_hidden_shared?: boolean;
+  /** older teen: browsing is theirs, the hub sees apps only */
+  sites_hidden_age?: boolean;
 }
 
 // ---- Unlock codes (per device, owned by the server) ---------------------------
