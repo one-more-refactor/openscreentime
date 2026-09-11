@@ -328,6 +328,11 @@ pub struct Agent {
     /// A console "pause" may carry a save-your-work window: the overlay shows
     /// at once, the freeze lands when this instant passes. None = immediate.
     device_lock_grace_until: Option<Instant>,
+    /// Last `local_network_up` probe (set in the offline check, reused after).
+    local_net_up: bool,
+    /// Once-per-episode gates for the two new warnings.
+    clock_ahead_reported: bool,
+    no_credential_reported: bool,
     /// Confirmation gate that separates a real, sustained evasion attempt from a
     /// transient blip before escalating to `tamper_lockdown`.
     tamper_monitor: tamper::TamperMonitor,
@@ -573,6 +578,9 @@ impl Agent {
             tamper_lockdown: carried.tamper_lockdown,
             last_local_recovery: read_local_recovery_marker(),
             device_lock_grace_until: None,
+            local_net_up: true,
+            clock_ahead_reported: false,
+            no_credential_reported: false,
             tamper_monitor: tamper::TamperMonitor::new(),
             unlock_until: HashMap::new(),
             warned: HashMap::new(),
@@ -786,11 +794,16 @@ impl Agent {
     /// non-zero) `lockdown.offline_lockdown_days` across all managed users.
     /// 0 = feature off.
     fn offline_lockdown_days(&self) -> u32 {
+        // Floored: the strictest user governs the whole device, so a stray `1`
+        // on one profile plus a flaky self-hosted server would strand every
+        // kid's device on the first outage.
+        const MIN_OFFLINE_LOCKDOWN_DAYS: u32 = 3;
         self.policies
             .values()
             .map(|p| p.lockdown.offline_lockdown_days)
             .filter(|d| *d > 0)
             .min()
+            .map(|d| d.max(MIN_OFFLINE_LOCKDOWN_DAYS))
             .unwrap_or(0)
     }
 
@@ -809,9 +822,30 @@ impl Agent {
         // outage, not tampering. Without this, one self-hosted-server outage
         // (ISP/VPS/cert) would strand every kid's device at once.
         let local_net_up = tamper::local_network_up(&self.exec);
-        let engaged = days > 0
+        self.local_net_up = local_net_up;
+        let past_threshold = days > 0
             && local_net_up
             && (chrono::Utc::now() - self.last_contact_wall).num_days() >= i64::from(days);
+        // A lockdown that has NO offline way back is a brick, not a defense:
+        // the unlock code lives on the console this device can't reach. Only
+        // engage when a recovery credential (recovery codes / backup code) is
+        // on the device; otherwise say so, loudly, and don't.
+        let engaged = past_threshold
+            && if parentcode::Verifier::from_device().configured() {
+                true
+            } else {
+                if !self.no_credential_reported {
+                    self.no_credential_reported = true;
+                    events.push(tamper::tamper_event(
+                        "offline_lockdown_no_credential",
+                        SEV_CRITICAL,
+                        "offline hard-lockdown threshold reached but this device has no offline \
+                         unlock credential (no recovery codes / backup code) — NOT locking, \
+                         because nobody could get back in. Generate recovery codes in the console.",
+                    ));
+                }
+                false
+            };
         if engaged && !self.offline_hard_lockdown {
             events.push(tamper::tamper_event(
                 "offline_hard_lockdown",
@@ -1269,6 +1303,30 @@ impl Agent {
             ));
         }
 
+        // Forward clock-jump defense: while on a network, the accounting day
+        // may not run ahead of "last server-confirmed day + 1". Genuinely
+        // offline (no network) → no ceiling, an honest week away still rolls.
+        let ceiling = self.local_net_up.then(|| {
+            self.last_contact_wall
+                .with_timezone(&chrono::Local)
+                .date_naive()
+                + chrono::Days::new(1)
+        });
+        self.tracker.set_day_ceiling(ceiling);
+        if self.tracker.clock_ahead_of_ceiling() {
+            if !self.clock_ahead_reported {
+                self.clock_ahead_reported = true;
+                events.push(tamper::tamper_event(
+                    "clock_ahead_of_server",
+                    SEV_WARN,
+                    "the clock is more than a day ahead of the last server-confirmed time — \
+                     the daily budget will not reset until the server is reached",
+                ));
+            }
+        } else {
+            self.clock_ahead_reported = false;
+        }
+
         // Screen-time: account active seat users, evaluate, freeze/unfreeze.
         let active = screentime::active_seat_users(&self.exec);
         self.active_users = active.clone();
@@ -1428,7 +1486,12 @@ impl Agent {
             // Still gated on `is_active` for users who are NOT frozen, so an
             // absent user is never newly frozen (and never shown an overlay)
             // just for existing in the policy.
-            let lock = if should_evaluate_screen_time(in_grace, is_active, currently_frozen) {
+            // Bedtime / allowed-window rules are about the clock, not the
+            // seat: an SSH-only login (Remote=yes, never a "seat") used to
+            // escape them entirely. Evaluate those for every policy user.
+            let has_clock_rule = policy.screen_time.enabled
+                && (policy.screen_time.bedtime.is_some() || !policy.screen_time.schedule.is_empty());
+            let lock = if should_evaluate_screen_time(in_grace, is_active, currently_frozen, has_clock_rule) {
                 screentime::evaluate(&policy, &self.tracker, &user)
             } else {
                 None
@@ -1669,13 +1732,20 @@ impl Agent {
             }
         }
 
-        // 1. Frozen means frozen.
+        // 1. Frozen means frozen — and stays frozen. The freeze used to be
+        // written once at the transition and never again, so a recreated
+        // slice (re-login, linger toggle) or a manual `echo 0` was a permanent
+        // thaw that this probe noticed and refused to fix. Re-assert it;
+        // idempotent, every probe round.
         for user in self.frozen.clone() {
             if screentime::is_frozen(&user) == Some(false) {
+                if let Err(e) = screentime::freeze_user(&self.exec, &user, true, false) {
+                    tracing::warn!("re-asserting freeze for {user} failed: {e}");
+                }
                 if let Some(ev) = report(
                     &mut self.probe_reported,
                     format!("freeze_ineffective:{user}"),
-                    format!("{user} should be stopped but the kernel says their session is running"),
+                    format!("{user} was found running while they should be stopped — stopped again"),
                 ) {
                     self.notify_user(
                         None,
@@ -2086,6 +2156,15 @@ impl Agent {
                     .unwrap_or(0);
                 self.device_lock_grace_until =
                     (grace > 0).then(|| Instant::now() + Duration::from_secs(grace));
+                if !parentcode::Verifier::from_device().configured() {
+                    events.push(tamper::tamper_event(
+                        "lock_without_offline_credential",
+                        SEV_WARN,
+                        "locked, but this device has no offline unlock credential — if the \
+                         server becomes unreachable while locked, only the root recovery \
+                         account can free it. Generate recovery codes in the console.",
+                    ));
+                }
                 let detail = if grace > 0 {
                     format!(
                         "A parent paused this computer. Save your work — it pauses in {} min.",
@@ -2376,8 +2455,13 @@ enum FreezeAction {
 ///
 /// A user who is neither active nor frozen is skipped, so nobody is newly
 /// frozen — or shown an overlay — merely for appearing in the policy.
-fn should_evaluate_screen_time(in_grace: bool, is_active: bool, currently_frozen: bool) -> bool {
-    !in_grace && (is_active || currently_frozen)
+fn should_evaluate_screen_time(
+    in_grace: bool,
+    is_active: bool,
+    currently_frozen: bool,
+    has_clock_rule: bool,
+) -> bool {
+    !in_grace && (is_active || currently_frozen || has_clock_rule)
 }
 
 fn decide_freeze(
@@ -2624,13 +2708,16 @@ mod tests {
     #[test]
     fn frozen_users_are_still_evaluated_when_inactive() {
         // frozen + inactive -> still evaluated, so the freeze holds
-        assert!(should_evaluate_screen_time(false, false, true));
+        assert!(should_evaluate_screen_time(false, false, true, false));
+        // a clock rule (bedtime/window) is evaluated even with no local seat
+        assert!(should_evaluate_screen_time(false, false, false, true));
+        assert!(!should_evaluate_screen_time(false, false, false, false));
         // active -> evaluated as always
-        assert!(should_evaluate_screen_time(false, true, false));
+        assert!(should_evaluate_screen_time(false, true, false, false));
         // neither active nor frozen -> skipped, never newly frozen while away
-        assert!(!should_evaluate_screen_time(false, false, false));
+        assert!(!should_evaluate_screen_time(false, false, false, false));
         // a parent-granted grace window suspends enforcement outright
-        assert!(!should_evaluate_screen_time(true, true, true));
+        assert!(!should_evaluate_screen_time(true, true, true, false));
     }
 
     /// A full retry buffer must drain in a bounded number of round-trips.
