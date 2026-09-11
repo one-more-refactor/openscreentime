@@ -33,9 +33,11 @@ pub enum LockReason {
 impl LockReason {
     pub fn headline(&self) -> String {
         match self {
-            LockReason::DailyLimit { .. } => "TIME'S UP".into(),
-            LockReason::OutsideWindow => "NOT NOW".into(),
-            LockReason::Bedtime => "BEDTIME".into(),
+            // Sentence case, warm, no shouting — the same words the README
+            // promises ("Stop — time's up for today"), on every surface.
+            LockReason::DailyLimit { .. } => "Stop".into(),
+            LockReason::OutsideWindow => "Not now".into(),
+            LockReason::Bedtime => "Goodnight".into(),
         }
     }
     pub fn detail(&self) -> String {
@@ -44,10 +46,10 @@ impl LockReason {
                 used_min,
                 limit_min,
             } => {
-                format!("USED {used_min} / {limit_min} MIN TODAY")
+                format!("Time's up for today — {used_min} of {limit_min} minutes used.")
             }
-            LockReason::OutsideWindow => "OUTSIDE ALLOWED HOURS".into(),
-            LockReason::Bedtime => "SCREENS ARE OFF UNTIL MORNING".into(),
+            LockReason::OutsideWindow => "Screens are off at this time of day.".into(),
+            LockReason::Bedtime => "Screens are off until morning.".into(),
         }
     }
 }

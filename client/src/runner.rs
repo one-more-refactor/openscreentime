@@ -2333,21 +2333,10 @@ fn lock_copy(
     reason: &screentime::LockReason,
     grace_secs: u64,
 ) -> (String, String) {
-    use screentime::LockReason::*;
-    let (head, fact) = match reason {
-        DailyLimit {
-            used_min,
-            limit_min,
-        } => (
-            "Time's up",
-            format!("You've used {used_min} of {limit_min} minutes today."),
-        ),
-        OutsideWindow => (
-            "Not now",
-            "Screens are off at this time of day.".to_string(),
-        ),
-        Bedtime => ("Bedtime", "Screens are off until morning.".to_string()),
-    };
+    // The words come from the reason itself, so the GUI overlay, the headless
+    // broadcast and the README all say the same thing ("Stop — time's up for
+    // today"), and it can't drift again.
+    let (head, fact) = (reason.headline(), reason.detail());
     match bracket {
         AgeBracket::Little | AgeBracket::Kid => (head.to_string(), fact),
         _ => (
@@ -2709,13 +2698,13 @@ mod tests {
             limit_min: 60,
         };
         let (h, d) = lock_copy(AgeBracket::Kid, &r, 60);
-        assert_eq!(h, "Time's up");
-        assert_eq!(d, "You've used 60 of 60 minutes today.");
+        assert_eq!(h, "Stop");
+        assert_eq!(d, "Time's up for today — 60 of 60 minutes used.");
         assert!(!d.contains("stops in"), "little/kid get the short form");
         let (_, d) = lock_copy(AgeBracket::YoungerTeen, &r, 120);
         assert!(d.contains("stops in 2 min"));
         let (h, d) = lock_copy(AgeBracket::Little, &LockReason::Bedtime, 60);
-        assert_eq!(h, "Bedtime");
+        assert_eq!(h, "Goodnight");
         assert_eq!(d, "Screens are off until morning.");
         // no shouting anywhere
         for s in [h, d] {

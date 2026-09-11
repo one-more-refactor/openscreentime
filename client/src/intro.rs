@@ -35,27 +35,27 @@ pub fn mark_seen() {
 /// The cards. Short, honest, kid-first — the same promises as TRANSPARENCY.md.
 const SLIDES: &[(&str, &str)] = &[
     (
-        "THIS COMPUTER HAS OPENSCREENTIME",
-        "It manages screen time and blocks some things on the network. Here's the honest version — swipe through, or skip.",
+        "This computer helps with screen time",
+        "It keeps track of screen time and blocks a few things online. Here's the honest version — swipe through, or skip.",
     ),
     (
-        "WHAT A PARENT CAN SEE",
+        "What a parent can see",
         "How much screen time you've used, on which device, and if someone tampers with OpenScreenTime. That's it.",
     ),
     (
-        "WHAT THEY CAN'T SEE",
-        "Not your screen. Not what you type. Not your messages, and not your browsing history. OpenScreenTime doesn't watch you — it counts time and filters the network.",
+        "What it can't see",
+        "Not your screen. Not what you type. Not your messages, and not your browsing history. It doesn't watch you — it counts time and filters the network. That's all.",
     ),
     (
-        "SCREEN TIME",
+        "Screen time",
         "You get a daily limit. When it's nearly up you'll get a heads-up, and there's a 60-second save-your-work warning before the screen pauses.",
     ),
     (
-        "NEED MORE TIME?",
-        "Click the OpenScreenTime tray icon and choose REQUEST MORE TIME. A parent gets the request and can say yes.",
+        "Need more time?",
+        "Click the OpenScreenTime tray icon and choose Request more time. A parent gets the request and can say yes.",
     ),
     (
-        "ONE MORE THING",
+        "One more thing",
         "There is no remote shell, no camera, no message reading. OpenScreenTime only enforces time and network rules — and everything it does shows up right here. That's the deal.",
     ),
 ];
@@ -103,7 +103,7 @@ fn show() {
                             .monospace(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(egui::RichText::new("SKIP").monospace()).clicked() {
+                        if ui.button(egui::RichText::new("Skip")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
