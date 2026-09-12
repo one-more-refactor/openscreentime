@@ -207,6 +207,34 @@ export const auth = {
 };
 
 /** GET /api/auth/config — public; reports SSO availability + first-run state. */
+export interface OidcSetup {
+  /** the IdP-verified email the account will be stamped with */
+  email: string;
+  suggested_username: string;
+  suggested_name: string;
+}
+
+/** First-run SSO: read the parked identity behind a /welcome?setup=… link. */
+export async function getOidcSetup(token: string): Promise<OidcSetup> {
+  if (usingMock) {
+    return { email: "you@home.lan", suggested_username: "dad", suggested_name: "Dad" };
+  }
+  return request<OidcSetup>(`/api/auth/oidc/setup/${encodeURIComponent(token)}`);
+}
+
+/** First-run SSO: create the account with the chosen name and sign in. */
+export async function finishOidcSetup(
+  token: string,
+  username: string,
+  display_name?: string,
+): Promise<void> {
+  if (usingMock) return;
+  await request(`/api/auth/oidc/setup/${encodeURIComponent(token)}`, {
+    method: "POST",
+    body: JSON.stringify({ username, display_name }),
+  });
+}
+
 export async function getAuthConfig(): Promise<AuthConfig> {
   const res = await read<{ needs_setup?: boolean; auth: Omit<AuthConfig, "needs_setup"> }>(
     "/api/auth/config",

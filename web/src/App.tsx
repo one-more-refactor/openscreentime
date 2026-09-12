@@ -4,6 +4,7 @@ import { ToastProvider } from "./lib/toast";
 import { ConfirmProvider } from "./lib/confirm";
 import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
+import { Welcome } from "./pages/Welcome";
 import { Family } from "./pages/Family";
 import { ChildDetail } from "./pages/ChildDetail";
 import { Devices } from "./pages/Devices";
@@ -100,6 +101,7 @@ export function App() {
       <ToastProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/welcome" element={<Welcome />} />
         <Route
           element={
             <RequireAuth>

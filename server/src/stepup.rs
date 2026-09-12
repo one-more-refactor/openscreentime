@@ -126,6 +126,10 @@ fn exempt(path: &str) -> bool {
     path.starts_with("/api/auth/register/")
         || path.starts_with("/api/auth/login/")
         || path.starts_with("/api/auth/device/")
+        // First-run SSO signup finish: there is no session yet (the account is
+        // being created), and the endpoint guards itself — a single-use token,
+        // an IdP-verified email, and the zero-admin bootstrap lock.
+        || path.starts_with("/api/auth/oidc/")
         || path == "/api/auth/logout"
         || path == "/api/auth/voucher"
         || path == "/api/auth/stepup/verify"
