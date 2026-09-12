@@ -342,3 +342,84 @@ pub fn run() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(users: Vec<UserStatus>, conn: &str) -> AppView {
+        AppView {
+            username: "kid".into(),
+            status: Some(Status {
+                connection: conn.into(),
+                users,
+                ..Default::default()
+            }),
+            asked: false,
+        }
+    }
+
+    fn kid(remaining: Option<i64>, frozen: bool) -> UserStatus {
+        UserStatus {
+            name: "kid".into(),
+            used_minutes: 20,
+            remaining_minutes: remaining,
+            frozen,
+            freeze_in_secs: None,
+        }
+    }
+
+    #[test]
+    fn time_formatting() {
+        assert_eq!(fmt_left(0), "0 min");
+        assert_eq!(fmt_left(45), "45 min");
+        assert_eq!(fmt_left(60), "1 h 00 min");
+        assert_eq!(fmt_left(125), "2 h 05 min");
+        // Never renders a negative number.
+        assert_eq!(fmt_left(-10), "0 min");
+    }
+
+    #[test]
+    fn headline_reflects_state() {
+        // Plenty of time: white, minutes shown.
+        let (h, c) = view(vec![kid(Some(90), false)], "online").time_headline();
+        assert_eq!(h, "1 h 30 min");
+        assert_eq!(c, FG);
+
+        // Almost out: red.
+        let (_h, c) = view(vec![kid(Some(10), false)], "online").time_headline();
+        assert_eq!(c, ACCENT);
+
+        // Out.
+        let (h, c) = view(vec![kid(Some(0), false)], "online").time_headline();
+        assert_eq!(h, "Time's up for today");
+        assert_eq!(c, ACCENT);
+
+        // Paused wins over any remaining count.
+        let (h, _c) = view(vec![kid(Some(90), true)], "online").time_headline();
+        assert_eq!(h, "Paused");
+
+        // No limit configured.
+        let (h, _c) = view(vec![kid(None, false)], "online").time_headline();
+        assert_eq!(h, "No limit today");
+
+        // Not a managed user on this device.
+        let (h, _c) = view(vec![], "online").time_headline();
+        assert_eq!(h, "This device is managed");
+    }
+
+    #[test]
+    fn connection_words() {
+        assert_eq!(view(vec![], "online").connection().0, "Connected");
+        assert_eq!(
+            view(vec![], "offline_fail_closed").connection().0,
+            "Offline — locked"
+        );
+        let v = AppView {
+            username: "kid".into(),
+            status: None,
+            asked: false,
+        };
+        assert_eq!(v.connection().0, "Not running");
+    }
+}
