@@ -15,6 +15,9 @@ const TRAY_UNIT: &str = include_str!("../systemd/openscreentime-tray.service");
 /// installed on a GUI build — a headless agent has no window to launch.
 const DESKTOP_ENTRY: &str = include_str!("../desktop/openscreentime.desktop");
 const DESKTOP_ICON: &str = include_str!("../desktop/openscreentime.svg");
+/// Autostart entry (opens `ost app` on login, so the device is never silent —
+/// GNOME has no usable tray). Distinct from the app-grid launcher above.
+const DESKTOP_AUTOSTART: &str = include_str!("../desktop/openscreentime-autostart.desktop");
 
 /// The unit names, defined once. They are referenced by the self-updater
 /// (restart after swapping the binary) and by tamper level 3 (masking
@@ -33,6 +36,8 @@ const TRAY_UNIT_PATH: &str = "/etc/systemd/user/openscreentime-tray.service";
 /// anything to open their own window.
 const DESKTOP_ENTRY_PATH: &str = "/usr/share/applications/openscreentime.desktop";
 const DESKTOP_ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/apps/openscreentime.svg";
+/// System-wide autostart (every user's session), so the window opens on login.
+const DESKTOP_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-app.desktop";
 
 pub const BIN_TARGET: &str = "/usr/local/bin/openscreentime";
 /// Short alias, symlinked next to the binary. `ost time` is what a person (or
@@ -155,6 +160,11 @@ fn install_desktop_entry(exec: &Exec) {
     if let Err(e) = exec.write_file(DESKTOP_ICON_PATH, DESKTOP_ICON) {
         tracing::warn!("could not install app icon {DESKTOP_ICON_PATH}: {e}");
     }
+    // Autostart: open the window on login so the device shows something without
+    // the child having to hunt for it in the app grid.
+    if let Err(e) = exec.write_file(DESKTOP_AUTOSTART_PATH, DESKTOP_AUTOSTART) {
+        tracing::warn!("could not install app autostart {DESKTOP_AUTOSTART_PATH}: {e}");
+    }
     // Refresh the desktop database + icon cache so the entry shows up without a
     // relogin. Both are optional tools; a miss just means it appears next login.
     let _ = exec.run("update-desktop-database", &["/usr/share/applications"]);
@@ -169,6 +179,7 @@ fn install_desktop_entry(exec: &Exec) {
 fn remove_desktop_entry() {
     let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
     let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
+    let _ = std::fs::remove_file(DESKTOP_AUTOSTART_PATH);
 }
 
 pub fn install_parent_sudo(exec: &Exec) -> Result<()> {

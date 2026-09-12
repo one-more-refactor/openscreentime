@@ -1,0 +1,14 @@
+[Desktop Entry]
+# Managed by OpenScreenTime — installed to /etc/xdg/autostart by
+# `ost install-service` (GUI build), removed by `ost uninstall`.
+# Opens the on-device window on login so the device is never silent about
+# what it is doing (GNOME shows no usable tray). NoDisplay keeps it out of the
+# app grid — the openscreentime.desktop launcher is the visible entry.
+Type=Application
+Name=OpenScreenTime
+Comment=Your screen time — opens on login so it is always in view
+Exec=/usr/local/bin/openscreentime app
+Icon=openscreentime
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
