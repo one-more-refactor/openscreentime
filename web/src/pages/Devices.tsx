@@ -301,15 +301,21 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
   );
 }
 
+// Last good list, kept across mounts so re-visiting Devices shows the cards
+// instantly and refreshes underneath — no "Checking…" flash on every click.
+let lastDevices: Device[] | null = null;
+
 export function Devices() {
-  const [devices, setDevices] = useState<Device[] | null>(null);
+  const [devices, setDevices] = useState<Device[] | null>(lastDevices);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       // Clone: the mock returns a stable array reference, and an identical
       // reference makes React skip the re-render that updates the verdict.
-      setDevices([...(await api.listDevices())]);
+      const next = [...(await api.listDevices())];
+      lastDevices = next;
+      setDevices(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the devices");
     }

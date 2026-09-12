@@ -1523,47 +1523,32 @@ body[data-leaving="true"] .shell {
 }
 :root > #root { position: relative; z-index: 1; }
 
-/* --- Arrivals: a touch more travel and an ease that settles (ease-out, never a
-   bounce), and a tighter cascade so a page reads as arriving, not assembling. */
+/* --- Arrivals: ONE quiet fade for the whole view, and no per-card cascade.
+   The staggered "rise" made every click read as the page re-assembling itself
+   (and a fast click-through felt broken). A page should just be there. Calmed
+   2026-09-12. */
 @keyframes rise {
-  from { opacity: 0; transform: translateY(14px) scale(0.988); }
-  to   { opacity: 1; transform: translateY(0)     scale(1); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
+.ch-wrap, .fam-wrap, .dev-wrap {
+  animation: rise 120ms var(--ease) both;
+}
+/* Kill the old per-child cascade entirely — no travel, no delays. */
 .ch-wrap > *,
 .fam-wrap > *,
 .dev-wrap > * {
-  animation: rise 460ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: none;
 }
-.ch-wrap > :nth-child(2), .fam-wrap > :nth-child(2), .dev-wrap > :nth-child(2) { animation-delay: 34ms; }
-.ch-wrap > :nth-child(3), .fam-wrap > :nth-child(3), .dev-wrap > :nth-child(3) { animation-delay: 68ms; }
-.ch-wrap > :nth-child(4), .fam-wrap > :nth-child(4), .dev-wrap > :nth-child(4) { animation-delay: 102ms; }
-.ch-wrap > :nth-child(5), .fam-wrap > :nth-child(5), .dev-wrap > :nth-child(5) { animation-delay: 132ms; }
-.ch-wrap > :nth-child(n+6), .fam-wrap > :nth-child(n+6), .dev-wrap > :nth-child(n+6) { animation-delay: 156ms; }
 
-/* --- Cards answer a hand: a clearer lift, and the face leans in a hair. The
-   avatar transition lives here so it only animates on the hover, not on load. */
+/* --- Cards answer a hand, but calmly: a small, steady lift. No rotation, no
+   pounce — conventional, so a hover never looks like a glitch. */
 .fam-card, .dev-card {
   transition: border-color var(--dur-tick) var(--ease),
-    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 160ms var(--ease),
     box-shadow var(--dur-tick) var(--ease);
 }
-.fam-card:hover { transform: translateY(-3px); }
-.fam-card .avring, .fam-card .fam-avatar {
-  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.fam-card:hover .avring, .fam-card:hover .fam-avatar { transform: scale(1.06) rotate(-2deg); }
-
-/* --- The greeting carries the room's warmth: the eyebrow gets a living dot. */
-.fam-wrap .ph-eyebrow::after,
-.ph-eyebrow[data-live]::after {
-  content: "";
-  display: inline-block;
-  width: 5px; height: 5px; margin-left: 0.5rem;
-  border-radius: 50%;
-  background: var(--ok);
-  vertical-align: middle;
-  animation: led-pulse 2.4s var(--ease) infinite;
-}
+.fam-card:hover { transform: translateY(-2px); }
 
 /* --- Press has spring back everywhere the eye follows a tap. */
 .ch-btn:active:not(:disabled),

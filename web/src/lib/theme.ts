@@ -34,6 +34,17 @@ export function applyTheme(theme: Theme, persist = true) {
   bump();
 }
 
+/** First paint. A brand-new visitor gets the warm LIGHT theme by default — a
+ *  family dashboard shouldn't inherit a stark OS dark mode and feel austere.
+ *  Any explicit prior choice (light, dark, or un-pinned follow-system) wins. */
+export function initTheme() {
+  if (localStorage.getItem(KEY) === null) {
+    applyTheme("light", true);
+  } else {
+    applyTheme(getInitialTheme(), false);
+  }
+}
+
 // Until the user toggles explicitly, track the OS live.
 systemDark.addEventListener("change", (e) => {
   if (localStorage.getItem(KEY) === null) {
