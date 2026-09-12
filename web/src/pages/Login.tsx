@@ -151,46 +151,71 @@ export function Login() {
           </div>
         ) : registering ? (
           // ---- First-run registration: passkey only, the only option. ----
-          <div className="flex flex-col gap-4">
+          // A real <form> with named fields so a password manager (1Password,
+          // the browser's own) recognises this as a sign-up and offers to fill
+          // and save the username + passkey.
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void runRegister();
+            }}
+          >
             <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create the first account.</p>
             <TextInput
               label="Username"
+              name="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={username}
               autoComplete="username webauthn"
               onChange={(e) => {
                 setUsername(e.target.value);
                 if (userError) setUserError(null);
               }}
-              onKeyDown={(e) => e.key === "Enter" && void runRegister()}
               placeholder="e.g. dad"
               aria-invalid={!!userError}
               hint={userError ?? "This is how you'll sign in. No email, ever."}
             />
             <TextInput
               label="Display name (optional)"
+              name="name"
+              autoComplete="name"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Parent"
             />
             <PasskeyButton label="Create account" onActivate={runRegister} disabled={!username.trim()} />
-          </div>
+          </form>
         ) : (
           // ---- Login: username → your computer approves; passkey beneath. ----
-          <div className="flex flex-col gap-4">
+          // Wrapped in a <form> with an autocomplete="username webauthn" field so
+          // a password manager surfaces the saved sign-in (and the passkey) here.
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void runDeviceLogin();
+            }}
+          >
             <TextInput
               label="Username"
+              name="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={username}
               autoComplete="username webauthn"
               onChange={(e) => {
                 setUsername(e.target.value);
                 if (userError) setUserError(null);
               }}
-              onKeyDown={(e) => e.key === "Enter" && void runDeviceLogin()}
               placeholder="e.g. dad"
               aria-invalid={!!userError}
               hint={userError ?? undefined}
             />
-            <Button onClick={() => void runDeviceLogin()} disabled={!username.trim()}>
+            <Button type="submit" disabled={!username.trim()}>
               Continue
             </Button>
             <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
@@ -230,7 +255,7 @@ export function Login() {
                 Sign in with {config.oidc_name} →
               </button>
             )}
-          </div>
+          </form>
         )}
 
         {error && (

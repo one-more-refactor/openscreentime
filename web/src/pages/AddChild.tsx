@@ -36,9 +36,13 @@ const BRACKET_BLURB: Record<AgeBracket, string> = {
   adult: "Private self-tracking. Nobody enforces anything; they can block things for themselves.",
 };
 
+/** The faces a parent can pick — the same friendly set as a child's own page. */
+const FACES = ["🦊", "🐼", "🦖", "🚀", "⚽", "🎨", "🐙", "🌟", "🦄", "🐸", "🎮", "🎧", "📚", "🌈", "🐳", "🐯"];
+
 export function AddChild() {
   const { guard } = useConfirm();
   const [name, setName] = useState("");
+  const [face, setFace] = useState<string | null>(null);
   const [birthdate, setBirthdate] = useState("");
   const [override, setOverride] = useState<AgeBracket | null>(null);
   const [theme, setTheme] = useState<Theme | null>(null);
@@ -75,6 +79,9 @@ export function AddChild() {
           age_bracket: bracket,
           theme,
         });
+        // The face is a person-detail, not part of member creation — set it
+        // right after, so a child arrives already looking like themselves.
+        if (face) await api.updateMember(m.id, { avatar: face });
         const dev = await api.createDevice(`${name.trim()}'s computer`, m.id);
         return { m, dev };
       });
@@ -123,6 +130,36 @@ export function AddChild() {
               autoFocus
               autoComplete="off"
             />
+
+            <p className="add-label" style={{ marginTop: "0.6rem" }}>
+              Give them a face <span className="add-optional">optional — they can change it later</span>
+            </p>
+            <div className="pills faces" role="radiogroup" aria-label="Their face">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={face === null}
+                className="pill"
+                data-on={face === null}
+                onClick={() => setFace(null)}
+              >
+                {name.trim() ? name.trim()[0].toUpperCase() : "Aa"}
+              </button>
+              {FACES.map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  role="radio"
+                  aria-checked={face === f}
+                  className="pill pill-face"
+                  data-on={face === f}
+                  aria-label={`Use ${f} as their face`}
+                  onClick={() => setFace(f)}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
 
             <label className="add-label" htmlFor="child-birthdate" style={{ marginTop: "0.6rem" }}>
               When were they born? <span className="add-optional">optional — it picks the age bracket</span>
