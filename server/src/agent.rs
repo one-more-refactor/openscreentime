@@ -758,6 +758,14 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
         }
     }
 
+    // Keepalive. An agent marks itself "online" only while it is hearing from
+    // the server — and that local contact state is what the on-device app shows.
+    // Without a server-initiated frame an idle-but-connected agent would report
+    // itself offline (its window is ~10s), so ping it well inside that window.
+    // A push that can't be delivered also surfaces a half-open socket to drop.
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(6));
+    keepalive.reset(); // first tick one period out — the connect push just ran.
+
     // Reader loop.
     loop {
         tokio::select! {
@@ -771,6 +779,17 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
                     Some(Ok(Message::Binary(_))) => { /* ignore in skeleton */ }
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                }
+            }
+            _ = keepalive.tick() => {
+                // Also refreshes the row's last_seen so the console's "last heard"
+                // stays honest for a device that is connected but quiet.
+                let _ = sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
+                    .bind(device_id)
+                    .execute(&st.db)
+                    .await;
+                if !st.hub.push(device_id, json!({ "type": "ping" })).await {
+                    break;
                 }
             }
             _ = &mut writer => break,
