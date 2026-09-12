@@ -29,6 +29,11 @@ use crate::state::AppState;
 /// `state` parameters expire after this.
 const STATE_TTL: Duration = Duration::from_secs(600);
 
+/// A first-run SSO signup, held after the identity is verified but before the
+/// account exists, expires after this — long enough to pick a name, short
+/// enough that a stale link is useless.
+const SIGNUP_TTL: Duration = Duration::from_secs(1800);
+
 /// Cookie that binds the OIDC `state` to the browser that started the flow.
 /// Without it, `state` existing server-side is not proof the SAME browser began
 /// the login, which enables login-CSRF / session fixation (an attacker primes a
@@ -52,6 +57,19 @@ struct PendingState {
     redirect_to: String,
 }
 
+/// A verified first-run SSO identity, parked while the person chooses their
+/// username. The account is not created — and no session issued — until they
+/// finish, so a half-finished SSO login leaves nothing behind.
+struct PendingSignup {
+    created: Instant,
+    /// The IdP-verified email, kept to stamp on the account they create.
+    email: String,
+    /// A friendly starting point for the username field (email local-part).
+    suggested_username: String,
+    /// The IdP `name` claim (or the local-part), for the display name.
+    suggested_name: String,
+}
+
 /// Discovered provider config + in-flight `state` store.
 pub struct Oidc {
     pub name: String,
@@ -63,6 +81,9 @@ pub struct Oidc {
     redirect_uri: String,
     http: reqwest::Client,
     states: tokio::sync::Mutex<HashMap<String, PendingState>>,
+    /// First-run signups awaiting a chosen username (keyed by an opaque token
+    /// carried in the /welcome URL — never anything sensitive).
+    pending_signups: tokio::sync::Mutex<HashMap<String, PendingSignup>>,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +137,7 @@ pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>
         redirect_uri: format!("{public_url}/api/auth/oidc/callback"),
         http,
         states: tokio::sync::Mutex::new(HashMap::new()),
+        pending_signups: tokio::sync::Mutex::new(HashMap::new()),
     })))
 }
 
@@ -167,26 +189,6 @@ impl Oidc {
             .json()
             .await
     }
-}
-
-/// First-boot bootstrap via SSO: a normalized username from the email's local
-/// part (the passkey path can mint/match it), and the verified email kept on
-/// the row so the next SSO login finds the account again.
-async fn bootstrap_sso_admin(
-    db: &sqlx::PgPool,
-    email: &str,
-    display_name: &str,
-) -> AppResult<(Uuid, Uuid)> {
-    let local = email.split('@').next().unwrap_or("user");
-    let username = crate::auth::normalize_username(local)
-        .unwrap_or_else(|_| format!("user-{}", &gen_token()[..8]));
-    let (tenant_id, admin_id) = create_tenant_with_admin(db, &username, display_name, true).await?;
-    sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
-        .bind(email)
-        .bind(admin_id)
-        .execute(db)
-        .await?;
-    Ok((tenant_id, admin_id))
 }
 
 /// GET /api/auth/config — public; tells the entry page whether SSO exists and
@@ -338,14 +340,34 @@ pub async fn callback(
                 // Family server: no auto-provisioning of extra admins.
                 return Ok(fail(jar, "sso_unknown_account"));
             }
-            // Fresh install: bootstrap tenant + admin, same as the first
-            // passkey registration.
-            let display_name = info
+            // Fresh install: the identity is verified, but the account is not
+            // created yet — the first parent gets to CHOOSE their username (the
+            // same as the passkey path), instead of one derived from their
+            // email. Park the identity and send them to the name-choosing page;
+            // no session is issued until they finish.
+            let local = email.split('@').next().unwrap_or("user");
+            let suggested_username = crate::auth::normalize_username(local)
+                .unwrap_or_else(|_| format!("user-{}", &gen_token()[..8]));
+            let suggested_name = info
                 .name
                 .filter(|n| !n.trim().is_empty())
-                .unwrap_or_else(|| email.split('@').next().unwrap_or("Admin").to_string());
-            let (tenant_id, admin_id) = bootstrap_sso_admin(&st.db, &email, &display_name).await?;
-            (admin_id, tenant_id)
+                .unwrap_or_else(|| local.to_string());
+            let token = gen_token();
+            {
+                let mut pend = oidc.pending_signups.lock().await;
+                pend.retain(|_, s| s.created.elapsed() < SIGNUP_TTL);
+                pend.insert(
+                    token.clone(),
+                    PendingSignup {
+                        created: Instant::now(),
+                        email: email.clone(),
+                        suggested_username,
+                        suggested_name,
+                    },
+                );
+            }
+            let to = format!("{}/welcome?setup={token}", st.public_url);
+            return Ok((jar, Redirect::temporary(&to)));
         }
     };
 
@@ -353,4 +375,90 @@ pub async fn callback(
     let jar = jar.add(session_cookie(sid, st.cookie_secure));
     let to = format!("{}{redirect_to}", st.public_url);
     Ok((jar, Redirect::temporary(&to)))
+}
+
+#[derive(serde::Serialize)]
+pub struct SetupInfo {
+    email: String,
+    suggested_username: String,
+    suggested_name: String,
+}
+
+/// GET /api/auth/oidc/setup/:token — the parked first-run identity behind a
+/// /welcome link, so the page can greet them and pre-fill the name. 404 once it
+/// has expired or been used (they simply sign in again).
+pub async fn setup_info(
+    State(st): State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> AppResult<Json<SetupInfo>> {
+    let oidc = st
+        .oidc
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("sso is not configured".into()))?;
+    let mut pend = oidc.pending_signups.lock().await;
+    pend.retain(|_, s| s.created.elapsed() < SIGNUP_TTL);
+    let s = pend
+        .get(&token)
+        .ok_or_else(|| AppError::NotFound("this setup link has expired — sign in again".into()))?;
+    Ok(Json(SetupInfo {
+        email: s.email.clone(),
+        suggested_username: s.suggested_username.clone(),
+        suggested_name: s.suggested_name.clone(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SetupFinishReq {
+    username: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// POST /api/auth/oidc/setup/:token — create the first-run account with the
+/// chosen username, stamp the verified email, and sign them in. Consumes the
+/// token. `create_tenant_with_admin(require_first = true)` still guards the
+/// zero-admin race, so a second concurrent finisher is refused.
+pub async fn setup_finish(
+    State(st): State<AppState>,
+    jar: CookieJar,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    Json(req): Json<SetupFinishReq>,
+) -> AppResult<(CookieJar, Json<Value>)> {
+    let oidc = st
+        .oidc
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("sso is not configured".into()))?;
+
+    let username = crate::auth::normalize_username(&req.username)?;
+
+    // Take the parked identity out (single-use) only once the username validates,
+    // so a bad name lets them try again rather than burning the link.
+    let pending = {
+        let mut pend = oidc.pending_signups.lock().await;
+        pend.retain(|_, s| s.created.elapsed() < SIGNUP_TTL);
+        if !pend.contains_key(&token) {
+            return Err(AppError::NotFound(
+                "this setup link has expired — sign in again".into(),
+            ));
+        }
+        pend.remove(&token).unwrap()
+    };
+
+    let display_name = req
+        .display_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(pending.suggested_name);
+
+    let (tenant_id, admin_id) =
+        create_tenant_with_admin(&st.db, &username, &display_name, true).await?;
+    sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
+        .bind(&pending.email)
+        .bind(admin_id)
+        .execute(&st.db)
+        .await?;
+
+    let sid = create_session(&st.db, admin_id, tenant_id).await?;
+    let jar = jar.add(session_cookie(sid, st.cookie_secure));
+    Ok((jar, Json(json!({ "ok": true }))))
 }

@@ -218,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/device/start", post(auth_device::start))
         .route("/api/auth/oidc/start", get(auth_oidc::start))
         .route("/api/auth/oidc/callback", get(auth_oidc::callback))
+        .route(
+            "/api/auth/oidc/setup/{token}",
+            get(auth_oidc::setup_info).post(auth_oidc::setup_finish),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::limit_auth,
