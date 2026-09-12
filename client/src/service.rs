@@ -11,6 +11,10 @@ const UNIT: &str = include_str!("../systemd/openscreentime-agent.service");
 const WATCHDOG_SERVICE: &str = include_str!("../systemd/openscreentime-watchdog.service");
 const WATCHDOG_TIMER: &str = include_str!("../systemd/openscreentime-watchdog.timer");
 const TRAY_UNIT: &str = include_str!("../systemd/openscreentime-tray.service");
+/// App-grid launcher for `ost app` (the on-device window) and its icon. Only
+/// installed on a GUI build — a headless agent has no window to launch.
+const DESKTOP_ENTRY: &str = include_str!("../desktop/openscreentime.desktop");
+const DESKTOP_ICON: &str = include_str!("../desktop/openscreentime.svg");
 
 /// The unit names, defined once. They are referenced by the self-updater
 /// (restart after swapping the binary) and by tamper level 3 (masking
@@ -25,6 +29,10 @@ const UNIT_PATH: &str = "/etc/systemd/system/openscreentime-agent.service";
 const WATCHDOG_SVC_PATH: &str = "/etc/systemd/system/openscreentime-watchdog.service";
 const WATCHDOG_TIMER_PATH: &str = "/etc/systemd/system/openscreentime-watchdog.timer";
 const TRAY_UNIT_PATH: &str = "/etc/systemd/user/openscreentime-tray.service";
+/// System-wide (every user's app grid), so a child never has to install
+/// anything to open their own window.
+const DESKTOP_ENTRY_PATH: &str = "/usr/share/applications/openscreentime.desktop";
+const DESKTOP_ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/apps/openscreentime.svg";
 
 pub const BIN_TARGET: &str = "/usr/local/bin/openscreentime";
 /// Short alias, symlinked next to the binary. `ost time` is what a person (or
@@ -136,6 +144,33 @@ fn write_sudoers(exec: &Exec, body: &str) -> Result<()> {
 }
 
 /// Install the PAM service and an (initially empty) sudoers drop-in.
+/// Install the app-grid launcher for `ost app` and its icon, system-wide.
+/// Best-effort: a device without a working window (or a distro that keeps
+/// applications elsewhere) still enforces perfectly; it just lacks the shortcut.
+fn install_desktop_entry(exec: &Exec) {
+    if let Err(e) = exec.write_file(DESKTOP_ENTRY_PATH, DESKTOP_ENTRY) {
+        tracing::warn!("could not install app launcher {DESKTOP_ENTRY_PATH}: {e}");
+        return;
+    }
+    if let Err(e) = exec.write_file(DESKTOP_ICON_PATH, DESKTOP_ICON) {
+        tracing::warn!("could not install app icon {DESKTOP_ICON_PATH}: {e}");
+    }
+    // Refresh the desktop database + icon cache so the entry shows up without a
+    // relogin. Both are optional tools; a miss just means it appears next login.
+    let _ = exec.run("update-desktop-database", &["/usr/share/applications"]);
+    let _ = exec.run(
+        "gtk-update-icon-cache",
+        &["-q", "-t", "-f", "/usr/share/icons/hicolor"],
+    );
+    tracing::info!("app launcher installed ({DESKTOP_ENTRY_PATH})");
+}
+
+/// Remove the app-grid launcher and icon (called by `uninstall`).
+fn remove_desktop_entry() {
+    let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
+    let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
+}
+
 pub fn install_parent_sudo(exec: &Exec) -> Result<()> {
     exec.write_file(PAM_SERVICE_PATH, &pam_service_body())?;
     write_sudoers(exec, &sudoers_body(&[]))?;
@@ -267,6 +302,12 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     if let Err(e) = exec.write_file(TRAY_UNIT_PATH, TRAY_UNIT) {
         tracing::warn!("could not install {TRAY_UNIT_PATH}: {e}");
     }
+    // The on-device window's launcher: an app-grid entry + icon, system-wide so
+    // it appears for every user with no per-user setup. GUI build only — a
+    // headless agent's `app` subcommand just bails.
+    if cfg!(feature = "gui") {
+        install_desktop_entry(&exec);
+    }
     tamper::install_polkit(&exec, 1)?;
     // sudo on this machine asks for the parent code (CONTRACT-0.4 §8). A
     // failure here must not abort the install of enforcement itself.
@@ -312,6 +353,7 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
         ] {
             let _ = std::fs::remove_file(p);
         }
+        remove_desktop_entry();
     }
     remove_parent_sudo(&exec);
     let _ = exec.run("systemctl", &["daemon-reload"]);

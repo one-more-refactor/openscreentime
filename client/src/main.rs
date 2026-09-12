@@ -5,6 +5,8 @@
 //!   --dry-run       log actions instead of executing them (safe as non-root)
 //!   --tamper-max    raise the tamper ceiling to level 3 (opt-in, TAMPER.md)
 
+#[cfg(feature = "gui")]
+mod app;
 mod attrib;
 mod childcli;
 mod client;
@@ -125,6 +127,10 @@ enum Cmd {
     /// approves time requests. Runs as the desktop user (no root).
     #[cfg(feature = "tray")]
     Tray,
+    /// Open the on-device window: time left, connection, and what OpenScreenTime
+    /// can and can't see — with a button to ask a parent for more. Runs as the
+    /// desktop user (no root). Needs a GUI build.
+    App,
     /// Parent recovery: verify the unlock code (read it off the OpenScreenTime
     /// console, or use a recovery code) and suspend enforcement for a while
     /// The guaranteed way back when the agent itself is the problem: persist a
@@ -246,6 +252,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // The on-device window (`ost app`): dispatched here, ahead of the async
+    // runtime's own threads, so the blocking egui event loop owns the main
+    // thread — the same reason `__intro` and `__lockout` run from here.
+    if raw_args.get(1).map(String::as_str) == Some("app") {
+        #[cfg(feature = "gui")]
+        {
+            return app::run();
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("this build has no window; rebuild with --features gui");
+        }
+    }
+
     let cli = Cli::parse();
     let ctx = AgentCtx::new(cli.dry_run, cli.tamper_max, cli.time_accel);
 
@@ -257,6 +277,7 @@ async fn main() -> Result<()> {
     let is_user_cmd = matches!(
         cli.cmd,
         Cmd::Tray
+            | Cmd::App
             | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
@@ -266,7 +287,8 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "tray"))]
     let is_user_cmd = matches!(
         cli.cmd,
-        Cmd::Pair { .. }
+        Cmd::App
+            | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
             | Cmd::Login { .. }
@@ -304,6 +326,16 @@ async fn main() -> Result<()> {
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]
         Cmd::Tray => tray::run(),
+        Cmd::App => {
+            #[cfg(feature = "gui")]
+            {
+                app::run()
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                anyhow::bail!("this build has no window; rebuild with --features gui")
+            }
+        }
         Cmd::Recover => unlock::recover(&ctx).await,
         Cmd::Unlock { code, pin, minutes } => {
             let code = match code.or(pin) {
