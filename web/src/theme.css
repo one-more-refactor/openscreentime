@@ -1496,3 +1496,84 @@ body[data-leaving="true"] .shell {
   text-underline-offset: 2px; min-height: 40px;
 }
 .enrol2fa-later:hover { color: var(--fg); }
+
+/* ============================================================================
+   WARMTH + LIFE (2026-09-12)
+   The bones stay rigorous — grayscale hierarchy, segmented data, red only for
+   the interrupt. This layer adds the human warmth the austere black was missing:
+   a breath of ambient light on the canvas, arrivals that settle instead of
+   snap, and controls that answer a hand. All motion honours reduced-motion via
+   the global guard above.
+   ========================================================================== */
+
+/* --- Ambient canvas: a soft, off-centre warmth so the void feels lit, not dead.
+   Dark only; light mode stays crisp. Fixed + behind everything, painted once. */
+:root:not([data-theme="light"]) body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(70rem 46rem at 78% -10%, rgba(255, 240, 224, 0.08), transparent 58%),
+    radial-gradient(58rem 44rem at 4% 112%, rgba(74, 158, 92, 0.07), transparent 55%);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) body::before { background: none; }
+}
+:root > #root { position: relative; z-index: 1; }
+
+/* --- Arrivals: a touch more travel and an ease that settles (ease-out, never a
+   bounce), and a tighter cascade so a page reads as arriving, not assembling. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px) scale(0.988); }
+  to   { opacity: 1; transform: translateY(0)     scale(1); }
+}
+.ch-wrap > *,
+.fam-wrap > *,
+.dev-wrap > * {
+  animation: rise 460ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.ch-wrap > :nth-child(2), .fam-wrap > :nth-child(2), .dev-wrap > :nth-child(2) { animation-delay: 34ms; }
+.ch-wrap > :nth-child(3), .fam-wrap > :nth-child(3), .dev-wrap > :nth-child(3) { animation-delay: 68ms; }
+.ch-wrap > :nth-child(4), .fam-wrap > :nth-child(4), .dev-wrap > :nth-child(4) { animation-delay: 102ms; }
+.ch-wrap > :nth-child(5), .fam-wrap > :nth-child(5), .dev-wrap > :nth-child(5) { animation-delay: 132ms; }
+.ch-wrap > :nth-child(n+6), .fam-wrap > :nth-child(n+6), .dev-wrap > :nth-child(n+6) { animation-delay: 156ms; }
+
+/* --- Cards answer a hand: a clearer lift, and the face leans in a hair. The
+   avatar transition lives here so it only animates on the hover, not on load. */
+.fam-card, .dev-card {
+  transition: border-color var(--dur-tick) var(--ease),
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow var(--dur-tick) var(--ease);
+}
+.fam-card:hover { transform: translateY(-3px); }
+.fam-card .avring, .fam-card .fam-avatar {
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.fam-card:hover .avring, .fam-card:hover .fam-avatar { transform: scale(1.06) rotate(-2deg); }
+
+/* --- The greeting carries the room's warmth: the eyebrow gets a living dot. */
+.fam-wrap .ph-eyebrow::after,
+.ph-eyebrow[data-live]::after {
+  content: "";
+  display: inline-block;
+  width: 5px; height: 5px; margin-left: 0.5rem;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: middle;
+  animation: led-pulse 2.4s var(--ease) infinite;
+}
+
+/* --- Press has spring back everywhere the eye follows a tap. */
+.ch-btn:active:not(:disabled),
+.fam-cta:active:not(:disabled) { transform: scale(0.97); }
+
+/* --- The "+ Add a child" call-to-action: a warm fill on hover, not just an
+   outline, so the one creative action on the home screen invites a click. */
+.fam-cta {
+  transition: transform var(--dur-tick) var(--ease),
+    border-color var(--dur-tick) var(--ease),
+    background var(--dur-tick) var(--ease),
+    color var(--dur-tick) var(--ease);
+}
