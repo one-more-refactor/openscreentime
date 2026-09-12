@@ -270,15 +270,17 @@ fn retire_legacy_units(exec: &Exec) {
 /// Removes whatever is there first: after an upgrade `sentinel-agent` is a real
 /// file (the previous release), and symlink() will not overwrite it.
 fn link_aliases(exec: &Exec) {
-    for alias in [BIN_ALIAS, LEGACY_BIN] {
-        if exec.dry_run() {
-            tracing::info!(target: "dry_run", "WOULD LINK {alias} → {BIN_TARGET}");
-            continue;
-        }
-        let _ = std::fs::remove_file(alias);
-        if let Err(e) = std::os::unix::fs::symlink(BIN_TARGET, alias) {
-            tracing::warn!("could not link {alias} → {BIN_TARGET}: {e}");
-        }
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD LINK {BIN_ALIAS} → {BIN_TARGET}");
+        tracing::info!(target: "dry_run", "WOULD REMOVE legacy alias {LEGACY_BIN}");
+        return;
+    }
+    // The Sentinel→OpenScreenTime rebrand is done: stop carrying the old
+    // `sentinel-agent` alias and remove it if a previous install left one.
+    let _ = std::fs::remove_file(LEGACY_BIN);
+    let _ = std::fs::remove_file(BIN_ALIAS);
+    if let Err(e) = std::os::unix::fs::symlink(BIN_TARGET, BIN_ALIAS) {
+        tracing::warn!("could not link {BIN_ALIAS} → {BIN_TARGET}: {e}");
     }
 }
 
