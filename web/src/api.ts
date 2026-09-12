@@ -746,6 +746,40 @@ export async function revokeParentToken(id: string): Promise<void> {
 
 // ---- Command queue ----------------------------------------------------------
 
+export interface PingResult {
+  ok: boolean;
+  agent_version?: string;
+  latency_ms?: number;
+}
+
+/** Liveness round-trip: enqueue a ping, then watch the command list until the
+ *  agent acks it (or ~35s pass = no response). "It works" is a returned pong. */
+export async function pingDevice(deviceId: string): Promise<PingResult> {
+  if (usingMock) {
+    await new Promise((r) => setTimeout(r, 600));
+    return { ok: true, agent_version: "0.6.0", latency_ms: 380 };
+  }
+  const t0 = Date.now();
+  const { command_id } = await request<{ command_id: string }>(
+    `/api/devices/${deviceId}/ping`,
+    { method: "POST" },
+  );
+  for (let i = 0; i < 35; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const cmds = await listCommands(deviceId);
+    const c = cmds.find((x) => x.id === command_id);
+    if (c && (c.status === "acked" || c.status === "failed")) {
+      const res = (c.result ?? {}) as { pong?: boolean; agent_version?: string };
+      return {
+        ok: c.status === "acked" && res.pong === true,
+        agent_version: res.agent_version,
+        latency_ms: Date.now() - t0,
+      };
+    }
+  }
+  return { ok: false };
+}
+
 export async function listCommands(deviceId: string): Promise<CommandRow[]> {
   const r = await request<{ commands: CommandRow[] }>(`/api/devices/${deviceId}/commands`);
   return r.commands;

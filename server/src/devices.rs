@@ -544,6 +544,21 @@ pub async fn delete_device(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/devices/{id}/ping` — enqueue a liveness probe. The agent acks
+/// with a pong; the console reads the round-trip off the command list. An
+/// offline device just never acks — which is the answer too.
+pub async fn ping_device(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    get_device_row(&st.db, id, admin.tenant_id).await?;
+    let (cmd_id, delivered) = enqueue_command_delivered(&st, id, "ping", json!({})).await?;
+    Ok(Json(
+        json!({ "command_id": cmd_id, "delivered": delivered }),
+    ))
+}
+
 pub async fn lock_device(
     State(st): State<AppState>,
     admin: AuthAdmin,
