@@ -328,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/devices/{id}/recovery-codes",
             get(devices::recovery_codes_status).post(devices::generate_recovery_codes),
         )
+        .route("/api/devices/{id}/ping", post(devices::ping_device))
         .route("/api/devices/{id}/lock", post(devices::lock_device))
         .route("/api/devices/{id}/unlock", post(devices::unlock_device))
         .route("/api/devices/{id}/users", get(devices::list_device_users))

@@ -2407,6 +2407,19 @@ impl Agent {
                 );
                 json!({ "denied": true, "os_username": os_username, "task_id": task_id })
             }
+            CMD_PING => {
+                // Liveness: prove the client is alive and say what it's doing.
+                // The console reads this off the command ack (a round-trip means
+                // "it works"); an offline device simply never acks.
+                json!({
+                    "pong": true,
+                    "agent_version": env!("CARGO_PKG_VERSION"),
+                    "enforcing": screentime::freezer_usable(),
+                    "frozen_users": self.frozen.len(),
+                    "active_users": self.active_users.len(),
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                })
+            }
             other => {
                 return (
                     ack_failed(&cmd.id, &format!("unknown command '{other}'")),

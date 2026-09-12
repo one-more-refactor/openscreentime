@@ -24,6 +24,9 @@ pub const CMD_DENY_EARN: &str = "deny_earn";
 /// expires_in_secs}` — prompt exactly those OS logins to approve or deny a
 /// web sign-in as `username`.
 pub const CMD_LOGIN_APPROVE: &str = "login_approve";
+/// A liveness probe from the console: the agent acks with a pong (version +
+/// enforcement summary), so a parent can see the client is alive and working.
+pub const CMD_PING: &str = "ping";
 
 /// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
 /// `enrolled` also exist but are written server-side, never by the agent).

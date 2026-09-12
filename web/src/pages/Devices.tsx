@@ -106,6 +106,9 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"crit" | undefined>();
   const [pickingDuration, setPickingDuration] = useState(false);
+  const [pinging, setPinging] = useState(false);
+  const [pingMsg, setPingMsg] = useState<string | null>(null);
+  const [pingTone, setPingTone] = useState<"ok" | "crit" | undefined>();
 
   const d = device;
   const state = stateOf(d);
@@ -132,6 +135,32 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
       setStatusTone("crit");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Liveness: a quiet round-trip that proves the client is alive and enforcing.
+  // Never step-up gated — it changes nothing on the device.
+  async function ping() {
+    setPinging(true);
+    setPingMsg("Pinging…");
+    setPingTone(undefined);
+    try {
+      const r = await api.pingDevice(d.id);
+      if (r.ok) {
+        const secs =
+          r.latency_ms != null ? Math.max(1, Math.round(r.latency_ms / 1000)) : null;
+        const v = r.agent_version ? ` · v${r.agent_version}` : "";
+        setPingMsg(secs != null ? `Answered in ${secs}s${v}` : `Answered${v}`);
+        setPingTone("ok");
+      } else {
+        setPingMsg("No answer — the device may be off or offline.");
+        setPingTone("crit");
+      }
+    } catch (e) {
+      setPingMsg(e instanceof Error ? e.message : "Couldn't reach it.");
+      setPingTone("crit");
+    } finally {
+      setPinging(false);
     }
   }
 
@@ -219,6 +248,10 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
               </button>
             )}
 
+            <button className="ch-btn" disabled={pinging} onClick={() => void ping()}>
+              {pinging ? "Pinging…" : "Ping"}
+            </button>
+
             {!away &&
               (pickingDuration ? (
                 <span className="dev-durations">
@@ -252,6 +285,16 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
       {status && (
         <p className="dev-inline-status" data-tone={statusTone} role="status">
           {status}
+        </p>
+      )}
+
+      {pingMsg && (
+        <p
+          className="dev-inline-status"
+          data-tone={pingTone === "crit" ? "crit" : undefined}
+          role="status"
+        >
+          {pingMsg}
         </p>
       )}
     </li>
