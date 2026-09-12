@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
-import { applyTheme, getInitialTheme } from "./lib/theme";
+import { initTheme } from "./lib/theme";
 import "@fontsource-variable/space-grotesk/wght.css";
 import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
@@ -12,9 +12,9 @@ import "./theme.css";
 import "./addon.css";
 import "./me.css";
 
-// Apply the stored-or-system theme before first paint, without persisting —
-// system-follow stays live until the user explicitly toggles.
-applyTheme(getInitialTheme(), false);
+// Warm light by default for a brand-new visitor; any explicit prior choice
+// (including follow-system) is respected. Runs before first paint.
+initTheme();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root not found");
