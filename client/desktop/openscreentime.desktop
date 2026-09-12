@@ -1,0 +1,13 @@
+[Desktop Entry]
+# Managed by OpenScreenTime — installed to /usr/share/applications by
+# `ost install-service` (GUI build), removed by `ost uninstall`.
+Type=Application
+Name=OpenScreenTime
+GenericName=Screen time
+Comment=See how much screen time is left — and exactly what OpenScreenTime can and can't see
+Exec=/usr/local/bin/openscreentime app
+Icon=openscreentime
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true
+Keywords=screen time;screentime;parental;limit;time left;

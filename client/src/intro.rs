@@ -52,7 +52,7 @@ const SLIDES: &[(&str, &str)] = &[
     ),
     (
         "Need more time?",
-        "Click the OpenScreenTime tray icon and choose Request more time. A parent gets the request and can say yes.",
+        "Open OpenScreenTime from your apps and tap Ask for more time. A parent gets the request and can say yes.",
     ),
     (
         "One more thing",
