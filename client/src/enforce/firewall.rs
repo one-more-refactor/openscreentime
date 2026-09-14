@@ -130,6 +130,14 @@ pub fn render_ruleset(
     // router advertisements ride on it, so dropping it under default-deny
     // doesn't restrict IPv6 — it silently breaks even the allowed ports on v6.
     s.push_str("    meta l4proto ipv6-icmp accept\n");
+    // Admin recovery must NEVER be locked out by enforcement. A fail-closed
+    // lockdown that also drops inbound SSH bricks the device: the parent can't
+    // reach it to unlock it, and there is no remote way back. Always allow SSH
+    // from the local network (RFC1918 + link-local), even under default-deny.
+    // This never helps a managed user evade screen time — freezing is
+    // cgroup-based, not network-based.
+    s.push_str("    ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 22 accept\n");
+    s.push_str("    ip6 saddr fe80::/10 tcp dport 22 accept\n");
     for p in &fw.allow_inbound_ports {
         s.push_str(&format!("    tcp dport {p} accept\n"));
         s.push_str(&format!("    udp dport {p} accept\n"));
