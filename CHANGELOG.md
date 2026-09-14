@@ -18,6 +18,37 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-14
+
+**Headline: a real app on the device, a warmer console, and a lock that can
+never brick the machine.** The client finally shows itself — a proper
+OpenScreenTime window a child can open (or that opens on login), in the same
+warm, light look as the console, instead of a tray icon GNOME never draws. The
+whole console went light-and-friendly by default, and a screen-time stop now
+reads calm and on-brand rather than a black alarm screen. Signing in with SSO
+for the first time lets you pick your own username. And enforcement can no
+longer lock a parent out of their own device.
+
+- **On-device app.** `ost app`: a window showing time left, connection and,
+  plainly, what OpenScreenTime can and can't see, with one button to ask for
+  more. `install-service` adds an app-grid launcher, an icon, and a login
+  autostart; the background companion still delivers notifications and the
+  sign-in-approval prompt.
+- **Device liveness.** A Ping button beside Pause/Resume on each device; the
+  agent answers with its version so a parent can see it is alive.
+- **On-brand client.** The lock screen, the app window and the first-run intro
+  are all in the warm OpenScreenTime palette now — off-white, real type, the
+  activity-ring marque, a calm dark action; red only for a wrong code.
+- **Warmer console.** Light is the default look; personal emoji faces for
+  children (and a face picker when you add one); calmer motion; a login page a
+  password manager can actually read.
+- **Pick your name on SSO sign-up.** A first-run SSO login lands on a Welcome
+  page to choose a username instead of one derived from your email.
+- **Recovery is never locked out.** The firewall always allows SSH from the
+  local network, even under a fail-closed lockdown, so a parent can always
+  reach a device to unlock it. The server also keeps a connected agent honestly
+  shown as "online."
+
 ## [0.6.0] - 2026-09-11
 
 **Headline: your name is your key, and the whole thing got red-teamed.** Sign
