@@ -71,9 +71,9 @@ fn show() {
     use eframe::egui;
 
     // Nothing-style palette (matches the lockout overlay).
-    const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
-    const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
-    const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
+    // OpenScreenTime brand — warm light, matching the console and the app window.
+    const BG: (u8, u8, u8) = (0xf5, 0xf5, 0xf4);
+    const FG: (u8, u8, u8) = (0x1a, 0x1a, 0x1a);
 
     struct IntroApp {
         slide: usize,
@@ -90,8 +90,8 @@ fn show() {
         }
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             let fg = egui::Color32::from_rgb(FG.0, FG.1, FG.2);
-            let faint = egui::Color32::from_rgb(0x8a, 0x8a, 0x8a);
-            let accent = egui::Color32::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2);
+            let bg = egui::Color32::from_rgb(BG.0, BG.1, BG.2);
+            let faint = egui::Color32::from_rgb(0x76, 0x76, 0x76);
             let (title, body) = SLIDES[self.slide.min(SLIDES.len() - 1)];
             let last = self.slide + 1 >= SLIDES.len();
 
@@ -112,15 +112,16 @@ fn show() {
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_space(48.0);
-                ui.colored_label(fg, egui::RichText::new(title).size(34.0).monospace());
+                ui.colored_label(fg, egui::RichText::new(title).size(34.0).strong());
                 ui.add_space(20.0);
-                ui.colored_label(fg, egui::RichText::new(body).size(18.0).monospace());
+                ui.colored_label(fg, egui::RichText::new(body).size(18.0));
                 ui.add_space(40.0);
-                let label = if last { "DONE" } else { "NEXT" };
+                let label = if last { "Done" } else { "Next" };
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new(label).size(18.0).monospace())
-                            .fill(accent),
+                        egui::Button::new(egui::RichText::new(label).size(18.0).strong().color(bg))
+                            .fill(fg)
+                            .rounding(10.0),
                     )
                     .clicked()
                 {
@@ -143,7 +144,10 @@ fn show() {
     if let Err(e) = eframe::run_native(
         "OPENSCREENTIME",
         native,
-        Box::new(|_cc| Ok(Box::new(IntroApp { slide: 0 }))),
+        Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
+            Ok(Box::new(IntroApp { slide: 0 }))
+        }),
     ) {
         tracing::warn!("intro window unavailable: {e}");
     }

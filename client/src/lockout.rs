@@ -1,8 +1,9 @@
 //! The full-screen host interruption — the Duolingo-style lockout / nudge screen.
 //!
-//! Aesthetic (DESIGN.md → "Host-side full-screen interruption"): black background,
-//! dot grid, one big dot-numeral countdown or streak flame in monochrome, a single
-//! accent-red action, mono uppercase copy. Calm and game-like, not punitive.
+//! Aesthetic: the OpenScreenTime brand — a warm off-white full screen, the
+//! activity-ring marque, the stop said plainly in a real sans, and one calm
+//! dark action. Red is kept for a wrong code, amber for the wind-down. Friendly
+//! and game-like, not punitive.
 //!
 //! Presenters:
 //!   * default (headless-safe): renders the screen as an ASCII/log overlay so the
@@ -413,12 +414,43 @@ pub mod gui {
     use base64::Engine;
     use eframe::egui;
 
-    /// Nothing-style palette from DESIGN.md (accent red, near-black bg, off-white fg).
-    const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21);
-    const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
-    const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
-    /// Label ink — quieter than FG, so the PIN prompt does not shout.
-    const FAINT: (u8, u8, u8) = (0x7a, 0x7a, 0x7a);
+    // OpenScreenTime brand — warm light, the same palette as the console. A
+    // screen-time stop should read as "that's it for today", calm and friendly,
+    // not a red alarm; red is kept for the one genuine wrong-code line.
+    const BG: (u8, u8, u8) = (0xf5, 0xf5, 0xf4); // warm off-white
+    const FG: (u8, u8, u8) = (0x1a, 0x1a, 0x1a); // ink
+    const DIM: (u8, u8, u8) = (0x5a, 0x5a, 0x5a);
+    const GREEN: (u8, u8, u8) = (0x2e, 0x7d, 0x46); // the activity ring / ok
+    const AMBER: (u8, u8, u8) = (0x8a, 0x63, 0x00); // the wind-down countdown
+    const ACCENT: (u8, u8, u8) = (0xb3, 0x15, 0x1c); // the stop / a wrong code
+    const LINE: (u8, u8, u8) = (0xcc, 0xcc, 0xcb);
+    /// Label ink — quieter than FG, so the code prompt does not shout.
+    const FAINT: (u8, u8, u8) = (0x76, 0x76, 0x76);
+
+    fn col(c: (u8, u8, u8)) -> egui::Color32 {
+        egui::Color32::from_rgb(c.0, c.1, c.2)
+    }
+
+    /// The activity-ring marque (a short "used" arc on a faint track), the same
+    /// mark as the favicon and the console wordmark.
+    fn ring(ui: &mut egui::Ui, r: f32) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(r * 2.0, r * 2.0), egui::Sense::hover());
+        let c = rect.center();
+        ui.painter()
+            .circle_stroke(c, r * 0.8, egui::Stroke::new(r * 0.3, col(LINE)));
+        let start = -std::f32::consts::FRAC_PI_2;
+        let sweep = std::f32::consts::PI * 0.55;
+        let pts: Vec<egui::Pos2> = (0..=24)
+            .map(|i| {
+                let a = start + sweep * (i as f32 / 24.0);
+                c + egui::vec2(a.cos(), a.sin()) * r * 0.8
+            })
+            .collect();
+        ui.painter().add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(r * 0.3, col(GREEN)),
+        ));
+    }
 
     /// Minutes granted by a verified early dismiss. The parent PIN is the real
     /// escape hatch (enough to matter); a solved challenge is a short breather
@@ -613,7 +645,9 @@ pub mod gui {
         if let Err(e) = eframe::run_native(
             "OPENSCREENTIME",
             native,
-            Box::new(move |_cc| {
+            Box::new(move |cc| {
+                // Light egui chrome to match the warm brand (egui defaults to dark).
+                cc.egui_ctx.set_visuals(egui::Visuals::light());
                 let deadline = spec.countdown_secs.map(|s| {
                     std::time::Instant::now() + std::time::Duration::from_secs(u64::from(s))
                 });
@@ -655,151 +689,166 @@ pub mod gui {
             ]
         }
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            let fg = egui::Color32::from_rgb(FG.0, FG.1, FG.2);
-            let accent = egui::Color32::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2);
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(120.0);
-                    ui.colored_label(
-                        fg,
-                        egui::RichText::new(&self.spec.headline)
-                            .size(64.0)
-                            .monospace(),
-                    );
-                    ui.add_space(16.0);
-                    ui.colored_label(
-                        fg,
-                        egui::RichText::new(&self.spec.detail)
-                            .size(22.0)
-                            .monospace(),
-                    );
-                    // Live save-your-work countdown, if this is a graced lockout.
-                    if let Some(deadline) = self.deadline {
-                        let remaining = deadline
-                            .saturating_duration_since(std::time::Instant::now())
-                            .as_secs();
-                        ui.add_space(20.0);
+            let fg = col(FG);
+            let dim = col(DIM);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::default()
+                        .fill(col(BG))
+                        .inner_margin(egui::Margin::same(24.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space((ui.available_height() * 0.12).min(120.0));
+
+                        // The wordmark: the activity-ring marque + name, centred.
+                        ui.horizontal(|ui| {
+                            ui.add_space(((ui.available_width() - 185.0) / 2.0).max(0.0));
+                            ring(ui, 15.0);
+                            ui.add_space(8.0);
+                            ui.colored_label(
+                                dim,
+                                egui::RichText::new("OpenScreenTime").size(15.0).strong(),
+                            );
+                        });
+                        ui.add_space(34.0);
+
+                        // The stop, said plainly — a real sans, not a wall of mono.
                         ui.colored_label(
-                            accent,
-                            egui::RichText::new(format!("SCREEN PAUSES IN {remaining}S"))
-                                .size(30.0)
-                                .monospace(),
+                            fg,
+                            egui::RichText::new(&self.spec.headline).size(46.0).strong(),
                         );
-                        // Keep ticking even without input events.
-                        ctx.request_repaint_after(std::time::Duration::from_millis(500));
-                    }
-                    ui.add_space(40.0);
-                    let prompt = self.spec.challenge.prompt();
-                    if !prompt.is_empty() {
-                        ui.colored_label(fg, egui::RichText::new(prompt).size(28.0).monospace());
-                    }
-                    // Math / parent-PIN challenges gate the early dismiss on a
-                    // typed answer, verified by `Challenge::verify`. `Wait` and
-                    // `None` have no typed input, so the action button alone
-                    // dismisses (Wait's cooldown isn't separately timed here —
-                    // the tick loop re-freezes if dismissed early and still
-                    // out of policy).
-                    // A parent-code input box is also offered on non-ParentPin
-                    // challenges when a code is configured, since it's always a
-                    // valid master escape (a parent physically present can
-                    // always get in).
-                    // The maths answer is visible; the code never is.
-                    if matches!(self.spec.challenge, Challenge::Math { .. }) {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.input)
-                                .hint_text("type your answer")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        ui.add_space(16.0);
-                    }
-                    if self.spec.parent.configured() {
-                        ui.label(
-                            egui::RichText::new(
-                                "Unlock code (from the OpenScreenTime console, or a recovery code)",
-                            )
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(FAINT.0, FAINT.1, FAINT.2)),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.pin)
-                                .password(true)
-                                .hint_text("123 456")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if let Some(msg) = &self.pin_msg {
-                            ui.label(
-                                egui::RichText::new(msg)
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2)),
+                        ui.add_space(12.0);
+                        ui.colored_label(dim, egui::RichText::new(&self.spec.detail).size(19.0));
+
+                        // Live save-your-work countdown — amber wind-down, not a red alarm.
+                        if let Some(deadline) = self.deadline {
+                            let remaining = deadline
+                                .saturating_duration_since(std::time::Instant::now())
+                                .as_secs();
+                            ui.add_space(18.0);
+                            ui.colored_label(
+                                col(AMBER),
+                                egui::RichText::new(format!(
+                                    "Saving your work — pausing in {remaining}s"
+                                ))
+                                .size(18.0)
+                                .strong(),
                             );
+                            // Keep ticking even without input events.
+                            ctx.request_repaint_after(std::time::Duration::from_millis(500));
                         }
-                        ui.add_space(16.0);
-                    }
-                    ui.add_space(24.0);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(&self.spec.action)
-                                    .size(20.0)
-                                    .monospace(),
-                            )
-                            .fill(accent),
-                        )
-                        .clicked()
-                    {
-                        // A verified dismissal must actually UNLOCK: hand the
-                        // runner an unlock grant, sized by how it was earned.
-                        // (Closing the window alone changes nothing — the tick
-                        // loop re-freezes — which made the challenge feel
-                        // rigged. Never again.)
-                        let verdict =
-                            if self.spec.parent.configured() && !self.pin.trim().is_empty() {
-                                Some(self.spec.parent.verifier().verify(self.pin.trim()))
-                            } else {
-                                None
-                            };
-                        let challenge_ok = self.spec.challenge.verify(&self.input, None);
-                        if let Some(v) = verdict.as_ref().filter(|v| v.accepted()) {
-                            let kind = match v {
-                                crate::parentcode::Verdict::Backup => "backup".to_string(),
-                                crate::parentcode::Verdict::Recovery(id) => {
-                                    format!("recovery#{id}")
-                                }
-                                _ => "pin".to_string(),
-                            };
-                            super::write_unlock_grant(
-                                &self.spec.for_user,
-                                GRANT_PARENT_PIN_MIN,
-                                &kind,
+
+                        ui.add_space(34.0);
+                        let prompt = self.spec.challenge.prompt();
+                        if !prompt.is_empty() {
+                            ui.colored_label(fg, egui::RichText::new(prompt).size(24.0).strong());
+                            ui.add_space(12.0);
+                        }
+                        // Math / parent-PIN challenges gate the early dismiss on a
+                        // typed answer, verified by `Challenge::verify`. `Wait`/`None`
+                        // have no typed input, so the action button alone dismisses.
+                        // The parent-code box is always offered when a code is set —
+                        // a parent physically present can always get in. The maths
+                        // answer is visible; the code never is.
+                        if matches!(self.spec.challenge, Challenge::Math { .. }) {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.input)
+                                    .hint_text("type your answer")
+                                    .desired_width(240.0),
                             );
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else if challenge_ok {
-                            // `Challenge::None` (nudge-only) verifies trivially:
-                            // it grants nothing and simply closes.
-                            if matches!(self.spec.challenge, Challenge::Math { .. }) {
+                            ui.add_space(14.0);
+                        }
+                        if self.spec.parent.configured() {
+                            ui.colored_label(
+                                col(FAINT),
+                                egui::RichText::new(
+                                    "A parent's unlock code (from the console, or a recovery code)",
+                                )
+                                .size(12.0),
+                            );
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pin)
+                                    .password(true)
+                                    .hint_text("123 456")
+                                    .desired_width(240.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if let Some(msg) = &self.pin_msg {
+                                ui.add_space(6.0);
+                                ui.colored_label(col(ACCENT), egui::RichText::new(msg).size(12.0));
+                            }
+                            ui.add_space(6.0);
+                        }
+                        ui.add_space(20.0);
+                        if ui
+                            .add_sized(
+                                [240.0, 46.0],
+                                egui::Button::new(
+                                    egui::RichText::new(&self.spec.action)
+                                        .size(18.0)
+                                        .strong()
+                                        .color(col(BG)),
+                                )
+                                .fill(fg)
+                                .rounding(10.0),
+                            )
+                            .clicked()
+                        {
+                            // A verified dismissal must actually UNLOCK: hand the
+                            // runner an unlock grant, sized by how it was earned.
+                            // (Closing the window alone changes nothing — the tick
+                            // loop re-freezes — which made the challenge feel
+                            // rigged. Never again.)
+                            let verdict =
+                                if self.spec.parent.configured() && !self.pin.trim().is_empty() {
+                                    Some(self.spec.parent.verifier().verify(self.pin.trim()))
+                                } else {
+                                    None
+                                };
+                            let challenge_ok = self.spec.challenge.verify(&self.input, None);
+                            if let Some(v) = verdict.as_ref().filter(|v| v.accepted()) {
+                                let kind = match v {
+                                    crate::parentcode::Verdict::Backup => "backup".to_string(),
+                                    crate::parentcode::Verdict::Recovery(id) => {
+                                        format!("recovery#{id}")
+                                    }
+                                    _ => "pin".to_string(),
+                                };
                                 super::write_unlock_grant(
                                     &self.spec.for_user,
-                                    GRANT_CHALLENGE_MIN,
-                                    "challenge",
+                                    GRANT_PARENT_PIN_MIN,
+                                    &kind,
                                 );
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else if challenge_ok {
+                                // `Challenge::None` (nudge-only) verifies trivially:
+                                // it grants nothing and simply closes.
+                                if matches!(self.spec.challenge, Challenge::Math { .. }) {
+                                    super::write_unlock_grant(
+                                        &self.spec.for_user,
+                                        GRANT_CHALLENGE_MIN,
+                                        "challenge",
+                                    );
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else if matches!(
+                                self.spec.challenge,
+                                Challenge::Wait { .. } | Challenge::None
+                            ) {
+                                // Wait/None: the typed box (when shown) is only the
+                                // optional PIN escape — the button alone still
+                                // dismisses, granting nothing.
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else {
+                                self.pin_msg = verdict.map(|v| v.message());
+                                self.input.clear();
+                                self.pin.clear();
                             }
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else if matches!(
-                            self.spec.challenge,
-                            Challenge::Wait { .. } | Challenge::None
-                        ) {
-                            // Wait/None: the typed box (when shown) is only the
-                            // optional PIN escape — the button alone still
-                            // dismisses, granting nothing.
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else {
-                            self.pin_msg = verdict.map(|v| v.message());
-                            self.input.clear();
-                            self.pin.clear();
                         }
-                    }
+                    });
                 });
-            });
         }
     }
 }
