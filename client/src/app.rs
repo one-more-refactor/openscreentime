@@ -79,12 +79,14 @@ fn request_more_time() -> bool {
 // The window
 // ---------------------------------------------------------------------------
 
-// Nothing-style palette, matching the lockout overlay and the first-run intro.
-const BG: (u8, u8, u8) = (0x0a, 0x0a, 0x0a);
-const FG: (u8, u8, u8) = (0xfa, 0xfa, 0xfa);
-const FAINT: (u8, u8, u8) = (0x8a, 0x8a, 0x8a);
-const ACCENT: (u8, u8, u8) = (0xd7, 0x19, 0x21); // stop red
-const GOOD: (u8, u8, u8) = (0x4a, 0x9e, 0x5c); // the ring green
+// OpenScreenTime brand — warm light, matching the console, the lock screen and
+// the first-run intro.
+const BG: (u8, u8, u8) = (0xf5, 0xf5, 0xf4); // warm off-white
+const FG: (u8, u8, u8) = (0x1a, 0x1a, 0x1a); // ink
+const FAINT: (u8, u8, u8) = (0x76, 0x76, 0x76);
+const LINE: (u8, u8, u8) = (0xcc, 0xcc, 0xcb); // ring track / hairlines
+const ACCENT: (u8, u8, u8) = (0xb3, 0x15, 0x1c); // the stop, used sparingly
+const GOOD: (u8, u8, u8) = (0x2e, 0x7d, 0x46); // the ring green
 
 struct AppView {
     username: String,
@@ -233,8 +235,14 @@ impl eframe::App for AppView {
                     if ui
                         .add_sized(
                             [ui.available_width().min(320.0), 44.0],
-                            egui::Button::new(egui::RichText::new(label).size(16.0).strong())
-                                .fill(col(ACCENT)),
+                            egui::Button::new(
+                                egui::RichText::new(label)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(col(BG)),
+                            )
+                            .fill(col(FG))
+                            .rounding(10.0),
                         )
                         .clicked()
                     {
@@ -286,7 +294,7 @@ fn dot(ui: &mut egui::Ui, c: (u8, u8, u8)) {
 fn ring(ui: &mut egui::Ui, r: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(r * 2.0, r * 2.0), egui::Sense::hover());
     let c = rect.center();
-    let stroke_track = egui::Stroke::new(r * 0.32, col((0x33, 0x33, 0x33)));
+    let stroke_track = egui::Stroke::new(r * 0.32, col(LINE));
     ui.painter().circle_stroke(c, r * 0.78, stroke_track);
     // A short "used" arc from the top, clockwise ~100°.
     let mut pts = Vec::new();
@@ -330,7 +338,9 @@ pub fn run() -> anyhow::Result<()> {
     if let Err(e) = eframe::run_native(
         "OPENSCREENTIME",
         native,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Light egui chrome to match the warm brand (egui defaults to dark).
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
             Ok(Box::new(AppView {
                 username,
                 status: initial,
