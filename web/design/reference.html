@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenScreenTime — Design language reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   OpenScreenTime — "The Ring" design language. One activity ring, one warm
+   sans, colour used for reassurance not decoration. This file is the visual
+   source of truth: every token and every core component, in both themes.
+   ========================================================================== */
+
+/* ---- TOKENS: light (the default) ---------------------------------------- */
+:root, .theme.light {
+  --bg:          #f4f2ee;   /* warm paper */
+  --surface:     #ffffff;
+  --surface-2:   #ecebe6;   /* sunken: tracks, ghosts, inset fills */
+  --rail:        #efede8;   /* nav plane, recedes under white cards */
+  --line:        #e6e3dd;   /* hairline */
+  --line-2:      #d5d1c9;   /* stronger edge: inputs, secondary buttons */
+
+  --ink:         #1e1c19;   /* primary text (13.9:1 on surface) */
+  --ink-2:       #57544e;   /* secondary text (7.0:1) */
+  --ink-3:       #726e66;   /* meta / captions — AA at >=12.5px (5.2:1) */
+
+  --brand:       #2e7d46;   /* the ring. Affordance + healthy progress (4.8:1) */
+  --brand-strong:#266a3b;   /* hover / pressed */
+  --brand-tint:  #e4f1e8;   /* selected fills, success wash */
+  --brand-ink:   #1c5c33;   /* green text on tint / white (5.6:1) */
+
+  --warn:        #8a6300;   /* attention / transition — amber text (4.9:1) */
+  --warn-tint:   #f7edd6;
+  --stop:        #b3151c;   /* the interrupt. Locked, over, destructive (5.9:1) */
+  --stop-tint:   #f8e3e2;
+
+  --focus:       #2e7d46;
+
+  --shadow-1: 0 1px 2px rgba(30,26,18,.05), 0 1px 3px rgba(30,26,18,.06);
+  --shadow-2: 0 4px 12px rgba(30,26,18,.07), 0 14px 30px -10px rgba(30,26,18,.14);
+
+  --r-sm: 10px;   /* inputs, chips, tiles */
+  --r:    16px;   /* cards */
+  --r-lg: 24px;   /* modals, hero cards */
+
+  --dur-1: 140ms; /* hover / press */
+  --dur-2: 240ms; /* enter / state change */
+  --dur-3: 640ms; /* data: the ring drawing, bars filling */
+  --ease:  cubic-bezier(.2,.7,.2,1);
+
+  --font: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-code: "Space Mono", ui-monospace, monospace;
+}
+
+/* ---- TOKENS: dark (web console only; on-device stays light) -------------- */
+.theme.dark {
+  --bg:          #171614;
+  --surface:     #201e1b;
+  --surface-2:   #2a2723;
+  --rail:        #131211;
+  --line:        #302c27;
+  --line-2:      #423d37;
+
+  --ink:         #f3f0ea;
+  --ink-2:       #b4aea4;
+  --ink-3:       #8b857b;
+
+  --brand:       #46b06a;
+  --brand-strong:#5cc07e;
+  --brand-tint:  #1e3a28;
+  --brand-ink:   #8fe0a6;
+
+  --warn:        #d8ab4a;
+  --warn-tint:   #38300f;
+  --stop:        #e5595c;
+  --stop-tint:   #3a1d1e;
+
+  --focus:       #46b06a;
+
+  --shadow-1: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
+  --shadow-2: 0 6px 18px rgba(0,0,0,.5), 0 18px 40px -12px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: #dedad2;
+  color: var(--ink);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* two theme panels side by side; each is a self-contained surface */
+.stage { display: grid; grid-template-columns: 1fr 1fr; }
+@media (max-width: 1100px){ .stage { grid-template-columns: 1fr; } }
+.theme {
+  background: var(--bg);
+  color: var(--ink);
+  padding: 40px clamp(20px, 3vw, 48px) 96px;
+  min-height: 100vh;
+}
+.theme.light { border-right: 1px solid #cfcabf; }
+
+/* subtle warmth on the canvas — both modes get it, so the default isn't the flat one */
+.theme.light { background-image: radial-gradient(60rem 40rem at 100% -10%, rgba(46,125,70,.05), transparent 60%); }
+.theme.dark  { background-image: radial-gradient(60rem 40rem at 100% -10%, rgba(70,176,106,.07), transparent 60%); }
+
+/* ---- doc scaffolding ----------------------------------------------------- */
+.masthead { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom: 8px; }
+.themetag {
+  font-size: 12.5px; font-weight: 700; letter-spacing:.04em; text-transform: uppercase;
+  color: var(--ink-3); padding: 3px 10px; border:1px solid var(--line-2); border-radius: 999px;
+}
+.lede { color: var(--ink-2); max-width: 46ch; margin: 4px 0 40px; }
+h2.sec {
+  font-size: 13px; font-weight: 700; letter-spacing:.05em; text-transform: uppercase;
+  color: var(--ink-3); margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+.col { display:flex; flex-direction:column; gap:12px; }
+.grid { display:grid; gap:16px; }
+.note { font-size: 12.5px; color: var(--ink-3); margin: 6px 0 0; }
+
+/* ============================================================================
+   TYPE
+   ========================================================================== */
+.wordmark { display:inline-flex; align-items:center; gap:.42em; font-size: 30px; letter-spacing:-.02em; line-height:1; font-weight: 700; }
+.wordmark .wm-open { font-weight: 500; color: var(--ink-2); }
+.wordmark svg { width:.92em; height:.92em; }
+
+.t-display { font-size: 56px; font-weight: 800; letter-spacing:-.03em; line-height:1; font-variant-numeric: tabular-nums; }
+.t-h1 { font-size: 28px; font-weight: 700; letter-spacing:-.02em; line-height:1.15; margin:0; }
+.t-h2 { font-size: 18px; font-weight: 600; line-height:1.3; margin:0; }
+.t-h3 { font-size: 16px; font-weight: 600; margin:0; }
+.t-body { font-size: 16px; font-weight: 400; margin:0; }
+.t-sm { font-size: 14px; margin:0; color: var(--ink-2); }
+.t-label { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.t-meta { font-size: 12.5px; font-weight: 500; color: var(--ink-3); }
+.t-code { font-family: var(--font-code); font-variant-numeric: tabular-nums; letter-spacing:.06em; }
+.type-spec { display:flex; align-items:baseline; gap:14px; padding: 10px 0; border-bottom:1px solid var(--line); }
+.type-spec .meta { margin-left:auto; font-size:12.5px; color:var(--ink-3); font-family: var(--font-code); white-space:nowrap; }
+
+/* ============================================================================
+   SWATCHES
+   ========================================================================== */
+.swatches { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap:12px; }
+.sw { border:1px solid var(--line); border-radius: var(--r-sm); overflow:hidden; background:var(--surface); }
+.sw .chip { height: 56px; }
+.sw .meta { padding: 8px 10px; }
+.sw .nm { font-size: 12.5px; font-weight:600; }
+.sw .hx { font-size: 11.5px; color: var(--ink-3); font-family: var(--font-code); }
+
+/* ============================================================================
+   BUTTONS — one grammar, four roles, three sizes
+   ========================================================================== */
+.btn {
+  font-family: var(--font); font-weight: 600; font-size: 15px;
+  border-radius: 999px; border: 1px solid transparent; cursor: pointer;
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  padding: 0 20px; min-height: 44px; white-space: nowrap;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.btn:active { transform: scale(.98); }
+.btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btn.sm { min-height: 36px; font-size: 14px; padding: 0 14px; }
+.btn.lg { min-height: 52px; font-size: 17px; padding: 0 28px; }
+
+.btn.primary { background: var(--brand); color: #fff; box-shadow: var(--shadow-1); }
+.btn.primary:hover { background: var(--brand-strong); }
+.btn.primary:focus-visible { outline-color: var(--ink); }
+.theme.dark .btn.primary { color: #0c1a10; }
+
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--line-2); box-shadow: var(--shadow-1); }
+.btn.secondary:hover { background: var(--surface-2); }
+
+.btn.quiet { background: transparent; color: var(--ink-2); }
+.btn.quiet:hover { background: var(--surface-2); color: var(--ink); }
+
+.btn.danger { background: transparent; color: var(--stop); border-color: color-mix(in srgb, var(--stop) 40%, transparent); }
+.btn.danger:hover { border-color: var(--stop); background: var(--stop-tint); }
+.btn.danger.solid { background: var(--stop); color:#fff; border-color: var(--stop); }
+.btn.danger.solid:hover { background: color-mix(in srgb, var(--stop) 82%, #000); }
+
+.btn:disabled { opacity: .45; cursor: default; transform:none; box-shadow:none; }
+
+/* ============================================================================
+   INPUTS
+   ========================================================================== */
+.field { display:flex; flex-direction:column; gap:6px; max-width: 320px; }
+.field > label { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.input, .select {
+  font-family: var(--font); font-size: 16px; color: var(--ink);
+  background: var(--surface); border:1px solid var(--line-2); border-radius: var(--r-sm);
+  padding: 0 14px; min-height: 44px; width: 100%;
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.input::placeholder { color: var(--ink-3); }
+.input:focus, .select:focus { outline:none; border-color: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent); }
+.input.err { border-color: var(--stop); }
+.field .hint { font-size: 12.5px; color: var(--ink-3); }
+.field .hint.err { color: var(--stop); }
+.select { appearance:none; background-image:
+  linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+  linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+
+/* code input (the one place mono lives) */
+.codebox { font-family: var(--font-code); font-size: 22px; letter-spacing:.14em; font-weight:700;
+  color: var(--ink); background: var(--surface-2); border:1px solid var(--line-2);
+  border-radius: var(--r-sm); padding: 12px 16px; display:inline-block; font-variant-numeric: tabular-nums; }
+
+/* ============================================================================
+   CARDS
+   ========================================================================== */
+.card { background: var(--surface); border:1px solid var(--line); border-radius: var(--r);
+  box-shadow: var(--shadow-1); padding: 20px; }
+.card.hoverable { transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease); cursor:pointer; }
+.card.hoverable:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+
+.famcard { display:flex; gap:16px; align-items:flex-start; }
+.famcard .body { min-width:0; flex:1; }
+.famcard .nm { font-size: 17px; font-weight: 700; margin:0 0 2px; }
+.famcard .meta { font-size: 12.5px; color: var(--ink-3); font-weight:500; margin:0 0 12px; }
+.timeline { font-size: 14px; color: var(--ink-2); margin: 10px 0 0; }
+.timeline strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* segmented budget bar: green within budget, red when over, 15-min cells */
+.budget { position:relative; height: 8px; border-radius: 999px; background: var(--surface-2); overflow:hidden; }
+.budget > i { display:block; height:100%; background: var(--brand); border-radius:999px; }
+.budget.over > i { background: var(--stop); }
+
+/* device card */
+.devcard { display:flex; flex-direction:column; gap:14px; }
+.devhead { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+.state { display:inline-flex; align-items:center; gap:7px; font-size:13px; font-weight:600; }
+.state .dot { width:8px; height:8px; border-radius:999px; background: var(--ink-3); }
+.state.ok { color: var(--brand-ink); } .state.ok .dot { background: var(--brand); }
+.state.warn { color: var(--warn); } .state.warn .dot { background: var(--warn); }
+.state.stop { color: var(--stop); } .state.stop .dot { background: var(--stop); }
+.facts { display:grid; gap:8px; margin:0; }
+.facts .f { display:flex; justify-content:space-between; font-size:14px; }
+.facts .f dt { color: var(--ink-3); margin:0; } .facts .f dd { margin:0; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* ============================================================================
+   AVATAR + RING — the mark
+   ========================================================================== */
+.avatar { position:relative; display:inline-grid; place-items:center; flex:none; }
+.avatar svg { position:absolute; inset:0; }
+.avatar .disc { border-radius:999px; display:grid; place-items:center; font-weight:700; }
+.ringcase { display:flex; gap:24px; flex-wrap:wrap; }
+.ringcase figure { margin:0; display:grid; justify-items:center; gap:8px; }
+.ringcase figcaption { font-size:12.5px; color:var(--ink-3); }
+
+/* ============================================================================
+   CHIPS / PILLS / TOGGLES / STATUS
+   ========================================================================== */
+.pill {
+  font-family: var(--font); font-size: 14px; font-weight: 500; cursor:pointer;
+  background: var(--surface); color: var(--ink-2); border:1px solid var(--line-2);
+  border-radius: 999px; padding: 8px 14px; min-height: 40px; display:inline-flex; align-items:center; gap:8px;
+  transition: all var(--dur-1) var(--ease);
+}
+.pill:hover { color: var(--ink); border-color: var(--ink-3); }
+.pill[aria-pressed="true"] { background: var(--brand-tint); color: var(--brand-ink); border-color: color-mix(in srgb, var(--brand) 45%, transparent); font-weight:600; }
+.theme.dark .pill[aria-pressed="true"] { color: var(--brand-ink); }
+
+.chip { display:inline-flex; align-items:center; gap:8px; background: var(--surface); border:1px solid var(--line);
+  border-radius: 999px; padding: 6px 8px 6px 14px; font-size: 13px; color: var(--ink); }
+.chip button { border:none; background:none; cursor:pointer; color: var(--ink-3); width:24px; height:24px; border-radius:999px; font-size:14px; line-height:1; }
+.chip button:hover { color: var(--stop); background: var(--stop-tint); }
+
+.tag { display:inline-flex; align-items:center; gap:6px; font-size: 12.5px; font-weight:600; border-radius: 999px; padding: 4px 10px; }
+.tag.ok { background: var(--brand-tint); color: var(--brand-ink); }
+.tag.warn { background: var(--warn-tint); color: var(--warn); }
+.tag.stop { background: var(--stop-tint); color: var(--stop); }
+.tag.neutral { background: var(--surface-2); color: var(--ink-2); }
+
+/* segmented control */
+.seg { display:inline-flex; padding: 4px; gap:4px; background: var(--surface-2); border-radius: 999px; }
+.seg button { border:none; background:none; border-radius:999px; padding: 8px 16px; font-family:var(--font); font-size:14px; font-weight:600; color: var(--ink-2); cursor:pointer; min-height:36px; }
+.seg button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1); }
+
+/* ============================================================================
+   NAV
+   ========================================================================== */
+.rail { width: 240px; background: var(--rail); border:1px solid var(--line); border-radius: var(--r);
+  padding: 16px 12px; display:flex; flex-direction:column; gap:4px; }
+.navitem { display:flex; align-items:center; gap:12px; padding: 10px 14px; border-radius: 999px;
+  color: var(--ink-2); font-weight: 600; font-size: 15px; text-decoration:none; cursor:pointer; }
+.navitem:hover { background: var(--surface-2); color: var(--ink); }
+.navitem.active { background: var(--brand-tint); color: var(--brand-ink); }
+.navitem .ic { width:20px; height:20px; flex:none; }
+.railsec { font-size: 12.5px; font-weight:600; color: var(--ink-3); padding: 16px 14px 6px; }
+.railchild { display:flex; align-items:center; gap:10px; padding: 8px 14px; border-radius: 12px; text-decoration:none; color:var(--ink); }
+.railchild:hover { background: var(--surface-2); }
+.railchild .nm { flex:1; font-size:14px; }
+.railchild .left { font-size:13px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* bottom nav (mobile) */
+.bottomnav { display:flex; background: var(--surface); border:1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2); padding: 8px; max-width: 380px; }
+.bottomnav a { flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding: 8px; border-radius: 14px;
+  text-decoration:none; color: var(--ink-3); font-size: 11.5px; font-weight:600; }
+.bottomnav a.active { color: var(--brand-ink); background: var(--brand-tint); }
+.bottomnav a .ic { width:22px; height:22px; }
+
+/* ============================================================================
+   MODAL
+   ========================================================================== */
+.modaldemo { position: relative; border-radius: var(--r-lg); overflow:hidden; border:1px solid var(--line); min-height: 260px; }
+.modaldemo .scrim { position:absolute; inset:0; background: rgba(30,26,18,.5); }
+.modal { position: relative; margin: 40px auto; width: min(90%, 380px); background: var(--surface);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-2); overflow:hidden; }
+.modal .head { padding: 18px 20px 0; }
+.modal .head h3 { margin:0; font-size:18px; font-weight:700; }
+.modal .bd { padding: 8px 20px 4px; color: var(--ink-2); font-size:14px; }
+.modal .ft { display:flex; justify-content:flex-end; gap:10px; padding: 16px 20px 20px; }
+
+/* ============================================================================
+   STATES
+   ========================================================================== */
+.empty { text-align:center; padding: 40px 24px; border:1px dashed var(--line-2); border-radius: var(--r); }
+.empty p { color: var(--ink-2); margin: 12px 0 20px; }
+.skel { background: var(--surface-2); border-radius: 8px; animation: breathe 1.8s var(--ease) infinite; }
+@keyframes breathe { 0%,100%{opacity:.9} 50%{opacity:.5} }
+.banner { display:flex; align-items:center; gap:12px; padding: 14px 16px; border-radius: var(--r-sm); font-size:14px; }
+.banner.err { background: var(--stop-tint); color: var(--stop); }
+.banner.warn { background: var(--warn-tint); color: var(--warn); }
+.banner.ok { background: var(--brand-tint); color: var(--brand-ink); }
+.banner .ic { flex:none; }
+
+/* ============================================================================
+   KID HERO + LOCK
+   ========================================================================== */
+.kid { background: var(--surface); border:1px solid var(--line); border-radius: var(--r-lg); padding: 32px; text-align:center; max-width: 340px; }
+.kid .hi { font-size: 22px; font-weight: 800; margin: 0 0 20px; }
+.kid .askbtn { margin-top: 20px; background: var(--brand); color:#fff; border:none; border-radius:999px;
+  font-family:var(--font); font-weight:800; font-size:18px; padding: 16px 32px; cursor:pointer;
+  box-shadow: 0 4px 0 var(--brand-strong); }
+.theme.dark .kid .askbtn { color:#0c1a10; }
+
+.lock { background: var(--bg); border:1px solid var(--line); border-radius: var(--r-lg); padding: 40px 32px; text-align:center; }
+.lock .msg { font-size: 22px; font-weight: 700; margin: 24px 0 8px; }
+.lock .sub { color: var(--ink-2); margin:0; }
+
+.hr { border:none; border-top:1px solid var(--line); margin: 40px 0; }
+.cap { font-size:12.5px; color:var(--ink-3); margin: 2px 0 10px; }
+</style>
+</head>
+<body>
+<div class="stage">
+<!-- =================== each panel rendered once per theme ================ -->
+<script type="text/template" id="panel">
+<section class="theme __CLASS__">
+  <div class="masthead">
+    <span class="wordmark">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="22" fill="none" stroke="var(--line-2)" stroke-width="9"/><path d="M 32 10 A 22 22 0 0 1 53.67 35.82" fill="none" stroke="var(--brand)" stroke-width="9" stroke-linecap="round"/></svg>
+      <span class="wm-open">Open</span><span>ScreenTime</span>
+    </span>
+    <span class="themetag">__NAME__</span>
+  </div>
+  <p class="lede">A warm family dashboard built on one idea — time is a ring you fill. Green is the day going well; red only ever means stop.</p>
+
+  <!-- ---- COLOUR ---- -->
+  <h2 class="sec">Colour · roles</h2>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:var(--bg)"></div><div class="meta"><div class="nm">bg</div><div class="hx">canvas</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface)"></div><div class="meta"><div class="nm">surface</div><div class="hx">cards</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface-2)"></div><div class="meta"><div class="nm">surface-2</div><div class="hx">tracks</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--ink)"></div><div class="meta"><div class="nm">ink</div><div class="hx">primary text</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--ink-2)"></div><div class="meta"><div class="nm">ink-2</div><div class="hx">secondary</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--ink-3)"></div><div class="meta"><div class="nm">ink-3</div><div class="hx">meta</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--brand)"></div><div class="meta"><div class="nm">brand</div><div class="hx">ring · action</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--brand-tint)"></div><div class="meta"><div class="nm">brand-tint</div><div class="hx">selected</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--warn)"></div><div class="meta"><div class="nm">warn</div><div class="hx">attention</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--stop)"></div><div class="meta"><div class="nm">stop</div><div class="hx">interrupt</div></div></div>
+  </div>
+  <p class="note">Green = healthy / within budget / the action to take. Amber = transitional attention (offline, wind-down, a waiting request). Red = the one interrupt: locked, over, destructive. Everything else is ink on warm neutral. On a calm day the screen shows no red at all.</p>
+
+  <!-- avatar palette -->
+  <h2 class="sec">Colour · avatar set (curated, deterministic)</h2>
+  <div class="row" id="avpal___CLASS__"></div>
+  <p class="note">Eight hand-picked warm pairs, chosen by <code>hash(id) % 8</code> — never random HSL, so faces feel like one family.</p>
+
+  <!-- ---- TYPE ---- -->
+  <h2 class="sec">Typography · Figtree</h2>
+  <div class="type-spec"><span class="t-display">42</span><span class="meta">Display · 800 · tabular</span></div>
+  <div class="type-spec"><span class="t-h1">A calm day at home</span><span class="meta">H1 · 28/700</span></div>
+  <div class="type-spec"><span class="t-h2">Today's screen time</span><span class="meta">H2 · 18/600</span></div>
+  <div class="type-spec"><span class="t-h3">Vali's laptop</span><span class="meta">H3 · 16/600</span></div>
+  <div class="type-spec"><span class="t-body">Body copy for anything a parent actually reads — sentence case, humanist, never shouty.</span><span class="meta">Body · 16/400</span></div>
+  <div class="type-spec"><span class="t-sm">Secondary line, quieter but legible.</span><span class="meta">Small · 14</span></div>
+  <div class="type-spec"><span class="t-label">Field label</span><span class="meta">Label · 13/600</span></div>
+  <div class="type-spec"><span class="t-meta">Last seen 2 minutes ago</span><span class="meta">Meta · 12.5/500</span></div>
+  <div class="type-spec"><span class="t-code">4 7 2 9</span><span class="meta">Space Mono · codes only</span></div>
+
+  <!-- ---- BUTTONS ---- -->
+  <h2 class="sec">Buttons</h2>
+  <p class="cap">Roles</p>
+  <div class="row">
+    <button class="btn primary">Add a child</button>
+    <button class="btn secondary">Not now</button>
+    <button class="btn quiet">Cancel</button>
+    <button class="btn danger">Remove</button>
+    <button class="btn danger solid">Yes, remove Vali</button>
+  </div>
+  <p class="cap">Sizes</p>
+  <div class="row">
+    <button class="btn primary sm">Small</button>
+    <button class="btn primary">Medium</button>
+    <button class="btn primary lg">Large</button>
+  </div>
+  <p class="cap">States — default · hover(sim) · focus · disabled</p>
+  <div class="row">
+    <button class="btn primary">Default</button>
+    <button class="btn primary" style="background:var(--brand-strong)">Hover</button>
+    <button class="btn primary" style="outline:2px solid var(--ink); outline-offset:2px">Focus</button>
+    <button class="btn primary" disabled>Disabled</button>
+  </div>
+
+  <!-- ---- INPUTS ---- -->
+  <h2 class="sec">Inputs</h2>
+  <div class="row" style="align-items:flex-start">
+    <div class="field">
+      <label>Child's name</label>
+      <input class="input" placeholder="e.g. Vali" value="Vali">
+      <span class="hint">This is how they'll show up at home.</span>
+    </div>
+    <div class="field">
+      <label>Daily limit</label>
+      <select class="select"><option>1 hour 30 minutes</option><option>2 hours</option></select>
+    </div>
+    <div class="field">
+      <label>Username</label>
+      <input class="input err" placeholder="dad" value="d">
+      <span class="hint err">3–32 characters: a–z, 0–9, dot, underscore.</span>
+    </div>
+    <div class="field" style="max-width:none">
+      <label>Unlock code</label>
+      <span class="codebox">4729</span>
+    </div>
+  </div>
+
+  <!-- ---- AVATAR RING ---- -->
+  <h2 class="sec">The activity ring · states</h2>
+  <div class="ringcase" id="rings___CLASS__"></div>
+  <p class="note">Track = <code>line</code>. Fill grows clockwise from 12&nbsp;o'clock in <code>brand</code> green, turning <code>stop</code> red only when over. Paused = a dashed ink-3 ring. No target = a plain disc. Stroke is 7% of diameter, round caps. Identical geometry in the favicon, the wordmark, the family grid, the child page and the lock screen.</p>
+
+  <!-- ---- CARDS ---- -->
+  <h2 class="sec">Cards</h2>
+  <div class="grid" style="grid-template-columns: repeat(auto-fill,minmax(280px,1fr))">
+    <a class="card hoverable famcard" id="fc1___CLASS__"></a>
+    <a class="card hoverable famcard" id="fc2___CLASS__"></a>
+    <div class="card devcard">
+      <div class="devhead">
+        <div><h3 class="t-h3">Vali's laptop</h3><p class="t-meta" style="margin:2px 0 0">Vali</p></div>
+        <span class="state ok"><span class="dot"></span>Online</span>
+      </div>
+      <dl class="facts">
+        <div class="f"><dt>Last seen</dt><dd>just now</dd></div>
+        <div class="f"><dt>Today</dt><dd>1h 12m</dd></div>
+        <div class="f"><dt>Protection</dt><dd>Strong</dd></div>
+      </dl>
+      <div class="row"><button class="btn secondary sm">Pause</button><button class="btn quiet sm">Manage</button></div>
+    </div>
+  </div>
+
+  <!-- ---- CHIPS ---- -->
+  <h2 class="sec">Chips · toggles · status</h2>
+  <p class="cap">Filter pills (multi-select)</p>
+  <div class="row">
+    <button class="pill" aria-pressed="true">Games</button>
+    <button class="pill" aria-pressed="true">Social</button>
+    <button class="pill">Video</button>
+    <button class="pill">Messaging</button>
+  </div>
+  <p class="cap">Removable chips · segmented control</p>
+  <div class="row">
+    <span class="chip">youtube.com <button aria-label="remove">✕</button></span>
+    <span class="chip">tiktok.com <button aria-label="remove">✕</button></span>
+    <span class="seg"><button aria-selected="true">Passkey</button><button>Code</button></span>
+  </div>
+  <p class="cap">Status tags</p>
+  <div class="row">
+    <span class="tag ok">Within budget</span>
+    <span class="tag warn">Offline 8m</span>
+    <span class="tag stop">Time's up</span>
+    <span class="tag neutral">No limit</span>
+  </div>
+
+  <!-- ---- NAV ---- -->
+  <h2 class="sec">Navigation</h2>
+  <div class="row" style="align-items:flex-start; gap:24px">
+    <div class="rail">
+      <span class="wordmark" style="font-size:20px; padding: 4px 10px 12px">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="22" fill="none" stroke="var(--line-2)" stroke-width="9"/><path d="M 32 10 A 22 22 0 0 1 53.67 35.82" fill="none" stroke="var(--brand)" stroke-width="9" stroke-linecap="round"/></svg>
+        <span class="wm-open">Open</span><span>ScreenTime</span>
+      </span>
+      <a class="navitem active"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>Family</a>
+      <a class="navitem"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg>Devices</a>
+      <a class="navitem"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>Settings</a>
+      <div class="railsec">Today at home</div>
+      <a class="railchild"><span class="avatar" style="width:28px;height:28px"><span class="disc" style="width:28px;height:28px;font-size:14px;background:#dfeecf;color:#3f6a2a">V</span></span><span class="nm">Vali</span><span class="left">48m left</span></a>
+      <a class="railchild"><span class="avatar" style="width:28px;height:28px"><span class="disc" style="width:28px;height:28px;font-size:14px;background:#d9e9f5;color:#2b5878">M</span></span><span class="nm">Mika</span><span class="left">1h 05m</span></a>
+    </div>
+    <div class="col">
+      <p class="cap">Mobile · bottom tab bar (conventional, thumb-reachable)</p>
+      <nav class="bottomnav">
+        <a class="active"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>Family</a>
+        <a><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg>Devices</a>
+        <a><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>Settings</a>
+        <a><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>You</a>
+      </nav>
+    </div>
+  </div>
+
+  <!-- ---- MODAL ---- -->
+  <h2 class="sec">Modal · confirm</h2>
+  <div class="modaldemo">
+    <div class="scrim"></div>
+    <div class="modal">
+      <div class="head"><h3>Remove Vali?</h3></div>
+      <div class="bd">Their devices will stop reporting and their history is deleted. Type <strong>Vali</strong> to confirm.</div>
+      <div class="bd"><input class="input" placeholder="Vali"></div>
+      <div class="ft"><button class="btn quiet">Cancel</button><button class="btn danger solid">Remove</button></div>
+    </div>
+  </div>
+
+  <!-- ---- STATES ---- -->
+  <h2 class="sec">Empty · loading · error · success</h2>
+  <div class="grid" style="grid-template-columns: repeat(auto-fill,minmax(260px,1fr))">
+    <div class="empty">
+      <span class="avatar" style="width:56px;height:56px">
+        <svg width="56" height="56" viewBox="0 0 56 56"><circle cx="28" cy="28" r="24" fill="none" stroke="var(--line-2)" stroke-width="4"/><path d="M28 4 A24 24 0 0 1 49 16" fill="none" stroke="var(--brand)" stroke-width="4" stroke-linecap="round"/></svg>
+      </span>
+      <p>No one here yet. Add your first child to see their day.</p>
+      <button class="btn primary">Add a child</button>
+    </div>
+    <div class="card">
+      <p class="cap">Loading — structural, breathes once</p>
+      <div class="row" style="gap:14px">
+        <div class="skel" style="width:48px;height:48px;border-radius:999px"></div>
+        <div class="col" style="flex:1;gap:8px">
+          <div class="skel" style="width:60%;height:14px"></div>
+          <div class="skel" style="width:40%;height:12px"></div>
+          <div class="skel" style="width:100%;height:8px;border-radius:999px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="banner err"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>Couldn't reach the server. <a href="#" style="color:inherit;text-decoration:underline">Retry</a></div>
+      <div class="banner warn"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>Vali's laptop has been offline for 8 minutes.</div>
+      <div class="banner ok"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>Saved. Vali's new limit is live.</div>
+    </div>
+  </div>
+
+  <!-- ---- KID + LOCK ---- -->
+  <h2 class="sec">The child's page &amp; the lock screen — same ring</h2>
+  <div class="row" style="align-items:flex-start; gap:24px">
+    <div class="kid">
+      <p class="hi">Hi Vali 👋</p>
+      <div class="avatar" style="width:180px;height:180px">
+        <svg width="180" height="180" viewBox="0 0 180 180"><circle cx="90" cy="90" r="80" fill="none" stroke="var(--surface-2)" stroke-width="16"/><path id="kidring___CLASS__" fill="none" stroke="var(--brand)" stroke-width="16" stroke-linecap="round"/></svg>
+        <span class="disc" style="width:120px;height:120px;background:transparent">
+          <span style="display:grid"><span class="t-display" style="font-size:52px">48</span><span class="t-meta" style="font-weight:700;color:var(--ink-2)">minutes left</span></span>
+        </span>
+      </div>
+      <button class="askbtn">Ask for more</button>
+    </div>
+    <div class="lock" style="flex:1; min-width:260px">
+      <div class="avatar" style="width:140px;height:140px">
+        <svg width="140" height="140" viewBox="0 0 140 140"><circle cx="70" cy="70" r="62" fill="none" stroke="var(--surface-2)" stroke-width="12"/><circle cx="70" cy="70" r="62" fill="none" stroke="var(--stop)" stroke-width="12" stroke-linecap="round"/></svg>
+        <span class="disc" style="width:110px;height:110px;background:transparent"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--stop)" stroke-width="2"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span>
+      </div>
+      <p class="msg">Stop — time's up for today</p>
+      <p class="sub">Screens come back tomorrow morning. A parent can add time from their phone.</p>
+    </div>
+  </div>
+  <p class="note">The on-device Rust/egui client (app, wind-down, lock, intro) uses the same tokens as constants — warm <code>bg</code>, ink text, the green ring, amber wind-down, red stop — so the screen a child is locked out of is unmistakably the same product. The black lock of the old system is retired.</p>
+
+  <hr class="hr">
+</section>
+</script>
+</div>
+
+<script>
+// avatar palette (curated, warm)
+const AV = [
+  ["#fbe3dd","#9a3b28"],["#fce6cf","#8a5a12"],["#f7efc9","#6f5a10"],["#dfeecf","#3f6a2a"],
+  ["#d6efe0","#1f6b45"],["#d9e9f5","#2b5878"],["#e2e2f7","#3f3f86"],["#efe0f2","#6d3577"]
+];
+const FACES = ["🦊","🐢","🐬","🦉","🐰","🐨","🐸","🐱"];
+
+function ring(size, pct, color, opts={}) {
+  const stroke = Math.max(3, Math.round(size*0.07));
+  const r = (size-stroke)/2, c = 2*Math.PI*r, cx = size/2;
+  const track = `<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${stroke}"/>`;
+  let fill = "";
+  if (opts.paused) {
+    fill = `<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="var(--ink-3)" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${c*0.02} ${c*0.05}"/>`;
+  } else if (opts.none) {
+    fill = "";
+  } else {
+    const off = c*(1-pct);
+    fill = `<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${off}" transform="rotate(-90 ${cx} ${cx})"/>`;
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${track}${fill}</svg>`;
+}
+function avatar(size, face, pal, opts={}) {
+  const stroke = Math.max(3, Math.round(size*0.07));
+  const inset = opts.none ? 0 : stroke+3;
+  const dsz = size - inset*2;
+  const r = opts.none ? "" : ring(size, opts.pct??0, opts.color??"var(--brand)", opts);
+  return `<span class="avatar" style="width:${size}px;height:${size}px">${r}
+    <span class="disc" style="width:${dsz}px;height:${dsz}px;font-size:${Math.round(dsz*0.5)}px;background:${pal[0]};color:${pal[1]};${opts.paused?'opacity:.6':''}">${face}</span></span>`;
+}
+
+function build(cls, name) {
+  const tpl = document.getElementById("panel").textContent
+    .replaceAll("__CLASS__", cls).replaceAll("__NAME__", name);
+  const wrap = document.createElement("div");
+  wrap.innerHTML = tpl;
+  document.querySelector(".stage").appendChild(wrap.firstElementChild);
+
+  // avatar palette row
+  const pal = document.getElementById("avpal_"+cls);
+  AV.forEach((p,i)=> pal.insertAdjacentHTML("beforeend", avatar(48, FACES[i], p, {pct:0.35, none:false})));
+
+  // ring states
+  const rc = document.getElementById("rings_"+cls);
+  const cases = [
+    ["Within budget", {pct:.42, color:"var(--brand)"}, ["#dfeecf","#3f6a2a"], "🦊"],
+    ["Almost up",     {pct:.85, color:"var(--brand)"}, ["#d9e9f5","#2b5878"], "🐬"],
+    ["Over",          {pct:1,   color:"var(--stop)"},  ["#fbe3dd","#9a3b28"], "🦉"],
+    ["Paused",        {paused:true},                    ["#f7efc9","#6f5a10"], "🐢"],
+    ["No target",     {none:true},                      ["#e2e2f7","#3f3f86"], "🐰"],
+  ];
+  cases.forEach(([label,opts,palc,face])=>{
+    rc.insertAdjacentHTML("beforeend",
+      `<figure>${avatar(72, face, palc, opts)}<figcaption>${label}</figcaption></figure>`);
+  });
+
+  // family cards
+  const fc1 = document.getElementById("fc1_"+cls);
+  fc1.innerHTML = avatar(56, "🦊", ["#dfeecf","#3f6a2a"], {pct:.42, color:"var(--brand)"}) +
+    `<div class="body"><p class="nm">Vali</p><p class="meta">Ages 6–9 · laptop</p>
+     <div class="budget"><i style="width:42%"></i></div>
+     <p class="timeline"><strong>48m</strong> left of 1h 30m</p></div>`;
+  const fc2 = document.getElementById("fc2_"+cls);
+  fc2.innerHTML = avatar(56, "🦉", ["#fbe3dd","#9a3b28"], {pct:1, color:"var(--stop)"}) +
+    `<div class="body"><p class="nm">Mika <span class="tag stop" style="vertical-align:middle">Time's up</span></p><p class="meta">Ages 10–12 · tablet</p>
+     <div class="budget over"><i style="width:100%"></i></div>
+     <p class="timeline"><strong>0m</strong> left — over by 12m</p></div>`;
+
+  // kid ring path
+  const kr = document.getElementById("kidring_"+cls);
+  const R=80, C=2*Math.PI*R, pct=0.6;
+  kr.setAttribute("d", describeArc(90,90,R, -90, -90 + 360*pct));
+}
+function polar(cx,cy,r,deg){const a=deg*Math.PI/180;return[cx+r*Math.cos(a),cy+r*Math.sin(a)];}
+function describeArc(cx,cy,r,a0,a1){const[x0,y0]=polar(cx,cy,r,a0);const[x1,y1]=polar(cx,cy,r,a1);const large=(a1-a0)>180?1:0;return`M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;}
+
+build("light","Light · default");
+build("dark","Dark");
+</script>
+</body>
+</html>
