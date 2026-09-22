@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenScreenTime — on-device client mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   OpenScreenTime — the on-device client (Rust/egui) rendered as a visual target.
+   Real palette (DESIGN.md §2), Figtree + Space Mono, the ring drawn with the
+   same geometry the painter uses. Every screen here is a spec for a surface in
+   app.rs / lockout.rs / intro.rs. Nothing loads but the two Google fonts.
+   ========================================================================== */
+:root{
+  --bg:#f4f2ee; --surface:#ffffff; --sunken:#ecebe6; --rail:#efede8;
+  --line:#e6e3dd; --line-2:#d5d1c9;
+  --ink:#1e1c19; --ink-2:#57544e; --ink-3:#726e66;
+  --brand:#2e7d46; --brand-strong:#266a3b; --brand-tint:#e4f1e8; --brand-ink:#1c5c33;
+  --warn:#8a6300; --warn-tint:#f7edd6; --stop:#b3151c; --stop-tint:#f8e3e2;
+  --shadow-1:0 1px 2px rgba(30,26,18,.05), 0 1px 3px rgba(30,26,18,.06);
+  --shadow-2:0 4px 12px rgba(30,26,18,.07), 0 14px 30px -10px rgba(30,26,18,.14);
+  --ease:cubic-bezier(.2,.7,.2,1);
+  --font:"Figtree",system-ui,sans-serif; --mono:"Space Mono",monospace;
+}
+*{box-sizing:border-box;}
+body{
+  margin:0; font-family:var(--font); background:#dedad2; color:var(--ink);
+  -webkit-font-smoothing:antialiased; line-height:1.5;
+}
+.wrap{max-width:1240px; margin:0 auto; padding:48px 24px 120px;}
+header.top{margin-bottom:8px;}
+.wm{display:inline-flex; align-items:center; gap:.42em; font-size:28px; font-weight:700; letter-spacing:-.02em; line-height:1;}
+.wm .open{font-weight:500; color:var(--ink-2);}
+.lede{color:var(--ink-2); max-width:60ch; margin:10px 0 8px; font-size:16px;}
+.legend{display:flex; flex-wrap:wrap; gap:8px 18px; margin:14px 0 0; font-size:12.5px; color:var(--ink-3);}
+.legend b{font-weight:600; color:var(--ink-2);}
+.swatch{display:inline-block; width:11px; height:11px; border-radius:3px; vertical-align:-1px; margin-right:6px; border:1px solid rgba(30,26,18,.12);}
+
+h2.sec{font-size:13px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink-3); margin:56px 0 6px; padding-bottom:8px; border-bottom:1px solid #cfcabf;}
+.secnote{font-size:13px; color:var(--ink-3); margin:0 0 22px; max-width:70ch;}
+
+.gallery{display:flex; flex-wrap:wrap; gap:32px; align-items:flex-start;}
+figure.shot{margin:0; display:flex; flex-direction:column; gap:10px;}
+figure.shot figcaption{font-size:12.5px; color:var(--ink-3); max-width:420px;}
+figure.shot figcaption b{color:var(--ink-2); font-weight:600;}
+
+/* device frames -------------------------------------------------------------- */
+.frame{background:var(--bg); border:1px solid #c9c4ba; border-radius:16px; box-shadow:var(--shadow-2); overflow:hidden; position:relative;}
+.frame .titlebar{height:30px; background:#e9e6e0; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:7px; padding:0 12px;}
+.frame .titlebar .tb{width:11px; height:11px; border-radius:999px; background:#cfcabf;}
+.frame .titlebar .tt{margin-left:8px; font-size:12px; color:var(--ink-3);}
+.win{width:420px; height:520px;}
+.win .stage{height:490px; padding:28px; display:flex; flex-direction:column;}
+.full{width:560px; height:472px;}
+.full .stage{height:calc(100% - 30px); padding:30px 34px;}
+
+/* the app window ------------------------------------------------------------- */
+.marque{display:flex; align-items:center; gap:8px;}
+.marque .nm{font-size:15px; font-weight:700; color:var(--ink);}
+.center{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;}
+.ringwrap{position:relative; display:grid; place-items:center;}
+.ringwrap .inner{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;}
+.bignum{font-size:64px; font-weight:800; letter-spacing:-.03em; line-height:.9; font-variant-numeric:tabular-nums;}
+.numlabel{font-size:12.5px; font-weight:500; color:var(--ink-2); margin-top:6px;}
+.chip{display:inline-flex; align-items:center; gap:8px; font-size:14px; font-weight:500;}
+.chip .dot{width:9px; height:9px; border-radius:999px;}
+.btn{display:flex; align-items:center; justify-content:center; height:44px; border-radius:16px;
+  font-size:16px; font-weight:700; cursor:default;}
+.btn.primary{background:var(--brand); color:#fff; box-shadow:var(--shadow-1);}
+.btn.pill{border-radius:999px;}
+.btn.ghost{background:transparent; color:var(--ink-2); border:1px solid var(--line-2); font-weight:600;}
+.footer{font-size:12.5px; font-weight:500; color:var(--ink-3); line-height:1.45;}
+.hr{border:none; border-top:1px solid var(--line); margin:0;}
+.banner{display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:10px; font-size:13.5px; font-weight:600;}
+.banner.stop{background:var(--stop-tint); color:var(--stop);}
+.banner.warn{background:var(--warn-tint); color:var(--warn);}
+.banner.ok{background:var(--brand-tint); color:var(--brand-ink);}
+
+/* fullscreen surfaces -------------------------------------------------------- */
+.full .stage{display:flex; flex-direction:column; align-items:center;}
+.marque.dim .nm{color:var(--ink-3);}
+.marque.dim{opacity:.9;}
+.stopstack{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:0;}
+.headline{font-size:34px; font-weight:700; letter-spacing:-.01em; margin:22px 0 8px;}
+.detail{font-size:17px; font-weight:400; color:var(--ink-2); max-width:42ch; margin:0;}
+
+/* the code entry ------------------------------------------------------------- */
+.entry{display:flex; flex-direction:column; align-items:center; gap:5px; margin-top:22px;}
+.entry .lbl{font-size:13px; font-weight:600; color:var(--ink-2);}
+.codefield{width:230px; height:46px; border-radius:10px; background:var(--surface); border:1px solid var(--line-2);
+  display:flex; align-items:center; justify-content:center; gap:.5em; font-family:var(--mono); font-size:22px; font-weight:700; color:var(--ink); letter-spacing:.08em;}
+.codefield.focus{border-color:var(--brand); box-shadow:0 0 0 3px rgba(46,125,70,.18);}
+.entry .hint{font-size:12.5px; font-weight:500; color:var(--ink-3);}
+.entry .wrong{font-size:13px; font-weight:600; color:var(--stop);}
+.mathfield{width:230px; height:46px; border-radius:10px; background:var(--surface); border:1px solid var(--line-2);
+  display:flex; align-items:center; padding:0 14px; font-size:18px; color:var(--ink);}
+.mathfield .cursor{color:var(--ink); }
+.prompt{font-size:22px; font-weight:700; color:var(--ink); margin:0 0 12px;}
+
+/* intro ---------------------------------------------------------------------- */
+.introtop{display:flex; align-items:center; justify-content:space-between; width:100%; align-self:stretch;}
+.skip{font-size:14px; font-weight:600; color:var(--ink-2); padding:6px 12px; border-radius:999px;}
+.introbody{flex:1; display:flex; flex-direction:column; justify-content:center;}
+.introtitle{font-size:34px; font-weight:800; letter-spacing:-.02em; margin:0 0 18px; line-height:1.1;}
+.introcopy{font-size:18px; color:var(--ink-2); max-width:44ch; margin:0;}
+.introfoot{display:flex; justify-content:flex-end;}
+.btn.next{padding:0 26px; width:auto; min-width:120px;}
+
+/* tray/notification cards ---------------------------------------------------- */
+.notif{width:340px; background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-1); padding:14px 16px; display:flex; gap:12px; align-items:flex-start;}
+.notif .ico{width:32px; height:32px; flex:none;}
+.notif .nt{font-size:14px; font-weight:700; margin:0 0 2px;}
+.notif .nb{font-size:13px; color:var(--ink-2); margin:0;}
+.notif .actions{display:flex; gap:8px; margin-top:10px;}
+.miniact{font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:999px; border:1px solid var(--line-2); color:var(--ink-2);}
+.miniact.p{background:var(--brand); color:#fff; border-color:var(--brand);}
+.traymenu{width:300px; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow-2); padding:6px; font-size:13.5px;}
+.traymenu .mi{padding:8px 12px; border-radius:8px; display:flex; justify-content:space-between; color:var(--ink);}
+.traymenu .mi.dis{color:var(--ink-3);}
+.traymenu .mi.act:hover{background:var(--sunken);}
+.traymenu .sep{height:1px; background:var(--line); margin:5px 6px;}
+.col{display:flex; flex-direction:column; gap:20px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <span class="wm" id="wm"></span>
+  <p class="lede">The four on-device surfaces of the Rust/egui client, drawn in the real ring language.
+    The same ring that shows a child their day is the ring that fills full and closes when it runs out — enforcement is the gauge completed, not an alarm raised.</p>
+  <div class="legend">
+    <span><span class="swatch" style="background:#2e7d46"></span><b>green</b> within budget · the action</span>
+    <span><span class="swatch" style="background:#8a6300"></span><b>amber</b> wind-down · offline (soft)</span>
+    <span><span class="swatch" style="background:#b3151c"></span><b>red</b> the one interrupt: locked / over</span>
+    <span><span class="swatch" style="background:#726e66"></span><b>ink-3</b> paused · a calm night</span>
+  </div>
+</header>
+
+<!-- ============================ APP WINDOW ============================ -->
+<h2 class="sec">1 · App window — <code>ost app</code></h2>
+<p class="secnote">420×520. The ring is the hero: it fills clockwise from 12&nbsp;o'clock proportional to the day used — green, then amber under 15&nbsp;minutes, red at zero. One green action; the honest promise always in view.</p>
+<div class="gallery" id="g-app"></div>
+
+<!-- ============================ WIND-DOWN ============================ -->
+<h2 class="sec">2 · Wind-down — the save-your-work countdown</h2>
+<p class="secnote">The amber bridge before a stop. A full amber ring; the number counts the grace seconds down. The one motion in the whole client's stop path: amber&nbsp;→&nbsp;red as it reaches zero, the ring hardening into the lock below — no shake, no siren.</p>
+<div class="gallery" id="g-wind"></div>
+
+<!-- ============================ HARD STOP ============================ -->
+<h2 class="sec">3 · Hard-stop lock — <code>lockout.rs</code></h2>
+<p class="secnote">Every reason shares the ring, drawn full and closed. The stop is red for the three walls (time's up, offline, tamper); the expected pauses stay calm — a night ring and a moon for bedtime, the language's own dashed <em>paused</em> ring for a parent pause. Headline and detail are passed verbatim from the runner, so the lock, the tray and the docs never drift.</p>
+<div class="gallery" id="g-stop"></div>
+
+<!-- ============================ CODE ENTRY ============================ -->
+<h2 class="sec">4 · The way back — challenge &amp; parent code</h2>
+<p class="secnote">A present parent can always get in with the unlock code (masked, Space&nbsp;Mono). A self-serve maths challenge buys a short breather. A rejected code does one calm thing: the ring flashes red once and a plain line explains — never a shake.</p>
+<div class="gallery" id="g-entry"></div>
+
+<!-- ============================ INTRO ============================ -->
+<h2 class="sec">5 · First-run intro — <code>intro.rs</code></h2>
+<p class="secnote">560×380. The child's documentation as a few honest cards — and the ring is the progress bar: it fills one segment per card, so you fill the ring as you learn how the ring works.</p>
+<div class="gallery" id="g-intro"></div>
+
+<!-- ============================ TRAY ============================ -->
+<h2 class="sec">6 · Tray &amp; notifications — voice, not paint</h2>
+<p class="secnote">The tray is system-rendered, so the redesign here is the words: every ALL-CAPS mono-console string becomes sentence case, calm and kind. Notifications shown as the desktop would draw them.</p>
+<div class="gallery" id="g-tray"></div>
+
+</div>
+
+<script>
+/* --- the ring, same geometry as the egui painter --------------------------- */
+function polar(cx,cy,r,deg){const a=(deg-90)*Math.PI/180;return[cx+r*Math.cos(a),cy+r*Math.sin(a)];}
+function arcPath(cx,cy,r,frac){
+  if(frac<=0) return "";
+  if(frac>=1) frac=0.99999; // full circle drawn as two arcs below
+  const [x0,y0]=polar(cx,cy,r,0);
+  const end=360*frac;
+  const [x1,y1]=polar(cx,cy,r,end);
+  const large=end>180?1:0;
+  return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+}
+/* ring(size, {frac,color,track,full,paused,none}) */
+function ring(size, o={}){
+  const sw=Math.max(3,Math.round(size*0.09));
+  const r=(size-sw)/2, cx=size/2;
+  const track=o.track||'var(--sunken)';
+  let inner=`<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="${track}" stroke-width="${sw}"/>`;
+  if(o.paused){
+    const c=2*Math.PI*r;
+    inner+=`<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="var(--ink-3)" stroke-width="${sw}" stroke-linecap="round" stroke-dasharray="${c*0.02} ${c*0.05}"/>`;
+  } else if(o.full){
+    inner+=`<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="${o.color}" stroke-width="${sw}"/>`;
+  } else if(!o.none && o.frac>0){
+    inner+=`<path d="${arcPath(cx,cx,r,o.frac)}" fill="none" stroke="${o.color}" stroke-width="${sw}" stroke-linecap="round"/>`;
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${inner}</svg>`;
+}
+/* the small wordmark marque (fixed ~40% green arc) */
+function marque(size){
+  const sw=Math.max(3,Math.round(size*0.32/2*2*0.5)); // ~ stroke
+  return ring(size,{frac:.40,color:'var(--brand)',track:'var(--line-2)'});
+}
+/* centre glyphs, drawn in the ring's colour ~ */
+function glyph(kind,color){
+  const s=`stroke="${color}" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"`;
+  const box=`width="46" height="46" viewBox="0 0 24 24"`;
+  switch(kind){
+    case 'lock': return `<svg ${box}><rect x="4.5" y="10" width="15" height="10.5" rx="2.2" ${s}/><path d="M8 10V7a4 4 0 0 1 8 0v3" ${s}/></svg>`;
+    case 'moon': return `<svg ${box}><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" ${s}/></svg>`;
+    case 'pause': return `<svg ${box}><rect x="7.5" y="6" width="3.2" height="12" rx="1.2" fill="${color}"/><rect x="13.3" y="6" width="3.2" height="12" rx="1.2" fill="${color}"/></svg>`;
+    case 'cloud': return `<svg ${box}><path d="M7 18h9a4 4 0 0 0 .3-8A6 6 0 0 0 5 11a3.5 3.5 0 0 0 2 7" ${s}/><path d="M4 4l16 16" ${s}/></svg>`;
+    case 'shield': return `<svg ${box}><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" ${s}/><path d="M12 9v3.5" ${s}/><circle cx="12" cy="15.5" r="0.6" fill="${color}"/></svg>`;
+    case 'check': return `<svg ${box}><path d="M20 6.5L9.2 17 4 11.8" stroke="${color}" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  return '';
+}
+function wmMark(){return ring(28,{frac:.40,color:'var(--brand)',track:'var(--line-2)'});}
+document.getElementById('wm').innerHTML = wmMark()+`<span class="open">Open</span><span>ScreenTime</span>`;
+
+/* --- surface builders ------------------------------------------------------- */
+function titlebar(t){return `<div class="titlebar"><span class="tb"></span><span class="tb"></span><span class="tb"></span><span class="tt">${t}</span></div>`;}
+
+function appWindow(o){
+  // o: {frac,color,num,label,chip,chipColor,btn,btnState,paused,none,banner}
+  const rr = o.paused ? ring(168,{paused:true,track:'var(--sunken)'})
+           : o.none   ? ring(168,{none:true,track:'var(--sunken)'})
+           : ring(168,{frac:o.frac,color:o.color,track:'var(--sunken)'});
+  const inner = o.paused ? `<div style="opacity:.6">${glyph('pause',o.color)}</div><div class="numlabel">Paused</div>`
+              : o.none   ? `${glyph('check','var(--brand)')}<div class="numlabel" style="margin-top:10px">No limit today</div>`
+              : o.stop   ? `${glyph('lock',o.color)}<div class="numlabel" style="margin-top:10px; color:var(--stop); font-weight:600">Time's up for today</div>`
+              : `<div class="bignum" style="color:${o.color}">${o.num}</div><div class="numlabel">${o.label}</div>`;
+  const banner = o.banner ? `<div class="banner ${o.banner.tone}">${o.banner.glyph||''}${o.banner.text}</div>` : '';
+  const btnCls = o.btnState==='sent' ? 'btn primary pill' : 'btn primary pill';
+  const btnStyle = o.btnState==='disabled' ? 'style="opacity:.45"' : (o.btnState==='ghost'?'':'');
+  const btn = o.btnState==='ghost'
+      ? `<div class="btn ghost pill" style="opacity:.7">Asked — waiting for a parent</div>`
+      : `<div class="btn primary pill">${o.btn||'Ask for more time'}</div>`;
+  const sent = o.btnState==='ghost' ? `<div style="text-align:center; font-size:13px; font-weight:600; color:var(--brand-ink); margin-top:8px">Sent — a parent can say yes.</div>` : '';
+  return `<div class="frame win">${titlebar('OpenScreenTime')}
+    <div class="stage">
+      <div class="marque">${wmMark()}<span class="nm">OpenScreenTime</span></div>
+      ${banner?`<div style="margin-top:18px">${banner}</div>`:''}
+      <div class="center">
+        <div class="ringwrap" style="width:168px;height:168px">${rr}<div class="inner">${inner}</div></div>
+        <div class="chip" style="color:${o.chipColor}; margin-top:22px"><span class="dot" style="background:${o.chipColor}"></span>${o.chip}</div>
+      </div>
+      <div style="margin-bottom:20px">${btn}${sent}</div>
+      <hr class="hr">
+      <p class="footer" style="margin:14px 0 0">OpenScreenTime counts screen time and filters the network. It can't see your screen, your messages, what you type, or your browsing history.</p>
+    </div></div>`;
+}
+
+document.getElementById('g-app').innerHTML =
+  `<figure class="shot">${appWindow({frac:.5,color:'var(--brand)',num:'45',label:'minutes left',chip:'Connected',chipColor:'var(--brand)'})}
+     <figcaption><b>Healthy.</b> Ring green at half the day used, big number, green “Ask for more time”, the honest footer.</figcaption></figure>`
+ +`<figure class="shot">${appWindow({frac:.87,color:'var(--warn)',num:'12',label:'minutes left',chip:'Connected',chipColor:'var(--brand)'})}
+     <figcaption><b>Almost up.</b> Under 15 minutes the ring and number turn amber — attention, not alarm.</figcaption></figure>`
+ +`<figure class="shot">${appWindow({paused:true,color:'var(--ink-3)',chip:'Paused by a parent',chipColor:'var(--warn)',btnState:'ghost',banner:{tone:'warn',text:'A parent paused this computer.'}})}
+     <figcaption><b>Paused.</b> The dashed ink-3 <em>paused</em> ring, disc dimmed, a warm banner — the window mirrors the lock in miniature.</figcaption></figure>`;
+
+function fullFrame(inner,title){return `<div class="frame full">${titlebar(title||'')}<div class="stage">${inner}</div></div>`;}
+
+function windDown(){
+  const inner = `<div class="marque dim">${wmMark()}<span class="nm">OpenScreenTime</span></div>
+    <div class="stopstack">
+      <div class="ringwrap" style="width:200px;height:200px">${ring(200,{full:true,color:'var(--warn)',track:'var(--sunken)'})}
+        <div class="inner"><div class="bignum" style="color:var(--warn)">30</div><div class="numlabel">seconds left</div></div></div>
+      <div class="headline">Wrapping up</div>
+      <p class="detail">Save your work — the screen pauses soon.</p>
+    </div>`;
+  return fullFrame(inner);
+}
+document.getElementById('g-wind').innerHTML =
+  `<figure class="shot">${windDown()}
+     <figcaption><b>Save-your-work grace.</b> Full amber ring; the number counts down. In the last second the ring lerps amber&nbsp;→&nbsp;red and hands off to the matching stop below — one continuous object hardening.</figcaption></figure>`;
+
+function stopScreen(o){
+  // o:{ring, headline, detail, glyph}
+  const inner = `<div class="marque dim">${wmMark()}<span class="nm">OpenScreenTime</span></div>
+    <div class="stopstack">
+      <div class="ringwrap" style="width:200px;height:200px">${o.ring}<div class="inner">${o.glyph}</div></div>
+      <div class="headline" style="${o.hcolor?`color:${o.hcolor}`:''}">${o.headline}</div>
+      <p class="detail">${o.detail}</p>
+    </div>`;
+  return fullFrame(inner);
+}
+document.getElementById('g-stop').innerHTML =
+  `<figure class="shot">${stopScreen({ring:ring(200,{full:true,color:'var(--stop)',track:'var(--sunken)'}),glyph:glyph('lock','var(--stop)'),headline:'Stop',detail:"Time's up for today — 60 of 60 minutes used."})}
+     <figcaption><b>Time's up.</b> The day's ring, full and red, closed. A padlock, the plain fact.</figcaption></figure>`
+ +`<figure class="shot">${stopScreen({ring:ring(200,{full:true,color:'var(--ink-2)',track:'var(--sunken)'}),glyph:glyph('moon','var(--ink-2)'),headline:'Goodnight',detail:'Screens are off until morning.'})}
+     <figcaption><b>Bedtime.</b> Expected and calm — a night ring in ink, a crescent moon, no red.</figcaption></figure>`
+ +`<figure class="shot">${stopScreen({ring:ring(200,{paused:true,track:'var(--sunken)'}),glyph:glyph('pause','var(--ink-3)'),headline:'Paused',detail:'A parent paused this computer. Save your work.'})}
+     <figcaption><b>Parent-paused.</b> Reuses the language's own dashed <em>paused</em> ring at hero scale.</figcaption></figure>`
+ +`<figure class="shot">${stopScreen({ring:ring(200,{full:true,color:'var(--stop)',track:'var(--sunken)'}),glyph:glyph('shield','var(--stop)'),headline:'Stopped',detail:'OpenScreenTime was changed. Ask a parent — their code unlocks.'})}
+     <figcaption><b>Tamper / offline.</b> The genuine walls share the red ring; the offline lockdown swaps the shield for a cloud-with-slash.</figcaption></figure>`;
+
+document.getElementById('g-entry').innerHTML =
+  `<figure class="shot">${fullFrame(`
+     <div class="marque dim">${wmMark()}<span class="nm">OpenScreenTime</span></div>
+     <div class="stopstack">
+       <div class="ringwrap" style="width:128px;height:128px">${ring(128,{full:true,color:'var(--stop)',track:'var(--sunken)'})}<div class="inner">${glyph('lock','var(--stop)')}</div></div>
+       <div class="headline" style="font-size:26px; margin:14px 0 0">Stop</div>
+       <div class="entry" style="margin-top:16px">
+         <div class="lbl">A parent's code</div>
+         <div class="codefield focus">• • •&nbsp;&nbsp;• • •</div>
+         <div class="hint">From the console, or a recovery code.</div>
+       </div>
+       <div class="btn primary pill" style="width:150px; margin-top:16px">Continue</div>
+     </div>`)}
+     <figcaption><b>Parent code.</b> Masked Space&nbsp;Mono in groups of three, brand focus ring, one green button.</figcaption></figure>`
+ +`<figure class="shot">${fullFrame(`
+     <div class="marque dim">${wmMark()}<span class="nm">OpenScreenTime</span></div>
+     <div class="stopstack">
+       <div class="ringwrap" style="width:128px;height:128px">${ring(128,{full:true,color:'var(--stop)',track:'var(--sunken)'})}<div class="inner">${glyph('lock','var(--stop)')}</div></div>
+       <div class="prompt" style="margin-top:18px">What's 7 × 8?</div>
+       <div class="mathfield"><span style="color:var(--ink)">56</span><span style="width:1px;height:22px;background:var(--ink); margin-left:1px; opacity:.7"></span></div>
+       <div class="entry" style="margin-top:16px">
+         <div class="wrong">That code didn't work. Try again.</div>
+       </div>
+       <div class="btn primary pill" style="width:150px; margin-top:14px">Continue</div>
+     </div>`)}
+     <figcaption><b>Maths challenge + wrong-code.</b> The answer is visible (a child must see their working); a rejected parent code flashes the ring red once and says so plainly.</figcaption></figure>`;
+
+function introCard(o){
+  const inner = `<div class="introtop">
+      <div class="ringwrap" style="width:26px;height:26px">${ring(26,{frac:o.frac,color:'var(--brand)',track:'var(--line-2)'})}</div>
+      <div class="skip">Skip</div>
+    </div>
+    <div class="introbody">
+      <div class="introtitle">${o.title}</div>
+      <p class="introcopy">${o.body}</p>
+    </div>
+    <div class="introfoot"><div class="btn primary next">${o.last?'Done':'Next'}</div></div>`;
+  return `<div class="frame full" style="width:560px;height:380px">${titlebar('OpenScreenTime')}<div class="stage">${inner}</div></div>`;
+}
+document.getElementById('g-intro').innerHTML =
+  `<figure class="shot">${introCard({frac:3/6,title:'What a parent can see',body:"How much screen time you've used, on which device, and if someone tampers with OpenScreenTime. That's it."})}
+     <figcaption><b>Card 3 of 6.</b> The ring at top has filled halfway; Skip is quiet, Next is the green primary.</figcaption></figure>`
+ +`<figure class="shot">${introCard({frac:6/6,last:true,title:'One more thing',body:'There is no remote shell, no camera, no message reading. OpenScreenTime only enforces time and network rules — and everything it does shows up right here.'})}
+     <figcaption><b>Last card.</b> The ring is full; the button reads Done.</figcaption></figure>`;
+
+document.getElementById('g-tray').innerHTML =
+  `<figure class="shot"><div class="col">
+     <div class="notif"><div class="ico">${ring(32,{frac:.87,color:'var(--warn)',track:'var(--line-2)'})}</div>
+       <div><p class="nt">12 minutes left</p><p class="nb">Time to wrap up and save your work.</p></div></div>
+     <div class="notif"><div class="ico">${ring(32,{full:true,color:'var(--stop)',track:'var(--line-2)'})}</div>
+       <div><p class="nt">Time's up for today</p><p class="nb">Ask a parent, or earn more.</p></div></div>
+     <div class="notif"><div class="ico">${ring(32,{frac:.30,color:'var(--brand)',track:'var(--line-2)'})}</div>
+       <div><p class="nt">Sign-in request</p><p class="nb">Vali is signing in on the web. If it's you, tap the number shown in your browser.</p>
+         <div class="actions"><span class="miniact">42</span><span class="miniact">17</span><span class="miniact">83</span><span class="miniact">Not me</span></div></div></div>
+   </div><figcaption><b>Notifications.</b> Sentence case, the ring as the icon, urgency only where it's earned.</figcaption></figure>`
+ +`<figure class="shot"><div class="traymenu">
+     <div class="mi dis"><span>45 minutes left today</span></div>
+     <div class="mi dis"><span>Connected</span></div>
+     <div class="sep"></div>
+     <div class="mi act"><span>Ask for more time</span></div>
+     <div class="sep"></div>
+     <div class="mi act"><span>About OpenScreenTime</span></div>
+   </div><figcaption><b>Tray menu.</b> Every ALL-CAPS mono line becomes a plain sentence — the surveillance voice, gone.</figcaption></figure>`;
+</script>
+</body>
+</html>
+</content>
