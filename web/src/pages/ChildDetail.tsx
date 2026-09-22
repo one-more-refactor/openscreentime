@@ -40,6 +40,7 @@ import { Modal } from "../components";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
 import { Avatar } from "./Family";
+import { AvatarRing } from "../components/AvatarRing";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
@@ -55,8 +56,25 @@ function since(iso: string | null | undefined): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-/** Today's time, as the one big number this page exists to answer. */
-function Today({ used, limit, earned }: { used: number; limit: number; earned: number }) {
+/** Today's time — the activity ring is the hero (the product's one mark), with
+ *  the big number the page exists to answer beneath it. */
+function Today({
+  used,
+  limit,
+  earned,
+  name,
+  seed,
+  avatar,
+  paused,
+}: {
+  used: number;
+  limit: number;
+  earned: number;
+  name: string;
+  seed: string;
+  avatar?: string | null;
+  paused?: boolean;
+}) {
   const total = limit + earned;
   const left = Math.max(0, total - used);
   const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
@@ -65,6 +83,17 @@ function Today({ used, limit, earned }: { used: number; limit: number; earned: n
   const shown = useCountUp(total === 0 ? used : spent ? 0 : left);
   return (
     <section className="ch-today">
+      <div className="ch-ring-hero">
+        <AvatarRing
+          name={name}
+          seed={seed}
+          avatar={avatar}
+          used={used}
+          target={total > 0 ? total : null}
+          paused={paused}
+          size={156}
+        />
+      </div>
       {total === 0 ? (
         <>
           <p className="ch-big">{shown}</p>
@@ -416,7 +445,15 @@ export function ChildDetail() {
       {note && <p className="ch-note">{note}</p>}
       {error && <p className="fam-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
-      <Today used={used} limit={limit} earned={earned} />
+      <Today
+        used={used}
+        limit={limit}
+        earned={earned}
+        name={name}
+        seed={key}
+        avatar={child.avatar}
+        paused={child.locked}
+      />
 
       <WhereTheTime accountId={child.account_id} />
 

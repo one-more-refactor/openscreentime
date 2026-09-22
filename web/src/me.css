@@ -19,7 +19,7 @@
   --me-ink-2: var(--fg-dim);
   --me-ink-3: var(--fg-faint);
   --me-track: var(--surface-2);
-  --me-fill: var(--fg-display);
+  --me-fill: var(--brand); /* time is the ring's green (docs/DESIGN.md §1), never ink-black */
   --me-stop: var(--accent);
   --me-go: var(--fg-display);
   --me-go-ink: var(--bg);
