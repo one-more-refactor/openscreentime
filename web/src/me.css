@@ -89,8 +89,8 @@
 .theme-plain .me-hi { font-size: 1.5rem; }
 .me-sub {
   margin: 0.3rem 0 0; color: var(--me-ink-3);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.6875rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 
 /* ---- the ring ---------------------------------------------------------------- */
@@ -116,8 +116,8 @@
 .theme-playful .me-big-stop { font-weight: 900; }
 .me-unit {
   margin-top: 0.35rem; color: var(--me-ink-2);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.6875rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .theme-playful .me-unit { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.95rem; font-weight: 800; }
 .me-under { margin: 0; color: var(--me-ink-3); font-size: 0.875rem; }
@@ -132,8 +132,8 @@
 }
 .me-stats div { display: grid; gap: 0.1rem; text-align: center; }
 .me-stats dt {
-  font-family: var(--font-mono); font-size: 0.625rem;
-  text-transform: uppercase; letter-spacing: 0.08em; color: var(--me-ink-3);
+  font-family: var(--font-sans); font-size: 0.625rem;
+  text-transform: none; letter-spacing: 0.08em; color: var(--me-ink-3);
 }
 .me-stats dd { margin: 0; font-size: 1rem; color: var(--me-ink); font-variant-numeric: tabular-nums; }
 
@@ -151,8 +151,8 @@
 .me-ask-big:disabled { opacity: 0.6; cursor: default; }
 .me-ask-label {
   margin: 0; color: var(--me-ink-3);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.6875rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .me-ask-row { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
 .me-ask-pill {
@@ -170,8 +170,8 @@
 .me-section { margin-bottom: 1.75rem; }
 .me-h2 {
   margin: 0 0 0.6rem; font-weight: 400;
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em; color: var(--me-ink-3);
+  font-family: var(--font-sans); font-size: 0.6875rem;
+  text-transform: none; letter-spacing: 0.08em; color: var(--me-ink-3);
 }
 .theme-playful .me-h2 { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 1rem; font-weight: 900; color: var(--me-ink); }
 
@@ -186,8 +186,8 @@
 }
 .me-card-title {
   margin: 0; color: var(--me-ink-3);
-  font-family: var(--font-mono); font-size: 0.625rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.625rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .theme-playful .me-card-title { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.8rem; font-weight: 800; color: var(--me-ink-2); }
 .me-card-value { margin: 0.1rem 0 0; font-size: 1rem; font-variant-numeric: tabular-nums; }
@@ -205,7 +205,7 @@
 .me-blocked-item {
   padding: 0.35rem 0.75rem; border-radius: 999px;
   border: 1px solid var(--me-line); background: var(--me-surface);
-  font-family: var(--font-mono); font-size: 0.75rem; color: var(--me-ink);
+  font-family: var(--font-sans); font-size: 0.75rem; color: var(--me-ink);
 }
 .me-blocked-item[data-kind="cat"] { border-color: var(--me-ink-3); }
 .theme-playful .me-blocked-item {
@@ -226,8 +226,8 @@
 .theme-playful .me-device-dot[data-state="online"] { background: var(--me-go); }
 .me-device-name { flex: 1; color: var(--me-ink); }
 .me-device-state {
-  color: var(--me-ink-3); font-family: var(--font-mono); font-size: 0.625rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--me-ink-3); font-family: var(--font-sans); font-size: 0.625rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .theme-playful .me-device-state { font-family: var(--me-font); text-transform: none; letter-spacing: 0; font-size: 0.85rem; font-weight: 800; color: var(--me-ink-2); }
 
@@ -240,8 +240,8 @@
 .me-plain-big[data-spent="true"] { color: var(--me-stop); }
 .me-plain-unit {
   margin: 0.4rem 0 0; color: var(--me-ink-3);
-  font-family: var(--font-mono); font-size: 0.6875rem;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 0.6875rem;
+  text-transform: none; letter-spacing: 0.08em;
 }
 
 /* ---- foot ------------------------------------------------------------------------- */
