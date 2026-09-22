@@ -32,6 +32,8 @@ mod sysusers;
 mod tamper;
 #[cfg(feature = "tray")]
 mod tray;
+#[cfg(feature = "gui")]
+mod ui;
 mod unlock;
 mod update;
 mod util;
