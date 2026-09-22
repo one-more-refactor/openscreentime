@@ -1606,3 +1606,7 @@ body[data-leaving="true"] .shell {
   background-repeat: no-repeat;
   background-position: right 0.75rem center;
 }
+
+/* The child page hero: the activity ring is the mark, the number sits beneath. */
+.ch-ring-hero { display: flex; justify-content: center; margin-bottom: 1.1rem; }
+.ch-today .ch-big { font-size: clamp(2.75rem, 1.8rem + 5vw, 4rem); }
