@@ -8,12 +8,8 @@
 // No target (no goal, no limit) → a plain identity disc, no ring.
 // ============================================================================
 import { useEffect, useState } from "react";
+import { avatarColors } from "../lib/avatar";
 
-function hueFor(seed: string): number {
-  let h = 0;
-  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return h;
-}
 function initials(name: string): string {
   const p = name.trim().split(/\s+/).filter(Boolean);
   if (!p.length) return "?";
@@ -38,7 +34,7 @@ export function AvatarRing({
   paused?: boolean;
   size?: number;
 }) {
-  const hue = hueFor(seed);
+  const disc = avatarColors(seed);
   const stroke = Math.max(3, Math.round(size * 0.07));
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
@@ -91,8 +87,8 @@ export function AvatarRing({
           width: "auto",
           height: "auto",
           fontSize: avatar ? size * 0.4 : size * 0.3,
-          background: `hsl(${hue} 45% 88%)`,
-          color: `hsl(${hue} 55% 26%)`,
+          background: disc.bg,
+          color: disc.ink,
           opacity: paused ? 0.6 : 1,
         }}
       >

@@ -22,13 +22,7 @@ import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/f
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
-
-/** Deterministic warm hue per child, so an avatar is recognisable at a glance. */
-export function hueFor(key: string): number {
-  let h = 0;
-  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return h;
-}
+import { avatarColors } from "../lib/avatar";
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -49,7 +43,7 @@ export function Avatar({
   avatar?: string | null;
   size?: number;
 }) {
-  const hue = hueFor(seed);
+  const disc = avatarColors(seed);
   return (
     <span
       className="fam-avatar"
@@ -57,8 +51,8 @@ export function Avatar({
         width: size,
         height: size,
         fontSize: avatar ? size * 0.5 : size * 0.34,
-        background: `hsl(${hue} 45% 88%)`,
-        color: `hsl(${hue} 55% 26%)`,
+        background: disc.bg,
+        color: disc.ink,
       }}
       aria-hidden="true"
     >

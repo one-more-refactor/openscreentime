@@ -5,7 +5,8 @@ interface Props extends InputHTMLAttributes<HTMLInputElement> {
   hint?: string;
 }
 
-// Hairline text input with a mono uppercase label above.
+// Text input with a sentence-case label (docs/DESIGN.md §5): surface bg, 1px
+// line-2, --r-sm, 44px min-height, Figtree 16px — never mono.
 export function TextInput({ label, hint, className = "", id, ...rest }: Props) {
   const inputId = id ?? (label ? `in-${label.replace(/\s+/g, "-").toLowerCase()}` : undefined);
   return (
@@ -17,12 +18,11 @@ export function TextInput({ label, hint, className = "", id, ...rest }: Props) {
       )}
       <input
         id={inputId}
-        className="focusable bg-transparent border rounded px-3 py-2 text-sm font-mono text-fg placeholder:text-fg-faint"
-        style={{ borderColor: "var(--line-2)" }}
+        className="ost-field"
         {...rest}
       />
       {hint && (
-        <span className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
+        <span className="text-[0.78rem]" style={{ color: "var(--ink-3)" }}>
           {hint}
         </span>
       )}
@@ -47,14 +47,13 @@ export function Select({ label, hint, className = "", id, children, ...rest }: S
       )}
       <select
         id={selId}
-        className="focusable bg-surface border rounded px-3 py-2 text-sm font-mono uppercase tracking-label text-fg"
-        style={{ borderColor: "var(--line-2)" }}
+        className="ost-field ost-select"
         {...rest}
       >
         {children}
       </select>
       {hint && (
-        <span className="text-[0.625rem]" style={{ color: "var(--fg-faint)" }}>
+        <span className="text-[0.78rem]" style={{ color: "var(--ink-3)" }}>
           {hint}
         </span>
       )}
