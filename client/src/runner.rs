@@ -1329,6 +1329,15 @@ impl Agent {
         let active = screentime::active_seat_users(&self.exec);
         self.active_users = active.clone();
         for user in &active {
+            // A frozen user is NOT spending screen time: their processes are
+            // suspended at the lock screen, but logind still reports the seat
+            // "active", so counting them here burned budget while locked —
+            // silently eating an earn-time grant so the freeze could never
+            // lift ("granted, but still locked"). Skip them, exactly as the
+            // attribution sampler below already does.
+            if self.frozen.contains(user) {
+                continue;
+            }
             self.tracker
                 .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
         }

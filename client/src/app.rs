@@ -1,27 +1,23 @@
 //! `ost app` — the on-device window a child (or parent) opens from the app grid.
 //!
-//! GNOME shows no usable system tray (no StatusNotifierItem host without an
-//! extension), so a tray icon is invisible there — yet a device this quiet
-//! about what it's doing is exactly the complaint. This window is the answer:
-//! a real, launchable app that says, in plain words, how much time is left,
-//! whether the device is connected, and — the honest part — what OpenScreenTime
-//! can and cannot see. One button: ask a parent for more.
+//! GNOME shows no usable system tray, so this window is how the device shows
+//! itself: in plain words, how much time is left (the ring is the hero), whether
+//! it's connected, and — the honest part — what OpenScreenTime can and cannot
+//! see. One thing it can do: ask a parent for more.
 //!
-//! It reads the very same status file the background companion (`ost tray`)
-//! watches, written by the root agent, and refreshes live. It runs as the
-//! desktop user (no root), and the only thing it can *do* is drop a
-//! "please, more time" marker in the user's own runtime dir — the same
-//! spoof-proof channel the tray uses.
+//! It reads the same status file the background companion watches, written by
+//! the root agent, and refreshes live. It runs as the desktop user (no root),
+//! and the only thing it can *do* is drop a "please, more time" marker in the
+//! user's own runtime dir — the spoof-proof channel the tray uses.
 //!
-//! Built with `--features gui`. Launched as `ost app` (a `.desktop` entry the
-//! installer drops into the app grid).
+//! Built with `--features gui`. Launched as `ost app`. Design: DESIGN-CLIENT.md §2.
 
+use crate::ui::{self, RingState};
 use eframe::egui;
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// Status snapshot (a read-only mirror of runner::write_status_file; kept
-// independent of the tray module so the window builds on `gui` alone).
+// Status snapshot (a read-only mirror of runner::write_status_file).
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -53,8 +49,6 @@ struct UserStatus {
     freeze_in_secs: Option<u64>,
 }
 
-/// This user's snapshot: the private per-user file if present, else the shared
-/// device-wide one (a non-managed user still sees lock/connection state).
 fn read_status(username: &str) -> Option<Status> {
     let per_user = crate::paths::run_str(&format!("status.{username}.json"));
     let raw = std::fs::read_to_string(&per_user)
@@ -63,9 +57,6 @@ fn read_status(username: &str) -> Option<Status> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Drop an on-demand "more time" marker in this user's own runtime dir for the
-/// root agent to turn into an earn-request. `/run/user/<uid>` is the user's own
-/// 0700 dir, so the channel is spoof-proof. Returns whether it was written.
 fn request_more_time() -> bool {
     let uid = users::get_current_uid();
     let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
@@ -79,19 +70,20 @@ fn request_more_time() -> bool {
 // The window
 // ---------------------------------------------------------------------------
 
-// OpenScreenTime brand — warm light, matching the console, the lock screen and
-// the first-run intro.
-const BG: (u8, u8, u8) = (0xf5, 0xf5, 0xf4); // warm off-white
-const FG: (u8, u8, u8) = (0x1a, 0x1a, 0x1a); // ink
-const FAINT: (u8, u8, u8) = (0x76, 0x76, 0x76);
-const LINE: (u8, u8, u8) = (0xcc, 0xcc, 0xcb); // ring track / hairlines
-const ACCENT: (u8, u8, u8) = (0xb3, 0x15, 0x1c); // the stop, used sparingly
-const GOOD: (u8, u8, u8) = (0x2e, 0x7d, 0x46); // the ring green
+/// What to paint in and around the hero ring for the current state.
+struct Hero {
+    ring: RingState,
+    /// The big centred glyph/number inside the disc.
+    big: String,
+    /// The small label under it.
+    label: String,
+    /// Colour of the big number.
+    num: (u8, u8, u8),
+}
 
 struct AppView {
     username: String,
     status: Option<Status>,
-    /// Set once the user asks for more; shown until the request clears.
     asked: bool,
 }
 
@@ -102,54 +94,89 @@ impl AppView {
             .and_then(|s| s.users.iter().find(|u| u.name == self.username))
     }
 
-    /// The one honest headline for the current user's time.
-    fn time_headline(&self) -> (String, (u8, u8, u8)) {
+    /// The ring + its centre, from the current state (DESIGN-CLIENT.md §1/§2).
+    fn hero(&self) -> Hero {
+        // Agent not running at all: a calm waiting state, track only.
+        if self.status.is_none() {
+            return Hero {
+                ring: RingState::Track,
+                big: "·".into(),
+                label: "not running yet".into(),
+                num: ui::INK_3,
+            };
+        }
         match self.me() {
-            Some(u) if u.frozen => ("Paused".to_string(), ACCENT),
+            Some(u) if u.frozen => Hero {
+                ring: RingState::Paused,
+                big: "‖".into(),
+                label: "Paused".into(),
+                num: ui::INK_3,
+            },
             Some(u) => match u.remaining_minutes {
-                Some(m) if m <= 0 => ("Time's up for today".to_string(), ACCENT),
-                Some(m) => (fmt_left(m), if m <= 15 { ACCENT } else { FG }),
-                None => ("No limit today".to_string(), FG),
+                None => Hero {
+                    ring: RingState::Track,
+                    big: "✓".into(),
+                    label: "no limit today".into(),
+                    num: ui::BRAND,
+                },
+                Some(m) if m <= 0 => Hero {
+                    ring: RingState::Full { color: ui::STOP },
+                    big: "0".into(),
+                    label: "time's up today".into(),
+                    num: ui::STOP,
+                },
+                Some(m) => {
+                    let total = u.used_minutes as i64 + m;
+                    let frac = if total > 0 {
+                        (u.used_minutes as f32) / total as f32
+                    } else {
+                        0.0
+                    };
+                    let color = if m <= 15 { ui::WARN } else { ui::BRAND };
+                    let (big, label) = ring_center(m);
+                    Hero {
+                        ring: RingState::Fill { frac, color },
+                        big,
+                        label,
+                        num: color,
+                    }
+                }
             },
             // Not a managed user on this device (e.g. a parent's own login).
-            None => ("This device is managed".to_string(), FG),
+            None => Hero {
+                ring: RingState::Track,
+                big: "·".into(),
+                label: "managed device".into(),
+                num: ui::INK_3,
+            },
         }
     }
 
-    /// A short line under the headline: used-so-far, or the wind-down warning.
-    fn time_detail(&self) -> Option<String> {
-        let u = self.me()?;
-        if let Some(secs) = u.freeze_in_secs {
-            return Some(format!("Saving your work — pausing in {secs}s"));
-        }
-        if u.frozen {
-            return Some("A parent can lift this, or ask for more.".to_string());
-        }
-        match u.remaining_minutes {
-            Some(m) if m <= 0 => Some("Ask a parent, or earn more.".to_string()),
-            _ => Some(format!("{} used today", fmt_left(u.used_minutes as i64))),
-        }
+    /// The wind-down line, when a freeze is imminent (drawn under the ring).
+    fn winddown(&self) -> Option<String> {
+        let secs = self.me()?.freeze_in_secs?;
+        Some(format!("Save your work — the screen pauses in {secs}s."))
     }
 
     fn connection(&self) -> (&'static str, (u8, u8, u8)) {
         match self.status.as_ref().map(|s| s.connection.as_str()) {
-            Some("online") => ("Connected", GOOD),
-            Some("offline_fail_closed") => ("Offline — locked", ACCENT),
-            Some(_) => ("Offline — catching up when it's back", FAINT),
-            None => ("Not running", FAINT),
+            Some("online") => ("Connected", ui::BRAND),
+            Some("offline_fail_closed") => ("Offline — locked", ui::STOP),
+            Some(_) => ("Offline — catching up when it's back", ui::INK_3),
+            None => ("Not running", ui::INK_3),
         }
     }
 
-    /// A device-level restriction worth a red banner, independent of the user's
-    /// own time.
+    /// A device-level restriction, mirrored in miniature at the top of the window
+    /// so an open window is never out of sync with a locked session.
     fn device_banner(&self) -> Option<&'static str> {
         let s = self.status.as_ref()?;
         if s.tamper_lockdown {
-            Some("Locked down — OpenScreenTime was tampered with.")
+            Some("This computer is locked — OpenScreenTime was tampered with.")
         } else if s.offline_hard_lockdown {
-            Some("Locked down — offline too long.")
+            Some("This computer is locked — it's been offline too long.")
         } else if s.device_locked {
-            Some("A parent paused this device.")
+            Some("A parent paused this computer.")
         } else {
             None
         }
@@ -158,19 +185,17 @@ impl AppView {
 
 impl eframe::App for AppView {
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
+        let c = ui::BG;
         [
-            BG.0 as f32 / 255.0,
-            BG.1 as f32 / 255.0,
-            BG.2 as f32 / 255.0,
+            c.0 as f32 / 255.0,
+            c.1 as f32 / 255.0,
+            c.2 as f32 / 255.0,
             1.0,
         ]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Re-read the live snapshot each frame; the file is tiny.
         let next = read_status(&self.username);
-        // Once the agent has turned our ask into a live request, the marker is
-        // gone — clear the local "asked" flag so the button is usable again.
         if self.asked {
             let uid = users::get_current_uid();
             let marker =
@@ -181,142 +206,137 @@ impl eframe::App for AppView {
         }
         self.status = next;
 
-        let fg = col(FG);
-        let faint = col(FAINT);
-
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::same(28.0)))
-            .show(ctx, |ui| {
-                // Wordmark.
-                ui.horizontal(|ui| {
-                    ring(ui, 18.0);
-                    ui.add_space(8.0);
-                    ui.colored_label(
-                        fg,
-                        egui::RichText::new("OpenScreenTime").size(15.0).strong(),
-                    );
+            .frame(egui::Frame::default().fill(ui::col(ui::BG)).inner_margin(egui::Margin::same(28.0)))
+            .show(ctx, |ui_| {
+                // Wordmark, top-left (stays put).
+                ui_.horizontal(|ui_| {
+                    let (rect, _) = ui_.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                    ui::ring(ui_.painter(), rect.center(), 20.0, &RingState::Fill { frac: 0.4, color: ui::BRAND });
+                    ui_.add_space(9.0);
+                    ui_.label(egui::RichText::new("OpenScreenTime").font(ui::font(15.0)).strong().color(ui::col(ui::INK)));
                 });
-                ui.add_space(26.0);
 
-                // Device-level lockdown takes the top line when present.
+                // Device-level lock mirrored at the top.
                 if let Some(banner) = self.device_banner() {
-                    ui.colored_label(col(ACCENT), egui::RichText::new(banner).size(18.0).strong());
-                    ui.add_space(18.0);
+                    ui_.add_space(14.0);
+                    banner_card(ui_, banner);
                 }
 
-                // The headline: time left (or paused / time's up).
-                let (head, head_col) = self.time_headline();
-                ui.colored_label(col(head_col), egui::RichText::new(head).size(40.0).strong());
-                if let Some(detail) = self.time_detail() {
-                    ui.add_space(6.0);
-                    ui.colored_label(faint, egui::RichText::new(detail).size(15.0));
-                }
+                ui_.vertical_centered(|ui_| {
+                    ui_.add_space((ui_.available_height() * 0.06).min(28.0));
 
-                ui.add_space(22.0);
+                    // The hero ring, 168px, with the number + label inside.
+                    let hero = self.hero();
+                    let d = 168.0;
+                    let (rect, _) = ui_.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+                    let center = rect.center();
+                    ui::ring(ui_.painter(), center, d, &hero.ring);
+                    ui_.painter().text(
+                        center - egui::vec2(0.0, 8.0),
+                        egui::Align2::CENTER_CENTER,
+                        &hero.big,
+                        ui::font(if hero.big.chars().count() > 2 { 44.0 } else { 60.0 }),
+                        ui::col(hero.num),
+                    );
+                    ui_.painter().text(
+                        center + egui::vec2(0.0, 34.0),
+                        egui::Align2::CENTER_CENTER,
+                        &hero.label,
+                        ui::font(13.0),
+                        ui::col(ui::INK_2),
+                    );
 
-                // Connection chip.
-                let (conn, conn_col) = self.connection();
-                ui.horizontal(|ui| {
-                    dot(ui, conn_col);
-                    ui.add_space(7.0);
-                    ui.colored_label(col(conn_col), egui::RichText::new(conn).size(14.0));
-                });
+                    // Wind-down line, if a freeze is imminent.
+                    if let Some(w) = self.winddown() {
+                        ui_.add_space(14.0);
+                        ui_.label(egui::RichText::new(w).font(ui::font(14.0)).color(ui::col(ui::WARN)));
+                    }
 
-                ui.add_space(28.0);
+                    ui_.add_space(20.0);
 
-                // Ask for more — the one thing this window can do.
-                let can_ask = self.status.is_some();
-                ui.add_enabled_ui(can_ask && !self.asked, |ui| {
-                    let label = if self.asked {
-                        "Asked — waiting for a parent"
-                    } else {
-                        "Ask for more time"
-                    };
-                    if ui
-                        .add_sized(
-                            [ui.available_width().min(320.0), 44.0],
-                            egui::Button::new(
-                                egui::RichText::new(label)
-                                    .size(16.0)
-                                    .strong()
-                                    .color(col(BG)),
-                            )
-                            .fill(col(FG))
-                            .rounding(10.0),
-                        )
-                        .clicked()
-                    {
+                    // Connection chip.
+                    let (conn, conn_col) = self.connection();
+                    ui_.horizontal(|ui_| {
+                        ui_.add_space((ui_.available_width() - text_w(ui_, conn) - 20.0).max(0.0) / 2.0);
+                        let (dot, _) = ui_.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                        ui_.painter().circle_filled(dot.center(), 4.5, ui::col(conn_col));
+                        ui_.add_space(7.0);
+                        ui_.label(egui::RichText::new(conn).font(ui::font(13.0)).color(ui::col(conn_col)));
+                    });
+
+                    ui_.add_space(26.0);
+
+                    // Ask for more — the one thing this window can do.
+                    let can_ask = self.me().is_some() && !self.asked;
+                    let label = if self.asked { "Asked — waiting for a parent" } else { "Ask for more time" };
+                    let w = ui_.available_width().min(300.0);
+                    if ui::primary_button(ui_, label, egui::vec2(w, 44.0), can_ask) {
                         self.asked = request_more_time();
                     }
+                    if self.asked {
+                        ui_.add_space(8.0);
+                        ui_.label(egui::RichText::new("Sent — a parent can say yes.").font(ui::font(13.0)).color(ui::col(ui::BRAND_INK)));
+                    }
                 });
-                if self.asked {
-                    ui.add_space(8.0);
-                    ui.colored_label(
-                        col(GOOD),
-                        egui::RichText::new("Sent — a parent can say yes.").size(13.0),
-                    );
-                }
 
-                // The honest footer — the same promises as the first-run intro
-                // and TRANSPARENCY.md, always in view.
-                ui.add_space(30.0);
-                ui.separator();
-                ui.add_space(12.0);
-                ui.colored_label(
-                    faint,
-                    egui::RichText::new(
-                        "OpenScreenTime counts screen time and filters the network. \
-                         It cannot see your screen, your messages, what you type, \
-                         or your browsing history.",
-                    )
-                    .size(12.5),
-                );
+                // The honest promise, always in view — a sunken footer card.
+                let avail = ui_.available_height();
+                if avail > 96.0 {
+                    ui_.add_space(avail - 96.0);
+                }
+                egui::Frame::default()
+                    .fill(ui::col(ui::SUNKEN))
+                    .rounding(egui::Rounding::same(10.0))
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui_, |ui_| {
+                        ui_.set_width(ui_.available_width());
+                        ui_.label(
+                            egui::RichText::new(
+                                "OpenScreenTime counts screen time and filters the network. It can't \
+                                 see your screen, your messages, what you type, or your browsing history.",
+                            )
+                            .font(ui::font(12.5))
+                            .color(ui::col(ui::INK_3)),
+                        );
+                    });
             });
 
-        // Live, but idle: a couple of seconds is plenty for a clock that ticks
-        // in minutes, and it keeps a backgrounded window off the CPU.
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
     }
 }
 
-fn col(c: (u8, u8, u8)) -> egui::Color32 {
-    egui::Color32::from_rgb(c.0, c.1, c.2)
+/// A small stop-tinted device-lock card at the top of the window.
+fn banner_card(ui_: &mut egui::Ui, text: &str) {
+    egui::Frame::default()
+        .fill(ui::col(ui::STOP_TINT))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui_, |ui_| {
+            ui_.set_width(ui_.available_width());
+            ui_.label(
+                egui::RichText::new(text)
+                    .font(ui::font(14.0))
+                    .strong()
+                    .color(ui::col(ui::STOP)),
+            );
+        });
 }
 
-/// A small filled status dot.
-fn dot(ui: &mut egui::Ui, c: (u8, u8, u8)) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 5.0, col(c));
+fn text_w(ui_: &egui::Ui, s: &str) -> f32 {
+    ui_.fonts(|f| {
+        s.chars()
+            .map(|c| f.glyph_width(&ui::font(13.0), c))
+            .sum::<f32>()
+    })
 }
 
-/// The activity-ring marque (a small arc of "used" on a faint track), painted
-/// to match the favicon.
-fn ring(ui: &mut egui::Ui, r: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(r * 2.0, r * 2.0), egui::Sense::hover());
-    let c = rect.center();
-    let stroke_track = egui::Stroke::new(r * 0.32, col(LINE));
-    ui.painter().circle_stroke(c, r * 0.78, stroke_track);
-    // A short "used" arc from the top, clockwise ~100°.
-    let mut pts = Vec::new();
-    let start = -std::f32::consts::FRAC_PI_2;
-    let sweep = std::f32::consts::PI * 0.56;
-    for i in 0..=24 {
-        let a = start + sweep * (i as f32 / 24.0);
-        pts.push(c + egui::vec2(a.cos(), a.sin()) * r * 0.78);
-    }
-    ui.painter().add(egui::Shape::line(
-        pts,
-        egui::Stroke::new(r * 0.32, col(GOOD)),
-    ));
-}
-
-/// "45 min" / "1 h 05 min".
-fn fmt_left(mins: i64) -> String {
-    let m = mins.max(0);
+/// The number and label inside the ring: minutes, or "h:mm" past an hour.
+fn ring_center(m: i64) -> (String, String) {
     if m < 60 {
-        format!("{m} min")
+        (m.to_string(), "minutes left".into())
     } else {
-        format!("{} h {:02} min", m / 60, m % 60)
+        (format!("{}:{:02}", m / 60, m % 60), "left today".into())
     }
 }
 
@@ -339,8 +359,7 @@ pub fn run() -> anyhow::Result<()> {
         "OPENSCREENTIME",
         native,
         Box::new(move |cc| {
-            // Light egui chrome to match the warm brand (egui defaults to dark).
-            cc.egui_ctx.set_visuals(egui::Visuals::light());
+            ui::install(cc);
             Ok(Box::new(AppView {
                 username,
                 status: initial,
@@ -368,7 +387,6 @@ mod tests {
             asked: false,
         }
     }
-
     fn kid(remaining: Option<i64>, frozen: bool) -> UserStatus {
         UserStatus {
             name: "kid".into(),
@@ -380,42 +398,41 @@ mod tests {
     }
 
     #[test]
-    fn time_formatting() {
-        assert_eq!(fmt_left(0), "0 min");
-        assert_eq!(fmt_left(45), "45 min");
-        assert_eq!(fmt_left(60), "1 h 00 min");
-        assert_eq!(fmt_left(125), "2 h 05 min");
-        // Never renders a negative number.
-        assert_eq!(fmt_left(-10), "0 min");
+    fn ring_center_formats() {
+        assert_eq!(ring_center(45), ("45".into(), "minutes left".into()));
+        assert_eq!(ring_center(90), ("1:30".into(), "left today".into()));
+        assert_eq!(ring_center(60), ("1:00".into(), "left today".into()));
     }
 
     #[test]
-    fn headline_reflects_state() {
-        // Plenty of time: white, minutes shown.
-        let (h, c) = view(vec![kid(Some(90), false)], "online").time_headline();
-        assert_eq!(h, "1 h 30 min");
-        assert_eq!(c, FG);
+    fn hero_reflects_state() {
+        // Plenty of time: green fill, minutes shown.
+        let h = view(vec![kid(Some(90), false)], "online").hero();
+        assert_eq!(h.big, "1:30");
+        assert_eq!(h.num, ui::BRAND);
+        assert!(matches!(h.ring, RingState::Fill { .. }));
 
-        // Almost out: red.
-        let (_h, c) = view(vec![kid(Some(10), false)], "online").time_headline();
-        assert_eq!(c, ACCENT);
+        // Almost out: amber.
+        assert_eq!(
+            view(vec![kid(Some(10), false)], "online").hero().num,
+            ui::WARN
+        );
 
-        // Out.
-        let (h, c) = view(vec![kid(Some(0), false)], "online").time_headline();
-        assert_eq!(h, "Time's up for today");
-        assert_eq!(c, ACCENT);
+        // Out: red, full ring.
+        let h = view(vec![kid(Some(0), false)], "online").hero();
+        assert_eq!(h.num, ui::STOP);
+        assert!(matches!(h.ring, RingState::Full { .. }));
 
-        // Paused wins over any remaining count.
-        let (h, _c) = view(vec![kid(Some(90), true)], "online").time_headline();
-        assert_eq!(h, "Paused");
+        // Paused wins.
+        assert!(matches!(
+            view(vec![kid(Some(90), true)], "online").hero().ring,
+            RingState::Paused
+        ));
 
-        // No limit configured.
-        let (h, _c) = view(vec![kid(None, false)], "online").time_headline();
-        assert_eq!(h, "No limit today");
-
-        // Not a managed user on this device.
-        let (h, _c) = view(vec![], "online").time_headline();
-        assert_eq!(h, "This device is managed");
+        // No limit: a check on a plain track.
+        let h = view(vec![kid(None, false)], "online").hero();
+        assert_eq!(h.big, "✓");
+        assert!(matches!(h.ring, RingState::Track));
     }
 
     #[test]
