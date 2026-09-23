@@ -212,3 +212,65 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, size: egui::Vec2, enabled: 
     })
     .inner
 }
+
+// ── Center glyphs, drawn as shapes (Figtree has no emoji) ───────────────────
+
+/// A padlock — the shared mark for the three "you hit a wall" stops (time's up,
+/// offline lockdown, tamper). `h` is the overall glyph height.
+pub fn glyph_padlock(painter: &egui::Painter, c: egui::Pos2, h: f32, color: (u8, u8, u8)) {
+    let ink = col(color);
+    let body_w = h * 0.62;
+    let body_h = h * 0.5;
+    let body_top = c.y + h * 0.02;
+    let body = egui::Rect::from_min_size(
+        egui::pos2(c.x - body_w / 2.0, body_top),
+        egui::vec2(body_w, body_h),
+    );
+    painter.rect_filled(body, egui::Rounding::same(h * 0.1), ink);
+    // The shackle: a stroked half-ring rising from the body.
+    let sr = body_w * 0.32;
+    let sc = egui::pos2(c.x, body_top);
+    let pts: Vec<egui::Pos2> = (0..=18)
+        .map(|i| {
+            let a = std::f32::consts::PI + std::f32::consts::PI * (i as f32 / 18.0);
+            sc + egui::vec2(a.cos(), a.sin()) * sr
+        })
+        .collect();
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(h * 0.11, ink)));
+    // Keyhole.
+    painter.circle_filled(egui::pos2(c.x, body_top + body_h * 0.45), h * 0.06, col(BG));
+}
+
+/// A calm crescent moon — bedtime / outside-window, a night not an alarm.
+pub fn glyph_moon(painter: &egui::Painter, c: egui::Pos2, h: f32, color: (u8, u8, u8)) {
+    let r = h * 0.42;
+    painter.circle_filled(c, r, col(color));
+    // Carve the crescent by overpainting a paper-coloured disc, offset up-right.
+    painter.circle_filled(c + egui::vec2(r * 0.42, -r * 0.34), r * 0.92, col(BG));
+}
+
+/// Two bars — a parent pause.
+pub fn glyph_pause(painter: &egui::Painter, c: egui::Pos2, h: f32, color: (u8, u8, u8)) {
+    let ink = col(color);
+    let bw = h * 0.2;
+    let bh = h * 0.72;
+    let gap = h * 0.16;
+    for dx in [-(gap / 2.0 + bw), gap / 2.0] {
+        let r = egui::Rect::from_min_size(egui::pos2(c.x + dx, c.y - bh / 2.0), egui::vec2(bw, bh));
+        painter.rect_filled(r, egui::Rounding::same(bw * 0.4), ink);
+    }
+}
+
+/// A check — no limit today.
+pub fn glyph_check(painter: &egui::Painter, c: egui::Pos2, h: f32, color: (u8, u8, u8)) {
+    let s = h * 0.5;
+    let pts = vec![
+        c + egui::vec2(-s * 0.55, 0.05 * s),
+        c + egui::vec2(-s * 0.12, s * 0.45),
+        c + egui::vec2(s * 0.6, -s * 0.5),
+    ];
+    painter.add(egui::Shape::line(
+        pts,
+        egui::Stroke::new(h * 0.12, col(color)),
+    ));
+}
