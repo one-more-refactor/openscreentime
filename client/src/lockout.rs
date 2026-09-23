@@ -110,9 +110,9 @@ pub mod challenge {
 
         pub fn prompt(&self) -> String {
             match self {
-                Challenge::Math { a, b, op, .. } => format!("SOLVE  {a} {op} {b} = ?"),
-                Challenge::Wait { seconds } => format!("WAIT {seconds}s TO CONTINUE"),
-                Challenge::ParentPin => "ENTER UNLOCK CODE (FROM THE CONSOLE)".into(),
+                Challenge::Math { a, b, op, .. } => format!("What's {a} {op} {b}?"),
+                Challenge::Wait { seconds } => format!("Wait {seconds}s to continue"),
+                Challenge::ParentPin => "Enter the unlock code from the console".into(),
                 Challenge::None => String::new(),
             }
         }
@@ -244,7 +244,7 @@ impl LockSpec {
             headline: headline.to_string(),
             detail: detail.to_string(),
             big_number: None,
-            action: "TAP TO CONTINUE".to_string(),
+            action: "Continue".to_string(),
             challenge,
             for_user: user.to_string(),
             parent,
@@ -411,45 +411,35 @@ pub mod gui {
     //! Minimal eframe/egui fullscreen presenter. Compiled only with `--features gui`.
     use super::challenge::Challenge;
     use super::LockSpec;
+    use crate::ui::{self, col, RingState};
     use base64::Engine;
     use eframe::egui;
 
-    // OpenScreenTime brand — warm light, the same palette as the console. A
-    // screen-time stop should read as "that's it for today", calm and friendly,
-    // not a red alarm; red is kept for the one genuine wrong-code line.
-    const BG: (u8, u8, u8) = (0xf5, 0xf5, 0xf4); // warm off-white
-    const FG: (u8, u8, u8) = (0x1a, 0x1a, 0x1a); // ink
-    const DIM: (u8, u8, u8) = (0x5a, 0x5a, 0x5a);
-    const GREEN: (u8, u8, u8) = (0x2e, 0x7d, 0x46); // the activity ring / ok
-    const AMBER: (u8, u8, u8) = (0x8a, 0x63, 0x00); // the wind-down countdown
-    const ACCENT: (u8, u8, u8) = (0xb3, 0x15, 0x1c); // the stop / a wrong code
-    const LINE: (u8, u8, u8) = (0xcc, 0xcc, 0xcb);
-    /// Label ink — quieter than FG, so the code prompt does not shout.
-    const FAINT: (u8, u8, u8) = (0x76, 0x76, 0x76);
-
-    fn col(c: (u8, u8, u8)) -> egui::Color32 {
-        egui::Color32::from_rgb(c.0, c.1, c.2)
+    /// Which ring + centre glyph a hard stop draws (DESIGN-CLIENT.md §1/§4).
+    /// The three "you hit a wall" reasons share the red padlock; a calm night
+    /// (bedtime / outside a window) shows an ink moon; a parent pause is the
+    /// dashed ring with pause bars.
+    enum Look {
+        Wall,   // time's up, offline lockdown, tamper — full red, padlock
+        Night,  // bedtime / outside window — full ink-2, moon
+        Paused, // a parent paused — dashed ring, pause bars
     }
 
-    /// The activity-ring marque (a short "used" arc on a faint track), the same
-    /// mark as the favicon and the console wordmark.
-    fn ring(ui: &mut egui::Ui, r: f32) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(r * 2.0, r * 2.0), egui::Sense::hover());
-        let c = rect.center();
-        ui.painter()
-            .circle_stroke(c, r * 0.8, egui::Stroke::new(r * 0.3, col(LINE)));
-        let start = -std::f32::consts::FRAC_PI_2;
-        let sweep = std::f32::consts::PI * 0.55;
-        let pts: Vec<egui::Pos2> = (0..=24)
-            .map(|i| {
-                let a = start + sweep * (i as f32 / 24.0);
-                c + egui::vec2(a.cos(), a.sin()) * r * 0.8
-            })
-            .collect();
-        ui.painter().add(egui::Shape::line(
-            pts,
-            egui::Stroke::new(r * 0.3, col(GREEN)),
-        ));
+    fn look_for(headline: &str, detail: &str) -> Look {
+        let h = headline.to_ascii_lowercase();
+        let d = detail.to_ascii_lowercase();
+        if h.contains("paused") || d.contains("paused") {
+            Look::Paused
+        } else if h.contains("goodnight")
+            || h.contains("not now")
+            || d.contains("bedtime")
+            || d.contains("morning")
+            || d.contains("time of day")
+        {
+            Look::Night
+        } else {
+            Look::Wall
+        }
     }
 
     /// Minutes granted by a verified early dismiss. The parent PIN is the real
@@ -646,8 +636,8 @@ pub mod gui {
             "OPENSCREENTIME",
             native,
             Box::new(move |cc| {
-                // Light egui chrome to match the warm brand (egui defaults to dark).
-                cc.egui_ctx.set_visuals(egui::Visuals::light());
+                // The ring language: bundled Figtree + the warm light chrome.
+                ui::install(cc);
                 let deadline = spec.countdown_secs.map(|s| {
                     std::time::Instant::now() + std::time::Duration::from_secs(u64::from(s))
                 });
@@ -657,6 +647,7 @@ pub mod gui {
                     pin: String::new(),
                     pin_msg: None,
                     deadline,
+                    flash_until: None,
                 }))
             }),
         ) {
@@ -677,98 +668,163 @@ pub mod gui {
         pin_msg: Option<String>,
         /// When the save-your-work grace ends (drives the live countdown line).
         deadline: Option<std::time::Instant>,
+        /// A single calm ring flash after a wrong code — never a shake or siren.
+        flash_until: Option<std::time::Instant>,
     }
 
     impl eframe::App for LockApp {
         fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
+            let c = ui::BG;
             [
-                BG.0 as f32 / 255.0,
-                BG.1 as f32 / 255.0,
-                BG.2 as f32 / 255.0,
+                c.0 as f32 / 255.0,
+                c.1 as f32 / 255.0,
+                c.2 as f32 / 255.0,
                 1.0,
             ]
         }
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            let fg = col(FG);
-            let dim = col(DIM);
+            let now = std::time::Instant::now();
+            // Wind-down: the save-your-work grace still running before the freeze.
+            let winddown = self.deadline.and_then(|d| {
+                let r = d.saturating_duration_since(now).as_secs();
+                (d > now).then_some(r)
+            });
+            let flashing = self.flash_until.is_some_and(|t| now < t);
+
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::default()
-                        .fill(col(BG))
+                        .fill(col(ui::BG))
                         .inner_margin(egui::Margin::same(24.0)),
                 )
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space((ui.available_height() * 0.12).min(120.0));
+                .show(ctx, |uic| {
+                    uic.vertical_centered(|uic| {
+                        uic.add_space((uic.available_height() * 0.10).min(80.0));
 
-                        // The wordmark: the activity-ring marque + name, centred.
-                        ui.horizontal(|ui| {
-                            ui.add_space(((ui.available_width() - 185.0) / 2.0).max(0.0));
-                            ring(ui, 15.0);
-                            ui.add_space(8.0);
-                            ui.colored_label(
-                                dim,
-                                egui::RichText::new("OpenScreenTime").size(15.0).strong(),
+                        // Wordmark, dim.
+                        uic.horizontal(|uic| {
+                            uic.add_space(((uic.available_width() - 175.0) / 2.0).max(0.0));
+                            let (m, _) = uic
+                                .allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                            ui::ring(
+                                uic.painter(),
+                                m.center(),
+                                20.0,
+                                &RingState::Fill {
+                                    frac: 0.4,
+                                    color: ui::BRAND,
+                                },
+                            );
+                            uic.add_space(8.0);
+                            uic.label(
+                                egui::RichText::new("OpenScreenTime")
+                                    .font(ui::font(15.0))
+                                    .strong()
+                                    .color(col(ui::INK_3)),
                             );
                         });
-                        ui.add_space(34.0);
+                        uic.add_space(30.0);
 
-                        // The stop, said plainly — a real sans, not a wall of mono.
-                        ui.colored_label(
-                            fg,
-                            egui::RichText::new(&self.spec.headline).size(46.0).strong(),
-                        );
-                        ui.add_space(12.0);
-                        ui.colored_label(dim, egui::RichText::new(&self.spec.detail).size(19.0));
-
-                        // Live save-your-work countdown — amber wind-down, not a red alarm.
-                        if let Some(deadline) = self.deadline {
-                            let remaining = deadline
-                                .saturating_duration_since(std::time::Instant::now())
-                                .as_secs();
-                            ui.add_space(18.0);
-                            ui.colored_label(
-                                col(AMBER),
-                                egui::RichText::new(format!(
-                                    "Saving your work — pausing in {remaining}s"
-                                ))
-                                .size(18.0)
-                                .strong(),
+                        // The hero ring, 220px — the gauge completed, not an alarm.
+                        let d = 220.0;
+                        let (rect, _) =
+                            uic.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+                        let center = rect.center();
+                        if let Some(secs) = winddown {
+                            // Full amber, hardening to red across the final 3 seconds.
+                            let t = if secs <= 3 {
+                                (3 - secs) as f32 / 3.0
+                            } else {
+                                0.0
+                            };
+                            let rc = ui::lerp(ui::WARN, ui::STOP, t);
+                            ui::ring(uic.painter(), center, d, &RingState::Full { color: rc });
+                            uic.painter().text(
+                                center - egui::vec2(0.0, 6.0),
+                                egui::Align2::CENTER_CENTER,
+                                secs.to_string(),
+                                ui::font(64.0),
+                                col(rc),
                             );
-                            // Keep ticking even without input events.
-                            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                            uic.painter().text(
+                                center + egui::vec2(0.0, 42.0),
+                                egui::Align2::CENTER_CENTER,
+                                "seconds left",
+                                ui::font(16.0),
+                                col(ui::INK_2),
+                            );
+                            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                        } else {
+                            let look = look_for(&self.spec.headline, &self.spec.detail);
+                            let (base_state, base_glyph) = match look {
+                                Look::Wall => (RingState::Full { color: ui::STOP }, ui::STOP),
+                                Look::Night => (RingState::Full { color: ui::INK_2 }, ui::INK_2),
+                                Look::Paused => (RingState::Paused, ui::INK_3),
+                            };
+                            // A wrong code flashes the ring red for a beat — no shake.
+                            let state = if flashing {
+                                RingState::Full { color: ui::STOP }
+                            } else {
+                                base_state
+                            };
+                            let gcol = if flashing { ui::STOP } else { base_glyph };
+                            ui::ring(uic.painter(), center, d, &state);
+                            match look {
+                                Look::Wall => ui::glyph_padlock(uic.painter(), center, 62.0, gcol),
+                                Look::Night => ui::glyph_moon(uic.painter(), center, 62.0, gcol),
+                                Look::Paused => ui::glyph_pause(uic.painter(), center, 58.0, gcol),
+                            }
+                            if flashing {
+                                ctx.request_repaint_after(std::time::Duration::from_millis(60));
+                            }
                         }
+                        uic.add_space(30.0);
 
-                        ui.add_space(34.0);
+                        // The reason, said plainly (verbatim from the spec).
+                        uic.set_max_width(460.0);
+                        uic.label(
+                            egui::RichText::new(&self.spec.headline)
+                                .font(ui::font(34.0))
+                                .strong()
+                                .color(col(ui::INK)),
+                        );
+                        uic.add_space(10.0);
+                        uic.label(
+                            egui::RichText::new(&self.spec.detail)
+                                .font(ui::font(18.0))
+                                .color(col(ui::INK_2)),
+                        );
+                        uic.add_space(30.0);
+
+                        // The way back in. The maths answer is visible; the code is not.
                         let prompt = self.spec.challenge.prompt();
                         if !prompt.is_empty() {
-                            ui.colored_label(fg, egui::RichText::new(prompt).size(24.0).strong());
-                            ui.add_space(12.0);
+                            uic.label(
+                                egui::RichText::new(prompt)
+                                    .font(ui::font(22.0))
+                                    .strong()
+                                    .color(col(ui::INK)),
+                            );
+                            uic.add_space(12.0);
                         }
-                        // Math / parent-PIN challenges gate the early dismiss on a
-                        // typed answer, verified by `Challenge::verify`. `Wait`/`None`
-                        // have no typed input, so the action button alone dismisses.
-                        // The parent-code box is always offered when a code is set —
-                        // a parent physically present can always get in. The maths
-                        // answer is visible; the code never is.
                         if matches!(self.spec.challenge, Challenge::Math { .. }) {
-                            ui.add(
+                            uic.add(
                                 egui::TextEdit::singleline(&mut self.input)
                                     .hint_text("type your answer")
                                     .desired_width(240.0),
                             );
-                            ui.add_space(14.0);
+                            uic.add_space(14.0);
                         }
                         if self.spec.parent.configured() {
-                            ui.colored_label(
-                                col(FAINT),
+                            uic.label(
                                 egui::RichText::new(
                                     "A parent's unlock code (from the console, or a recovery code)",
                                 )
-                                .size(12.0),
+                                .font(ui::font(13.0))
+                                .color(col(ui::INK_3)),
                             );
-                            ui.add_space(4.0);
-                            ui.add(
+                            uic.add_space(4.0);
+                            uic.add(
                                 egui::TextEdit::singleline(&mut self.pin)
                                     .password(true)
                                     .hint_text("123 456")
@@ -776,23 +832,27 @@ pub mod gui {
                                     .font(egui::TextStyle::Monospace),
                             );
                             if let Some(msg) = &self.pin_msg {
-                                ui.add_space(6.0);
-                                ui.colored_label(col(ACCENT), egui::RichText::new(msg).size(12.0));
+                                uic.add_space(6.0);
+                                uic.label(
+                                    egui::RichText::new(msg)
+                                        .font(ui::font(13.0))
+                                        .color(col(ui::STOP)),
+                                );
                             }
-                            ui.add_space(6.0);
+                            uic.add_space(6.0);
                         }
-                        ui.add_space(20.0);
-                        if ui
+                        uic.add_space(20.0);
+                        if uic
                             .add_sized(
                                 [240.0, 46.0],
                                 egui::Button::new(
                                     egui::RichText::new(&self.spec.action)
-                                        .size(18.0)
+                                        .font(ui::font(17.0))
                                         .strong()
-                                        .color(col(BG)),
+                                        .color(col(ui::SURFACE)),
                                 )
-                                .fill(fg)
-                                .rounding(10.0),
+                                .fill(col(ui::BRAND))
+                                .rounding(egui::Rounding::same(23.0)),
                             )
                             .clicked()
                         {
@@ -845,6 +905,11 @@ pub mod gui {
                                 self.pin_msg = verdict.map(|v| v.message());
                                 self.input.clear();
                                 self.pin.clear();
+                                // One calm red flash of the ring — never a shake.
+                                self.flash_until = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_millis(240),
+                                );
                             }
                         }
                     });
