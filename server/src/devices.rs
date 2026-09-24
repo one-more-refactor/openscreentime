@@ -342,7 +342,7 @@ pub async fn mark_recovery_code_used(db: &sqlx::PgPool, device_id: Uuid, payload
 async fn pending_command_types(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT type FROM commands
-         WHERE device_id = $1 AND status IN ('queued','sent')
+         WHERE device_id = $1 AND status IN ('queued','sent') AND type <> 'login_code'
          ORDER BY created_at",
     )
     .bind(device_id)
@@ -419,13 +419,21 @@ pub struct CreateDeviceReq {
 pub async fn create_device(
     State(st): State<AppState>,
     admin: AuthAdmin,
+    jar: axum_extra::extract::cookie::CookieJar,
     Json(req): Json<CreateDeviceReq>,
 ) -> AppResult<Json<Value>> {
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
     if let Some(acct) = req.account_id {
-        crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        let owner = crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        // A parent's own computer is a door to that parent: its enroll token
+        // becomes a device that mints vouchers — fresh sessions — for them.
+        // So setting one up is in the sensitive corner, like a fresh enroll
+        // token for any computer.
+        if owner.4 != "member" {
+            crate::confirm::require_window(&st, &jar).await?;
+        }
     }
     let enroll_token = gen_token();
     // The unlock-code secret is born with the device; only the agent ever
@@ -627,6 +635,7 @@ type DeviceUserRow = (
     i32,
     i32,
     Option<Uuid>,
+    bool,
 );
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
@@ -634,7 +643,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
     let rows: Vec<DeviceUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
                 p.name, p.kind, \
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id, \
+                du.unsorted \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
          JOIN devices d ON d.id = du.device_id \
          LEFT JOIN screen_time_ledger l \
@@ -659,6 +669,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "used_minutes_today": r.7 / 60,
                 "earned_minutes_today": r.8 / 60,
                 "account_id": r.9,
+                // Nobody has said who this login is yet (Who's who).
+                "unsorted": r.10,
             })
         })
         .collect();
@@ -708,7 +720,7 @@ pub async fn assign_profile(
             .await?;
     prof.ok_or_else(|| AppError::NotFound("profile not found".into()))?;
 
-    sqlx::query("UPDATE device_users SET profile_id = $1 WHERE id = $2")
+    sqlx::query("UPDATE device_users SET profile_id = $1, unsorted = false WHERE id = $2")
         .bind(req.profile_id)
         .bind(device_user_id)
         .execute(&st.db)
@@ -726,11 +738,11 @@ pub struct AssignAccountReq {
 }
 
 /// `POST /api/device-users/{id}/assign-account` — relink an OS login to a
-/// different person in the household. Enrollment links unmatched logins to the
-/// device's owner; a second account on a child's laptop (a parent's, say) ends
-/// up with the child's rules until it is moved here. The login takes the new
-/// person's rules immediately (profile_id follows the account) and the agent
-/// re-pulls.
+/// different person in the household (Devices → Who's who; behind confirm,
+/// since it decides who that login signs in as). Every login but the owner's
+/// enrolls as a person of its own; this is where "that one's me" goes. The
+/// login takes the new person's rules immediately (profile_id follows the
+/// account) and the agent re-pulls.
 pub async fn assign_account(
     State(st): State<AppState>,
     admin: AuthAdmin,
@@ -759,14 +771,35 @@ pub async fn assign_account(
         .ok_or_else(|| AppError::NotFound("person not found".into()))?
         .0;
 
-    sqlx::query(
-        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id) WHERE id = $3",
+    let mut tx = st.db.begin().await?;
+    let login: String = sqlx::query_scalar(
+        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id),
+                unsorted = false
+          WHERE id = $3 RETURNING os_username",
     )
     .bind(req.account_id)
     .bind(profile_id)
     .bind(device_user_id)
-    .execute(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
+    // The owner's login is the one last pointed at the computer's owner here —
+    // which is how a parent settles theirs on their own computer (it is what
+    // their sign-in codes and `ost login` go to). Pointing it at someone else
+    // unsettles it.
+    sqlx::query(
+        "UPDATE devices
+            SET owner_os_username = CASE
+                    WHEN owner_account_id = $2 THEN $3
+                    WHEN lower(owner_os_username) = lower($3) THEN NULL
+                    ELSE owner_os_username END
+          WHERE id = $1",
+    )
+    .bind(device_id)
+    .bind(req.account_id)
+    .bind(&login)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
     Ok(Json(json!({ "ok": true })))

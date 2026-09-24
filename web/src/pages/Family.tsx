@@ -274,6 +274,30 @@ function Trouble({ devices }: { devices: Device[] }) {
   );
 }
 
+/**
+ * Logins nobody has said who they are yet. Calm — nothing is wrong, and until
+ * a parent sorts them their rules enforce nothing on a parent's computer —
+ * but only a parent can do it, under Computers → Who's who.
+ */
+function Unsorted({ devices }: { devices: Device[] }) {
+  const waiting = devices.filter((d) => (d.unsorted_logins ?? 0) > 0);
+  if (waiting.length === 0) return null;
+  const n = waiting[0].unsorted_logins ?? 0;
+  return (
+    <div className="banner fam-trouble">
+      <Icon name="person" size={20} />
+      <p className="banner-main">
+        {waiting.length === 1
+          ? `${waiting[0].name} has ${n === 1 ? "a login" : `${n} logins`} nobody's sorted yet.`
+          : `${waiting.length} computers have logins nobody's sorted yet.`}
+      </p>
+      <Link to="/computers" className="btn btn-quiet btn-sm">
+        Who's who
+      </Link>
+    </div>
+  );
+}
+
 /** The first minutes with an empty household: three honest steps, one door. */
 function FirstRun() {
   return (
@@ -397,6 +421,7 @@ export function Family() {
       )}
 
       {devices && <Trouble devices={devices} />}
+      {devices && <Unsorted devices={devices} />}
 
       {loading && !hasData ? (
         <FamilyWaiting />

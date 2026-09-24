@@ -162,13 +162,14 @@ server, so the voucher cannot appear in an access log or a proxy trace. The
 console redeems it on load and strips it from the address bar with
 `history.replaceState`, leaving no history entry to go Back to.
 
-What a voucher session can and cannot do:
+What a voucher is:
 
-* It can **read** everything the account can read.
-* It **cannot change anything** without a second factor. The session never
-  starts with a step-up grant — possession of the laptop is not possession of
-  the phone — so every mutation still answers `428 step_up_required`.
-* It is **single-use** and expires after two minutes.
+* A sign-in for **the person behind the OS login that asked** — a child's
+  login opens the child's page. A parent is vouched for only from their own
+  computer, and there only from its owner's login (docs/AUTH.md).
+* A sign-in like the others: the session (7 days) opens with the 15-minute
+  "confirm it's you" window, and a parent's raises an `account_login` alert.
+* **Single-use**, and it expires after two minutes.
 
 ### Environment
 

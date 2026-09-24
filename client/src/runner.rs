@@ -709,6 +709,7 @@ impl Agent {
             gaps,
             agent_version: crate::client::AGENT_VERSION.to_string(),
             active_users: self.active_users.clone(),
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
         }
     }
 

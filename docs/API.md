@@ -69,7 +69,10 @@ for 2 minutes so in-flight requests and second tabs survive.
 and `owner_login` (the one the installer picked), and answers with `users:
 [{ os_username, person, parent }]`. Commands include **`login_code`**
 `{ request_id, name, os_users, code, purpose, site, expires_in_secs }` — show
-the code to exactly those OS logins (docs/AUTH.md).
+the code to exactly those OS logins (docs/AUTH.md). It is sent only to an
+agent that lists `"login_code"` in `features` (its `state` frame, or the
+heartbeat body's `features`); it is never redelivered, and never shown in
+`GET /api/devices/:id/commands`.
 
 Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
 `ost_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
@@ -136,7 +139,7 @@ self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by 
 |--------|-------------------------------|-------------------------------------------------------------|
 | GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users, per-device `online: bool`) |
 | GET    | `/api/devices/:id`            | detail incl. device_users, recent events, `online: bool`     |
-| POST   | `/api/devices`                | `{ name }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }` |
+| POST   | `/api/devices`                | `{ name, account_id? }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }`; for a parent's own computer (`account_id` = a parent) `428` unless the confirm window is open |
 | PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
 | POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
 | POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
@@ -429,5 +432,7 @@ os_username}], pending_requests, locked, blocks, blocked_apps, can_ask, managed`
 
 Body `{ "account_id": "<uuid>" }`. Moves an OS login to another person in the
 household; the login takes that person's rules (`profile_id` follows) and the
-agent is told to re-pull. Step-up gated like every mutation. Use it when
-enrollment linked a second adult's login on a child's laptop to the child.
+agent is told to re-pull. Needs the confirm window (`428` without). Pointing
+a login at the computer's owner makes it the owner's login
+(`devices.owner_os_username`) — how a parent settles theirs on their own
+computer.

@@ -12,6 +12,16 @@ import { Wordmark, TextInput, Button } from "../components";
 
 const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
 
+/** The setup code the first-run page kept from the installer's `#setup=`
+ * link (Login.tsx) — the server wants it for an SSO first run too. */
+function keptSetupCode(): string | undefined {
+  try {
+    return sessionStorage.getItem("ost-setup") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function Welcome() {
   const [params] = useSearchParams();
   const token = params.get("setup") ?? "";
@@ -55,7 +65,7 @@ export function Welcome() {
     setError(null);
     setBusy(true);
     try {
-      await finishOidcSetup(token, u, displayName.trim() || undefined);
+      await finishOidcSetup(token, u, displayName.trim() || undefined, keptSetupCode());
       // The session cookie is set — reload into the console fresh so the
       // session provider picks up the new sign-in.
       window.location.assign("/");
