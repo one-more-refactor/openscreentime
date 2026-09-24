@@ -11,6 +11,12 @@
 // Now the server answers all of it at `GET /api/family` in a fixed number of
 // queries, and this module is a single store every view subscribes to: one
 // fetch, one truth, no matter how many components are watching.
+//
+// While anyone is watching, it refreshes itself quietly — every 20 seconds,
+// every 4 while a pause is still on its way to a computer — so a new request
+// for time appears and "Pausing…" becomes "Paused" without navigating. A
+// hidden tab doesn't poll; coming back to it refreshes at once. A failed
+// refresh keeps the last good snapshot on screen.
 // ============================================================================
 import { useEffect, useState } from "react";
 import * as api from "../api";
@@ -62,15 +68,21 @@ const listeners = new Set<(s: FamilyState) => void>();
 /** In-flight request, so N mounting components cause exactly one fetch. */
 let inflight: Promise<void> | null = null;
 
+const POLL_MS = 20_000;
+/** While a pause or resume is still on its way to a computer. */
+const PENDING_POLL_MS = 4_000;
+let timer: ReturnType<typeof setTimeout> | null = null;
+
 function emit(next: Partial<FamilyState>) {
   state = { ...state, ...next };
   for (const l of listeners) l(state);
 }
 
-async function load(): Promise<void> {
+/** Fetch the family. `quiet` refreshes (the ambient poll) show no hairline. */
+async function load(quiet = false): Promise<void> {
   // Coalesce: the rail and the page mount in the same tick.
   if (inflight) return inflight;
-  emit(state.devices ? { refreshing: true } : { loading: true });
+  if (!quiet) emit(state.devices ? { refreshing: true } : { loading: true });
   inflight = (async () => {
     try {
       const f = await api.getFamily();
@@ -93,9 +105,36 @@ async function load(): Promise<void> {
       });
     } finally {
       inflight = null;
+      schedule();
     }
   })();
   return inflight;
+}
+
+function hidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
+/** The next ambient refresh — only while someone is watching. */
+function schedule() {
+  if (timer) clearTimeout(timer);
+  timer = null;
+  if (listeners.size === 0) return;
+  const pending = state.devices?.some((d) => d.lock_pending) ?? false;
+  timer = setTimeout(
+    () => {
+      timer = null;
+      if (hidden()) return; // picked up again on visibilitychange
+      void load(true);
+    },
+    pending ? PENDING_POLL_MS : POLL_MS,
+  );
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (!hidden() && listeners.size > 0 && state.devices && !inflight) void load(true);
+  });
 }
 
 /** Mutations anywhere (a granted quarter-hour, a pause) announce themselves
@@ -106,20 +145,11 @@ export function familyChanged(): void {
 
 /** Drop everything on sign-out so the next account never sees a stale family. */
 export function resetFamily(): void {
+  if (timer) clearTimeout(timer);
+  timer = null;
   state = EMPTY;
   inflight = null;
   for (const l of listeners) l(state);
-}
-
-/**
- * Optimistically patch a child in place, before the server round-trip lands.
- * Used by the pause control so the UI reacts on the tap rather than 300ms
- * later — the refetch that follows is what makes it true.
- */
-export function patchChild(key: string, patch: Partial<FamilyChild>): void {
-  emit({
-    children: state.children.map((c) => (c.key === key ? { ...c, ...patch } : c)),
-  });
 }
 
 export function useFamily(): FamilyState & { reload: () => Promise<void> } {
@@ -129,11 +159,18 @@ export function useFamily(): FamilyState & { reload: () => Promise<void> } {
     listeners.add(setLocal);
     // Fetch on first subscriber, or when a previous load failed outright.
     if (!state.devices && !inflight) void load();
-    else setLocal(state);
+    else {
+      setLocal(state);
+      if (!timer && !inflight) schedule();
+    }
     return () => {
       listeners.delete(setLocal);
+      if (listeners.size === 0 && timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     };
   }, []);
 
-  return { ...local, reload: load };
+  return { ...local, reload: () => load() };
 }
