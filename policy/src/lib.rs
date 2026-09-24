@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod catalog;
+pub mod rules;
 
 fn default_version() -> u32 {
     1
@@ -353,6 +354,9 @@ impl FirewallPolicy {
     }
 }
 
+/// Screen-time rules. What they *mean* — "any time", windows ending at 00:00
+/// or crossing midnight, an invalid window never locking anyone out, limit 0
+/// = no limit — is defined in one place: [`rules`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenTime {
     #[serde(default)]
@@ -366,6 +370,8 @@ pub struct ScreenTime {
 }
 
 /// An allowed window. `days` uses 0=Sunday .. 6=Saturday (matches the docs).
+/// A day with no window is unrestricted; `end` `"00:00"` is midnight; an end
+/// before the start crosses midnight. See [`rules`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Window {
     #[serde(default)]
