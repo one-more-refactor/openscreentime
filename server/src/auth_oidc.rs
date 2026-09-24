@@ -133,6 +133,35 @@ pub fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
     Ok(Some(oidc))
 }
 
+#[cfg(test)]
+impl Oidc {
+    /// An SSO config with no provider behind it, holding one first-run
+    /// identity parked the way `callback` parks it. Returns the /welcome token.
+    pub(crate) async fn parked_for_test(email: &str) -> (Arc<Oidc>, String) {
+        let oidc = Arc::new(Oidc {
+            name: "SSO".into(),
+            client_id: "test".into(),
+            client_secret: "test".into(),
+            endpoints: std::sync::OnceLock::new(),
+            redirect_uri: "http://localhost/api/auth/oidc/callback".into(),
+            http: reqwest::Client::new(),
+            states: tokio::sync::Mutex::new(HashMap::new()),
+            pending_signups: tokio::sync::Mutex::new(HashMap::new()),
+        });
+        let token = gen_token();
+        oidc.pending_signups.lock().await.insert(
+            token.clone(),
+            PendingSignup {
+                created: Instant::now(),
+                email: email.into(),
+                suggested_username: "someone".into(),
+                suggested_name: "Someone".into(),
+            },
+        );
+        (oidc, token)
+    }
+}
+
 impl Oidc {
     /// Discovery ran and the SSO button can be offered.
     pub fn ready(&self) -> bool {
