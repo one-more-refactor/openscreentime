@@ -258,22 +258,6 @@ pub fn in_bedtime(bt: &Bedtime, now: NaiveTime) -> bool {
     }
 }
 
-/// Minutes until bedtime starts (handles start times past midnight relative to
-/// `now`). `Some(0)` while bedtime is already in effect; `None` if the policy's
-/// times don't parse. Used for the pre-bedtime wind-down nudge.
-pub fn minutes_until_bedtime(bt: &Bedtime, now: NaiveTime) -> Option<i64> {
-    let start = parse_hm(&bt.start)?;
-    parse_hm(&bt.end)?; // both must parse for bedtime to be enforceable at all
-    if in_bedtime(bt, now) {
-        return Some(0);
-    }
-    let mut mins = (start - now).num_minutes();
-    if mins < 0 {
-        mins += 24 * 60;
-    }
-    Some(mins)
-}
-
 pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) -> bool {
     schedule.iter().any(|w| {
         if !w.days.contains(&weekday_sun0) {
@@ -437,42 +421,6 @@ mod tests {
         t.add_active("kid", 61 * 60, 1);
         let r = evaluate(&policy, &t, "kid");
         assert!(matches!(r, Some(LockReason::DailyLimit { .. })));
-    }
-
-    #[test]
-    fn minutes_until_bedtime_handles_wrap_and_in_effect() {
-        let bt = Bedtime {
-            start: "22:30".into(),
-            end: "06:30".into(),
-        };
-        // 15 minutes out → wind-down window.
-        assert_eq!(
-            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(22, 15, 0).unwrap()),
-            Some(15)
-        );
-        // Already in bedtime (both sides of midnight) → 0.
-        assert_eq!(
-            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(23, 0, 0).unwrap()),
-            Some(0)
-        );
-        assert_eq!(
-            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(3, 0, 0).unwrap()),
-            Some(0)
-        );
-        // Morning, bedtime tonight → wraps forward, not negative.
-        assert_eq!(
-            minutes_until_bedtime(&bt, NaiveTime::from_hms_opt(7, 30, 0).unwrap()),
-            Some(15 * 60)
-        );
-        // Unparseable policy times → None.
-        let bad = Bedtime {
-            start: "late".into(),
-            end: "06:30".into(),
-        };
-        assert_eq!(
-            minutes_until_bedtime(&bad, NaiveTime::from_hms_opt(12, 0, 0).unwrap()),
-            None
-        );
     }
 
     #[test]

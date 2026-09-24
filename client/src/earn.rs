@@ -2,7 +2,8 @@
 //! fired when a parent approves one.
 //!
 //! Earn-time is server-authoritative (the `screen_time_ledger` table). The
-//! agent's job is to (a) surface the offers on the lockout overlay, (b) credit
+//! agent's job is to (a) file a request when someone asks (the lock's "Ask for
+//! more time", the companion, `ost ask`), (b) credit
 //! local budget when the server sends `credit_time`, and (c) fire the
 //! `screen_time_earned` event. Whether the child really read for 20 minutes is
 //! a parent decision, made in the console.
