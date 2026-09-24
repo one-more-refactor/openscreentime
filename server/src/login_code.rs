@@ -61,6 +61,11 @@ pub const WRONG_PER_HOUR: i64 = 10;
 
 pub const CMD_LOGIN_CODE: &str = "login_code";
 
+/// What an agent says it understands (`devices.agent_features`) before a code
+/// is sent to it. Agents from before sign-in codes say nothing, and would
+/// only fail the command — so a code is never sent where nobody can see it.
+pub const FEATURE: &str = "login_code";
+
 /// Advisory-lock class for one person's code bookkeeping (count + insert, and
 /// the one warning per incident); the second key is `hashtext(account id)`.
 const CODE_LOCK_CLASS: i32 = 0x0C0DE;
@@ -145,19 +150,20 @@ async fn resolve_name(db: &sqlx::PgPool, name: &str) -> AppResult<Option<(Uuid, 
 }
 
 /// The online computers where `account` may be shown a code, with the OS
-/// logins that are theirs there. A member: any computer they use. A parent:
-/// only a computer declared as theirs, and there only **the owner's login**
+/// logins that are theirs there, and whether that computer's agent can show
+/// one ([`FEATURE`]). A member: any computer they use. A parent: only a
+/// computer declared as theirs, and there only **the owner's login**
 /// (`devices.owner_os_username`) — root on a child's laptop must not be able
 /// to read a parent's code off a login it linked to the parent, and neither
 /// must a child's login that an older server linked to the parent on the
 /// parent's own computer. No owner login settled yet: no code there.
-pub async fn code_targets(
+pub async fn all_code_targets(
     db: &sqlx::PgPool,
     account_id: Uuid,
     tenant_id: Uuid,
-) -> AppResult<Vec<(Uuid, String)>> {
+) -> AppResult<Vec<(Uuid, String, bool)>> {
     Ok(sqlx::query_as(
-        "SELECT d.id, du.os_username
+        "SELECT d.id, du.os_username, COALESCE($3 = ANY(d.agent_features), false)
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
            JOIN admins a ON a.id = du.account_id
@@ -169,8 +175,23 @@ pub async fn code_targets(
     )
     .bind(account_id)
     .bind(tenant_id)
+    .bind(FEATURE)
     .fetch_all(db)
     .await?)
+}
+
+/// [`all_code_targets`] whose agent can actually show a code.
+pub async fn code_targets(
+    db: &sqlx::PgPool,
+    account_id: Uuid,
+    tenant_id: Uuid,
+) -> AppResult<Vec<(Uuid, String)>> {
+    Ok(all_code_targets(db, account_id, tenant_id)
+        .await?
+        .into_iter()
+        .filter(|t| t.2)
+        .map(|(d, u, _)| (d, u))
+        .collect())
 }
 
 /// What a new code row is for.
@@ -553,7 +574,22 @@ pub async fn start(
         .as_ref()
         .map(|(a, t, _)| (*a, *t))
         .unwrap_or((Uuid::nil(), Uuid::nil()));
-    let targets = code_targets(&st.db, account_id, tenant_id).await?;
+    let all = all_code_targets(&st.db, account_id, tenant_id).await?;
+    let targets: Vec<(Uuid, String)> = all
+        .iter()
+        .filter(|t| t.2)
+        .map(|(d, u, _)| (*d, u.clone()))
+        .collect();
+    if person.is_some() && targets.is_empty() && !all.is_empty() {
+        // Their computer is online but its agent predates sign-in codes: it
+        // would only fail the command. The browser gets the usual decoy; the
+        // operator gets the reason.
+        tracing::info!(
+            account = %account_id,
+            "a sign-in code was asked for, but none of their online computers runs an agent \
+             that can show one (update the agent there) — answered with a decoy"
+        );
+    }
 
     let to = (person.is_some() && !targets.is_empty()).then_some(Recipient {
         account_id,

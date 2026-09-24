@@ -289,11 +289,18 @@ pub async fn code_start(
     admin: AuthAdmin,
     jar: CookieJar,
 ) -> AppResult<Json<Value>> {
-    let targets = login_code::code_targets(&st.db, admin.admin_id, admin.tenant_id).await?;
+    let all = login_code::all_code_targets(&st.db, admin.admin_id, admin.tenant_id).await?;
+    let targets: Vec<(Uuid, String)> = all
+        .iter()
+        .filter(|t| t.2)
+        .map(|(d, u, _)| (*d, u.clone()))
+        .collect();
     if targets.is_empty() {
-        return Err(AppError::Conflict(
-            "none of your computers is online right now".into(),
-        ));
+        return Err(AppError::Conflict(if all.is_empty() {
+            "none of your computers is online right now".into()
+        } else {
+            "your computer's OpenScreenTime is too old to show a code — update it there".into()
+        }));
     }
     let session_id = session_id_for(&st, &jar).await?;
     // The same caps as the sign-in door: five codes per ten minutes, and none
