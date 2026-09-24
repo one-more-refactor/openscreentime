@@ -1,198 +1,223 @@
-# Data Model
+# Data model
 
-Postgres. All timestamps are `timestamptz`. All ids are `uuid` (v4) unless noted. Every
-tenant-owned row carries `tenant_id` for isolation. Row-level tenant scoping is enforced in the
-application layer (every query filters by `tenant_id` from the authenticated session).
+Postgres. The schema is whatever `server/migrations/` produces; this doc is
+the map. Timestamps are `timestamptz`, ids `uuid` unless noted. Every
+household-owned row carries `tenant_id` (a household is a tenant), and every
+query filters on it — scoping lives in the application, not in row-level
+security.
 
 ## Tables
 
 ### `tenants`
-| column      | type        | notes                          |
-|-------------|-------------|--------------------------------|
-| id          | uuid pk     |                                |
-| name        | text        |                                |
-| created_at  | timestamptz | default now()                  |
+A household. `id`, `name`, `created_at`.
 
-### `admins`
-Parents/operators. Passkey-only — **no password column**.
-| column       | type        | notes                         |
-|--------------|-------------|-------------------------------|
-| id           | uuid pk     |                               |
-| tenant_id    | uuid fk     | → tenants.id                  |
-| email        | text unique |                               |
-| display_name | text        |                               |
-| created_at   | timestamptz | default now()                 |
+### `admins` — accounts
+Everyone has one: parents and the people they look after. No password column
+anywhere.
+
+| column | type | notes |
+|---|---|---|
+| id, tenant_id | uuid | |
+| display_name | text | |
+| username | text | sign-in name; unique (case-insensitive) where set |
+| email | text, nullable, unique | legacy; SSO still matches on it |
+| role | text | `owner` \| `parent` \| `member` |
+| age_bracket | text | `little` \| `kid` \| `younger_teen` \| `older_teen` \| `adult` |
+| birthdate | date, nullable | picks the bracket when given |
+| theme | text, nullable | `playful` \| `calm` \| `plain`; null = by bracket |
+| self_managed | bool | keeps their own time (adults) |
+| profile_id | uuid → profiles | their rules |
+| avatar | text, nullable | a parent-picked emoji; null = monogram |
+| goal_minutes | int, nullable | their own daily goal (API only now) |
+| blocked_at | timestamptz, nullable | account suspended |
+| created_at | timestamptz | |
 
 ### `webauthn_credentials`
-One row per registered passkey.
-| column         | type        | notes                                   |
-|----------------|-------------|-----------------------------------------|
-| id             | uuid pk     |                                         |
-| admin_id       | uuid fk     | → admins.id                             |
-| credential_id  | bytea       | raw credential id                       |
-| passkey        | jsonb       | serialized `webauthn_rs::prelude::Passkey` |
-| nickname       | text        | e.g. "Pixel 8 fingerprint"              |
-| created_at     | timestamptz | default now()                           |
-| last_used_at   | timestamptz | nullable                                |
-
-### `profiles`
-Policy presets. Ships with three `is_preset=true` rows per tenant on creation: kids, teen, default.
-| column      | type        | notes                                        |
-|-------------|-------------|----------------------------------------------|
-| id          | uuid pk     |                                              |
-| tenant_id   | uuid fk     |                                              |
-| name        | text        | "Kids", "Teen", "Default", or custom         |
-| kind        | text        | enum: `kids` \| `teen` \| `default` \| `custom` |
-| is_preset   | bool        | true for the three shipped presets           |
-| policy      | jsonb       | the Policy document (see API.md → Policy)     |
-| created_at  | timestamptz |                                              |
-| updated_at  | timestamptz |                                              |
-
-### `devices`
-| column          | type        | notes                                                   |
-|-----------------|-------------|---------------------------------------------------------|
-| id              | uuid pk     |                                                         |
-| tenant_id       | uuid fk     |                                                         |
-| name            | text        | friendly name                                           |
-| hostname        | text        | reported by agent                                       |
-| os              | text        | e.g. "linux"                                            |
-| agent_version   | text        |                                                         |
-| status          | text        | enum: `pending` \| `online` \| `offline` \| `locked`    |
-| tamper_level    | int         | 1 (default) or 3                                        |
-| device_token    | text        | bearer token the agent uses (hashed at rest)            |
-| enroll_token    | text        | one-time enrollment token, null after enrollment        |
-| enroll_token_expires_at | timestamptz | 24 h after issue; NULL for rows predating this column (no expiry) |
-| public_ip       | inet        | nullable                                                |
-| last_seen       | timestamptz | nullable                                                |
-| created_at      | timestamptz |                                                         |
-
-### `device_users`
-One row per OS user account on a device (zero-trust: policy is per person).
-| column          | type        | notes                                       |
-|-----------------|-------------|---------------------------------------------|
-| id              | uuid pk     |                                             |
-| device_id       | uuid fk     |                                             |
-| os_username     | text        | Linux username                              |
-| display_name    | text        | nullable                                    |
-| profile_id      | uuid fk     | → profiles.id (which policy applies)        |
-| created_at      | timestamptz |                                             |
-| UNIQUE(device_id, os_username)                                                            |
-
-### `commands`
-Server → agent command queue. Agent pulls on heartbeat / WS.
-| column      | type        | notes                                                      |
-|-------------|-------------|------------------------------------------------------------|
-| id          | uuid pk     |                                                            |
-| device_id   | uuid fk     |                                                            |
-| type        | text        | `lock` \| `unlock` \| `apply_policy` \| `set_tamper_level` \| `credit_time` \| `deny_earn` |
-| payload     | jsonb       | command-specific args                                      |
-| status      | text        | `queued` \| `sent` \| `acked` \| `failed`                  |
-| result      | jsonb       | nullable, agent's response                                 |
-| created_at  | timestamptz |                                                            |
-| acked_at    | timestamptz | nullable                                                   |
-
-### `events`
-Agent → server telemetry & audit log.
-| column      | type        | notes                                                          |
-|-------------|-------------|----------------------------------------------------------------|
-| id          | uuid pk     |                                                                |
-| tenant_id   | uuid fk     |                                                                |
-| device_id   | uuid fk     | nullable                                                       |
-| device_user_id | uuid fk  | nullable                                                       |
-| type        | text        | `heartbeat` \| `tamper` \| `lock` \| `unlock` \| `policy_applied` \| `screen_time_exceeded` \| `screen_time_earned` \| `enrolled` \| `ssh` (historical only — see below) \| `earn_request` |
-| severity    | text        | `info` \| `warn` \| `critical`                                 |
-| payload     | jsonb       |                                                                |
-| created_at  | timestamptz |                                                                |
-
-The `ssh` event type is **historical only**: the remote-shell feature (and its
-`ssh_sessions` table) was removed in v0.4, but existing `ssh` event rows stay readable —
-the record that past sessions happened survives; only the capability is gone. No new
-`ssh` events are written.
+One row per passkey: `id`, `admin_id`, `credential_id` (bytea, indexed),
+`passkey` (jsonb, `webauthn_rs` `Passkey`), `nickname`, `created_at`,
+`last_used_at`.
 
 ### `admin_sessions`
-DB-backed admin login sessions (cookie `ost_session`). Expired rows are deleted lazily.
-| column      | type        | notes                                        |
-|-------------|-------------|----------------------------------------------|
-| id          | uuid pk     |                                              |
-| token_hash  | text unique | sha256 hex of the cookie value               |
-| admin_id    | uuid fk     | → admins.id (cascade)                        |
-| tenant_id   | uuid fk     | → tenants.id (cascade)                       |
-| created_at  | timestamptz | default now()                                |
-| expires_at  | timestamptz | 30 days after creation (not sliding)         |
+Console sessions (cookie `ost_session`): `id`, `token_hash` (sha256 hex,
+unique), `admin_id`, `tenant_id`, `created_at`, `expires_at` (30 days, 7 for a
+voucher; not sliding), `stepup_until` (the "confirm it's you" window),
+`last_seen_at`, `prev_token_hash` + `prev_valid_until` (a rotated token stays
+valid 2 minutes), `via_voucher`.
 
-### `earn_requests`
-Earn-time approval flow: agent files a request, a parent approves/denies it.
-| column          | type        | notes                                        |
-|-----------------|-------------|----------------------------------------------|
-| id              | uuid pk     |                                              |
-| tenant_id       | uuid fk     |                                              |
-| device_id       | uuid fk     |                                              |
-| device_user_id  | uuid fk     |                                              |
-| task_id         | text        | earn task id from the policy                 |
-| task_label      | text        |                                              |
-| minutes         | int         | 1..240                                       |
-| status          | text        | `pending` \| `approved` \| `denied`          |
-| created_at      | timestamptz |                                              |
-| decided_at      | timestamptz | nullable                                     |
+### `login_codes`
+Door one and "confirm with a code": `id`, `tenant_id`, `account_id` (both null
+for a decoy), `purpose` (`login` \| `confirm`), `code_challenge` (PKCE, login),
+`session_id` (confirm), `code_hash`, `attempts`, `used_at`, `created_at`,
+`expires_at`.
 
-One *pending* request per (device_user, task, day) — the server dedupes by returning the
-existing pending row. Approval upserts `screen_time_ledger.earned_seconds` and enqueues a
-`credit_time` command.
+### `signin_links`
+One-time recovery links from `openscreentime-server recover`: `id`,
+`tenant_id`, `account_id`, `token_hash` (unique), `created_at`, `expires_at`,
+`consumed_at`.
+
+### `device_vouchers`
+One-time `ost login` vouchers: `id`, `device_id`, `tenant_id`, `account_id`,
+`voucher_hash` (unique), `consumed_at`, `expires_at`, `created_at`.
+
+### `profiles` — rules
+| column | type | notes |
+|---|---|---|
+| id, tenant_id | uuid | |
+| name | text | |
+| kind | text | `little` \| `kid` \| `younger_teen` \| `older_teen` \| `adult` \| `custom`, plus legacy `kids` \| `teen` \| `default` |
+| is_preset | bool | the five bracket presets per household |
+| policy | jsonb | the `Policy` document (docs/PROFILES.md) |
+| created_at, updated_at | timestamptz | `updated_at` bumps make agents re-pull |
+
+A person's rules are a non-preset copy with `kind` = their bracket.
+
+### `devices` — computers
+| column | type | notes |
+|---|---|---|
+| id, tenant_id | uuid | |
+| name, hostname, os, agent_version | text | |
+| status | text | presence only: `pending` \| `online` \| `offline` |
+| locked | bool | paused, as the agent last reported |
+| last_state | jsonb | the agent's last `state` frame |
+| tamper_level | int | 1 or 3 |
+| device_token | text | sha256 of the agent's bearer token |
+| enroll_token, enroll_token_expires_at | text, timestamptz | one-time, 24 h |
+| enroll_token_used, enrolled_at | text, timestamptz | a retried enroll within 15 min gets the same answer |
+| parent_totp_secret | text | the secret behind the unlock code |
+| owner_account_id | uuid → admins | whose computer it is |
+| owner_os_username | text | the owner's own login; a parent's codes and vouchers go there only |
+| agent_features | text[] | what the agent said it understands (`login_code`); null = older agent |
+| offline_allowed_until | timestamptz | "Allow offline…" |
+| utc_offset_secs | int | its UTC offset as last reported (which date is "today" there) |
+| vpn_updated_at | timestamptz | |
+| recovery_pin_hash, recovery_pin_set_at | text, timestamptz | from 0011; nothing reads them |
+| public_ip | inet | |
+| last_seen, created_at | timestamptz | |
+
+### `device_users` — logins
+One row per OS login on a computer: `id`, `device_id`, `os_username`,
+`display_name`, `profile_id` (always the linked person's rules), `account_id`
+(→ admins, the person), `unsorted` (became a person of its own because nobody
+could say whose it is; cleared when a parent sorts it), `created_at`.
+`UNIQUE(device_id, os_username)`.
+
+### `commands`
+Server → agent queue.
+
+| column | type | notes |
+|---|---|---|
+| id, device_id | uuid | |
+| type | text | `lock` \| `unlock` \| `apply_policy` \| `set_tamper_level` \| `credit_time` \| `deny_earn` \| `ping` \| `login_code` |
+| payload, result | jsonb | |
+| status | text | `queued` \| `sent` \| `acked` \| `failed` \| `cancelled` |
+| created_at, sent_at, acked_at | timestamptz | |
+
+A partial unique index allows one pending (`queued`/`sent`) `lock`, `unlock`,
+`apply_policy` or `set_tamper_level` per computer.
+A `login_code` row's code is emptied once it's delivered, acked, used or
+expired, and never listed in the console.
+
+### `events`
+The agent's reports and the server's own audit trail.
+
+| column | type | notes |
+|---|---|---|
+| id, tenant_id | uuid | |
+| device_id, device_user_id | uuid, nullable | |
+| client_id | uuid, nullable | the agent's event id; unique per device, so a redelivery is stored once |
+| type | text | `heartbeat`, `tamper`, `lock`, `unlock`, `policy_applied`, `screen_time_exceeded`, `screen_time_earned`, `enrolled`, `ssh` (historical), `earn_request`, `evasion`, `enforcement_degraded`, `vpn_profile`, `parent_code_ok`, `parent_code_failed`, `parent_code_backup_used`, `app_blocked`, `member`, `account_login`, `login_approval`, `other` |
+| severity | text | `info` \| `warn` \| `critical` |
+| payload | jsonb | |
+| created_at | timestamptz | pruned after 90 days |
+
+### `earn_requests` — requests for more time
+`id`, `tenant_id`, `device_id`, `device_user_id`, `task_id` (`ask` from the
+web, else an earn task id), `task_label`, `minutes` (1–240), `status`
+(`pending` \| `approved` \| `denied`), `created_at`, `decided_at`. One pending
+request per login, task and day.
 
 ### `screen_time_ledger`
-Per-login daily use and grants. One person's day is the sum of their logins'
-rows for that day (a daily limit is one budget per person — `docs/TRACKING.md`).
-| column          | type        | notes                                     |
-|-----------------|-------------|-------------------------------------------|
-| id              | uuid pk     |                                           |
-| device_user_id  | uuid fk     |                                           |
-| day             | date        | the **device-local** day the agent enforces (reported with the usage; not the server's UTC date) |
-| earned_seconds  | int         | granted (approved requests, console "+N") |
-| used_seconds    | int         | real use, monotonic within a day (`GREATEST`) |
-| streak_days     | int         | unused                                    |
-| UNIQUE(device_user_id, day)                                                |
+Per-login daily use and grants. A person's day is the sum of their logins'
+rows for that day — one budget per person (docs/TRACKING.md).
 
-Migration `0027_device_local_day.sql` adds `devices.utc_offset_secs` (int,
-nullable): the device's UTC offset as last reported, so the console knows
-which date is "today" for each device.
+| column | type | notes |
+|---|---|---|
+| id, device_user_id | uuid | `UNIQUE(device_user_id, day)` |
+| day | date | the **device-local** day the agent enforces |
+| used_seconds | int | real use, never decreases within a day (`GREATEST`) |
+| earned_seconds | int | time given (a grant or an approved request) |
+| streak_days | int | never written by anything |
+
+Not pruned.
+
+### `usage_slices` — where the time went
+`device_id`, `tenant_id`, `os_username` (`''` for a site), `hour`, `kind`
+(`app`: seconds open; `site`: lookups — no CHECK), `key`, `amount`. Primary
+key `(device_id, os_username, hour, kind, key)`. Pruned after 21 days.
+
+### `device_recovery_codes`
+`id`, `device_id`, `idx`, `mac` (HMAC of the 8 digits, keyed by the unlock
+secret; the code itself isn't stored), `created_at`, `used_at`.
+
+### `device_vpn_profiles`
+`id`, `device_id`, `name` (unique per computer), `kind` (`wireguard` \|
+`openvpn`), `config`, `status` (`untested` \| `testing` \| `active` \|
+`failed`), `last_error`, `last_tested_at`, `is_active` (at most one per
+computer), `created_at`, `updated_at`.
+
+### `parent_access_tokens`
+Paired-companion tokens: `id`, `tenant_id`, `token_hash` (unique), `label`,
+`created_by`, `created_at`, `last_used_at`, `revoked_at`.
+
+### `telegram_chats`, `telegram_pair_codes`
+A paired chat: `chat_id` (bigint pk), `admin_id`, `tenant_id`, `username`,
+`created_at`. A pairing code: `id`, `admin_id`, `tenant_id`, `code_hash`,
+`expires_at`, `consumed_at`.
+
+### `ops_log`, `ops_incidents`
+The appliance's own record. `ops_log`: `id` (bigserial), `kind` (`install` \|
+`backup` \| `update`), `ok`, `detail`, `created_at` (pruned after 90 days).
+`ops_incidents`: one open incident per `key` (`tenant_id`, `message`,
+`opened_at`), so an operator alert fires once per incident.
 
 ## Migrations
 
-Live in `server/migrations/` as SQLx migrations (`NNNN_description.sql`). `0001_init.sql`
-creates the original tables; `0002_prod.sql` adds `admin_sessions`, `earn_requests` and extends
-the `commands.type` (`credit_time`) and `events.type` (`ssh`, `earn_request`) CHECK constraints.
-`0003_deny_earn.sql` extends the `commands.type` CHECK constraint to add `deny_earn`, the mirror
-of `credit_time` for the denial path (lets the agent clear its once-per-day earn-request dedupe
-and surface an honest denial instead of a stale "WAITING FOR APPROVAL"). `0004_enroll_token_ttl.sql`
-adds `devices.enroll_token_expires_at` (24 h TTL on enrollment tokens; NULL/no-expiry for rows
-predating the migration, additive with no backfill). `0008_remove_ssh.sql` drops the
-`ssh_sessions` table and the `ssh_open`/`ssh_close` command types (the remote shell is gone);
-`events.type = 'ssh'` stays in the CHECK constraint so historical rows remain readable.
-Seeding the three preset profiles happens in
-application code when a tenant is created (see `PROFILES.md`).
+`server/migrations/NNNN_description.sql`, run by the server on start
+(`db::migrate`). Numbers go 0001–0027, then 0030: **0028 and 0029 don't
+exist** — they were left unused when parallel branches merged, and sqlx
+accepts the gap. A new migration is 0031 or later (a lower number would run
+after 0030 on databases that already have it).
 
+| # | What it did |
+|---|---|
+| 0001 | Initial schema (tenants, admins, passkeys, profiles, devices, device users, commands, events, ledger, ssh sessions). Its header still claims to mirror this doc. |
+| 0002 | `admin_sessions`, `earn_requests`; `credit_time`, `ssh`, `earn_request` types. |
+| 0003 | `deny_earn` command. |
+| 0004 | 24 h expiry on enroll tokens. |
+| 0005 | `evasion` events. |
+| 0006 | `parent_access_tokens`. |
+| 0007 | A VPN profile per device (columns dropped by 0010). |
+| 0008 | The remote shell is gone: drops `ssh_sessions` and its commands; `ssh` events stay readable. |
+| 0009 | A real command queue: `sent_at`, `cancelled`, dedupe. |
+| 0010 | Named VPN profiles (`device_vpn_profiles`). |
+| 0011 | A recovery PIN per device (no longer used). |
+| 0012 | Step-up 2FA (its admin columns and email codes dropped by 0030); `device_vouchers`; session rotation columns. |
+| 0013 | Drops LAN discovery and streak nudges. |
+| 0014 | `offline_allowed_until`; ledger and pending-command indexes. |
+| 0015 | Accounts: roles, brackets, `self_managed`, `profile_id`; per-device unlock-code secret; `locked` as its own column; five bracket presets; new event types. |
+| 0016 | `device_recovery_codes`; change mode (dropped by 0030). |
+| 0017 | Trust decided at login (its column dropped by 0030). |
+| 0018 | Telegram pairing (its verification table dropped by 0030). |
+| 0019 | Client-first login requests (dropped by 0030). |
+| 0020 | `avatar`. |
+| 0021 | `usage_slices`. |
+| 0022 | A match code for login requests (dropped with them). |
+| 0023 | `goal_minutes`. |
+| 0024 | `username`. |
+| 0025 | `blocked_at`. |
+| 0026 | The appliance: idempotent events (`client_id`), retry-safe enroll, `ops_log`, `ops_incidents`, `login_approval` / `other` events. |
+| 0027 | The ledger's day is the device-local day; `utc_offset_secs`. |
+| 0030 | Two doors: `login_codes`, `signin_links`, `owner_os_username`, `agent_features`, `unsorted`; drops TOTP 2FA, email codes, change mode, trusted sessions, login requests and Telegram verifications; unlinks logins it can't attribute on a parent's computer (docs/AUTH.md). |
 
-## 0.4 (migration 0015)
-
-- `admins` += `role`, `age_bracket`, `birthdate`, `theme`, `self_managed`,
-  `profile_id` (→ profiles); `email` is nullable (members usually have none).
-  The admins table *is* the account table; "member" = a managed person or a
-  self-tracking adult, no passkey.
-- `device_users` += `account_id` (→ admins, ON DELETE SET NULL). Every OS login
-  is linked on enroll/heartbeat/startup (`members::link_os_user`).
-- `devices` += `parent_totp_secret` (base32 — the per-device parent code),
-  `owner_account_id`, `locked` (bool), `last_state` (jsonb). `status` CHECK is
-  now `pending|online|offline`; old `'locked'` rows became `offline`+`locked`.
-  (0030:) `owner_os_username` — the one login that is the owner's; a parent's
-  sign-in codes and vouchers go to it alone. `agent_features text[]` — what
-  the agent declared it understands (`login_code`); NULL = an agent from before
-  features, never sent a code. `device_users.unsorted` — the login became a
-  person of its own because nobody could say whose it is; cleared when a
-  parent sorts it (Who's who, its rules, or that person's details).
-- `device_vouchers` += `account_id`.
-- `profiles.kind` CHECK accepts the five bracket ids (+ the legacy three and
-  `custom`). Five bracket presets per tenant; a member's rules are a non-preset
-  copy with `kind = <bracket>`.
-- `events.type` CHECK += `parent_code_ok`, `parent_code_failed`,
-  `parent_code_backup_used`, `app_blocked`, `member`, and restores
-  `enforcement_degraded` + `vpn_profile` (dropped by 0013 by mistake).
+The five bracket presets are seeded in application code
+(`server/src/presets.rs`), for every household at startup and on creation.

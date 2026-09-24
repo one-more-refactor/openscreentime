@@ -4,7 +4,7 @@ Status: rewritten 2026-09-24 with the fair-measurement work. It replaces the
 2026-09-22 read-only audit, whose findings (B1–B8) are listed at the end with
 what became of each. Scope: the **decision layer** — how much time a person
 has used, and whether they should be stopped right now, and why. *How* a
-stop is presented and applied (the overlay, the cgroup freeze, the frozen
+stop is presented and applied (the lock, the cgroup freeze, the frozen
 set, notifications) is documented in `docs/AGENT.md` and owned separately.
 
 The bar, in the owner's words: the thing has to be fair for everyone. The
@@ -159,15 +159,15 @@ expiring on the trusted clock:
 | Approved request / console "+N min" (`credit_time`) | N minutes on today's budget **and** an override for N minutes. Idempotent by command id: a redelivery after a lost ack is acked `duplicate`. |
 | Code at the lock screen | 30 minutes, plus every device-level lock cleared. |
 | `ost unlock --minutes N` | N minutes for everyone on the machine (it used to clear the lock and re-stop the child ~70 s later). |
-| Console Resume | Clears the pause; a plain Resume gives 30 minutes to whoever a rule is stopping right then (explicit `minutes` / `until: "end_of_day"` also accepted). |
+| Console Resume | Clears the pause and gives 30 minutes to whoever a rule is stopping right then. (The agent also accepts an explicit `minutes` / `until: "end_of_day"`; the console never sends one.) |
 
 A **pause beats an override** — the later, stronger parent action.
 
 ## 7. What the device publishes
 
 `status.<user>.json` carries the verdict — `allowed`, `reason`,
-`minutes_left`, `stop_at`, `resume_at`, `next_warning_at` (10 and 2 minutes
-before the stop), `override_until`, `counting`, `measured` — documented
+`minutes_left`, `stop_at`, `resume_at`, `next_warning_at` (15, 5 and 1
+minute before the stop), `override_until`, `counting`, `measured` — documented
 field by field in `docs/AGENT.md` → "The verdict". The warnings and the lock
 screen are built on these.
 

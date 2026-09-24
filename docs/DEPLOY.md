@@ -29,9 +29,11 @@ Then:
 
 1. Point your reverse proxy at `127.0.0.1:8080` (snippets below — setup.sh
    prints them for your domain).
-2. Open `https://ost.example.com` and create the first parent account with
-   the one-time setup code setup.sh prints (`OST_BOOTSTRAP_TOKEN` in `.env`).
-3. Click **ADD DEVICE** in the console and paste the one-liner on each device.
+2. Open the one-time setup link setup.sh prints
+   (`https://ost.example.com/#setup=<code>`, the code is `OST_BOOTSTRAP_TOKEN`
+   in `.env`): your name, then a passkey.
+3. **Computers → Add a computer** in the console, and paste the one-liner on
+   each computer.
 
 Re-running `deploy/setup.sh` is safe: it never touches an existing `.env`, and
 on an existing stack it runs `deploy/update.sh` (the safe update path).
@@ -132,20 +134,23 @@ OpenScreenTime URL can't be hijacked by whoever finds it first. (Without the
 link, the page asks for the setup code.) After that, people sign in with their
 name and a code on their own computer, or a passkey — see docs/AUTH.md.
 
-## Enrolling devices
+## Adding computers
 
-The ADD DEVICE modal shows a one-liner like:
+**Computers → Add a computer** (or **Add a person**, which sets up their
+computer next) gives a one-liner like:
 
 ```sh
 curl -fsSL https://ost.example.com/install.sh | \
   sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://ost.example.com
 ```
 
-It installs the agent build **this server** bundles (desktop build with the
-lock screen and tray on a machine with a graphical session, headless
-otherwise), sha256-verified, enrolls, and installs the systemd service. If the
-one-liner dies halfway, just run it again within 15 minutes — the token is not
-used up until the device has actually connected.
+It installs the agent build **this server** bundles — the desktop build (the
+app window, the graphical lock, the companion) on a machine with a graphical
+session, headless otherwise — sha256-verified, enrolls, and installs the
+systemd service. On a desktop build it also installs `cage` for the lock where
+apt, pacman or dnf has it; without cage the lock is a text screen on its own
+console. If the one-liner dies halfway, just run it again within 15 minutes —
+the token is not used up until the computer has actually connected.
 
 Devices then update themselves from this server (see OPERATIONS.md →
 "Devices update themselves"): the server is their release channel.

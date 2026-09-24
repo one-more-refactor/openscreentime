@@ -18,6 +18,92 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+**Headline: the house clock. Set it once. It keeps time.** OpenScreenTime is
+now the clock on the kitchen wall, not a cop at the door — one look, one ring
+and one set of words from the console to the lock. A stop is a real lock on
+its own screen that can never strand anyone; only real use counts; signing in
+has two doors and no passwords or authenticator apps; an adult can keep time
+for just themselves; and the server looks after itself.
+
+**For parents**
+- **A rebuilt console.** Family, a person's page in two parts — **Today**
+  (time left, requests, Pause, Give 15/30 min, where the time went, the keys)
+  and **Rules** (daily limit, when screens can be on, bedtime, what's blocked,
+  earning time) — **Computers** and **Settings**. Every ring means time used
+  today, filling clockwise from a tick at twelve; red means time's up and
+  nothing else; a pause is calm, never red. Icons, type and colours come from
+  one brand board.
+- **One rules model.** The "Protection" slider that overwrote your rules is
+  gone; so are "Block account", "Ping" (now "Is it answering?") and the
+  Profiles, Events and Approvals pages.
+- **Sign-in: two doors.** Type your name and your own computer shows a
+  6-digit code, or use a passkey. Pausing, giving time and changing rules just
+  work; only the keys (unlock and recovery codes, passkeys, pairing, Who's
+  who) ask you to confirm it's you. Lost every passkey? The operator runs
+  `openscreentime-server recover <name>` for a one-time link.
+- **Who's who.** Every login on a computer is its own person; a login nobody
+  has sorted says so on the Family page.
+- **Fair numbers.** The day's time is one budget across all of a person's
+  computers, filed under each computer's own local day, so "today" is the
+  same everywhere and midnight no longer raises false alarms.
+
+**For children and teens**
+- **The lock.** When time is up the screen switches to the OpenScreenTime
+  lock on its own console — "Time's up for today", "Bedtime until 07:00",
+  "Paused by a parent". Apps are paused, not closed. The code field has the
+  keyboard, and **Ask for more time** is right there. A computer that can't
+  show the lock freezes nobody.
+- **Warnings at 15, 5 and 1 minute** before every stop, as normal
+  notifications — even on GNOME, without a tray.
+- **Only real use counts:** the session on screen, with a key, the mouse or
+  sound in the last five minutes. A locked screen, a closed lid or an SSH login
+  costs nothing. Changing the clock changes nothing either.
+- The math and wait challenges are gone; the unlock code is the one way a
+  parent opens the lock.
+
+**For an adult keeping their own time**
+- **My computer:** your own daily limit (a hard stop with the same warnings),
+  focus hours, and sites you block for yourself — blocked in your focus hours,
+  or all day. Nobody else sees your apps or sites, and a household of one gets
+  a console that says "It's just you so far".
+
+**For the operator**
+- **One command:** `deploy/setup.sh --domain …` writes `.env`, starts the
+  stack and prints the one-time setup link. `OST_PUBLIC_URL` is the one
+  setting; the passkey domain, origin and cookies derive from it.
+- **It runs itself:** starts at boot, backs up nightly, updates daily and
+  rolls back — image and database — if the new version isn't healthy.
+  `/health` checks the database. Server problems (a failed backup or update,
+  the database gone) reach your phone once per incident.
+- **Computers update from your server**, never downgrade, refuse a build that
+  can't run there, and roll back on their own if an update crash-loops. The
+  server now bundles a desktop build (app window, graphical lock, companion)
+  next to the headless one; `install.sh` picks the right one. Desktop builds
+  need glibc 2.35 or newer.
+- Event ingest is idempotent and enrollment retry-safe; a half-finished
+  install can simply be run again.
+
+### Upgrading
+
+- **Migrations run by themselves** on start (0026, 0027, 0030; 0028 and 0029
+  don't exist).
+- **Logins nobody has sorted get no limits** on a parent's own computer (and
+  when the server re-links a login at startup) until you sort them under
+  **Computers → Who's who**; on a child's computer they get the Kid rules.
+  Where more than one login on a parent's computer was linked to that parent,
+  the upgrade unlinks them all — pick yours again in Who's who before you can
+  sign in with a code there.
+- **The old TOTP 2FA, number-match login approvals and change mode are
+  gone.** Sign in with a passkey, or add your own computer and use the code it
+  shows.
+- **Computers update themselves from your server**; an agent too old to show
+  sign-in codes gets them once it has updated.
+- **For the graphical lock, a desktop computer needs `cage`.** The agent
+  installs it where apt, pacman or dnf has it; without it the lock is a text
+  screen on its own console, which works the same.
+- An install from before the boot/backup/update timers: run
+  `deploy/install-auto-update.sh` once.
+
 ## [0.6.1] - 2026-09-14
 
 **Headline: a real app on the device, a warmer console, and a lock that can
