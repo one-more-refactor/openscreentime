@@ -143,7 +143,9 @@ trap - EXIT INT TERM
 echo "Installed $BIN"
 
 echo "Enrolling against $SERVER ..."
-"$BIN" enroll --server "$SERVER" --token "$TOKEN"
+# The token rides in the environment, never argv: an argument is in every
+# user's `ps` while enroll runs; an environment is readable only by root.
+OST_TOKEN="$TOKEN" "$BIN" enroll --server "$SERVER"
 echo "Installing systemd service ..."
 "$BIN" install-service
 

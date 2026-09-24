@@ -108,6 +108,10 @@ for just themselves; and the server looks after itself.
   members' own rules were protected; one parent could read and change
   another's through `/api/profiles/:id`. Now that's a 403 for anyone but the
   person, who changes them through `/api/me/rules`.
+- **The enroll token stays out of `ps`.** `install.sh` took the token from
+  `OST_TOKEN` and then passed it to `ost enroll --token`, in every user's
+  process list. It now hands it over in the environment; `ost enroll` reads
+  `OST_TOKEN` (or `--token -` for stdin) when `--token` is absent.
 
 ### Upgrading
 
