@@ -3,8 +3,8 @@
 //! The server hashes the parent's PIN with `Argon2::default()` into a
 //! self-describing PHC string (`policy.parent_pin_hash`); verification here is
 //! param-agnostic — it just needs the hash, never the plaintext PIN, and works
-//! fully offline (no server round-trip). Used by both the lockout overlay's
-//! `parent_pin`/master-escape path and the `unlock` CLI subcommand.
+//! fully offline (no server round-trip). Checked (as the backup code) for a
+//! code typed at the lock, at `ost unlock` and at `sudo`.
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 

@@ -18,6 +18,10 @@ const DESKTOP_ICON: &str = include_str!("../desktop/openscreentime.svg");
 /// Autostart entry (opens `ost app` on login, so the device is never silent —
 /// GNOME has no usable tray). Distinct from the app-grid launcher above.
 const DESKTOP_AUTOSTART: &str = include_str!("../desktop/openscreentime-autostart.desktop");
+/// The companion's autostart: every desktop login, with or without a systemd
+/// user session (the tray user unit covers the ones with). Tray build only.
+const COMPANION_AUTOSTART: &str = include_str!("../desktop/openscreentime-companion.desktop");
+const COMPANION_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-companion.desktop";
 
 /// The unit names, defined once. They are referenced by the self-updater
 /// (restart after swapping the binary) and by tamper level 3 (masking
@@ -180,6 +184,93 @@ fn remove_desktop_entry() {
     let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
     let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
     let _ = std::fs::remove_file(DESKTOP_AUTOSTART_PATH);
+    let _ = std::fs::remove_file(COMPANION_AUTOSTART_PATH);
+}
+
+/// The graphical lock: its unprivileged user, its unit, its PAM session and
+/// `cage`. GUI build only. Nothing here is fatal: without any of it the agent
+/// draws the text lock instead.
+fn install_lock(exec: &Exec) {
+    ensure_lock_user(exec);
+    for (path, body) in [
+        (crate::lock::UNIT_TEMPLATE_PATH, crate::lock::UNIT_TEMPLATE),
+        (crate::lock::PAM_PATH, crate::lock::PAM_BODY),
+    ] {
+        if let Err(e) = exec.write_file(path, body) {
+            tracing::warn!("could not install {path}: {e} (the text lock will be used)");
+        }
+    }
+    ensure_cage(exec);
+}
+
+/// `ost-lock`: a system account (below uid 1000, so it is never listed as a
+/// person on this computer), no home, no shell, no password.
+fn ensure_lock_user(exec: &Exec) {
+    let name = crate::lock::LOCK_USER;
+    if users::get_user_by_name(name).is_some() {
+        return;
+    }
+    let nologin = ["/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/nologin"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("/bin/false");
+    match exec.run(
+        "useradd",
+        &[
+            "--system",
+            "--user-group",
+            "--no-create-home",
+            "--home-dir",
+            "/nonexistent",
+            "--shell",
+            nologin,
+            "--comment",
+            "OpenScreenTime lock screen",
+            name,
+        ],
+    ) {
+        Ok(_) => tracing::info!("created the {name} system user (the lock screen runs as it)"),
+        Err(e) => tracing::warn!("could not create {name}: {e} (the text lock will be used)"),
+    }
+}
+
+/// Install `cage` (the lock's kiosk compositor) where the distro packages it.
+/// Missing cage is not an error: the lock falls back to text mode.
+fn ensure_cage(exec: &Exec) {
+    if crate::lock::which("cage") {
+        return;
+    }
+    let pm: &[(&str, &[&str])] = &[
+        (
+            "apt-get",
+            &["install", "-y", "--no-install-recommends", "cage"],
+        ),
+        ("pacman", &["-S", "--noconfirm", "--needed", "cage"]),
+        ("dnf", &["install", "-y", "cage"]),
+    ];
+    let Some((tool, args)) = pm.iter().find(|(t, _)| crate::lock::which(t)) else {
+        tracing::info!("no apt/pacman/dnf here: install `cage` for the graphical lock (the text lock works without it)");
+        return;
+    };
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD RUN: {tool} {}", args.join(" "));
+        return;
+    }
+    let run = |args: &[&str]| {
+        std::process::Command::new(tool)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    // A fresh apt box may have no package lists yet.
+    let ok = run(args) || (*tool == "apt-get" && run(&["update"]) && run(args));
+    if ok {
+        tracing::info!("installed cage (the graphical lock's compositor)");
+    } else {
+        tracing::warn!("could not install cage with {tool}; the lock will use its text mode");
+    }
 }
 
 pub fn install_parent_sudo(exec: &Exec) -> Result<()> {
@@ -320,6 +411,14 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     // headless agent's `app` subcommand just bails.
     if cfg!(feature = "gui") {
         install_desktop_entry(&exec);
+        install_lock(&exec);
+    }
+    // The companion (warnings, "You're back") starts on every desktop login,
+    // with or without a systemd user session.
+    if cfg!(feature = "tray") {
+        if let Err(e) = exec.write_file(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART) {
+            tracing::warn!("could not install {COMPANION_AUTOSTART_PATH}: {e}");
+        }
     }
     tamper::install_polkit(&exec, 1)?;
     // sudo on this machine asks for the parent code (CONTRACT-0.4 §8). A
@@ -357,16 +456,25 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
     let _ = exec.run("systemctl", &["disable", "--now", WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["disable", "--now", AGENT_UNIT]);
     let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
+    let _ = exec.run(
+        "systemctl",
+        &["stop", &crate::lock::unit_name(crate::lock::LOCK_VT)],
+    );
     if !exec.dry_run() {
         for p in [
             UNIT_PATH,
             WATCHDOG_SVC_PATH,
             WATCHDOG_TIMER_PATH,
             TRAY_UNIT_PATH,
+            crate::lock::UNIT_TEMPLATE_PATH,
+            crate::lock::PAM_PATH,
         ] {
             let _ = std::fs::remove_file(p);
         }
         remove_desktop_entry();
+    }
+    if users::get_user_by_name(crate::lock::LOCK_USER).is_some() {
+        let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
     }
     remove_parent_sudo(&exec);
     let _ = exec.run("systemctl", &["daemon-reload"]);

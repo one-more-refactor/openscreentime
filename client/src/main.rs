@@ -16,7 +16,7 @@ mod enforce;
 mod enroll;
 #[cfg(feature = "gui")]
 mod intro;
-mod lockout;
+mod lock;
 mod login;
 mod loginbroker;
 mod pam;
@@ -37,6 +37,7 @@ mod ui;
 mod unlock;
 mod update;
 mod util;
+mod warn;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -224,20 +225,28 @@ async fn main() -> Result<()> {
         return unlock::resume_after(secs);
     }
 
-    // Hidden GUI presenter subprocess (spawned detached by the runner so the
-    // blocking egui event loop never stalls the enforcement tick). Reads the
-    // root-only staged LockSpec file whose path is the argument (never the spec
-    // itself — it carries the parent-PIN hash, which must not sit on argv), shows
-    // the overlay, and writes an unlock grant on a verified dismissal.
-    if raw_args.get(1).map(String::as_str) == Some("__lockout") {
+    // The lock screen's own session (openscreentime-lock@<vt>.service, as the
+    // unprivileged `ost-lock` user): `__lock-session` starts cage, which hosts
+    // `__lockscreen`, the window that shows the lock and passes typed codes to
+    // the agent over the lock socket. Neither holds a secret.
+    if raw_args.get(1).map(String::as_str) == Some("__lock-session") {
         #[cfg(feature = "gui")]
         {
-            let spec_path = raw_args.get(2).map(String::as_str).unwrap_or("");
-            return lockout::gui::run_from_spec_file(spec_path);
+            return lock::screen::run_session();
         }
         #[cfg(not(feature = "gui"))]
         {
-            anyhow::bail!("__lockout requires a build with --features gui");
+            anyhow::bail!("__lock-session requires a build with --features gui");
+        }
+    }
+    if raw_args.get(1).map(String::as_str) == Some("__lockscreen") {
+        #[cfg(feature = "gui")]
+        {
+            return lock::screen::run_lockscreen();
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("__lockscreen requires a build with --features gui");
         }
     }
 
@@ -256,7 +265,7 @@ async fn main() -> Result<()> {
 
     // The on-device window (`ost app`): dispatched here, ahead of the async
     // runtime's own threads, so the blocking egui event loop owns the main
-    // thread — the same reason `__intro` and `__lockout` run from here.
+    // thread — the same reason `__intro` and `__lockscreen` run from here.
     if raw_args.get(1).map(String::as_str) == Some("app") {
         #[cfg(feature = "gui")]
         {
