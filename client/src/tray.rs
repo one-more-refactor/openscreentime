@@ -53,24 +53,10 @@ struct Status {
     /// to deliver. Consumed by monotonic `id` so each shows exactly once.
     #[serde(default)]
     notifications: Vec<TrayNotification>,
-    /// Web sign-in prompts addressed to this user (client-first login,
-    /// CONTRACT-0.6): the tray shows an actionable notification and drops the
-    /// answer as a decision file the root agent consumes.
+    /// Sign-in / confirm codes for this user (logincode.rs): one desktop
+    /// notification each, shared with the app window so it rings once.
     #[serde(default)]
-    login_requests: Vec<LoginRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-struct LoginRequest {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    username: String,
-    /// Three numbers; the human taps the one shown in their browser.
-    #[serde(default)]
-    codes: Vec<String>,
-    #[serde(default)]
-    expires_at: String,
+    login_codes: Vec<crate::logincode::LoginCode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -323,55 +309,6 @@ fn request_more_time() {
         "Asked for more time — waiting for a parent",
         false,
     );
-}
-
-/// Show one actionable sign-in prompt and translate the human's click into a
-/// decision file in this user's own runtime dir (the same spoof-proof channel
-/// as the earn marker). Dismissing the notification decides nothing — the
-/// prompt simply expires server-side; only an explicit "Block" denies.
-///
-/// Runs on its own thread: `wait_for_action` blocks until the user clicks or
-/// the notification closes, and the tray loop must keep polling meanwhile.
-fn prompt_login(req: LoginRequest) {
-    std::thread::spawn(move || {
-        let decide = |verdict: &str| {
-            let uid = users::get_current_uid();
-            let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
-            if std::fs::create_dir_all(&dir).is_err() {
-                return;
-            }
-            let _ = std::fs::write(dir.join(format!("login_decision_{}", req.id)), verdict);
-        };
-        // Number-matching: the browser shows one of these three; the human taps
-        // the match. Tapping the wrong one (or Not me) is a deny server-side.
-        let mut n = notify_rust::Notification::new();
-        n.appname("OpenScreenTime")
-            .summary("Sign-in request")
-            .body(&format!(
-                "{} is signing in on the web. If it's you, tap the number shown in your browser.",
-                req.username
-            ))
-            .icon("security-high")
-            .urgency(notify_rust::Urgency::Critical)
-            .timeout(notify_rust::Timeout::Milliseconds(150_000));
-        for c in req.codes.iter().take(3) {
-            n.action(c, c);
-        }
-        n.action("deny", "Not me");
-        match n.show() {
-            Ok(handle) => handle.wait_for_action(|action| {
-                // The action key IS the tapped number (or "deny"). Forward it
-                // verbatim; the server matches it to the real code.
-                if action == "deny" {
-                    decide("deny");
-                } else if action.chars().all(|c| c.is_ascii_digit()) && !action.is_empty() {
-                    decide(action);
-                }
-                // "__closed"/anything else: no decision — let it expire.
-            }),
-            Err(e) => tracing::debug!("sign-in prompt failed to show: {e}"),
-        }
-    });
 }
 
 fn notify(summary: &str, body: &str, critical: bool) {
@@ -643,12 +580,6 @@ pub fn run() -> Result<()> {
     #[cfg(feature = "gui")]
     maybe_show_intro();
 
-    // Sign-in prompts already shown, so each is asked exactly once.
-    let mut prompted_logins: std::collections::HashSet<String> = prev
-        .as_ref()
-        .map(|s| s.login_requests.iter().map(|r| r.id.clone()).collect())
-        .unwrap_or_default();
-
     loop {
         std::thread::sleep(POLL_INTERVAL);
         let next = read_status(&username);
@@ -659,14 +590,12 @@ pub fn run() -> Result<()> {
         }
         if let Some(n) = &next {
             last_notif_id = deliver_notifications(&username, n, last_notif_id);
-            for req in &n.login_requests {
-                if prompted_logins.insert(req.id.clone()) {
-                    prompt_login(req.clone());
+            let now = chrono::Utc::now();
+            for c in n.login_codes.iter().filter(|c| c.is_live(now)) {
+                if crate::logincode::first_sighting(c) {
+                    crate::logincode::notify(c);
                 }
             }
-            // Forget prompts the agent no longer lists, so a later re-ask
-            // (same person, new request id) prompts again.
-            prompted_logins.retain(|id| n.login_requests.iter().any(|r| &r.id == id));
         }
         if prev != next {
             let for_tray = next.clone();
