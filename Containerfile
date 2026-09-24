@@ -101,6 +101,9 @@ RUN set -eu; \
 FROM docker.io/oven/bun:1 AS web-builder
 
 WORKDIR /build/web
+# The console draws its icons straight from the brand set (web/src/components/Icon.tsx
+# imports ../../../brand/icons/*.svg), so that folder rides along.
+COPY brand/icons/ /build/brand/icons/
 COPY web/ .
 
 RUN (bun install --frozen-lockfile || bun install) && bun run build
