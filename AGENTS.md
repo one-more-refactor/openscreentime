@@ -48,9 +48,8 @@ sudo ./target/release/openscreentime install-service
 
 ```bash
 git clone <repo> openscreentime && cd openscreentime
-cp .env.example .env        # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
-deploy/build.sh             # builds server+web image from Containerfile
-podman-compose up -d
+deploy/setup.sh --domain ost.example.com   # .env, image, stack, backup, boot/backup/update units
+deploy/update.sh            # later: pull, backup, swap, health check, rollback (daily timer does this)
 ```
 
 ### Key Environment Variables
@@ -58,10 +57,9 @@ podman-compose up -d
 | Var | Purpose | Required |
 |-----|---------|----------|
 | `DATABASE_URL` | Postgres connection string | Yes (server) |
-| `RP_ID` | WebAuthn relying party ID (bare domain) | Yes |
-| `RP_ORIGIN` | WebAuthn origin (`https://...`) | Yes |
-| `OST_PUBLIC_URL` | Public HTTPS base URL (OIDC redirect, falls back to RP_ORIGIN) | Prod |
-| `OST_INSECURE_COOKIES=1` | Allow non-Secure cookies (dev only) | Dev only |
+| `OST_PUBLIC_URL` | Public HTTPS base URL — RP_ID, RP_ORIGIN, CORS and cookie security derive from it (`server/src/settings.rs`) | Prod |
+| `RP_ID` / `RP_ORIGIN` | Overrides of the derived WebAuthn values | Rarely |
+| `OST_INSECURE_COOKIES` | `1`/`0` override the scheme-derived cookie security | Rarely |
 | `OST_TRUST_PROXY=1` | Rate limiter keys on last X-Forwarded-For hop | Behind proxy |
 | `OST_OIDC_ISSUER/CLIENT_ID/CLIENT_SECRET` | OIDC SSO (all three required to enable) | Optional |
 | `OST_OFFLINE_GRACE_SECS` | Agent fail-closed grace period (default 900s) | Optional |

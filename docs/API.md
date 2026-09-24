@@ -12,8 +12,10 @@ with an appropriate HTTP status.
 
 Base URL in dev: `http://localhost:8080`.
 
-`GET /health` — unauthenticated liveness check → `{ "status": "ok", "service":
-"openscreentime-server" }`.
+`GET /health` — unauthenticated. `200 { "status": "ok", "service":
+"openscreentime-server", "version": "x.y.z", "db": "ok" }` while the server and
+its database answer; `503` with `"status": "degraded", "db": "unreachable"`
+when Postgres does not (checked with a 2 s timeout, cached for 2 s).
 
 ---
 
@@ -81,7 +83,7 @@ Enabled when `OST_OIDC_ISSUER`, `OST_OIDC_CLIENT_ID` and `OST_OIDC_CLIENT_SECRET
 are all set (`OST_OIDC_NAME` optionally labels the login button, default "SSO"). Endpoints
 are discovered at startup from `<issuer>/.well-known/openid-configuration`; authorization-code
 flow with scopes `openid email profile`; redirect URI is
-`<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL` falls back to `RP_ORIGIN`).
+`<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL`; `RP_ORIGIN` if only that is set).
 The callback matches the verified userinfo email against existing admins (any tenant). Fresh
 installs (no admins at all) bootstrap a tenant + admin; an unknown email on a non-empty install
 redirects to `/login?error=sso_unknown_account` (no auto-provisioning); other failures redirect
