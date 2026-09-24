@@ -244,16 +244,18 @@ export async function getOidcSetup(token: string): Promise<OidcSetup> {
   return request<OidcSetup>(`/api/auth/oidc/setup/${encodeURIComponent(token)}`);
 }
 
-/** First-run SSO: create the account with the chosen name and sign in. */
+/** First-run SSO: create the account with the chosen name and sign in. Like
+ * the passkey first run, it needs the server's setup code when it has one. */
 export async function finishOidcSetup(
   token: string,
   username: string,
   display_name?: string,
+  setup_token?: string,
 ): Promise<void> {
   if (usingMock) return;
   await request(`/api/auth/oidc/setup/${encodeURIComponent(token)}`, {
     method: "POST",
-    body: JSON.stringify({ username, display_name }),
+    body: JSON.stringify({ username, display_name, setup_token }),
   });
 }
 
