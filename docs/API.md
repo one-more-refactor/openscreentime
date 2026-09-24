@@ -269,7 +269,11 @@ never the sites themselves. `GET /api/me/today` adds `self_managed` and
 |--------|---------------------|---------------------------------------------------|
 | GET    | `/api/events`       | `?device_id=&type=&severity=&limit=` → newest first; `limit` default 100, max 500 (no paging) |
 
-Events older than 90 days are pruned. `where the time went` and the rest of a
+Events under the login of someone a parent sees only the minutes of (an
+adult, a co-parent, anyone self-managed — `usage.rs` `hub_exposure`) are left
+out for everyone but that person, here and in `GET /api/devices/:id`'s
+`recent_events`; events with no login (the computer's own) stay. Events
+older than 90 days are pruned. `where the time went` and the rest of a
 person's day are under "People" below.
 
 ## Companion API (`/api/parent/*`)

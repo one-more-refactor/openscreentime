@@ -18,6 +18,7 @@ import type {
   CodeRequest,
   ConfirmGrant,
   ConfirmStatus,
+  Event,
   FamilyResponse,
   LockResponse,
   RecoveryCodes,
@@ -60,6 +61,7 @@ export const apiCalls = {
   profileSaves: [] as { id: string; policy: Policy }[],
   myRules: [] as MyRules[],
   where: [] as (string | undefined)[],
+  events: [] as (string | undefined)[],
 };
 
 export const MOCK_CODE = "123456";
@@ -120,6 +122,7 @@ export const apiImpl = {
   getWhere: ((_?: string) =>
     Promise.resolve({ apps: [], sites: [], hours: [] })) as (accountId?: string) => Promise<WhereData>,
   getCatalog: (() => Promise.resolve({ categories: [], apps: [] })) as () => Promise<Catalog>,
+  listEvents: ((_?: string) => Promise.resolve([])) as (deviceId?: string) => Promise<Event[]>,
 };
 
 const defaults = { ...apiImpl };
@@ -148,6 +151,7 @@ export function resetApiMock() {
   apiCalls.profileSaves.length = 0;
   apiCalls.myRules.length = 0;
   apiCalls.where.length = 0;
+  apiCalls.events.length = 0;
   Object.assign(apiImpl, defaults);
 }
 
@@ -220,7 +224,10 @@ mock.module("../api", () => ({
     return apiImpl.getRecoveryCodes(id);
   },
   // The person page.
-  listEvents: () => Promise.resolve([]),
+  listEvents: (filter: { device_id?: string } = {}) => {
+    apiCalls.events.push(filter.device_id);
+    return apiImpl.listEvents(filter.device_id);
+  },
   getCatalog: () => apiImpl.getCatalog(),
   getWhere: (accountId?: string) => {
     apiCalls.where.push(accountId);
