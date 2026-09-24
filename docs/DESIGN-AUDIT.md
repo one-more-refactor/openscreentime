@@ -1,5 +1,7 @@
 # Design audit — why the current client reads inconsistent
 
+> **Historical.** The September 2026 audit that led to the house-clock rebuild of the web console (`brand/board.html`, `docs/DESIGN.md`). Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
+
 The client was pushed from an austere "Nothing" dark system to a warm light one,
 but only the surface changed: the **bones still execute the old system** (ink
 fills, monospace ALL-CAPS labels, corner ticks, dot-grid, gray focus) while a

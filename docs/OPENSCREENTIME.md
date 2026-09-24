@@ -1,10 +1,6 @@
 # OpenScreenTime — Product & Design Brief
 
-> The north star for the Sentinel → **OpenScreenTime** rebrand + rebuild.
-> Decisions below were made with the operator, not guessed. When something
-> here conflicts with older docs, this wins — and where **`CONTRACT-0.6.md`**
-> (the passive turn: allow-by-default, client-first login, where-time-goes)
-> conflicts with THIS, 0.6 wins.
+> **Historical.** The 0.4 product brief. What is still true of it now lives in [`PRODUCT.md`](PRODUCT.md). Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
 
 ## What it is
 

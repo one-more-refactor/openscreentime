@@ -1,5 +1,7 @@
 # Prod push — cross-layer contract (2026-07-12)
 
+> **Historical.** The build contract for the July 2026 production push. Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
+
 Authoritative spec for this session's changes. Server, agent, and web MUST match these shapes
 exactly. Existing conventions still apply: every admin JSON response is wrapped in a named
 envelope; agent API is Bearer-token; tenant isolation threaded through every query.
