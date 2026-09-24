@@ -2014,7 +2014,11 @@ impl Agent {
                 }) => (
                     Look::Wall,
                     "Time's up for today".to_string(),
-                    format!("{used_min} of {limit_min} minutes used."),
+                    if used_min > limit_min {
+                        format!("All {limit_min} minutes are used.")
+                    } else {
+                        format!("{used_min} of {limit_min} minutes used.")
+                    },
                     true,
                 ),
                 Some(screentime::LockReason::Bedtime) => (
@@ -2483,7 +2487,21 @@ impl Agent {
                 self.device_lock_grace_until = None;
                 // An admin unlock also lifts a confirmed-evasion lockdown.
                 self.tamper_lockdown = false;
-                for user in self.frozen.drain().collect::<Vec<_>>() {
+                // Resume lifts the pause. Someone whose own rules still stop
+                // them (time's up, bedtime) stays stopped — thawing them only
+                // for the next tick to freeze them again would flash their
+                // desktop and tell them "you're back" when they aren't. The
+                // lock just changes its words.
+                for user in self.frozen.clone() {
+                    let policy = self.policies.get(&user).cloned().unwrap_or_default();
+                    let in_grace = self
+                        .unlock_until
+                        .get(&user)
+                        .is_some_and(|t| *t > Instant::now());
+                    if !in_grace && screentime::evaluate(&policy, &self.tracker, &user).is_some() {
+                        continue;
+                    }
+                    self.frozen.remove(&user);
                     self.lock.host().freeze(&user, false, false);
                     self.notify_user(
                         Some(&user),
@@ -3349,8 +3367,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_keeps_someone_whose_own_rules_still_stop_them() {
+        let (mut a, fake) = agent_with_mia(); // over her 60 minutes
+        let cmd = |t: &str| Command {
+            id: "c1".into(),
+            cmd_type: t.into(),
+            payload: json!({}),
+        };
+        let _ = a.handle_command(cmd(CMD_LOCK)).await;
+        assert_eq!(a.face_for("mia").title, "Paused by a parent");
+        let _ = a.handle_command(cmd(CMD_UNLOCK)).await;
+        a.reconcile_lock().await;
+        // Still stopped by her limit: no thaw, no "You're back"; the lock
+        // just says why now.
+        assert!(a.frozen.contains("mia"));
+        assert_eq!(a.lock.subject(), Some("mia"));
+        assert_eq!(a.face_for("mia").title, "Time's up for today");
+        assert!(!fake.w().log.contains(&"thaw mia".to_string()));
+    }
+
+    #[tokio::test]
     async fn resume_from_the_console_takes_the_lock_down() {
         let (mut a, fake) = agent_with_mia();
+        a.tracker.add_earned("mia", 30); // within her rules
         a.prev_active = Some(HashSet::new());
         let cmd = |t: &str| Command {
             id: "c1".into(),
