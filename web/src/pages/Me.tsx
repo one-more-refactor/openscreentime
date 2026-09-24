@@ -25,6 +25,7 @@ import { useCountUp } from "../lib/useCountUp";
 import { duration, durationShort, sentence } from "../lib/format";
 import { describeWindow } from "../lib/schedule";
 import { stopSentence } from "../lib/day";
+import { parentSeesSentence } from "../lib/parentSees";
 import {
   DAY_LETTERS,
   DAY_SHORT,
@@ -195,13 +196,16 @@ function ComputerRows({ today, hub, who }: { today: MeToday; hub: boolean; who: 
 
 // ---- a child's or teen's own day ------------------------------------------------
 
-/** "What can they see?" — said once on a first visit, and always one tap away. */
-const SEE = [
-  "Your parents can see how long your computer was used, which apps and sites it used, and when the rules kicked in.",
-  "They can't see your screen, read your messages or see what you type. Nothing in OpenScreenTime can.",
-];
+/** "What can they see?" — said once on a first visit, and always one tap away.
+ * The first sentence is the server's own answer for this person. */
+function seeSentences(today: MeToday): [string, string] {
+  return [
+    parentSeesSentence(today.parent_sees),
+    "They can't see your screen, read your messages or see what you type. Nothing in OpenScreenTime can.",
+  ];
+}
 
-function FirstVisit() {
+function FirstVisit({ see }: { see: [string, string] }) {
   const KEY = "ost-intro-seen";
   const [seen, setSeen] = useState(() => {
     try {
@@ -216,7 +220,7 @@ function FirstVisit() {
       <Icon name="info" size={20} />
       <div className="banner-main">
         <p>
-          <b>Before anything else.</b> {SEE[0]} {SEE[1]}
+          <b>Before anything else.</b> {see[0]} {see[1]}
         </p>
       </div>
       <Button
@@ -358,11 +362,12 @@ function MyDay({
   const next = today.locked
     ? "A parent paused your computer. Nothing is broken — talk to them, and it comes back."
     : stopSentence(today.rules, "you");
+  const see = seeSentences(today);
 
   return (
     <>
       <PageHead title={first ? `Hi, ${first}` : "Your day"} sub="Here's your day so far." />
-      <FirstVisit />
+      <FirstVisit see={see} />
       <section className="card me-hero">
         <DayRing today={today} size={176} />
         <div className="me-hero-main">
@@ -396,8 +401,8 @@ function MyDay({
           <Icon name="chevron-right" size={16} />
           What can a parent see?
         </summary>
-        <p className="lede">{SEE[0]}</p>
-        <p className="lede">{SEE[1]}</p>
+        <p className="lede">{see[0]}</p>
+        <p className="lede">{see[1]}</p>
       </details>
     </>
   );

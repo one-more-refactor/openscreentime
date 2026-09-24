@@ -523,6 +523,16 @@ export interface MeToday {
   self_managed?: boolean;
   /** their own site blocks and focus hours */
   focus?: Focus;
+  /** what a parent sees of their day beyond the minutes — the server's own
+   *  rule (server/src/usage.rs `hub_exposure`), never re-derived here */
+  parent_sees: ParentSees;
+}
+
+/** What a parent sees of a person's day besides their minutes. Both false:
+ *  minutes only (an adult, or someone who manages themselves). */
+export interface ParentSees {
+  apps: boolean;
+  sites: boolean;
 }
 
 /** One day of a person's own history (GET /api/me/history). */

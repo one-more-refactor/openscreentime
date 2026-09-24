@@ -215,6 +215,11 @@ async fn an_adults_rules_are_theirs_and_the_hub_cannot_see_them() {
         .unwrap()
         .0;
     assert_eq!(today["self_managed"], true);
+    // …and tells him what the hub sees: his minutes, nothing more.
+    assert_eq!(
+        today["parent_sees"],
+        json!({ "apps": false, "sites": false })
+    );
     assert_eq!(today["limit_minutes"], 120);
     assert_eq!(today["focus"]["sites"], json!(["news.ycombinator.com"]));
 
@@ -282,6 +287,7 @@ async fn an_adults_rules_are_theirs_and_the_hub_cannot_see_them() {
         .unwrap()
         .0;
     assert_eq!(today["self_managed"], false);
+    assert_eq!(today["parent_sees"], json!({ "apps": true, "sites": true }));
     let fam = crate::family::get_family(State(env.st.clone()), clone(&as_hub))
         .await
         .unwrap()

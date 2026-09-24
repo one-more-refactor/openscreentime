@@ -164,6 +164,31 @@ impl Exposure {
     };
 }
 
+/// What the hub may see of a person's day beyond their minutes — THE rule.
+/// `where_api` enforces it, and `/api/me/today` tells the person the same
+/// thing (`parent_sees`), so their page can't promise one thing while the
+/// server does another. `None`: their minutes and nothing else — an adult
+/// (co-parent or not), or someone who manages themselves.
+pub fn hub_exposure(bracket: AgeBracket, self_managed: bool) -> Option<Exposure> {
+    if !bracket.is_managed() || self_managed {
+        return None;
+    }
+    Some(if matches!(bracket, AgeBracket::OlderTeen) {
+        Exposure::HUB_APPS_ONLY
+    } else {
+        Exposure::HUB_FULL
+    })
+}
+
+/// [`hub_exposure`] as the person reads it on their own page.
+pub fn parent_sees(bracket: AgeBracket, self_managed: bool) -> Value {
+    let e = hub_exposure(bracket, self_managed);
+    json!({
+        "apps": e.is_some_and(|e| e.apps),
+        "sites": e.is_some_and(|e| e.sites),
+    })
+}
+
 pub async fn where_for_account(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -273,20 +298,15 @@ pub async fn where_api(
         Exposure::SELF
     } else {
         let bracket = AgeBracket::parse(&bracket).unwrap_or(AgeBracket::Adult);
-        if !bracket.is_managed() || self_managed {
-            // One adult in the household must not be able to pull another
-            // adult's activity, co-parent or not; and a self-managed teen has
-            // opted out of the hub's eyes. Their day is their own.
-            return Err(AppError::ForbiddenForMember(
+        // One adult in the household must not be able to pull another
+        // adult's activity, co-parent or not; and a self-managed teen has
+        // opted out of the hub's eyes. Their day is their own.
+        hub_exposure(bracket, self_managed).ok_or_else(|| {
+            AppError::ForbiddenForMember(
                 "their day is their own — adults and self-managed people aren't tracked by the hub"
                     .into(),
-            ));
-        }
-        if matches!(bracket, AgeBracket::OlderTeen) {
-            Exposure::HUB_APPS_ONLY
-        } else {
-            Exposure::HUB_FULL
-        }
+            )
+        })?
     };
     Ok(Json(
         where_for_account(&st.db, admin.tenant_id, q.account_id, exposure).await?,
@@ -298,4 +318,37 @@ pub async fn me_where(State(st): State<AppState>, admin: AuthAdmin) -> AppResult
     Ok(Json(
         where_for_account(&st.db, admin.tenant_id, admin.admin_id, Exposure::SELF).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one rule, per bracket — the same answer `where_api` enforces and
+    /// `/api/me/today` tells the person (TRANSPARENCY.md's table).
+    #[test]
+    fn what_a_parent_sees_per_bracket() {
+        for (bracket, apps, sites) in [
+            (AgeBracket::Little, true, true),
+            (AgeBracket::Kid, true, true),
+            (AgeBracket::YoungerTeen, true, true),
+            (AgeBracket::OlderTeen, true, false),
+            (AgeBracket::Adult, false, false),
+        ] {
+            assert_eq!(
+                parent_sees(bracket, false),
+                json!({ "apps": apps, "sites": sites }),
+                "{bracket:?}"
+            );
+            assert_eq!(hub_exposure(bracket, false).is_some(), apps, "{bracket:?}");
+        }
+        // Someone who manages themselves: minutes only, whatever their age.
+        for bracket in AgeBracket::ALL {
+            assert!(hub_exposure(bracket, true).is_none(), "{bracket:?}");
+            assert_eq!(
+                parent_sees(bracket, true),
+                json!({ "apps": false, "sites": false })
+            );
+        }
+    }
 }
