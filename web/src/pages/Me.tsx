@@ -1,207 +1,207 @@
 // ============================================================================
-// ME — a person's own page. The console a child sees when they open
-// OpenScreenTime on their own computer (a member session can reach nothing
-// else), and what a parent sees under "My screen time" for themselves.
+// ME — a person's own page, in one calm look for everyone.
 //
-// One question, answered at a glance: how much time do I have left today?
-// Then, in order: ask for more (if their bracket may), what's blocked, when
-// screens are off, which computers count. Nothing else.
+// Two shapes of the same page:
 //
-// Three looks, keyed by the person's effective theme and scoped by a class on
-// the page root so the rest of the console is untouched (me.css):
-//   playful — little/kid: one huge friendly ring, chunky rounded type, warm
-//             bright palette. Duolingo energy without a mascot.
-//   calm    — teens: a quieter ring, a stats row, goals, blocked as a list.
-//   plain   — adults: a compact private dashboard; no ring, no asking.
-// Enforcement words stay plain in all three: when it's stopped, it says so.
+//   My day       a child or teen on their own computer (a member session can
+//                reach nothing else): the ring — time USED today, filling
+//                like every ring in the product — and the time left; asking
+//                for more; their rules in one glance; the week; where the
+//                time went; their computers.
+//
+//   My computer  someone who keeps their own time — an adult, or the parent
+//                for themselves (brand board § f): the same ring, then their
+//                own daily limit, focus hours and the sites they block for
+//                themselves, each edited in place; the week; where the time
+//                went; this computer. No "parent" anywhere: the limits are
+//                the ones they set.
 // ============================================================================
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import * as api from "../api";
-import type { Catalog, MeHistory, MeToday, Theme } from "../types";
+import type { Catalog, MeHistory, MeToday, MyRules, TimeWindow } from "../types";
 import { useSession } from "../lib/session";
 import { useCountUp } from "../lib/useCountUp";
-import { useTheme } from "../lib/theme";
+import { duration, durationShort, sentence } from "../lib/format";
+import { describeWindow } from "../lib/schedule";
+import { stopSentence } from "../lib/day";
+import {
+  DAY_LETTERS,
+  DAY_SHORT,
+  WEEK_ORDER,
+  describeDays,
+  focusEndsAt,
+  focusProblem,
+  nextFocusStart,
+  normalizeSite,
+} from "../lib/myRules";
+import { Ring, RingNumber } from "../components/Ring";
+import { Button } from "../components/Button";
+import { Icon, type IconName } from "../components/Icon";
 import { Wordmark } from "../components/Wordmark";
 import { WhereTheTime } from "../components/WhereTheTime";
+import { FluentSlider } from "../components/FluentSlider";
+import { TextInput } from "../components/TextInput";
+import { PageHead } from "../layout/PageHead";
 
-// ---- the ring ----------------------------------------------------------------
+// ---- the day, as a ring ---------------------------------------------------------
 
-function Ring({
-  pct,
-  size,
-  stroke,
-  children,
-  spent,
-}: {
-  /** 0..1 of the day still available */
-  pct: number;
-  size: number;
-  stroke: number;
-  spent: boolean;
-  children: ReactNode;
-}) {
-  // Fills from empty on mount — the page arrives, the day draws itself.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => {
-    const t = requestAnimationFrame(() => setMounted(true));
-    return () => cancelAnimationFrame(t);
-  }, []);
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const offset = mounted ? c * (1 - Math.max(0, Math.min(1, pct))) : c;
+/** Fraction of the day used — what the ring draws. Null = no limit. */
+export function usedFraction(today: MeToday): number | null {
+  if (today.limit_minutes === null) return null;
+  const total = today.limit_minutes + today.earned_minutes;
+  return total > 0 ? today.used_minutes / total : 1;
+}
+
+function DayRing({ today, size }: { today: MeToday; size: number }) {
+  const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
+  const left = today.left_minutes ?? (total === null ? null : Math.max(0, total - today.used_minutes));
+  const shown = useCountUp(left ?? today.used_minutes, 700);
+  const label =
+    total === null
+      ? `${duration(today.used_minutes)} used today, no limit`
+      : `${duration(today.used_minutes)} used of ${duration(total)}, ${duration(left ?? 0)} left`;
   return (
-    <div className="me-ring" style={{ width: size, height: size }} data-spent={spent}>
-      <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} aria-hidden="true">
-        <circle className="me-ring-track" cx={size / 2} cy={size / 2} r={r} strokeWidth={stroke} fill="none" />
-        <circle
-          className="me-ring-fill"
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          strokeWidth={stroke}
-          fill="none"
-          strokeLinecap="round"
-          strokeDasharray={c}
-          strokeDashoffset={offset}
-          transform={`rotate(-90 ${size / 2} ${size / 2})`}
-        />
-      </svg>
-      <div className="me-ring-inner">{children}</div>
-    </div>
+    <Ring size={size} used={usedFraction(today)} minutesLeft={left} paused={today.locked} on="card" label={label}>
+      <RingNumber
+        size={size}
+        value={durationShort(shown)}
+        unit={
+          total === null
+            ? shown < 60
+              ? "min today"
+              : "today"
+            : shown >= 60 && shown % 60 === 0
+              ? "left"
+              : "min left"
+        }
+      />
+    </Ring>
   );
 }
 
-function fmt(m: number): string {
-  if (m < 60) return `${m}`;
-  const h = Math.floor(m / 60);
-  const r = m % 60;
-  return r === 0 ? `${h}h` : `${h}h ${String(r).padStart(2, "0")}`;
+// ---- the week -------------------------------------------------------------------
+
+function lastSevenDays(history: MeHistory | null, today: MeToday) {
+  const byDay = new Map((history?.days ?? []).map((d) => [d.day, d]));
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const row = byDay.get(key);
+    return { key, day: d.getDay(), used: row?.used_minutes ?? 0, earned: row?.earned_minutes ?? 0, today: i === 6 };
+  });
+  // The live numbers beat a history row that may lag behind them.
+  days[6].used = Math.max(days[6].used, today.used_minutes);
+  days[6].earned = Math.max(days[6].earned, today.earned_minutes);
+  return days;
 }
-function unitFor(m: number): string {
-  return m < 60 ? (m === 1 ? "minute" : "minutes") : "";
-}
 
-// ---- shared pieces ---------------------------------------------------------------
-
-function AskForTime({
-  today,
-  theme,
-  onAsked,
-}: {
-  today: MeToday;
-  theme: Theme;
-  onAsked: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  // Little ones have no request UI; adults have no one to ask.
-  if (today.bracket === "little" || today.bracket === "adult") return null;
-
-  if (today.pending_request)
-    return (
-      <p className="me-asked">
-        {theme === "playful" ? "You asked. A parent will answer soon." : "Asked — waiting for a parent."}
-      </p>
-    );
-
-  async function ask(minutes: number) {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.askForTime(minutes);
-      onAsked();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "That didn't go through. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (theme === "playful")
-    return (
-      <div className="me-ask">
-        <button className="me-ask-big" disabled={busy} onClick={() => void ask(15)}>
-          {busy ? "Asking…" : "Ask for 15 more minutes"}
-        </button>
-        {err && <p className="me-err">{err}</p>}
-      </div>
-    );
-
+function Week({ history, today, title }: { history: MeHistory | null; today: MeToday; title: string }) {
+  const days = lastSevenDays(history, today);
+  const limit = today.limit_minutes;
+  // A little headroom above the tallest bar (or the limit line).
+  const max = Math.max(...days.map((d) => d.used), limit ?? 0, 60) * 1.12;
+  const earlier = days.slice(0, 6).filter((d) => d.used > 0);
+  const avg = earlier.length ? Math.round(earlier.reduce((s, d) => s + d.used, 0) / earlier.length) : null;
+  const short = (m: number) => (m < 60 ? `${m} min` : durationShort(m));
   return (
-    <div className="me-ask">
-      <p className="me-ask-label">Ask for more time</p>
-      <div className="me-ask-row">
-        {[15, 30, 60].map((m) => (
-          <button key={m} className="me-ask-pill" disabled={busy} onClick={() => void ask(m)}>
-            +{m} min
-          </button>
-        ))}
-      </div>
-      {err && <p className="me-err">{err}</p>}
-    </div>
-  );
-}
-
-/** Which apps are blocked, as names — the catalog gives us the words. */
-function useBlockedNames(today: MeToday | null, catalog: Catalog | null) {
-  return useMemo(() => {
-    if (!today || !catalog) return { apps: [] as { id: string; name: string }[], cats: [] as string[], sites: [] as string[] };
-    const catSet = new Set(today.blocks.categories);
-    const viaCat = new Set(catalog.apps.filter((a) => catSet.has(a.category)).map((a) => a.id));
-    const apps = catalog.apps
-      .filter((a) => today.blocks.apps.includes(a.id) && !viaCat.has(a.id))
-      .map((a) => ({ id: a.id, name: a.name }));
-    const cats = catalog.categories.filter((c) => catSet.has(c.id)).map((c) => c.name);
-    return { apps, cats, sites: today.blocks.custom_domains };
-  }, [today, catalog]);
-}
-
-function Blocked({ today, catalog, theme }: { today: MeToday; catalog: Catalog | null; theme: Theme }) {
-  const b = useBlockedNames(today, catalog);
-  const nothing = b.apps.length === 0 && b.cats.length === 0 && b.sites.length === 0;
-  if (nothing) return null;
-  const title =
-    theme === "playful" ? "Not on this computer" : theme === "calm" ? "Blocked" : "What you've blocked";
-  return (
-    <section className="me-section">
-      <h2 className="me-h2">{title}</h2>
-      <div className="me-blocked">
-        {b.cats.map((c) => (
-          <span key={c} className="me-blocked-item" data-kind="cat">{c}</span>
-        ))}
-        {b.apps.map((a) => (
-          <span key={a.id} className="me-blocked-item">{a.name}</span>
-        ))}
-        {b.sites.map((s) => (
-          <span key={s} className="me-blocked-item" data-kind="site">{s}</span>
-        ))}
+    <section className="section">
+      <div className="card card-pad me-week">
+        <div className="me-week-h">
+          <h2 className="h2">{title}</h2>
+          <span className="meta num">
+            {[avg !== null ? `average ${duration(avg)}` : null, limit ? `limit ${duration(limit)}` : null]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </div>
+        <div
+          className="me-bars"
+          role="img"
+          aria-label={`Screen time, the last seven days${avg !== null ? `, average ${duration(avg)}` : ""}`}
+        >
+          <div className="me-bars-plot">
+            {limit ? (
+              <div className="me-bars-limit" style={{ bottom: `${(limit / max) * 100}%` }}>
+                <em className="num">{duration(limit)}</em>
+              </div>
+            ) : null}
+            {days.map((d) => (
+              <i
+                key={d.key}
+                className="me-bar"
+                data-today={d.today}
+                // Over is over the day's whole budget — time given on top isn't "over".
+                data-over={limit ? d.used > limit + d.earned : false}
+                style={{ height: `${Math.max(1.5, (d.used / max) * 100)}%` }}
+              />
+            ))}
+          </div>
+          <div className="me-bars-labels">
+            {days.map((d) => (
+              <span key={d.key} className="num" data-today={d.today}>
+                <b>{d.used > 0 ? short(d.used) : "—"}</b>
+                {d.today ? "Today" : DAY_SHORT[d.day]}
+              </span>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   );
 }
 
-// ---- first visit ---------------------------------------------------------------
-// The transparency intro, in the console (CONTRACT-0.6 §3): the first time a
-// member opens their page, it says plainly what a parent can and cannot see.
-// Shown once per browser; the full version lives in docs/TRANSPARENCY.md and
-// as the device's first-run intro.
+// ---- their computers ------------------------------------------------------------
 
-/** The two transparency points, worded per look — shared by the first-visit
- * card and the standing "what can they see?" link so they never drift. */
-function transparencyPoints(theme: Theme): [string, string] {
-  if (theme === "playful")
-    return [
-      "Your grown-ups can see how long you've been on the computer and which apps were open — like a clock, not a camera.",
-      "They can NOT read your messages, see your screen, or watch what you type. Ever.",
-    ];
-  return [
-    "Your parents can see: your minutes, which apps and sites your computer used, and the moments the rules kicked in.",
-    "They can NOT read messages, see your screen, record keystrokes, or open a remote shell — that last one doesn't even exist in this software.",
-  ];
+function ComputerRows({ today, hub, who }: { today: MeToday; hub: boolean; who: "my" | "your" }) {
+  if (today.devices.length === 0) {
+    return (
+      <div className="card me-devrow">
+        <Icon name="laptop" size={20} />
+        <span>No computer yet.</span>
+        <span className="sp" />
+        {hub && (
+          <Link to="/computers?add=mine" className="btn btn-secondary btn-sm">
+            Add my computer
+          </Link>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="card me-devices">
+      {today.devices.map((d) => (
+        <div key={d.name} className="me-devrow">
+          <Icon name={d.status === "offline" ? "offline" : "laptop"} size={20} />
+          <span>
+            <b>{d.name}</b>
+            <span className="meta">
+              {" · "}
+              {d.locked ? "paused" : d.status === "online" ? "online" : d.status === "pending" ? "not set up yet" : "offline — it keeps today's rules"}
+            </span>
+          </span>
+          <span className="sp" />
+          {hub && (
+            <Link to="/settings" className="me-devrow-keys">
+              {who === "my" ? "Unlock code and recovery codes are in Settings" : "Keys are in Settings"}
+            </Link>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
-function FirstVisit({ theme }: { theme: Theme }) {
+// ---- a child's or teen's own day ------------------------------------------------
+
+/** "What can they see?" — said once on a first visit, and always one tap away. */
+const SEE = [
+  "Your parents can see how long your computer was used, which apps and sites it used, and when the rules kicked in.",
+  "They can't see your screen, read your messages or see what you type. Nothing in OpenScreenTime can.",
+];
+
+function FirstVisit() {
   const KEY = "ost-intro-seen";
   const [seen, setSeen] = useState(() => {
     try {
@@ -211,476 +211,634 @@ function FirstVisit({ theme }: { theme: Theme }) {
     }
   });
   if (seen) return null;
-  const dismiss = () => {
-    try {
-      localStorage.setItem(KEY, "1");
-    } catch {
-      /* private mode: show again next time, no harm */
-    }
-    setSeen(true);
-  };
-  const [a, b] = transparencyPoints(theme);
   return (
-    <section className="me-section me-intro">
-      <h2 className="me-h2">{theme === "playful" ? "What this is" : "Before anything else"}</h2>
-      <p className="me-intro-p">{a}</p>
-      <p className="me-intro-p">{b}</p>
-      <button className="me-link" onClick={dismiss}>
-        Okay, got it
-      </button>
-    </section>
-  );
-}
-
-/** A permanent, low-key way to re-check what's visible — trust is ongoing, not
- * a one-time dismissed card (the first-visit intro is gone after one tap). */
-function WhatCanTheySee({ theme }: { theme: Theme }) {
-  const [a, b] = transparencyPoints(theme);
-  return (
-    <details className="me-see">
-      <summary className="me-link">What can they see?</summary>
-      <p className="me-intro-p" style={{ marginTop: "0.6rem" }}>{a}</p>
-      <p className="me-intro-p">{b}</p>
-    </details>
-  );
-}
-
-/** One optional, once-a-day reflective touch — reflection is what converts
- * "here's your data" into behaviour change. Never a notification (the person
- * chose to open their page), shown at most once/day, dismissed forever. */
-function Reflection({ theme }: { theme: Theme }) {
-  const KEY = () => `ost-reflect-${new Date().toISOString().slice(0, 10)}`;
-  const [done, setDone] = useState(() => {
-    try {
-      return localStorage.getItem(KEY()) === "1";
-    } catch {
-      return true;
-    }
-  });
-  if (done || theme === "plain") return null; // adults get the quiet version elsewhere
-  const answer = () => {
-    try {
-      localStorage.setItem(KEY(), "1");
-    } catch {
-      /* ignore */
-    }
-    setDone(true);
-  };
-  return (
-    <section className="me-section me-reflect">
-      <p className="me-reflect-q">
-        {theme === "playful" ? "Happy with your day so far?" : "How do you feel about today so far?"}
-      </p>
-      <div className="me-ask-row">
-        <button className="me-ask-pill" onClick={answer}>Good</button>
-        <button className="me-ask-pill" onClick={answer}>Okay</button>
-        <button className="me-ask-pill" onClick={answer}>Too much</button>
+    <div className="banner me-intro" role="note">
+      <Icon name="info" size={20} />
+      <div className="banner-main">
+        <p>
+          <b>Before anything else.</b> {SEE[0]} {SEE[1]}
+        </p>
       </div>
-    </section>
+      <Button
+        size="sm"
+        variant="quiet"
+        onClick={() => {
+          try {
+            localStorage.setItem(KEY, "1");
+          } catch {
+            /* private mode: show again next time */
+          }
+          setSeen(true);
+        }}
+      >
+        Got it
+      </Button>
+    </div>
   );
 }
 
-// ---- the week ----------------------------------------------------------------
-// "Know what you did" is the floor of any motivation: seven bars, today
-// telling you how it compares to your usual, and where today's minutes went.
-
-function fmtLong(m: number): string {
-  if (m < 60) return `${m} min`;
-  const h = Math.floor(m / 60);
-  const r = m % 60;
-  return r === 0 ? `${h} h` : `${h} h ${r.toString().padStart(2, "0")}`;
-}
-
-function Week({
-  history,
-  today,
-  theme,
-}: {
-  history: MeHistory;
-  today: MeToday;
-  theme: Theme;
-}) {
-  // The last 7 calendar days, today last, missing days as zero.
-  const byDay = new Map(history.days.map((d) => [d.day, d]));
-  const week = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    return {
-      key,
-      letter: d.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 2),
-      used: byDay.get(key)?.used_minutes ?? 0,
-      isToday: i === 6,
-    };
-  });
-  // Live truth beats a possibly momentarily-stale history row for today.
-  week[6].used = Math.max(week[6].used, today.used_minutes);
-
-  const limit = today.limit_minutes !== null ? today.limit_minutes + today.earned_minutes : null;
-  const max = Math.max(...week.map((d) => d.used), limit ?? 0, 30);
-
-  // "How does today compare to my usual?" — the average of the earlier days
-  // in the strip that saw any use. Fewer than three and we stay quiet.
-  const prior = week.slice(0, 6).filter((d) => d.used > 0);
-  const avg = prior.length >= 3 ? Math.round(prior.reduce((s, d) => s + d.used, 0) / prior.length) : null;
-  const delta = avg !== null ? week[6].used - avg : null;
-  const compare =
-    delta === null
-      ? null
-      : Math.abs(delta) < 10
-        ? "Right around your usual so far."
-        : delta < 0
-          ? `${fmtLong(-delta)} less than your usual day — nice.`
-          : `${fmtLong(delta)} more than your usual day.`;
-
-  const devices = history.today_by_device;
-
-  return (
-    <section className="me-section me-week-wrap">
-      <h2 className="me-h2">{theme === "playful" ? "Your week" : "This week"}</h2>
-      <div className="me-week" role="img" aria-label="Screen time, last seven days">
-        {week.map((d) => (
-          <div key={d.key} className="me-week-day" data-today={d.isToday}>
-            <div className="me-week-bar">
-              {limit !== null && (
-                <span className="me-week-limit" style={{ bottom: `${(limit / max) * 100}%` }} />
-              )}
-              <span
-                className="me-week-fill"
-                data-over={limit !== null && d.used > limit}
-                style={{ height: `${Math.max(4, (d.used / max) * 100)}%` }}
-              />
-            </div>
-            <span className="me-week-min">{d.used > 0 ? fmt(d.used) : "·"}</span>
-            <span className="me-week-label">{d.letter}</span>
-          </div>
-        ))}
-      </div>
-      {compare && <p className="me-week-compare">{compare}</p>}
-      {devices.length > 0 && (
-        <ul className="me-where">
-          {devices.map((d) => (
-            <li key={d.name} className="me-where-row">
-              <span className="me-where-name">{d.name}</span>
-              <span className="me-where-min">{fmtLong(d.used_minutes)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function Schedule({ today, theme }: { today: MeToday; theme: Theme }) {
-  if (!today.bedtime && today.windows.length === 0) return null;
-  const w = today.windows;
-  return (
-    <section className="me-section me-when">
-      {today.bedtime && (
-        <div className="me-card me-card-night">
-          <span className="me-moon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
-              <path d="M21 14.5A8.5 8.5 0 0 1 9.5 3a7 7 0 1 0 11.5 11.5Z" />
-            </svg>
-          </span>
-          <div>
-            <p className="me-card-title">{theme === "playful" ? "Bedtime" : "Screens off"}</p>
-            <p className="me-card-value">{today.bedtime.start} – {today.bedtime.end}</p>
-          </div>
-        </div>
-      )}
-      {w.length > 0 && (
-        <div className="me-card">
-          <span className="me-sun" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
-              <circle cx="12" cy="12" r="5" />
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </span>
-          <div>
-            <p className="me-card-title">{theme === "playful" ? "Screen time is" : "Allowed hours"}</p>
-            <p className="me-card-value">
-              {w.map((x, i) => (
-                <span key={i}>
-                  {i > 0 && " · "}
-                  {x.days.includes(1) && x.days.includes(5) ? "school days" : x.days.includes(0) || x.days.includes(6) ? "weekend" : "days"}{" "}
-                  {x.start}–{x.end}
-                </span>
-              ))}
-            </p>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ---- the goal: the shift from an imposed limit to a target you own ----------
-// A goal is YOURS — distinct from the parent cap. The whole feedback loop
-// (week, streak, "less than usual — nice") points at it. Little kids don't set
-// their own (a parent does, on the child page); teens and adults do, here.
-
-const GOAL_CHOICES = [30, 45, 60, 90, 120, 180, 240];
-
-function GoalControl({
-  goal,
-  streak,
-  theme,
-  onSet,
-}: {
-  goal: number | null | undefined;
-  streak: number;
-  theme: Theme;
-  onSet: (m: number) => void;
-}) {
-  const [open, setOpen] = useState(false);
+function AskForTime({ today, onAsked }: { today: MeToday; onAsked: () => void }) {
   const [busy, setBusy] = useState(false);
-  // Little kids (playful) don't self-set — the parent does; show it read-only.
-  const canSet = theme !== "playful";
-
-  async function pick(m: number) {
+  const [err, setErr] = useState<string | null>(null);
+  if (today.bracket === "little" || today.bracket === "adult") return null;
+  if (today.pending_request) {
+    return (
+      <p className="me-asked">
+        <Icon name="check" size={18} /> You asked. A parent will answer soon.
+      </p>
+    );
+  }
+  async function ask(minutes: number) {
     setBusy(true);
+    setErr(null);
     try {
-      await api.setMyGoal(m);
-      onSet(m);
-      setOpen(false);
+      await api.askForTime(minutes);
+      onAsked();
+    } catch (e) {
+      setErr(sentence(e instanceof Error ? e.message : "That didn't go through. Try again."));
     } finally {
       setBusy(false);
     }
   }
-
+  const kid = today.bracket === "kid";
   return (
-    <section className="me-section me-goal">
-      <h2 className="me-h2">{theme === "playful" ? "Your goal" : "My goal"}</h2>
-      {goal ? (
-        <p className="me-goal-line">
-          Aiming for <strong>{fmt(goal)}{goal < 60 ? " min" : ""}</strong> a day
-          {streak > 0 && (
-            <span className="me-goal-streak"> · met it {streak} day{streak === 1 ? "" : "s"} running</span>
-          )}
-          {canSet && (
-            <button className="me-link" style={{ marginLeft: "0.5rem" }} onClick={() => setOpen((o) => !o)}>
-              change
-            </button>
-          )}
-        </p>
-      ) : canSet ? (
-        <button className="me-link" onClick={() => setOpen(true)}>
-          Set a daily goal for yourself
-        </button>
-      ) : (
-        <p className="me-goal-line" style={{ color: "var(--me-ink-3)" }}>
-          No goal set yet — a grown-up can pick one with you.
+    <div className="me-ask">
+      <Button icon="ask" disabled={busy} onClick={() => void ask(15)}>
+        {busy ? "Asking…" : kid ? "Ask for 15 more minutes" : "Ask for more time"}
+      </Button>
+      {!kid && (
+        <span className="me-ask-more">
+          <Button size="sm" variant="quiet" disabled={busy} onClick={() => void ask(30)}>
+            30 min
+          </Button>
+          <Button size="sm" variant="quiet" disabled={busy} onClick={() => void ask(60)}>
+            1 h
+          </Button>
+        </span>
+      )}
+      {err && (
+        <p className="hint" data-error="true" role="alert">
+          {err}
         </p>
       )}
-      {open && canSet && (
-        <div className="me-ask-row" style={{ marginTop: "0.6rem" }}>
-          {GOAL_CHOICES.map((m) => (
-            <button
-              key={m}
-              className="me-ask-pill"
-              data-on={goal === m}
-              disabled={busy}
-              onClick={() => void pick(m)}
-            >
-              {fmt(m)}{m < 60 ? " min" : ""}
-            </button>
-          ))}
-          {goal != null && (
-            <button className="me-ask-pill" disabled={busy} onClick={() => void pick(0)}>
-              clear
-            </button>
-          )}
-        </div>
-      )}
-    </section>
+    </div>
   );
 }
 
-function Devices({ today, theme }: { today: MeToday; theme: Theme }) {
-  if (today.devices.length === 0) return null;
+function RuleLine({ icon, label, value }: { icon: IconName; label: string; value: ReactNode }) {
   return (
-    <section className="me-section">
-      <h2 className="me-h2">{theme === "playful" ? "Your computers" : "Devices"}</h2>
-      <ul className="me-devices">
-        {today.devices.map((d) => (
-          <li key={d.name} className="me-device">
-            <span className="me-device-dot" data-state={d.status} aria-hidden="true" />
-            <span className="me-device-name">{d.name}</span>
-            <span className="me-device-state">
-              {d.locked ? "paused" : d.status === "online" ? "on" : d.status === "pending" ? "not set up" : "off"}
-            </span>
-          </li>
-        ))}
+    <li className="me-rule">
+      <Icon name={icon} size={20} />
+      <span className="me-rule-label">{label}</span>
+      <b className="me-rule-value num">{value}</b>
+    </li>
+  );
+}
+
+/** Their rules in one glance — the ones a parent set. */
+function YourRules({ today, catalog }: { today: MeToday; catalog: Catalog | null }) {
+  const blocked = useMemo(() => {
+    const cats = new Set(today.blocks.categories);
+    const viaCat = new Set((catalog?.apps ?? []).filter((a) => cats.has(a.category)).map((a) => a.id));
+    return [
+      ...(catalog?.categories ?? []).filter((c) => cats.has(c.id)).map((c) => c.name),
+      ...(catalog?.apps ?? []).filter((a) => today.blocks.apps.includes(a.id) && !viaCat.has(a.id)).map((a) => a.name),
+      ...today.blocks.custom_domains,
+    ];
+  }, [today, catalog]);
+  const school = today.windows.find((w) => w.days.includes(1));
+  const weekend = today.windows.find((w) => w.days.includes(0) || w.days.includes(6));
+  const hours = [
+    school ? `School days ${describeWindow(school.start, school.end)}` : null,
+    weekend ? `Weekend ${describeWindow(weekend.start, weekend.end)}` : null,
+  ].filter(Boolean);
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2 className="h2">Your rules</h2>
+      </div>
+      <ul className="card me-rules">
+        <RuleLine icon="clock" label="Every day" value={today.limit_minutes ? duration(today.limit_minutes) : "No limit"} />
+        {hours.length > 0 && <RuleLine icon="allowed-hours" label="Screens on" value={hours.join(" · ")} />}
+        {today.bedtime && (
+          <RuleLine
+            icon="moon"
+            label="Bedtime"
+            value={`${today.bedtime.start} – ${today.bedtime.end === "00:00" ? "midnight" : today.bedtime.end}`}
+          />
+        )}
+        {blocked.length > 0 && (
+          <RuleLine
+            icon="block"
+            label="Blocked"
+            value={blocked.length > 6 ? `${blocked.slice(0, 5).join(", ")} and ${blocked.length - 5} more` : blocked.join(", ")}
+          />
+        )}
       </ul>
     </section>
   );
 }
 
-// ---- the page ----------------------------------------------------------------------
+function MyDay({
+  today,
+  history,
+  catalog,
+  reload,
+}: {
+  today: MeToday;
+  history: MeHistory | null;
+  catalog: Catalog | null;
+  reload: () => void;
+}) {
+  const { me } = useSession();
+  const first = (me?.account?.display_name ?? "").split(/\s+/)[0];
+  const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
+  const spent = total !== null && (today.left_minutes ?? 1) <= 0;
+  const next = today.locked
+    ? "A parent paused your computer. Nothing is broken — talk to them, and it comes back."
+    : stopSentence(today.rules, "you");
+
+  return (
+    <>
+      <PageHead title={first ? `Hi, ${first}` : "Your day"} sub="Here's your day so far." />
+      <FirstVisit />
+      <section className="card me-hero">
+        <DayRing today={today} size={176} />
+        <div className="me-hero-main">
+          <p className="me-big num">
+            {duration(today.used_minutes)} used today{" "}
+            <small>
+              {total !== null
+                ? `of ${duration(total)}${today.earned_minutes > 0 ? ` · ${today.earned_minutes} min extra` : ""}`
+                : "· no limit"}
+            </small>
+          </p>
+          {spent && !today.locked ? (
+            <p className="me-next">That's all the screen time for today. It starts again tomorrow.</p>
+          ) : (
+            next && <p className="me-next">{next}</p>
+          )}
+          <AskForTime today={today} onAsked={reload} />
+        </div>
+      </section>
+      <YourRules today={today} catalog={catalog} />
+      <Week history={history} today={today} title="Your week" />
+      <WhereTheTime who="you" />
+      <section className="section">
+        <div className="section-head">
+          <h2 className="h2">Your computers</h2>
+        </div>
+        <ComputerRows today={today} hub={false} who="your" />
+      </section>
+      <details className="disclosure me-see">
+        <summary>
+          <Icon name="chevron-right" size={16} />
+          What can a parent see?
+        </summary>
+        <p className="lede">{SEE[0]}</p>
+        <p className="lede">{SEE[1]}</p>
+      </details>
+    </>
+  );
+}
+
+// ---- my computer: someone keeping their own time --------------------------------
+
+function RuleCard({
+  icon,
+  title,
+  editing,
+  onEdit,
+  wide,
+  children,
+}: {
+  icon: IconName;
+  title: string;
+  editing: boolean;
+  onEdit?: () => void;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="card me-mrule" data-wide={wide} data-editing={editing}>
+      <div className="me-mrule-h">
+        <Icon name={icon} size={18} />
+        <h3>{title}</h3>
+        {onEdit && !editing && (
+          <button type="button" className="me-edit" onClick={onEdit}>
+            Edit
+          </button>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function LimitCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save: (r: MyRules) => Promise<boolean> }) {
+  const [editing, setEditing] = useState(false);
+  const limit = rules.daily_limit_minutes;
+  return (
+    <RuleCard icon="clock" title="My daily limit" editing={editing} onEdit={() => setEditing(true)}>
+      <p className="me-mrule-v num">
+        {limit > 0 ? duration(limit) : "No limit"}{" "}
+        <small>{limit > 0 ? "a day · a hard stop, with warnings at 15, 5 and 1 minute" : "· your minutes are only counted"}</small>
+      </p>
+      {editing && (
+        <div className="me-mrule-edit">
+          <FluentSlider
+            min={0}
+            max={600}
+            step={15}
+            value={limit}
+            disabled={busy}
+            aria-label="My daily limit"
+            format={(v) => (v === 0 ? "No limit" : `${duration(v)} a day`)}
+            onCommit={(v) => void save({ ...rules, daily_limit_minutes: v }).then((ok) => ok && setEditing(false))}
+          />
+          <Button size="sm" variant="quiet" onClick={() => setEditing(false)}>
+            Done
+          </Button>
+        </div>
+      )}
+    </RuleCard>
+  );
+}
+
+function FocusCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save: (r: MyRules) => Promise<boolean> }) {
+  const h = rules.focus_hours;
+  const [editing, setEditing] = useState(false);
+  const [days, setDays] = useState<number[]>(h?.days ?? [1, 2, 3, 4, 5]);
+  const [start, setStart] = useState(h?.start ?? "09:00");
+  const [end, setEnd] = useState(h?.end ?? "12:00");
+  function open() {
+    setDays(h?.days ?? [1, 2, 3, 4, 5]);
+    setStart(h?.start ?? "09:00");
+    setEnd(h?.end ?? "12:00");
+    setEditing(true);
+  }
+  const draft: TimeWindow = { days: [...days].sort(), start, end };
+  const problem = focusProblem(draft);
+
+  return (
+    <RuleCard icon="allowed-hours" title="My focus hours" editing={editing} onEdit={open}>
+      <p className="me-mrule-v num">
+        {h ? describeWindow(h.start, h.end) : "All day"}{" "}
+        <small>
+          {h ? `${describeDays(h.days)} · the sites below are blocked` : "· the sites below are blocked all the time"}
+        </small>
+      </p>
+      {editing && (
+        <form
+          className="me-mrule-edit me-focus-edit"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!problem) void save({ ...rules, focus_hours: draft }).then((ok) => ok && setEditing(false));
+          }}
+        >
+          <div className="me-days" role="group" aria-label="Days">
+            {WEEK_ORDER.map((d) => (
+              <button
+                key={d}
+                type="button"
+                className="me-day"
+                aria-pressed={days.includes(d)}
+                aria-label={DAY_SHORT[d]}
+                onClick={() => setDays((xs) => (xs.includes(d) ? xs.filter((x) => x !== d) : [...xs, d]))}
+              >
+                {DAY_LETTERS[d]}
+              </button>
+            ))}
+          </div>
+          <div className="me-times">
+            <input className="field pp-time num" inputMode="numeric" maxLength={5} aria-label="Focus from" value={start} onChange={(e) => setStart(e.target.value)} />
+            <span className="pp-dash">–</span>
+            <input className="field pp-time num" inputMode="numeric" maxLength={5} aria-label="Focus until" value={end} onChange={(e) => setEnd(e.target.value)} />
+          </div>
+          <p className="hint" data-error={problem !== null} role={problem ? "alert" : undefined}>
+            {problem ?? `${describeDays(draft.days)}, ${describeWindow(start, end)}. 00:00 is midnight; hours can run past it.`}
+          </p>
+          <div className="me-mrule-actions">
+            <Button size="sm" type="submit" disabled={busy || problem !== null}>
+              Save
+            </Button>
+            {h && (
+              <Button
+                size="sm"
+                variant="quiet"
+                disabled={busy}
+                onClick={() => void save({ ...rules, focus_hours: null }).then((ok) => ok && setEditing(false))}
+              >
+                Block all day instead
+              </Button>
+            )}
+            <Button size="sm" variant="quiet" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+    </RuleCard>
+  );
+}
+
+function SitesCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save: (r: MyRules) => Promise<boolean> }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  function add(e: React.FormEvent) {
+    e.preventDefault();
+    const n = normalizeSite(draft);
+    if ("problem" in n) {
+      setProblem(n.problem);
+      return;
+    }
+    if (rules.sites.includes(n.site)) {
+      setDraft("");
+      return;
+    }
+    void save({ ...rules, sites: [...rules.sites, n.site] }).then((ok) => {
+      if (ok) setDraft("");
+    });
+  }
+  return (
+    <RuleCard icon="block" title="Sites I block for myself" editing={adding} wide>
+      <ul className="me-chips" aria-label="Sites I block for myself">
+        {rules.sites.map((s) => (
+          <li key={s} className="chip">
+            <Icon name="globe" size={14} />
+            {s}
+            <button
+              type="button"
+              className="chip-x"
+              disabled={busy}
+              aria-label={`Stop blocking ${s}`}
+              onClick={() => void save({ ...rules, sites: rules.sites.filter((x) => x !== s) })}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </li>
+        ))}
+        {!adding && (
+          <li>
+            <button type="button" className="chip me-chip-add" onClick={() => setAdding(true)}>
+              <Icon name="add" size={14} />
+              Add a site
+            </button>
+          </li>
+        )}
+      </ul>
+      {rules.sites.length === 0 && !adding && <p className="meta">Nothing yet. Add the ones that pull you in.</p>}
+      {adding && (
+        <form className="me-add-site" onSubmit={add}>
+          <TextInput
+            aria-label="A site to block"
+            placeholder="e.g. reddit.com"
+            value={draft}
+            autoFocus
+            error={problem}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setProblem(null);
+            }}
+          />
+          <Button type="submit" size="sm" disabled={busy || !draft.trim()}>
+            Block it
+          </Button>
+          <Button size="sm" variant="quiet" onClick={() => setAdding(false)}>
+            Done
+          </Button>
+        </form>
+      )}
+    </RuleCard>
+  );
+}
+
+/** One sentence about the focus hours: what holds now, what happens next. */
+function focusLine(rules: MyRules, now = new Date()): string | null {
+  const f = { sites: rules.sites, hours: rules.focus_hours };
+  if (rules.sites.length === 0) return null;
+  const ends = focusEndsAt(f, now);
+  if (ends) return `Focus hours until ${ends} — the sites below open again then.`;
+  if (!rules.focus_hours) return "The sites below are blocked all day.";
+  const next = nextFocusStart(f, now);
+  if (!next) return null;
+  return next.today
+    ? `Focus hours start at ${next.start} today — the sites below are blocked then.`
+    : `Next focus hours: ${DAY_SHORT[next.day]} at ${next.start}. Until then the sites below are open.`;
+}
+
+function MyComputer({
+  today,
+  history,
+  reload,
+}: {
+  today: MeToday;
+  history: MeHistory | null;
+  reload: () => void;
+}) {
+  const { me } = useSession();
+  const hub = me?.account?.role !== "member";
+  const [rules, setRules] = useState<MyRules | null>(null);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getMyRules()
+      .then((r) => alive && setRules(r))
+      .catch((e) => alive && setRulesError(sentence(e instanceof Error ? e.message : "Couldn't load your rules.")));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const save = useCallback(
+    async (next: MyRules): Promise<boolean> => {
+      setBusy(true);
+      setSaveError(null);
+      setSaved(false);
+      try {
+        setRules(await api.setMyRules(next));
+        setSaved(true);
+        reload();
+        return true;
+      } catch (e) {
+        setSaveError(sentence(e instanceof Error ? e.message : "That didn't save. Try again."));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [reload],
+  );
+
+  const online = today.devices.some((d) => d.status === "online");
+  const title =
+    today.devices.length === 1 ? today.devices[0].name : today.devices.length > 1 ? "My computers" : "My computer";
+  const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
+  const next = today.locked ? "This computer is paused." : stopSentence(today.rules, "you");
+  const focus = rules ? focusLine(rules) : null;
+
+  return (
+    <>
+      <PageHead
+        eyebrow="My computer"
+        title={title}
+        sub="Only you can see this. The limits here are the ones you set — nobody else's."
+        actions={
+          online ? (
+            <span className="tag tag-ok me-online">
+              <Icon name="check" size={14} />
+              Online
+            </span>
+          ) : undefined
+        }
+      />
+
+      <section className="card me-hero">
+        <DayRing today={today} size={152} />
+        <div className="me-hero-main">
+          <p className="me-big num">
+            {duration(today.used_minutes)} used today{" "}
+            <small>{total !== null ? `of the ${duration(today.limit_minutes ?? 0)} you set` : "· no limit set"}</small>
+          </p>
+          {focus && <p className="me-next">{focus}</p>}
+          {next && <p className="me-next">{next}</p>}
+          {total !== null && (
+            <p className="me-hatch">
+              <Icon name="info" size={16} />
+              When you hit your limit you can wait a minute and take 15 more — it's your call.
+            </p>
+          )}
+        </div>
+      </section>
+
+      <section className="section" aria-label="My rules">
+        {rulesError ? (
+          <p className="banner banner-warn">
+            <Icon name="warning" size={20} />
+            <span className="banner-main">{rulesError}</span>
+          </p>
+        ) : !rules ? (
+          <div className="me-mrules" aria-busy="true">
+            <span className="wait" style={{ height: 96 }} />
+            <span className="wait" style={{ height: 96 }} />
+          </div>
+        ) : (
+          <div className="me-mrules">
+            <LimitCard rules={rules} busy={busy} save={save} />
+            <FocusCard rules={rules} busy={busy} save={save} />
+            <SitesCard rules={rules} busy={busy} save={save} />
+          </div>
+        )}
+        {(saveError || saved) && (
+          <p className="hint me-saved" data-error={!!saveError} role={saveError ? "alert" : "status"}>
+            {saveError ?? "Saved. Your computer picks it up within a minute."}
+          </p>
+        )}
+      </section>
+
+      <Week history={history} today={today} title="My week" />
+      <WhereTheTime who="you" />
+      <section className="section">
+        <div className="section-head">
+          <h2 className="h2">{today.devices.length > 1 ? "These computers" : "This computer"}</h2>
+        </div>
+        <ComputerRows today={today} hub={hub} who="my" />
+      </section>
+    </>
+  );
+}
+
+// ---- the page -------------------------------------------------------------------
 
 export function Me() {
   const { me, logout } = useSession();
   const navigate = useNavigate();
-  const { theme: mode } = useTheme();
   const [today, setToday] = useState<MeToday | null>(null);
   const [history, setHistory] = useState<MeHistory | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     try {
       setToday(await api.getMeToday());
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't load your day");
+      setError(e instanceof Error ? e.message : "Couldn't load your day.");
     }
-    // The week is decoration on top of the day — it failing is not an error.
-    void api.getMeHistory().then(setHistory).catch(() => {});
-  }
+    // The week is decoration on the day — it failing is not an error.
+    void api
+      .getMeHistory()
+      .then(setHistory)
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     void load();
-    void api.getCatalog().then(setCatalog).catch(() => setCatalog(null));
+    void api
+      .getCatalog()
+      .then(setCatalog)
+      .catch(() => setCatalog(null));
     // Living data: the minutes move while the page is open.
     const t = setInterval(() => void load(), 30_000);
     return () => clearInterval(t);
-  }, []);
+  }, [load]);
 
-  const member = me?.account?.role === "member";
-  const name = me?.account?.display_name ?? "";
-  const theme: Theme = today?.theme ?? me?.account?.effective_theme ?? "plain";
-
-  // Headline numbers. With a limit: what's left. Without: what's used.
-  const total = today && today.limit_minutes !== null ? today.limit_minutes + today.earned_minutes : null;
-  const left = today?.left_minutes ?? null;
-  const spent = today ? today.locked || (left !== null && left <= 0) : false;
-  const headline = useCountUp(today ? (total !== null ? (left ?? 0) : today.used_minutes) : 0, 900);
-  const pct = total && left !== null ? left / total : total === null ? 1 : 0;
-
-  async function signOut() {
-    await logout();
-    navigate("/login", { replace: true });
-  }
-
-  const hour = new Date().getHours();
-  const hi =
-    theme === "playful"
-      ? `${hour < 12 ? "Good morning" : hour < 18 ? "Hi" : "Good evening"}, ${name.split(" ")[0]}!`
-      : theme === "calm"
-        ? name
-        : "My screen time";
+  const account = me?.account;
+  const member = account?.role === "member";
+  const own =
+    today?.self_managed ?? (!!account && (account.role !== "member" || account.age_bracket === "adult" || account.self_managed));
 
   return (
-    <div className={`me theme-${theme}`} data-mode={mode}>
-      <header className="me-head">
-        <h1 className="me-hi">{hi}</h1>
-        {!member && <p className="me-sub">Your own day, private to you.</p>}
-      </header>
-
-      {me?.account.blocked && (
-        <p className="me-paused" role="status">
-          A parent paused your devices. Nothing here is broken — talk to them, and it comes back.
-        </p>
+    <div className="page me" data-shape={own ? "own" : "day"}>
+      {member && (
+        <div className="me-top">
+          <Wordmark />
+        </div>
       )}
 
       {error && (
-        <p className="me-err">
-          {error}{" "}
-          <button className="me-link" onClick={() => void load()}>Try again</button>
-        </p>
+        <div className="banner banner-stop" role="alert">
+          <Icon name="warning" size={20} />
+          <p className="banner-main">{today ? "Couldn't refresh — this is your day a moment ago." : "Couldn't load your day."}</p>
+          <Button size="sm" variant="quiet" icon="refresh" onClick={() => void load()}>
+            Try again
+          </Button>
+        </div>
       )}
 
-      {member && <FirstVisit theme={theme} />}
-
-      {today && (
-        <>
-          {theme !== "plain" ? (
-            <section className="me-hero">
-              <Ring pct={pct} size={theme === "playful" ? 280 : 220} stroke={theme === "playful" ? 24 : 10} spent={spent}>
-                {spent ? (
-                  <>
-                    <span className="me-big me-big-stop">Stop</span>
-                    <span className="me-unit">{today.locked ? "paused by a parent" : "time's up for today"}</span>
-                  </>
-                ) : total !== null ? (
-                  <>
-                    <span className="me-big">{fmt(headline)}</span>
-                    <span className="me-unit">{unitFor(headline)} left today</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="me-big">{fmt(headline)}</span>
-                    <span className="me-unit">{unitFor(headline)} today · no limit</span>
-                  </>
-                )}
-              </Ring>
-              {spent && (
-                <p className="me-stopline">
-                  {today.locked
-                    ? "Your screen is paused. A parent can start it again."
-                    : "That's all the screen time for today. It starts again tomorrow."}
-                </p>
-              )}
-              {!spent && total !== null && (
-                <p className="me-under">
-                  {today.used_minutes} of {total} used
-                  {today.earned_minutes > 0 && ` · ${today.earned_minutes} earned`}
-                </p>
-              )}
-              {theme === "calm" && total !== null && (
-                <dl className="me-stats">
-                  <div><dt>used</dt><dd>{today.used_minutes} min</dd></div>
-                  <div><dt>limit</dt><dd>{today.limit_minutes} min</dd></div>
-                  <div><dt>earned</dt><dd>{today.earned_minutes} min</dd></div>
-                </dl>
-              )}
-              <AskForTime today={today} theme={theme} onAsked={() => void load()} />
-            </section>
-          ) : (
-            <section className="me-plain-top">
-              <div className="me-plain-stat">
-                <p className="me-plain-big" data-spent={spent}>{headline}</p>
-                <p className="me-plain-unit">
-                  {total !== null ? (spent ? "no time left today" : "minutes left today") : "minutes today · no limit"}
-                </p>
-              </div>
-              {today.locked && <p className="me-stopline">Paused.</p>}
-            </section>
-          )}
-
-          <GoalControl
-            goal={today.goal_minutes ?? history?.goal_minutes}
-            streak={history?.goal_streak ?? 0}
-            theme={theme}
-            onSet={(m) => {
-              setToday((t) => (t ? { ...t, goal_minutes: m || null } : t));
-              void api.getMeHistory().then(setHistory).catch(() => {});
-            }}
-          />
-          {member && <Reflection theme={theme} />}
-          {history && history.days.length > 0 && (
-            <Week history={history} today={today} theme={theme} />
-          )}
-          <WhereTheTime />
-          <Schedule today={today} theme={theme} />
-          <Blocked today={today} catalog={catalog} theme={theme} />
-          <Devices today={today} theme={theme} />
-        </>
+      {!today && !error && (
+        <div className="me-waiting" aria-busy="true" aria-label="Loading your day">
+          <span className="wait" style={{ height: 40, width: "40%" }} />
+          <span className="wait" style={{ height: 200 }} />
+        </div>
       )}
 
-      {!today && !error && <p className="me-wait wait-text">…</p>}
-
-      <footer className="me-foot">
-        {member ? (
-          <>
-            {today && <WhatCanTheySee theme={theme} />}
-            <Wordmark size={0.8} />
-            <button className="me-link" onClick={() => void signOut()}>Sign out</button>
-          </>
+      {today &&
+        (own ? (
+          <MyComputer today={today} history={history} reload={() => void load()} />
         ) : (
-          <p className="me-foot-note">This is what {name || "you"} would see on their own computer.</p>
-        )}
-      </footer>
+          <MyDay today={today} history={history} catalog={catalog} reload={() => void load()} />
+        ))}
+
+      {member && (
+        <footer className="me-foot">
+          <Button
+            size="sm"
+            variant="quiet"
+            icon="sign-out"
+            onClick={() => void logout().then(() => navigate("/login", { replace: true }))}
+          >
+            Sign out
+          </Button>
+        </footer>
+      )}
     </div>
   );
 }

@@ -15,7 +15,7 @@ import "./styles/settings.css";
 import "./styles/sign-in.css";
 import "./styles/add.css";
 import "./styles/person.css";
-import "./me.css";
+import "./styles/me.css";
 
 // Warm light by default for a brand-new visitor; any explicit prior choice
 // (including "match my system") is respected.
