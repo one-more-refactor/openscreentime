@@ -178,8 +178,8 @@ Next steps:
    Setup closes the moment that first account exists — nobody else can
    take the server after you.
 
-3. In the console, click ADD DEVICE — it gives you a copy-paste installer
-   one-liner to enroll each device.
+3. In the console, Computers → Add a computer gives you the one line to
+   paste on each Linux computer you look after.
 
 From here on it runs by itself: it starts at boot, backs up nightly to
 backups/ (copy that folder off this machine now and then), and updates daily

@@ -132,20 +132,23 @@ OpenScreenTime URL can't be hijacked by whoever finds it first. (Without the
 link, the page asks for the setup code.) After that, people sign in with their
 name and a code on their own computer, or a passkey — see docs/AUTH.md.
 
-## Enrolling devices
+## Adding computers
 
-The ADD DEVICE modal shows a one-liner like:
+**Computers → Add a computer** (or **Add a person**, which sets up their
+computer next) gives a one-liner like:
 
 ```sh
 curl -fsSL https://ost.example.com/install.sh | \
   sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://ost.example.com
 ```
 
-It installs the agent build **this server** bundles (desktop build with the
-lock screen and tray on a machine with a graphical session, headless
-otherwise), sha256-verified, enrolls, and installs the systemd service. If the
-one-liner dies halfway, just run it again within 15 minutes — the token is not
-used up until the device has actually connected.
+It installs the agent build **this server** bundles — the desktop build (the
+app window, the graphical lock, the companion) on a machine with a graphical
+session, headless otherwise — sha256-verified, enrolls, and installs the
+systemd service. On a desktop build it also installs `cage` for the lock where
+apt, pacman or dnf has it; without cage the lock is a text screen on its own
+console. If the one-liner dies halfway, just run it again within 15 minutes —
+the token is not used up until the computer has actually connected.
 
 Devices then update themselves from this server (see OPERATIONS.md →
 "Devices update themselves"): the server is their release channel.
