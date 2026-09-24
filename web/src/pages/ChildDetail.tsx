@@ -39,7 +39,8 @@ import { UnlockCodePanel } from "../components/UnlockCodePanel";
 import { Modal } from "../components";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useFamily, familyChanged } from "../lib/family";
-import { Avatar } from "./Family";
+import { Avatar } from "../components/AvatarRing";
+import { FACES } from "../lib/avatar";
 import { AvatarRing } from "../components/AvatarRing";
 import { Rules } from "./ChildRules";
 import { useCountUp } from "../lib/useCountUp";
@@ -123,8 +124,6 @@ function Today({
   );
 }
 
-/** The faces a parent can pick — stable, friendly, no uploads to moderate. */
-const FACES = ["🦊", "🐼", "🦖", "🚀", "⚽", "🎨", "🐙", "🌟", "🦄", "🐸", "🎮", "🎧", "📚", "🌈", "🐳", "🐯"];
 
 /** Age bracket + look + face, in the header. Each is one tap. */
 function Identity({
@@ -554,7 +553,7 @@ export function ChildDetail() {
           ))}
           {childDevices.length === 0 && (
             <li className="fam-quiet">
-              No devices yet. <Link to="/add" style={{ color: "var(--fg)" }}>Set one up</Link>.
+              No devices yet. <Link to="/add" style={{ color: "var(--ink)" }}>Set one up</Link>.
             </li>
           )}
         </ul>

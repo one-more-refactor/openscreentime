@@ -20,7 +20,6 @@ import type {
   Account,
   Admin,
   Device,
-  DeviceDetail,
   DeviceUser,
   EarnRequest,
   EnrollTokenResponse,
@@ -515,7 +514,7 @@ export const mockEarnRequests: EarnRequest[] = [
     task_label: "Read for 20 min",
     minutes: 15,
     status: "pending",
-    created_at: "2026-07-07T14:02:11Z",
+    created_at: ago(4), // fresh in a demo
     decided_at: null,
     device_name: "Living Room PC",
     user_display_name: "Mia",
@@ -530,7 +529,7 @@ export const mockEarnRequests: EarnRequest[] = [
     task_label: "Finish homework",
     minutes: 20,
     status: "pending",
-    created_at: "2026-07-07T13:45:00Z",
+    created_at: ago(21),
     decided_at: null,
     device_name: "Studio Laptop",
     user_display_name: "Noah",
@@ -621,15 +620,6 @@ export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
   return {
     device: dev,
     enroll_token: `mock-${id}-${Math.random().toString(36).slice(2, 10)}`,
-  };
-}
-
-export function mockDeviceDetail(id: string): DeviceDetail {
-  const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
-  return {
-    ...dev,
-    users: dev.users ?? [],
-    recent_events: mockEvents.filter((e) => e.device_id === dev.id).slice(0, 8),
   };
 }
 
@@ -744,7 +734,6 @@ export function mockFamily(): FamilyResponse {
   };
 }
 
-
 // ---- Members ------------------------------------------------------------------
 
 /** Mock for POST /api/members — a new member with the bracket's preset rules. */
@@ -857,9 +846,14 @@ export function mockRecoveryCodesStatus(deviceId: string): RecoveryCodesStatus {
 // Mirrors the server's confirm window: 15 minutes, opened by a passkey or a code.
 
 const CONFIRM_MS = 15 * 60_000;
-let mockArmedUntil: number | null = null;
+// undefined = not asked yet. Design review: ?mock=confirmed opens the window
+// from the start (screenshots of the keys).
+let mockArmedUntil: number | null | undefined;
 export const mockConfirm = {
   status(): ConfirmStatus {
+    if (mockArmedUntil === undefined)
+      mockArmedUntil =
+        new URLSearchParams(window.location.search).get("mock") === "confirmed" ? Date.now() + CONFIRM_MS : null;
     if (mockArmedUntil !== null && mockArmedUntil <= Date.now()) mockArmedUntil = null;
     return {
       armed_until: mockArmedUntil === null ? null : new Date(mockArmedUntil).toISOString(),

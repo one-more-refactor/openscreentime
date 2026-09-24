@@ -23,8 +23,9 @@ interface SessionState {
   createHousehold: (name: string, setupToken?: string) => Promise<void>;
   /** Door two: a passkey, no name first. */
   signInWithPasskey: () => Promise<void>;
-  /** Door one: send a code to the computer of whoever is called `name`. */
-  sendCode: (name: string) => Promise<void>;
+  /** Door one: send a code to the computer of whoever is called `name`.
+   * Resolves to how many seconds the code works for. */
+  sendCode: (name: string) => Promise<number>;
   /** …then type it in. Throws `wrong_code` (type it again) or
    * `code_expired` (ask for a new one). */
   enterCode: (code: string) => Promise<void>;
@@ -94,6 +95,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const { verifier, challenge } = await pkcePair();
     const started = await auth.codeStart(name, challenge);
     pending.current = { id: started.request_id, verifier };
+    return started.expires_in_secs;
   }, []);
 
   const enterCode = useCallback(

@@ -1,0 +1,43 @@
+/* ============================================================================
+   SETTINGS — rows in cards; the keys behind one calm gate.
+   ========================================================================== */
+.settings .section:first-of-type { margin-top: 0; }
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.row-ic { color: var(--ink-3); }
+.settings-add { display: flex; }
+.settings-add + .hint { margin-top: 8px; }
+.settings-uc { padding-top: 14px; padding-bottom: 14px; }
+
+.gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 32px 24px;
+  text-align: center;
+}
+.gate-ic {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.gate-title { margin: 0; font-size: 1.0625rem; font-weight: 600; }
+.gate-sub { margin: 0 0 14px; max-width: 28rem; font-size: 0.90625rem; color: var(--ink-2); }
+
+@media (max-width: 560px) {
+  .settings .row-wrap .row-end { width: 100%; }
+  .settings .seg { width: 100%; }
+  .settings .seg-btn { flex: 1; justify-content: center; padding: 0 8px; }
+}

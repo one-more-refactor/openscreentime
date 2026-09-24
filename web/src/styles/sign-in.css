@@ -1,0 +1,29 @@
+/* ============================================================================
+   SIGN IN, FIRST RUN, WELCOME — two equal doors (brand board § d).
+   ========================================================================== */
+.signin {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: max(10vh, 36px) 22px 48px;
+}
+.signin-box { width: 100%; max-width: 380px; }
+.signin-lockup { margin-bottom: 28px; }
+.signin-form { display: flex; flex-direction: column; gap: 14px; }
+.signin-form .signin-form { gap: 12px; }
+.signin-title { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+.signin-sub { margin: -8px 0 10px; font-size: 0.9375rem; color: var(--ink-2); }
+.signin-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0;
+  font-size: 0.78125rem;
+  color: var(--ink-3);
+}
+.signin-or::before,
+.signin-or::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
+.signin-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.signin-foot { margin: 10px 0 0; font-size: 0.8125rem; color: var(--ink-3); }
+.signin-error { margin-top: 14px; }

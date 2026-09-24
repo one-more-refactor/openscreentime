@@ -48,7 +48,7 @@ export function Welcome() {
   async function submit() {
     const u = username.trim().toLowerCase();
     if (!USERNAME_RE.test(u)) {
-      setUserError("3–32 characters: a–z, 0–9, dot, underscore, hyphen.");
+      setUserError("Use 3 to 32 lower-case letters, numbers, dots, dashes or underscores.");
       return;
     }
     setUserError(null);
@@ -62,7 +62,7 @@ export function Welcome() {
     } catch (e) {
       setBusy(false);
       if (e instanceof ApiError && e.status === 409) {
-        setUserError("That username is taken — pick another.");
+        setUserError("That name is taken. Pick another.");
         return;
       }
       setError(
@@ -74,39 +74,32 @@ export function Welcome() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-6">
-      <div className="w-full max-w-sm">
-        <div className="mb-2">
-          <Wordmark size={2} />
-        </div>
+    <div className="signin">
+      <div className="signin-box">
+        <Wordmark size={1.625} className="signin-lockup" />
 
         {loadError ? (
-          <>
-            <p className="mb-6 text-sm" style={{ color: "var(--fg-dim)" }}>
-              {loadError}
-            </p>
-            <Button onClick={() => window.location.assign("/login")}>Back to sign in</Button>
-          </>
+          <div className="signin-form">
+            <h1 className="signin-title">Let's start over</h1>
+            <p className="signin-sub">{loadError}</p>
+            <Button block onClick={() => window.location.assign("/login")}>
+              Back to sign in
+            </Button>
+          </div>
         ) : !setup ? (
-          <p className="mt-6 text-sm" style={{ color: "var(--fg-dim)" }}>
-            Setting things up…
-          </p>
+          <p className="signin-sub wait-text">Setting things up…</p>
         ) : (
           <form
-            className="flex flex-col gap-4"
+            className="signin-form"
             onSubmit={(e) => {
               e.preventDefault();
               void submit();
             }}
           >
-            <div>
-              <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>
-                Welcome — pick your name.
-              </p>
-              <p className="mt-1 text-xs" style={{ color: "var(--fg-dim)" }}>
-                Signed in as {setup.email}. This is the name you'll sign in with from now on.
-              </p>
-            </div>
+            <h1 className="signin-title">Welcome — pick your name</h1>
+            <p className="signin-sub">
+              Signed in as {setup.email}. This is the name you'll sign in with from now on.
+            </p>
 
             <TextInput
               label="Username"
@@ -121,12 +114,12 @@ export function Welcome() {
                 if (userError) setUserError(null);
               }}
               placeholder="e.g. dad"
-              aria-invalid={!!userError}
-              hint={userError ?? "3–32 characters: a–z, 0–9, dot, underscore, hyphen."}
+              error={userError}
+              hint="Lower-case letters and numbers, 3 to 32 of them. Dots, dashes and underscores work too."
             />
 
             <TextInput
-              label="Display name (optional)"
+              label="Your name, as the family sees it"
               name="name"
               autoComplete="name"
               value={displayName}
@@ -134,22 +127,16 @@ export function Welcome() {
               placeholder="Parent"
             />
 
-            <Button type="submit" disabled={busy || !username.trim()}>
+            <Button type="submit" block disabled={busy || !username.trim()}>
               {busy ? "Creating your account…" : "Create account"}
             </Button>
           </form>
         )}
 
         {error && (
-          <div
-            className="mt-4 flex items-start gap-2 border rounded px-3 py-2"
-            style={{ borderColor: "var(--accent)" }}
-            role="alert"
-          >
-            <span className="text-xs" style={{ color: "var(--accent)" }}>
-              {error}
-            </span>
-          </div>
+          <p className="hint signin-error" data-error="true" role="alert">
+            {error}
+          </p>
         )}
       </div>
     </div>

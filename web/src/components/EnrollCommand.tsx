@@ -1,30 +1,17 @@
-import { useState } from "react";
+import { CopyField } from "./CopyField";
 
-/**
- * The one-line install for a computer, with a Copy button. The token rides in
- * an environment variable, so it stays out of argv; the installer asks which
- * login is whose when the computer has several.
- */
+/** The one-line install for a computer. The token rides in an environment
+ * variable, so it stays out of argv; the installer asks which login is whose
+ * when the computer has several. */
+export function installCommand(token: string, origin = window.location.origin): string {
+  return `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${token} sh -s -- --server ${origin}`;
+}
+
 export function EnrollCommand({ token }: { token: string }) {
-  const [copied, setCopied] = useState(false);
-  const origin = window.location.origin;
-  const oneLiner = `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${token} sh -s -- --server ${origin}`;
-
-  function copy() {
-    void navigator.clipboard?.writeText(oneLiner);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
-  }
-
   return (
-    <>
-      <pre className="add-code">{oneLiner}</pre>
-      <button className="ch-btn" onClick={copy}>
-        {copied ? "Copied" : "Copy command"}
-      </button>
-      <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
-        This command works for 24 hours and only once.
-      </p>
-    </>
+    <div className="enroll">
+      <CopyField value={installCommand(token)} label="Copy command" />
+      <p className="hint">It works once, within 24 hours. Linux only for now.</p>
+    </div>
   );
 }
