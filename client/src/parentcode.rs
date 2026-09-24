@@ -178,7 +178,7 @@ pub fn totp_at(key: &[u8], counter: u64) -> String {
 }
 
 /// The recovery-code MAC: hex HMAC-SHA256 over the 8 ASCII digits, keyed by
-/// the decoded TOTP secret. Must equal the server's `stepup::recovery_mac`
+/// the decoded TOTP secret. Must equal the server's `unlock_code::recovery_mac`
 /// byte for byte (shared test vector below). Only the server *produces* MACs;
 /// the agent only ever checks them (`recovery_matches`, constant-time), which
 /// is why this lives in the tests.
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(event(&Verdict::Wrong, "overlay", "kid").severity, SEV_WARN);
     }
 
-    /// Shared with the server (`stepup::recovery_mac` test): both sides must
+    /// Shared with the server (`unlock_code::recovery_mac` test): both sides must
     /// produce this exact MAC or no recovery code would ever open a door.
     #[test]
     fn recovery_mac_matches_the_shared_vector() {
