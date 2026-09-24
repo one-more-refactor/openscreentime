@@ -20,6 +20,7 @@ import { FluentSlider } from "../components/FluentSlider";
 import { AppGlyph } from "../components/AppGlyph";
 import { getCatalog } from "../api";
 import { useAsync } from "../lib/useAsync";
+import { bedtimeProblem, describeWindow, windowProblem } from "../lib/schedule";
 
 export function fmtMin(m: number): string {
   if (m < 60) return `${m} min`;
@@ -277,6 +278,10 @@ function HoursWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win?.start, win?.end]);
   const dirty = win !== null && (start !== win.start || end !== win.end);
+  // The agent's semantics (lib/schedule): 00:00 is midnight, an end before
+  // the start runs into the next day, an empty window is refused.
+  const problem = windowProblem(start, end);
+  const reads = describeWindow(start, end);
   void days;
 
   return (
@@ -289,8 +294,14 @@ function HoursWindow({
           <span className="rl-dash">–</span>
           <input type="time" className="rl-time" value={end} disabled={busy}
             onChange={(e) => setEnd(e.target.value)} aria-label={`${label} end`} />
+          {problem ? (
+            <span className="rl-app-mins" role="alert">{problem}</span>
+          ) : (
+            reads !== `${start} – ${end}` && <span className="rl-app-mins">{reads}</span>
+          )}
           {dirty && (
-            <button className="ch-btn ch-btn-yes" disabled={busy} onClick={() => onSet(start, end)}>
+            <button className="ch-btn ch-btn-yes" disabled={busy || problem !== null}
+              onClick={() => onSet(start, end)}>
               Save
             </button>
           )}
@@ -301,8 +312,8 @@ function HoursWindow({
       ) : (
         <span className="rl-controls">
           <span className="rl-app-mins">any time</span>
-          <button className="ch-btn" disabled={busy} onClick={() => onSet(start, end)}>
-            Set {start} – {end}
+          <button className="ch-btn" disabled={busy || problem !== null} onClick={() => onSet(start, end)}>
+            Set {reads}
           </button>
         </span>
       )}
@@ -325,10 +336,11 @@ function AllowedHours({
   const weekend = findWindow(st.schedule, WEEKEND);
 
   function setWindow(days: number[], start: string, end: string, label: string) {
+    if (windowProblem(start, end)) return; // the server would refuse it anyway
     const rest = st.schedule.filter((w) => !days.some((d) => w.days.includes(d)));
     onSave(
       withScreenTime({ schedule: [...rest, { days, start, end }] }),
-      `${label}: screens allowed ${start} – ${end}.`,
+      `${label}: screens allowed ${describeWindow(start, end)}.`,
     );
   }
   function clearWindow(days: number[], label: string) {
@@ -343,7 +355,8 @@ function AllowedHours({
       <div className="rl-what">
         <p className="rl-name">Allowed hours</p>
         <p className="rl-value">
-          When screens are on at all — outside these hours they are off, limit or not
+          When screens are on at all — outside these hours they are off, limit or not.
+          Days without hours are any time; 00:00 means midnight, and a window can run past it.
         </p>
       </div>
       <HoursWindow label="School days" win={weekday} days={WEEKDAYS} busy={busy}
@@ -379,13 +392,16 @@ function BedtimeRule({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [st.bedtime?.start, st.bedtime?.end]);
   const dirty = st.bedtime !== null && (start !== st.bedtime.start || end !== st.bedtime.end);
+  const problem = bedtimeProblem(start, end);
 
   return (
     <div className="rl-row">
       <div className="rl-what">
         <p className="rl-name">Bedtime</p>
         <p className="rl-value">
-          {st.bedtime ? `Screens off ${st.bedtime.start} – ${st.bedtime.end}` : "No bedtime"}
+          {st.bedtime
+            ? `Screens off ${describeWindow(st.bedtime.start, st.bedtime.end)}`
+            : "No bedtime"}
         </p>
       </div>
       <span className="rl-controls">
@@ -396,8 +412,9 @@ function BedtimeRule({
             <span className="rl-dash">–</span>
             <input type="time" className="rl-time" value={end} disabled={busy}
               onChange={(e) => setEnd(e.target.value)} aria-label="Bedtime end" />
+            {problem && <span className="rl-app-mins" role="alert">{problem}</span>}
             {dirty && (
-              <button className="ch-btn ch-btn-yes" disabled={busy}
+              <button className="ch-btn ch-btn-yes" disabled={busy || problem !== null}
                 onClick={() => onSave(withScreenTime({ bedtime: { start, end } }), `Bedtime set: ${start} – ${end}.`)}>
                 Save
               </button>
@@ -408,7 +425,7 @@ function BedtimeRule({
             </button>
           </>
         ) : (
-          <button className="ch-btn" disabled={busy}
+          <button className="ch-btn" disabled={busy || problem !== null}
             onClick={() => onSave(withScreenTime({ bedtime: { start, end } }), `Bedtime set: ${start} – ${end}.`)}>
             Set {start} – {end}
           </button>

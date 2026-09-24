@@ -20,10 +20,10 @@ pub const CMD_CREDIT_TIME: &str = "credit_time";
 /// Lets the agent clear its once-per-day dedupe so the teen can re-ask, and
 /// tell them they were denied instead of leaving "WAITING FOR APPROVAL" up all day.
 pub const CMD_DENY_EARN: &str = "deny_earn";
-/// Client-first login (CONTRACT-0.6 §2): `{request_id, username, os_users,
-/// expires_in_secs}` — prompt exactly those OS logins to approve or deny a
-/// web sign-in as `username`.
-pub const CMD_LOGIN_APPROVE: &str = "login_approve";
+/// A sign-in / confirm code to show (docs/AUTH.md, logincode.rs):
+/// `{request_id, name, os_users, code, purpose, site, expires_in_secs}` —
+/// shown only to exactly those OS logins.
+pub const CMD_LOGIN_CODE: &str = "login_code";
 /// A liveness probe from the console: the agent acks with a pong (version +
 /// enforcement summary), so a parent can see the client is alive and working.
 pub const CMD_PING: &str = "ping";
@@ -61,6 +61,11 @@ pub struct Command {
 /// An agent → server event (`POST /agent/events` element).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
+    /// Minted once when the event is created and kept across retries, so the
+    /// server stores it at most once even when a delivered batch's response
+    /// was lost and the batch is sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub ev_type: String,
     pub severity: String,
@@ -72,6 +77,7 @@ pub struct Event {
 impl Event {
     pub fn new(ev_type: &str, severity: &str, payload: Value) -> Self {
         Event {
+            id: Some(uuid::Uuid::new_v4().to_string()),
             ev_type: ev_type.to_string(),
             severity: severity.to_string(),
             device_user: None,
@@ -87,10 +93,43 @@ impl Event {
 /// One user's screen-time usage as of "now" (CONTRACT-PROD.md §5). Reported both
 /// in the HTTP heartbeat body and in the WS `heartbeat` frame; the server upserts
 /// it into `screen_time_ledger`.
+///
+/// Only THIS device's use is reported; the server sums a person's devices and
+/// answers with [`PersonDay`]. Numbers are filed under the device-local `day`
+/// the agent enforces, never the server's UTC date.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReport {
     pub os_username: String,
+    /// Whole minutes (kept for servers that predate `used_seconds_today`).
     pub used_minutes_today: u32,
+    /// The same, in seconds (no flooring lag on the console).
+    #[serde(default)]
+    pub used_seconds_today: u64,
+    /// The device-local accounting day these numbers belong to.
+    #[serde(default)]
+    pub day: Option<chrono::NaiveDate>,
+    /// The device's UTC offset right now (local − UTC), so the server knows
+    /// which date is "today" for this device.
+    #[serde(default)]
+    pub utc_offset_secs: Option<i32>,
+}
+
+/// The server's answer to a usage report: what the same person used (and was
+/// granted) on their other computers on `day`. The daily limit is one budget
+/// per person; the agent enforces its own use plus this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonDay {
+    pub os_username: String,
+    pub day: chrono::NaiveDate,
+    #[serde(default)]
+    pub used_elsewhere_secs: u64,
+    #[serde(default)]
+    pub earned_elsewhere_secs: u64,
+    /// Grants the server has on record for THIS login today. The agent uses
+    /// the larger of this and its own count (a device that lost its ledger
+    /// still knows its grants; never counted twice).
+    #[serde(default)]
+    pub earned_here_secs: u64,
 }
 
 /// A command ack (`POST /agent/commands/:id/ack`).
@@ -117,6 +156,14 @@ pub enum ServerFrame {
     },
     /// Keepalive.
     Ping,
+    /// Reply to a `heartbeat` frame: the person's day on their other
+    /// computers, plus the server's clock (a time source the agent trusts).
+    Usage {
+        #[serde(default)]
+        server_time: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        users: Vec<PersonDay>,
+    },
 }
 
 /// Agent → server frames on the WS bus. See `ServerFrame` doc for the `"type"` tag note.

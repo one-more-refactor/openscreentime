@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <style>
+    .tile{fill:#f4f2ee;stroke:#e0dcd4} .track{stroke:#cfcac0} .tick{stroke:#1e1c19} .arc{stroke:#2e7d46;fill:none} .cap{fill:#2e7d46}
+    @media (prefers-color-scheme: dark){ .tile{fill:#201e1b;stroke:#302c27} .track{stroke:#423d37} .tick{stroke:#f3f0ea} .arc{stroke:#46b06a} .cap{fill:#46b06a} }
+  </style>
+  <path d="M17.92 0H46.08C55.936 0 64 8.064 64 17.92V46.08C64 55.936 55.936 64 46.08 64H17.92C8.064 64 0 55.936 0 46.08V17.92C0 8.064 8.064 0 17.92 0Z" class="tile" stroke-width="1"/>
+  <circle class="track" cx="32" cy="32" r="21" fill="none" stroke-width="9"/>
+  <path class="arc" d="M32 11A21 21 0 0 1 44.34 48.99" stroke-width="9"/>
+  <circle class="cap" cx="44.34" cy="48.99" r="4.5"/>
+  <path class="tick" d="M32 3.5v15" stroke-width="4" stroke-linecap="round" fill="none"/>
+</svg>

@@ -10,6 +10,10 @@
 //! and the only thing it can *do* is drop a "please, more time" marker in the
 //! user's own runtime dir — the spoof-proof channel the tray uses.
 //!
+//! It is also where a **sign-in code** shows up (logincode.rs): a card at the
+//! top, and the window comes forward. The agent opens the window for a code if
+//! it isn't open; one copy runs per user.
+//!
 //! Built with `--features gui`. Launched as `ost app`. Design: DESIGN-CLIENT.md §2.
 
 use crate::ui::{self, RingState};
@@ -32,6 +36,9 @@ struct Status {
     tamper_lockdown: bool,
     #[serde(default)]
     users: Vec<UserStatus>,
+    /// Sign-in / confirm codes for this user (logincode.rs).
+    #[serde(default)]
+    login_codes: Vec<crate::logincode::LoginCode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -85,6 +92,8 @@ struct AppView {
     username: String,
     status: Option<Status>,
     asked: bool,
+    /// The newest code this window has already come forward for.
+    shown_code: Option<String>,
 }
 
 impl AppView {
@@ -206,6 +215,34 @@ impl eframe::App for AppView {
         }
         self.status = next;
 
+        // A new sign-in code: come forward (and ring once, if the tray hasn't).
+        let now = chrono::Utc::now();
+        let codes: Vec<crate::logincode::LoginCode> = self
+            .status
+            .as_ref()
+            .map(|s| {
+                s.login_codes
+                    .iter()
+                    .filter(|c| c.is_live(now))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(c) = codes.last() {
+            if self.shown_code.as_deref() != Some(c.id.as_str()) {
+                self.shown_code = Some(c.id.clone());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Critical,
+                ));
+                #[cfg(feature = "tray")]
+                if crate::logincode::first_sighting(c) {
+                    crate::logincode::notify(c);
+                }
+            }
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(ui::col(ui::BG)).inner_margin(egui::Margin::same(28.0)))
             .show(ctx, |ui_| {
@@ -216,6 +253,12 @@ impl eframe::App for AppView {
                     ui_.add_space(9.0);
                     ui_.label(egui::RichText::new("OpenScreenTime").font(ui::font(15.0)).strong().color(ui::col(ui::INK)));
                 });
+
+                // A sign-in code, above everything else while it lasts.
+                for c in &codes {
+                    ui_.add_space(14.0);
+                    code_card(ui_, c, now);
+                }
 
                 // Device-level lock mirrored at the top.
                 if let Some(banner) = self.device_banner() {
@@ -306,6 +349,67 @@ impl eframe::App for AppView {
     }
 }
 
+/// The sign-in code card: the code, big and spaced, and one plain line on
+/// where to type it.
+fn code_card(
+    ui_: &mut egui::Ui,
+    c: &crate::logincode::LoginCode,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    egui::Frame::default()
+        .fill(ui::col(ui::BRAND_TINT))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui_, |ui_| {
+            ui_.set_width(ui_.available_width());
+            ui_.label(
+                egui::RichText::new(c.headline())
+                    .font(ui::font(13.0))
+                    .color(ui::col(ui::INK_2)),
+            );
+            ui_.label(
+                egui::RichText::new(c.spaced())
+                    .font(ui::mono(40.0))
+                    .color(ui::col(ui::BRAND_INK)),
+            );
+            ui_.label(
+                egui::RichText::new(c.instructions())
+                    .font(ui::font(13.0))
+                    .color(ui::col(ui::INK_2)),
+            );
+            let m = c.minutes_left(now);
+            ui_.label(
+                egui::RichText::new(format!(
+                    "Works for {m} more minute{}.",
+                    if m == 1 { "" } else { "s" }
+                ))
+                .font(ui::font(12.5))
+                .color(ui::col(ui::INK_3)),
+            );
+        });
+}
+
+/// One window per user: a second `ost app` (the agent opens one when a code
+/// arrives) leaves as soon as it sees the first holding this lock. The lock
+/// lives in the user's own 0700 runtime dir and dies with the process.
+fn single_instance() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let dir = std::path::PathBuf::from(format!(
+        "/run/user/{}/openscreentime",
+        users::get_current_uid()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("app.lock"))
+        .ok()?;
+    // SAFETY: flock on a descriptor we own; no memory is shared.
+    let got = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    got.then_some(f)
+}
+
 /// A small stop-tinted device-lock card at the top of the window.
 fn banner_card(ui_: &mut egui::Ui, text: &str) {
     egui::Frame::default()
@@ -347,6 +451,12 @@ pub fn run() -> anyhow::Result<()> {
         .or_else(|| users::get_current_username().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
 
+    // Already open (the agent opens one per code): the running window has
+    // seen the code and come forward; nothing to do here.
+    let Some(_lock) = single_instance() else {
+        return Ok(());
+    };
+
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 520.0])
@@ -364,6 +474,7 @@ pub fn run() -> anyhow::Result<()> {
                 username,
                 status: initial,
                 asked: false,
+                shown_code: None,
             }))
         }),
     ) {
@@ -385,6 +496,7 @@ mod tests {
                 ..Default::default()
             }),
             asked: false,
+            shown_code: None,
         }
     }
     fn kid(remaining: Option<i64>, frozen: bool) -> UserStatus {
@@ -446,6 +558,7 @@ mod tests {
             username: "kid".into(),
             status: None,
             asked: false,
+            shown_code: None,
         };
         assert_eq!(v.connection().0, "Not running");
     }

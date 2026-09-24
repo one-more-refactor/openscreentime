@@ -65,17 +65,28 @@ COPY policy/ policy/
 COPY client/ client/
 
 WORKDIR /build/client
-RUN cargo build --release --target x86_64-unknown-linux-musl
-RUN cargo build --release --features gui,tray
+# The build id: a hash of the agent's source (client/ + policy/). Compiled into
+# the binaries and published in the manifest, so an installed agent can tell
+# "a different build" from "a different version number" — a fix merged
+# without a version bump still reaches the fleet, and an unchanged agent is
+# not re-installed just because the server image was rebuilt. CI computes it
+# the same way (.github/workflows/build.yml).
+RUN cd /build && find policy client -type f -not -path '*/target/*' -print0 \
+        | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16 > /build/agent-build-id \
+    && cat /build/agent-build-id
+RUN OST_BUILD_ID="$(cat /build/agent-build-id)" \
+    cargo build --release --target x86_64-unknown-linux-musl
+RUN OST_BUILD_ID="$(cat /build/agent-build-id)" \
+    cargo build --release --features gui,tray
 
 # Stage both versioned artifacts + a two-artifact manifest.json for
 # /api/agent/latest. jq builds the JSON so a weird value can never produce a
-# malformed manifest. The image's glibc (bookworm, 2.36) is the floor: the
-# desktop binary runs on any target with glibc >= that, which every current
-# Debian/Ubuntu desktop clears.
+# malformed manifest. Built on bookworm, the desktop binary needs glibc 2.35
+# at most (checked in CI), so it runs on Debian 12, Ubuntu 22.04 and newer.
 RUN set -eu; \
     VERSION="$(cargo metadata --no-deps --format-version 1 \
         | jq -r '.packages[] | select(.name == "openscreentime") | .version')"; \
+    BUILD="$(cat /build/agent-build-id)"; \
     mkdir -p /out/agent; \
     FILE="openscreentime-${VERSION}-x86_64-musl"; \
     install -m 0755 "target/x86_64-unknown-linux-musl/release/openscreentime" "/out/agent/${FILE}"; \
@@ -83,7 +94,7 @@ RUN set -eu; \
     DFILE="openscreentime-${VERSION}-x86_64-desktop"; \
     install -m 0755 "target/release/openscreentime" "/out/agent/${DFILE}"; \
     DSHA256="$(sha256sum "/out/agent/${DFILE}" | cut -d' ' -f1)"; \
-    jq -n --arg version "$VERSION" --arg file "$FILE" --arg sha256 "$SHA256" --arg dfile "$DFILE" --arg dsha256 "$DSHA256" '{version: $version, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}, {target: "x86_64-linux-gnu", features: "desktop", url: ("/api/agent/download/" + $dfile), sha256: $dsha256}]}' > /out/agent/manifest.json; \
+    jq -n --arg version "$VERSION" --arg build "$BUILD" --arg file "$FILE" --arg sha256 "$SHA256" --arg dfile "$DFILE" --arg dsha256 "$DSHA256" '{version: $version, build: $build, artifacts: [{target: "x86_64-linux-musl", features: "headless", url: ("/api/agent/download/" + $file), sha256: $sha256}, {target: "x86_64-linux-gnu", features: "desktop", url: ("/api/agent/download/" + $dfile), sha256: $dsha256}]}' > /out/agent/manifest.json; \
     cat /out/agent/manifest.json
 
 # ---- Stage 2: Web builder --------------------------------------------------

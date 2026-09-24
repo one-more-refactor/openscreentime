@@ -4,164 +4,26 @@
 //! scheduled pause — is announced at 15, 5 and 1 minute before it lands, so the
 //! lock never arrives "randomly". The per-user companion shows these as desktop
 //! notifications; the agent writes the same words to the terminals of someone
-//! with no desktop. Both use this module, so they can't disagree.
-//!
-//! [`forecast`] is a stand-in for the decision layer's own `stop_at`/`reason`:
-//! the lock only needs *when* and *why*, and it reads whatever the status
-//! snapshot publishes.
+//! with no desktop. Both use this module, so they can't disagree. *When* and
+//! *why* come from the rules function's verdict (`stop_at`, `reason` in the
+//! status snapshot); this module only decides when to speak and what to say.
 
-use crate::policy::{Bedtime, Policy, Window};
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Local};
+pub use openscreentime_policy::rules::StopReason;
 
 /// The minutes-before-a-stop that get a warning.
 pub const THRESHOLDS: [u32; 3] = [15, 5, 1];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    Limit,
-    Bedtime,
-    Window,
-    Pause,
-}
-
-impl StopReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StopReason::Limit => "limit",
-            StopReason::Bedtime => "bedtime",
-            StopReason::Window => "window",
-            StopReason::Pause => "pause",
-        }
-    }
-    #[cfg_attr(not(feature = "tray"), allow(dead_code))] // the companion reads it back
-    pub fn parse(s: &str) -> Option<StopReason> {
-        Some(match s {
-            "limit" | "daily_limit" => StopReason::Limit,
-            "bedtime" => StopReason::Bedtime,
-            "window" | "outside_window" | "schedule" => StopReason::Window,
-            "pause" | "paused" => StopReason::Pause,
-            _ => return None,
-        })
-    }
-}
-
-/// The next stop for someone who is within their rules right now.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Forecast {
-    pub reason: StopReason,
-    pub at: DateTime<Local>,
-}
-
-fn hm(s: &str) -> Option<NaiveTime> {
-    let (h, m) = s.trim().split_once(':')?;
-    NaiveTime::from_hms_opt(h.parse().ok()?, m.parse().ok()?, 0)
-}
-
-fn at_local(day: chrono::NaiveDate, t: NaiveTime) -> Option<DateTime<Local>> {
-    Local.from_local_datetime(&day.and_time(t)).earliest()
-}
-
-/// When bedtime next starts (not while it's already on).
-fn next_bedtime(bt: &Bedtime, now: DateTime<Local>) -> Option<DateTime<Local>> {
-    let start = hm(&bt.start)?;
-    hm(&bt.end)?;
-    if crate::enforce::screentime::in_bedtime(bt, now.time()) {
-        return None;
-    }
-    let day = if start > now.time() {
-        now.date_naive()
-    } else {
-        now.date_naive() + Duration::days(1)
-    };
-    at_local(day, start)
-}
-
-/// When the allowed window we're in ends — windows that touch count as one.
-fn window_end(schedule: &[Window], now: DateTime<Local>) -> Option<DateTime<Local>> {
-    let wd = now.weekday().num_days_from_sunday() as u8;
-    let today: Vec<(NaiveTime, NaiveTime)> = schedule
-        .iter()
-        .filter(|w| w.days.contains(&wd))
-        .filter_map(|w| Some((hm(&w.start)?, hm(&w.end)?)))
-        .collect();
-    let t = now.time();
-    let mut end = today
-        .iter()
-        .filter(|(s, e)| t >= *s && t < *e)
-        .map(|(_, e)| *e)
-        .max()?;
-    while let Some(later) = today
-        .iter()
-        .filter(|(s, e)| *s <= end && *e > end)
-        .map(|(_, e)| *e)
-        .max()
-    {
-        end = later;
-    }
-    at_local(now.date_naive(), end)
-}
-
-/// The earliest of: the daily limit running out, bedtime starting, the
-/// allowed window ending. `limit_left` is the wall-clock time until the daily
-/// limit runs out (`None` = no limit).
-pub fn forecast(
-    policy: &Policy,
-    limit_left: Option<Duration>,
-    now: DateTime<Local>,
-) -> Option<Forecast> {
-    let st = &policy.screen_time;
-    if !st.enabled {
-        return None;
-    }
-    let mut next: Vec<Forecast> = Vec::new();
-    if let Some(r) = limit_left.filter(|r| *r > Duration::zero()) {
-        next.push(Forecast {
-            reason: StopReason::Limit,
-            at: now + r,
-        });
-    }
-    if let Some(at) = st.bedtime.as_ref().and_then(|b| next_bedtime(b, now)) {
-        next.push(Forecast {
-            reason: StopReason::Bedtime,
-            at,
-        });
-    }
-    if !st.schedule.is_empty() {
-        if let Some(at) = window_end(&st.schedule, now) {
-            next.push(Forecast {
-                reason: StopReason::Window,
-                at,
-            });
-        }
-    }
-    next.into_iter().min_by_key(|f| f.at)
-}
-
-/// When allowed hours next begin, said the way a person would: "15:00",
-/// "tomorrow at 15:00", "Monday at 15:00". `None` if no window is coming.
-pub fn next_allowed(schedule: &[Window], now: DateTime<Local>) -> Option<String> {
-    for ahead in 0..8i64 {
-        let day = now.date_naive() + Duration::days(ahead);
-        let wd = day.weekday().num_days_from_sunday() as u8;
-        let start = schedule
-            .iter()
-            .filter(|w| w.days.contains(&wd))
-            .filter_map(|w| Some((hm(&w.start)?, hm(&w.end)?)))
-            .filter(|(s, e)| s < e && (ahead > 0 || *s > now.time()))
-            .map(|(s, _)| s)
-            .min();
-        if let Some(s) = start {
-            let t = s.format("%H:%M").to_string();
-            return Some(match ahead {
-                0 => t,
-                1 => format!("tomorrow at {t}"),
-                _ => format!("{} at {t}", day.format("%A")),
-            });
-        }
-    }
-    None
+/// A `reason` id as the status snapshot publishes it.
+#[cfg_attr(not(feature = "tray"), allow(dead_code))] // the companion reads it back
+pub fn parse_reason(id: &str) -> Option<StopReason> {
+    Some(match id {
+        "limit" => StopReason::Limit,
+        "bedtime" => StopReason::Bedtime,
+        "outside_hours" => StopReason::OutsideHours,
+        "paused" => StopReason::Paused,
+        _ => return None,
+    })
 }
 
 /// Which thresholds have already been announced for the stop coming up.
@@ -236,8 +98,8 @@ pub fn words(reason: StopReason, secs_left: i64, at: Option<DateTime<Local>>) ->
     let body = match reason {
         StopReason::Limit => format!("Today's screen time ends at {when}."),
         StopReason::Bedtime => format!("Bedtime starts at {when}."),
-        StopReason::Window => format!("Allowed hours end at {when}."),
-        StopReason::Pause => format!("A parent is pausing this computer at {when}."),
+        StopReason::OutsideHours => format!("Allowed hours end at {when}."),
+        StopReason::Paused => format!("A parent is pausing this computer at {when}."),
     };
     Words {
         title,
@@ -246,26 +108,25 @@ pub fn words(reason: StopReason, secs_left: i64, at: Option<DateTime<Local>>) ->
     }
 }
 
+/// When a stopped person may use the screen again, said the way a person
+/// would: "07:00", "tomorrow at 07:00", "Monday at 07:00".
+pub fn until_words(at: DateTime<Local>, now: DateTime<Local>) -> String {
+    let t = at.format("%H:%M").to_string();
+    match (at.date_naive() - now.date_naive()).num_days() {
+        d if d <= 0 => t,
+        1 => format!("tomorrow at {t}"),
+        _ => format!("{} at {t}", at.format("%A")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::ScreenTime;
+    use chrono::TimeZone;
 
     fn at(h: u32, m: u32) -> DateTime<Local> {
-        // A Wednesday, so weekday windows are predictable (Sun = 0 → Wed = 3).
-        let d = chrono::NaiveDate::from_ymd_opt(2026, 9, 23).unwrap();
-        at_local(d, NaiveTime::from_hms_opt(h, m, 0).unwrap()).unwrap()
-    }
-
-    fn policy() -> Policy {
-        Policy {
-            screen_time: ScreenTime {
-                enabled: true,
-                daily_limit_minutes: 60,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        // A Wednesday.
+        Local.with_ymd_and_hms(2026, 9, 23, h, m, 0).unwrap()
     }
 
     /// Walk the minutes up to a stop and collect what gets announced.
@@ -287,14 +148,15 @@ mod tests {
         for r in [
             StopReason::Limit,
             StopReason::Bedtime,
-            StopReason::Window,
-            StopReason::Pause,
+            StopReason::OutsideHours,
+            StopReason::Paused,
         ] {
             assert_eq!(announced(r, 40), vec![15, 5, 1], "{r:?}");
             let w = words(r, 60, Some(at(21, 0)));
             assert!(w.critical, "the last minute is critical for {r:?}");
             assert!(w.body.contains("21:00"));
             assert_ne!(w.title, w.title.to_uppercase(), "no shouting");
+            assert_eq!(parse_reason(r.id()), Some(r));
         }
         assert_eq!(
             words(StopReason::Limit, 5 * 60, None).title,
@@ -318,74 +180,14 @@ mod tests {
     }
 
     #[test]
-    fn forecast_picks_the_earliest_stop() {
-        let mut p = policy();
-        // Limit only.
-        let f = forecast(&p, Some(Duration::minutes(20)), at(16, 0)).unwrap();
-        assert_eq!((f.reason, f.at), (StopReason::Limit, at(16, 20)));
-        // Bedtime sooner than the limit.
-        p.screen_time.bedtime = Some(Bedtime {
-            start: "16:10".into(),
-            end: "07:00".into(),
-        });
-        let f = forecast(&p, Some(Duration::minutes(20)), at(16, 0)).unwrap();
-        assert_eq!((f.reason, f.at), (StopReason::Bedtime, at(16, 10)));
-        // Inside touching windows 15:00–16:05 + 16:05–17:00: ends at 17:00, and
-        // a window end sooner than bedtime wins.
-        p.screen_time.bedtime = Some(Bedtime {
-            start: "21:00".into(),
-            end: "07:00".into(),
-        });
-        p.screen_time.schedule = vec![
-            Window {
-                days: vec![3],
-                start: "15:00".into(),
-                end: "16:05".into(),
-            },
-            Window {
-                days: vec![3],
-                start: "16:05".into(),
-                end: "17:00".into(),
-            },
-        ];
-        let f = forecast(&p, None, at(16, 0)).unwrap();
-        assert_eq!((f.reason, f.at), (StopReason::Window, at(17, 0)));
-        // Already in bedtime / no rules: nothing to forecast.
-        p.screen_time.schedule.clear();
-        assert!(forecast(&p, None, at(22, 0)).is_none());
-        p.screen_time.enabled = false;
-        assert!(forecast(&p, Some(Duration::minutes(5)), at(16, 0)).is_none());
-    }
-
-    #[test]
-    fn next_allowed_hours_read_like_speech() {
-        let sched = vec![
-            Window {
-                days: vec![3],
-                start: "15:00".into(),
-                end: "17:00".into(),
-            },
-            Window {
-                days: vec![4],
-                start: "09:00".into(),
-                end: "10:00".into(),
-            },
-            Window {
-                days: vec![1],
-                start: "08:00".into(),
-                end: "09:00".into(),
-            },
-        ];
-        assert_eq!(next_allowed(&sched, at(12, 0)).as_deref(), Some("15:00"));
+    fn until_reads_like_speech() {
+        let now = at(22, 0);
+        assert_eq!(until_words(at(23, 30), now), "23:30");
         assert_eq!(
-            next_allowed(&sched, at(18, 0)).as_deref(),
-            Some("tomorrow at 09:00")
+            until_words(at(7, 0) + chrono::Duration::days(1), now),
+            "tomorrow at 07:00"
         );
-        let fri = at(18, 0) + Duration::days(2);
-        assert_eq!(
-            next_allowed(&sched, fri).as_deref(),
-            Some("Monday at 08:00")
-        );
-        assert_eq!(next_allowed(&[], at(12, 0)), None);
+        let monday = at(7, 0) + chrono::Duration::days(5);
+        assert_eq!(until_words(monday, now), "Monday at 07:00");
     }
 }

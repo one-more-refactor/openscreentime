@@ -341,7 +341,7 @@ fn boot_id() -> String {
 
 /// The machine-facing operations of the lock and freeze, behind one seam so
 /// the lifecycle can be tested without a machine.
-pub trait Host: Send {
+pub trait Host: Send + Sync {
     fn freeze(&self, user: &str, on: bool, hard: bool);
     fn is_frozen(&self, user: &str) -> Option<bool>;
     /// Has a login (a user slice) right now. Logged-out people are never frozen.

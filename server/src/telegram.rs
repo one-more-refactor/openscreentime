@@ -6,9 +6,10 @@
 //!
 //!   - **get alerts** (tamper, lockdown, time requests — see `alerts.rs`),
 //!   - **ok a chore**: the time-request alert carries inline ✅/❌ buttons
-//!     that answer the request right from the phone,
-//!   - **confirm it's you**: the console's confirm dialog can send one tap
-//!     to the phone instead of asking for a typed code.
+//!     that answer the request right from the phone.
+//!
+//! It is not a way to sign in or to confirm it's you — those are a passkey or
+//! a code on your own computer (docs/AUTH.md).
 //!
 //! The worker long-polls `getUpdates` — no webhook server, nothing listens,
 //! which keeps the self-hosted story ("the agent dials out") intact.
@@ -19,8 +20,7 @@
 //! achieve nothing.
 
 use axum::{extract::State, Json};
-use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -28,14 +28,10 @@ use uuid::Uuid;
 
 use crate::auth::hash_token;
 use crate::error::{AppError, AppResult};
-use crate::state::{AppState, AuthAdmin, SESSION_COOKIE};
+use crate::state::{AppState, AuthAdmin};
 
 /// How long a pairing code is redeemable.
 const PAIR_CODE_MINUTES: i64 = 10;
-/// How long a confirm-tap request waits for the phone.
-const VERIFY_MINUTES: i64 = 2;
-/// The confirm window a tap opens — same as a typed factor (stepup.rs).
-const GRANT_MINUTES: i64 = 15;
 
 pub fn bot_token() -> Option<String> {
     std::env::var("OST_TELEGRAM_BOT_TOKEN")
@@ -117,44 +113,61 @@ pub fn spawn(st: AppState) {
     let Some(token) = bot_token() else {
         return;
     };
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        if let Some(me) = call(&client, &token, "getMe", json!({})).await {
-            if let Some(name) = me.get("username").and_then(Value::as_str) {
-                let _ = BOT_USERNAME.set(name.to_string());
-                tracing::info!(bot = name, "telegram bot connected");
-            }
-        }
-        let mut offset: i64 = 0;
-        loop {
-            let updates = call(
-                &client,
-                &token,
-                "getUpdates",
-                json!({
-                    "offset": offset,
-                    "timeout": 50,
-                    "allowed_updates": ["message", "callback_query"],
-                }),
-            )
-            .await;
-            let Some(Value::Array(updates)) = updates else {
-                // API hiccup — breathe, then poll again.
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            };
-            for u in updates {
-                if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
-                    offset = offset.max(id + 1);
-                }
-                if let Some(msg) = u.get("message") {
-                    handle_message(&st, &client, &token, msg).await;
-                } else if let Some(cq) = u.get("callback_query") {
-                    handle_callback(&st, &client, &token, cq).await;
-                }
-            }
-        }
+    // The update offset outlives a restart of the worker, so an update that
+    // made it panic is not fetched (and panicked on) again.
+    let offset = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    crate::supervise::spawn("telegram", move || {
+        let (st, token, offset) = (st.clone(), token.clone(), offset.clone());
+        async move { poll(st, token, offset).await }
     });
+}
+
+async fn poll(st: AppState, token: String, offset: std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    use std::sync::atomic::Ordering;
+    // Bounded, but longer than the 50 s long-poll below.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(70))
+        .build()
+        .unwrap_or_default();
+    loop {
+        // Learn the bot's @username (the pairing deep link needs it) — and
+        // keep trying if the network was down when we started.
+        if BOT_USERNAME.get().is_none() {
+            if let Some(me) = call(&client, &token, "getMe", json!({})).await {
+                if let Some(name) = me.get("username").and_then(Value::as_str) {
+                    let _ = BOT_USERNAME.set(name.to_string());
+                    tracing::info!(bot = name, "telegram bot connected");
+                }
+            }
+        }
+        let updates = call(
+            &client,
+            &token,
+            "getUpdates",
+            json!({
+                "offset": offset.load(Ordering::Relaxed),
+                "timeout": 50,
+                "allowed_updates": ["message", "callback_query"],
+            }),
+        )
+        .await;
+        let Some(Value::Array(updates)) = updates else {
+            // API hiccup — breathe, then poll again.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        };
+        for u in updates {
+            if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
+                offset.fetch_max(id + 1, Ordering::Relaxed);
+            }
+            if let Some(msg) = u.get("message") {
+                handle_message(&st, &client, &token, msg).await;
+            } else if let Some(cq) = u.get("callback_query") {
+                handle_callback(&st, &client, &token, cq).await;
+            }
+        }
+    }
 }
 
 /// `/start <code>` pairs the chat; anything else gets a gentle pointer.
@@ -232,13 +245,13 @@ async fn handle_message(st: &AppState, client: &reqwest::Client, token: &str, ms
         client,
         token,
         chat_id,
-        "Paired ✅ — you'll get alerts here, you can ok a time request with one tap, and approve the console's confirm checks.",
+        "Paired ✅ — you'll get alerts here, and you can ok a time request with one tap.",
         None,
     )
     .await;
 }
 
-/// Inline-button taps: answer a time request, or approve a confirm check.
+/// Inline-button taps: answer a time request.
 async fn handle_callback(st: &AppState, client: &reqwest::Client, token: &str, cq: &Value) {
     let Some(cq_id) = cq.get("id").and_then(Value::as_str) else {
         return;
@@ -314,55 +327,6 @@ async fn handle_callback(st: &AppState, client: &reqwest::Client, token: &str, c
                 Err(_) => answer("That didn't work — answer it in the console.").await,
             }
         }
-        ["verify", id, verdict] => {
-            let Ok(id) = Uuid::parse_str(id) else {
-                answer("That button is broken.").await;
-                return;
-            };
-            let ok = *verdict == "ok";
-            // Decide once; the tap must come from the phone of the person who asked.
-            let session: Option<Uuid> = sqlx::query_scalar(
-                "UPDATE telegram_verifications SET decided_at = now(), approved = $3
-                  WHERE id = $1 AND admin_id = $2 AND decided_at IS NULL AND expires_at > now()
-                RETURNING session_id",
-            )
-            .bind(id)
-            .bind(admin_id)
-            .bind(ok)
-            .fetch_optional(&st.db)
-            .await
-            .ok()
-            .flatten();
-            match (session, ok) {
-                (Some(session_id), true) => {
-                    // Open the asking session's confirm window — same grant a
-                    // typed factor earns (no token rotation: there is no HTTP
-                    // response here to carry a fresh cookie).
-                    let until = Utc::now() + Duration::minutes(GRANT_MINUTES);
-                    let _ = sqlx::query(
-                        "UPDATE admin_sessions
-                            SET stepup_until = $2, stepup_extended = false, trusted = true
-                          WHERE id = $1",
-                    )
-                    .bind(session_id)
-                    .bind(until)
-                    .execute(&st.db)
-                    .await;
-                    answer("Confirmed ✅").await;
-                }
-                (Some(_), false) => answer("Blocked. That session stays unconfirmed.").await,
-                (None, _) => answer("That check expired — ask again from the console.").await,
-            }
-            if let Some(mid) = message_id {
-                let _ = call(
-                    client,
-                    token,
-                    "editMessageReplyMarkup",
-                    json!({ "chat_id": chat_id, "message_id": mid, "reply_markup": { "inline_keyboard": [] } }),
-                )
-                .await;
-            }
-        }
         _ => answer("").await,
     }
 }
@@ -434,72 +398,6 @@ pub async fn unpair(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<J
         .execute(&st.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
-}
-
-/// `POST /api/auth/stepup/telegram/start` — send one tap to the phone. The
-/// console then polls `GET /api/auth/stepup` until the window opens.
-pub async fn verify_start(
-    State(st): State<AppState>,
-    admin: AuthAdmin,
-    jar: CookieJar,
-) -> AppResult<Json<Value>> {
-    let Some(token) = bot_token() else {
-        return Err(AppError::BadRequest("no Telegram bot configured".into()));
-    };
-    let chat: Option<i64> = sqlx::query_scalar(
-        "SELECT chat_id FROM telegram_chats WHERE admin_id = $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(admin.admin_id)
-    .fetch_optional(&st.db)
-    .await?;
-    let Some(chat_id) = chat else {
-        return Err(AppError::BadRequest(
-            "no phone is paired — pair Telegram in Settings first".into(),
-        ));
-    };
-
-    // Bind the check to the session that is asking.
-    let cookie = jar
-        .get(SESSION_COOKIE)
-        .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
-    let session_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM admin_sessions
-         WHERE (token_hash = $1 OR (prev_token_hash = $1 AND prev_valid_until > now()))
-           AND expires_at > now()",
-    )
-    .bind(hash_token(cookie.value()))
-    .fetch_optional(&st.db)
-    .await?;
-    let session_id = session_id.ok_or_else(|| AppError::Unauthorized("no session".into()))?;
-
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO telegram_verifications (admin_id, session_id, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3))
-        RETURNING id",
-    )
-    .bind(admin.admin_id)
-    .bind(session_id)
-    .bind(VERIFY_MINUTES as i32)
-    .fetch_one(&st.db)
-    .await?;
-
-    let keyboard = json!({ "inline_keyboard": [[
-        { "text": "✅ It's me",  "callback_data": format!("verify:{id}:ok") },
-        { "text": "❌ Block it", "callback_data": format!("verify:{id}:no") },
-    ]]});
-    let client = reqwest::Client::new();
-    send_message(
-        &client,
-        &token,
-        chat_id,
-        "Someone at your console wants to touch the household's keys. Was that you?",
-        Some(keyboard),
-    )
-    .await;
-
-    Ok(Json(
-        json!({ "ok": true, "expires_in_seconds": VERIFY_MINUTES * 60 }),
-    ))
 }
 
 #[cfg(test)]

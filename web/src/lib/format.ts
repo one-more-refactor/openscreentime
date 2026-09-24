@@ -1,5 +1,13 @@
 // Small formatting helpers (relative time, minute/port rendering).
 
+/** Server messages are lower-case fragments ("that code didn't match");
+ * people read sentences. */
+export function sentence(msg: string): string {
+  const m = msg.trim();
+  if (!m) return m;
+  return m[0].toUpperCase() + m.slice(1) + (/[.!?…]$/.test(m) ? "" : ".");
+}
+
 export function relTime(iso: string | null): string {
   if (!iso) return "—";
   const then = new Date(iso).getTime();

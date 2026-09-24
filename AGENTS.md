@@ -48,9 +48,8 @@ sudo ./target/release/openscreentime install-service
 
 ```bash
 git clone <repo> openscreentime && cd openscreentime
-cp .env.example .env        # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
-deploy/build.sh             # builds server+web image from Containerfile
-podman-compose up -d
+deploy/setup.sh --domain ost.example.com   # .env, image, stack, backup, boot/backup/update units
+deploy/update.sh            # later: pull, backup, swap, health check, rollback (daily timer does this)
 ```
 
 ### Key Environment Variables
@@ -58,10 +57,9 @@ podman-compose up -d
 | Var | Purpose | Required |
 |-----|---------|----------|
 | `DATABASE_URL` | Postgres connection string | Yes (server) |
-| `RP_ID` | WebAuthn relying party ID (bare domain) | Yes |
-| `RP_ORIGIN` | WebAuthn origin (`https://...`) | Yes |
-| `OST_PUBLIC_URL` | Public HTTPS base URL (OIDC redirect, falls back to RP_ORIGIN) | Prod |
-| `OST_INSECURE_COOKIES=1` | Allow non-Secure cookies (dev only) | Dev only |
+| `OST_PUBLIC_URL` | Public HTTPS base URL — RP_ID, RP_ORIGIN, CORS and cookie security derive from it (`server/src/settings.rs`) | Prod |
+| `RP_ID` / `RP_ORIGIN` | Overrides of the derived WebAuthn values | Rarely |
+| `OST_INSECURE_COOKIES` | `1`/`0` override the scheme-derived cookie security | Rarely |
 | `OST_TRUST_PROXY=1` | Rate limiter keys on last X-Forwarded-For hop | Behind proxy |
 | `OST_OIDC_ISSUER/CLIENT_ID/CLIENT_SECRET` | OIDC SSO (all three required to enable) | Optional |
 | `OST_OFFLINE_GRACE_SECS` | Agent fail-closed grace period (default 900s) | Optional |
@@ -124,7 +122,7 @@ client.rs     → HTTP client for enrollment/heartbeat/policy/earn-request
 config.rs     → AgentConfig (TOML at /etc/openscreentime/agent.toml, 0600), AgentCtx (dry-run, root check)
 protocol.rs   → Wire types: Command, Event, UsageReport, WS envelope (tagged JSON)
 enforce/      → DNS, firewall, screentime (applies most restrictive across active users)
-lockout.rs    → Full-screen overlay (eframe, optional `gui` feature)
+lock/         → The lock: its own session on its own VT (cage + egui as `ost-lock`, or the agent's text lock); codes checked by the agent
 tamper.rs     → Watchdog, NM D-Bus signals, polkit masking, config integrity
 earn.rs       → Earn-time offers + the screen_time_earned event
 unlock.rs     → Parent PIN CLI (suspends enforcement for N minutes)
@@ -158,7 +156,7 @@ Single source of truth for `Policy` document. All components serialize/deseriali
 1. Agent WS/heartbeat → `GET /agent/policy` → `{ policy_version, users: [{ os_username, profile_kind, policy }] }`
 2. Agent merges per-user policies, applies most restrictive network policy (DNS + firewall)
 3. Screen-time runs every 10s tick (`screentime::UsageTracker`), freezes users via cgroup freezer when limit hit
-4. Lockout overlay shows earn offers → user picks → `POST /agent/earn-request`
+4. The lock (or the companion, or `ost ask`) offers "Ask for more time" → `POST /agent/earn-request`
 
 ### Earn-Time Approval
 1. Agent → `POST /agent/earn-request` (deduped per user/task/day server-side)
@@ -297,7 +295,7 @@ bun run build          # tsc -b && vite build
 
 1. **Preset JSON must stay byte-identical**: `lockdown` and `parent_pin_hash` omitted when default via `skip_serializing_if`. Tests assert round-trip equality.
 
-2. **`app_limits` and streak nudges are gone**: both removed (migration 0013). `app_limits` was accepted but never enforced; streak nudges were engagement bait the product brief forbids. Wind-down warnings ("2 min left") survive in `runner::maybe_warn` and deliberately emit no event.
+2. **`app_limits` and streak nudges are gone**: both removed (migration 0013). `app_limits` was accepted but never enforced; streak nudges were engagement bait the product brief forbids. Warnings before a stop (15, 5 and 1 minute) come from the per-user companion (`warn.rs`, `tray.rs`) and deliberately emit no event.
 
 3. **Wildcard DNS `allowlist: ["*"]`**: Means "forward everything to filtered upstream" (used by `default` profile). Zero-trust mode stays `default_deny` structurally.
 

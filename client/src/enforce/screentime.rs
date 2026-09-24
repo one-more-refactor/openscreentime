@@ -1,28 +1,42 @@
-//! Screen-time enforcement: per-OS-user active-seat accounting via `loginctl`,
-//! enforcing daily limit + allowed windows + bedtime. When a user's balance hits
-//! zero the runner shows the lockout overlay, then this module freezes the user's
-//! cgroup (freezer) or ends the session (TAMPER.md).
+//! Screen-time accounting and the verdict: how much time a person has used
+//! today, and whether they should be stopped right now, and why.
+//!
+//! * **What counts** is decided in [`super::activity`] (a foreground seat
+//!   session with recent input or sound).
+//! * **The day** is the trusted clock's local date ([`crate::clock`]): it rolls
+//!   at local midnight, never earlier than real boottime allows, forward only,
+//!   and without needing the server.
+//! * **The rules** are [`openscreentime_policy::rules::evaluate`] — the same
+//!   function the server uses.
+//! * **Per person**: the daily limit is one budget across all of a person's
+//!   computers. The server reports what they used elsewhere today; this device
+//!   adds its own. Offline, the last-known "elsewhere" still applies.
+//!
+//! Stopping someone (overlay, cgroup freeze) is the runner's business; the
+//! freeze primitives at the bottom of this file are shared with it.
 
-use crate::policy::{Bedtime, Policy, Window};
+use crate::clock::{Reading, TrustedClock};
+use crate::policy::Policy;
 use crate::sysusers;
 use crate::util::Exec;
 use anyhow::Result;
-use chrono::{Datelike, Local, NaiveDate, NaiveTime};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use openscreentime_policy::rules::{self, StopReason, Verdict};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 /// Reboot-surviving usage ledger. Without this, a `systemctl restart` (crash,
 /// watchdog kick, self-update — or a kid who guesses the trick) drops the
-/// in-memory counters to zero and hands out a fresh daily budget. Root-owned
-/// dir; the systemd unit already lists it under `ReadWritePaths`.
-/// Persisted usage ledger. Losing this resets how much time a child has
-/// already spent today, so it lives in the migrated state directory.
+/// in-memory counters to zero and hands out a fresh daily budget. It also
+/// carries the parent overrides and the trusted-clock anchor, so neither a
+/// restart nor a reboot loses a parent's "30 more minutes".
 pub fn ledger_path() -> std::path::PathBuf {
     crate::paths::state("usage_ledger.json")
 }
 
-/// Why a user is being locked out.
+/// Why a user is being locked out. (The stop presenters key their words off
+/// this; [`lock_reason`] maps the rules' verdict onto it.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockReason {
     DailyLimit { used_min: u32, limit_min: u32 },
@@ -54,23 +68,56 @@ impl LockReason {
     }
 }
 
-/// Accumulates active seconds per user, resetting at local midnight. `earned`
-/// seconds (from approved earn-time tasks) extend the daily budget. Serialized to
-/// [`ledger_path`] so it survives an agent restart.
+/// What the family server says a person used on their *other* computers
+/// today (and was granted there). Kept per OS user, tagged with the day it
+/// belongs to, so yesterday's number never leaks into today.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Elsewhere {
+    pub day: Option<NaiveDate>,
+    #[serde(default)]
+    pub used_secs: u64,
+    #[serde(default)]
+    pub earned_secs: u64,
+    /// The server's record of grants to THIS login today (see `day_for`).
+    #[serde(default)]
+    pub earned_here_secs: u64,
+}
+
+/// Outcome of a parent grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grant {
+    Applied,
+    /// This command id was already applied — a redelivery after a lost ack.
+    Duplicate,
+}
+
+/// The day's ledger for every managed user on this device.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UsageTracker {
-    /// Runtime-only: see `set_day_ceiling`. Never persisted.
-    #[serde(skip)]
-    day_ceiling: Option<chrono::NaiveDate>,
+    /// The accounting day (trusted local date). Forward-only.
     day: Option<NaiveDate>,
+    /// Seconds of real use on THIS device today.
     used_secs: HashMap<String, u32>,
+    /// Seconds granted on this device today (earn-time, "+N min").
     earned_secs: HashMap<String, u32>,
+    /// The person's use on other computers today, per the server.
+    #[serde(default)]
+    elsewhere: HashMap<String, Elsewhere>,
+    /// Parent overrides: user → end (trusted UTC). One per user, whatever
+    /// wrote it — a grant, a code at the lock screen, `ost unlock`, Resume.
+    #[serde(default)]
+    overrides: HashMap<String, DateTime<Utc>>,
+    /// Grant command ids already applied → the day they landed. A lost ack
+    /// makes the server redeliver; the second copy must not credit twice.
+    #[serde(default)]
+    grants: HashMap<String, NaiveDate>,
+    /// Trusted-clock anchor, persisted so a restart keeps it.
+    #[serde(default)]
+    pub clock: TrustedClock,
 }
 
 impl UsageTracker {
-    /// Fresh, empty tracker. The running agent uses [`load`](Self::load) instead
-    /// so a restart resumes the day; kept for tests and callers that want a
-    /// clean slate.
+    /// Fresh, empty tracker (tests; the running agent uses [`load`](Self::load)).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
@@ -105,230 +152,213 @@ impl UsageTracker {
         }
     }
 
-    /// Roll to a new day ONLY when the wall clock has genuinely advanced past
-    /// the day we're accounting for. This is forward-only on purpose: setting
-    /// the clock *backward* (to earlier today or to yesterday) used to make
-    /// `self.day != today` and wipe the counters — an instant free-time cheat.
-    /// Now a backward jump keeps the existing day and its accumulated usage;
-    /// the clock jump itself is separately surfaced as a tamper event.
-    /// The accounting day, capped by a server-confirmed ceiling when one is
-    /// set (see `set_day_ceiling`): a clock set FORWARD while the device is on
-    /// a network but hasn't heard from our server must not mint a fresh daily
-    /// budget. Backward jumps were already defended; this closes the other
-    /// direction without punishing a genuinely offline week (no ceiling then).
-    fn effective_today(&self) -> chrono::NaiveDate {
-        let today = Local::now().date_naive();
-        match self.day_ceiling {
-            Some(c) if today > c => c,
-            _ => today,
+    /// Read the clocks into the trusted clock, roll the day if the trusted
+    /// local date has advanced, and return trusted "now".
+    pub fn advance<Tz: TimeZone>(&mut self, reading: &Reading, tz: &Tz) -> DateTime<Utc> {
+        let now = self.clock.observe(reading);
+        self.roll_to(now.with_timezone(tz).date_naive());
+        now
+    }
+
+    /// Roll to `today` ONLY when it is later than the day being accounted —
+    /// forward-only on purpose: a clock set *backward* must never wipe the
+    /// counters (that was an instant free-time cheat). `today` comes from the
+    /// trusted clock, so a clock set *forward* by hand doesn't get here early
+    /// either. Returns whether a new day started.
+    pub fn roll_to(&mut self, today: NaiveDate) -> bool {
+        if self.day.is_some_and(|d| today <= d) {
+            return false;
         }
+        self.day = Some(today);
+        self.used_secs.clear();
+        self.earned_secs.clear();
+        self.elsewhere.retain(|_, e| e.day == Some(today));
+        // Keep grant ids a couple of days: a grant delivered late must still
+        // be recognised as already applied.
+        self.grants
+            .retain(|_, d| today.signed_duration_since(*d).num_days() <= 2);
+        true
     }
 
-    /// Set (or clear) the day ceiling: the latest day the counters may roll
-    /// to. The runner passes "last server-confirmed day + 1" while the
-    /// device is on a network, and None when it's genuinely offline.
-    pub fn set_day_ceiling(&mut self, ceiling: Option<chrono::NaiveDate>) {
-        self.day_ceiling = ceiling;
-        // An offline boot with the RTC set forward rolled the counters onto a
-        // future day; when the server's clock says otherwise, pull the
-        // accounting day back to the ceiling WITHOUT clearing — the budget
-        // that was spent stays spent.
-        if let (Some(c), Some(d)) = (ceiling, self.day) {
-            if d > c {
-                self.day = Some(c);
-            }
-        }
+    /// The accounting day.
+    pub fn day(&self) -> Option<NaiveDate> {
+        self.day
     }
 
-    /// True when the wall clock is ahead of the ceiling — i.e. it's being clamped.
-    pub fn clock_ahead_of_ceiling(&self) -> bool {
-        matches!(self.day_ceiling, Some(c) if Local::now().date_naive() > c)
-    }
-
-    fn roll_day(&mut self) {
-        let today = self.effective_today();
-        let advanced = match self.day {
-            Some(d) => today > d,
-            None => true,
-        };
-        if advanced {
-            self.day = Some(today);
-            self.used_secs.clear();
-            self.earned_secs.clear();
-        }
-    }
-
-    /// Whether the accumulated counters still apply to the current wall-clock
-    /// day. True when the clock has NOT advanced past the accounting day — this
-    /// covers both the same-day case and a backward clock jump (a set-back must
-    /// not zero the reported usage). False once the clock genuinely crosses into
-    /// a later day but no seat user has been active yet to roll the counters, so
-    /// readers report 0 for the new day rather than yesterday's stale totals.
-    fn counters_current(&self) -> bool {
-        match self.day {
-            Some(d) => self.effective_today() <= d,
-            None => false,
-        }
-    }
-
-    /// Add `real_secs` of wall time for `user`, scaled by the dev time-accel factor.
+    /// Bill `real_secs` of real use to `user`, scaled by the dev time-accel.
     pub fn add_active(&mut self, user: &str, real_secs: u32, accel: u32) {
-        self.roll_day();
         *self.used_secs.entry(user.to_string()).or_insert(0) += real_secs.saturating_mul(accel);
     }
 
-    /// Credit earned reward minutes to a user's daily budget. Called from the
-    /// runner's `credit_time` command handler once an admin approves an
-    /// earn-request (CONTRACT-PROD.md §4).
+    /// Credit earned minutes to today's budget (no override, no idempotency —
+    /// see [`grant`](Self::grant) for a parent's "+N").
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn add_earned(&mut self, user: &str, minutes: u32) {
-        self.roll_day();
         *self.earned_secs.entry(user.to_string()).or_insert(0) += minutes.saturating_mul(60);
     }
 
-    pub fn used_minutes(&self, user: &str) -> u32 {
-        if !self.counters_current() {
-            return 0;
+    /// A parent's "+N minutes": N more minutes on today's budget AND an
+    /// override until `now + N`, so it also carries past bedtime or the end of
+    /// the allowed hours ("N more minutes, now, whatever the rule").
+    /// Idempotent on `id` (the command id).
+    pub fn grant(&mut self, id: &str, user: &str, minutes: u32, now: DateTime<Utc>) -> Grant {
+        if !id.is_empty() && self.grants.contains_key(id) {
+            return Grant::Duplicate;
         }
-        self.used_secs.get(user).copied().unwrap_or(0) / 60
-    }
-    pub fn earned_minutes(&self, user: &str) -> u32 {
-        if !self.counters_current() {
-            return 0;
+        if !id.is_empty() {
+            self.grants
+                .insert(id.to_string(), self.day.unwrap_or_else(|| now.date_naive()));
         }
-        self.earned_secs.get(user).copied().unwrap_or(0) / 60
+        self.add_earned_secs(user, u64::from(minutes) * 60);
+        self.set_override(user, now + chrono::Duration::minutes(i64::from(minutes)));
+        Grant::Applied
     }
 
-    /// Effective remaining minutes given the policy limit (+ earned). None = unlimited.
+    fn add_earned_secs(&mut self, user: &str, secs: u64) {
+        let e = self.earned_secs.entry(user.to_string()).or_insert(0);
+        *e = e.saturating_add(u32::try_from(secs).unwrap_or(u32::MAX));
+    }
+
+    /// Hold the rules off for `user` until `until` (trusted UTC). Never
+    /// shortens an override already running.
+    pub fn set_override(&mut self, user: &str, until: DateTime<Utc>) {
+        let e = self.overrides.entry(user.to_string()).or_insert(until);
+        if until > *e {
+            *e = until;
+        }
+    }
+
+    /// The active override's end, if one is running at `now`. Expired ones
+    /// are dropped on the way.
+    pub fn override_until(&mut self, user: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        match self.overrides.get(user) {
+            Some(u) if *u > now => Some(*u),
+            Some(_) => {
+                self.overrides.remove(user);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Read-only view of an override (for status output).
+    pub fn peek_override(&self, user: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.overrides.get(user).copied().filter(|u| *u > now)
+    }
+
+    /// Record what the server says the person used elsewhere today. Ignored
+    /// unless it is for the day being accounted here.
+    pub fn set_elsewhere(&mut self, user: &str, e: Elsewhere) {
+        if e.day.is_some() && e.day == self.day {
+            self.elsewhere.insert(user.to_string(), e);
+        }
+    }
+
+    /// Today's report from the server for `user`, if it is for today.
+    fn elsewhere_of(&self, user: &str) -> Elsewhere {
+        self.elsewhere
+            .get(user)
+            .filter(|e| e.day.is_some() && e.day == self.day)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Seconds used on this device today.
+    pub fn used_here_secs(&self, user: &str) -> u64 {
+        u64::from(self.used_secs.get(user).copied().unwrap_or(0))
+    }
+
+    /// The person's whole day: this device plus their other computers.
+    /// Grants on this login are the larger of what this device applied and
+    /// what the server has on record (it credits its ledger when the parent
+    /// grants, before the command arrives) — the larger, never the sum.
+    pub fn day_for(&self, user: &str) -> rules::Day {
+        let e = self.elsewhere_of(user);
+        let earned_here =
+            u64::from(self.earned_secs.get(user).copied().unwrap_or(0)).max(e.earned_here_secs);
+        rules::Day {
+            used_secs: self.used_here_secs(user) + e.used_secs,
+            earned_secs: earned_here + e.earned_secs,
+        }
+    }
+
+    /// Minutes used today by the person (all their computers), floored.
+    pub fn used_minutes(&self, user: &str) -> u32 {
+        u32::try_from(self.day_for(user).used_secs / 60).unwrap_or(u32::MAX)
+    }
+
+    /// Minutes earned today by the person (all their computers), floored.
+    pub fn earned_minutes(&self, user: &str) -> u32 {
+        u32::try_from(self.day_for(user).earned_secs / 60).unwrap_or(u32::MAX)
+    }
+
+    /// Daily budget left in minutes (limit + earned − used, rounded up; may be
+    /// negative). `None` = no limit. This is the ring's number; when the screen
+    /// actually stops is [`verdict`]'s `minutes_left`.
     pub fn remaining_minutes(&self, user: &str, policy: &Policy) -> Option<i64> {
-        if !policy.screen_time.enabled || policy.screen_time.daily_limit_minutes == 0 {
+        let st = &policy.screen_time;
+        if !st.enabled || st.daily_limit_minutes == 0 {
             return None;
         }
-        let budget =
-            policy.screen_time.daily_limit_minutes as i64 + self.earned_minutes(user) as i64;
-        Some(budget - self.used_minutes(user) as i64)
+        let d = self.day_for(user);
+        let left =
+            i64::from(st.daily_limit_minutes) * 60 + d.earned_secs as i64 - d.used_secs as i64;
+        Some((left + 59).div_euclid(60))
     }
 }
 
-/// Evaluate whether `user` should be locked right now.
-pub fn evaluate(policy: &Policy, tracker: &UsageTracker, user: &str) -> Option<LockReason> {
-    let st = &policy.screen_time;
-    if !st.enabled {
+/// The rules' verdict for `user` at trusted local time `now`. `paused` is a
+/// whole-device lock; the override comes from the ledger.
+pub fn verdict<Tz: TimeZone>(
+    policy: &Policy,
+    tracker: &UsageTracker,
+    user: &str,
+    now: &DateTime<Tz>,
+    paused: bool,
+) -> Verdict<Tz> {
+    let until = tracker
+        .peek_override(user, now.with_timezone(&Utc))
+        .map(|u| u.with_timezone(&now.timezone()));
+    rules::evaluate(
+        &policy.screen_time,
+        now,
+        tracker.day_for(user),
+        until.as_ref(),
+        paused,
+    )
+}
+
+/// The screen-time stop the runner acts on, if the verdict says "stop now".
+/// (A pause is not a screen-time reason — the runner handles device locks.)
+pub fn lock_reason<Tz: TimeZone>(
+    v: &Verdict<Tz>,
+    tracker: &UsageTracker,
+    user: &str,
+    policy: &Policy,
+) -> Option<LockReason> {
+    if v.allowed {
         return None;
     }
-    let now = Local::now();
-    let weekday_sun0 = now.weekday().num_days_from_sunday() as u8;
-    let now_t = now.time();
-
-    if let Some(bt) = &st.bedtime {
-        if in_bedtime(bt, now_t) {
-            return Some(LockReason::Bedtime);
-        }
-    }
-    if !st.schedule.is_empty() && !within_any_window(&st.schedule, weekday_sun0, now_t) {
-        return Some(LockReason::OutsideWindow);
-    }
-    if let Some(remaining) = tracker.remaining_minutes(user, policy) {
-        if remaining <= 0 {
-            let limit = st.daily_limit_minutes + tracker.earned_minutes(user);
-            return Some(LockReason::DailyLimit {
-                used_min: tracker.used_minutes(user),
-                limit_min: limit,
-            });
-        }
-    }
-    None
-}
-
-fn parse_hm(s: &str) -> Option<NaiveTime> {
-    let mut parts = s.split(':');
-    let h: u32 = parts.next()?.parse().ok()?;
-    let m: u32 = parts.next()?.parse().ok()?;
-    NaiveTime::from_hms_opt(h, m, 0)
-}
-
-/// Bedtime may wrap past midnight (e.g. 21:00 → 07:00).
-pub fn in_bedtime(bt: &Bedtime, now: NaiveTime) -> bool {
-    let (Some(start), Some(end)) = (parse_hm(&bt.start), parse_hm(&bt.end)) else {
-        return false;
-    };
-    if start <= end {
-        now >= start && now < end
-    } else {
-        now >= start || now < end
+    match v.reason? {
+        StopReason::Bedtime => Some(LockReason::Bedtime),
+        StopReason::OutsideHours => Some(LockReason::OutsideWindow),
+        StopReason::Limit => Some(LockReason::DailyLimit {
+            used_min: tracker.used_minutes(user),
+            limit_min: policy.screen_time.daily_limit_minutes + tracker.earned_minutes(user),
+        }),
+        StopReason::Paused => None,
     }
 }
 
-pub fn within_any_window(schedule: &[Window], weekday_sun0: u8, now: NaiveTime) -> bool {
-    schedule.iter().any(|w| {
-        if !w.days.contains(&weekday_sun0) {
-            return false;
-        }
-        match (parse_hm(&w.start), parse_hm(&w.end)) {
-            (Some(s), Some(e)) => now >= s && now < e,
-            _ => false,
-        }
-    })
-}
-
-/// Users currently active on a local seat (loginctl). Empty on headless/no-logind.
-///
-/// Accounting deliberately does NOT consult the session's `IdleHint`: logind lets
-/// a session's own owner set that hint (`SetIdleHint` on the session object), so
-/// a managed user could mark themselves "idle" while actively using the machine
-/// and never burn their daily budget. Screen time must not be gameable, so an
-/// active, local (non-remote) session counts regardless of the self-reported
-/// idle state.
-pub fn active_seat_users(exec: &Exec) -> Vec<String> {
-    let listing = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
-    // Bounded: a managed user can open sessions without sudo, and the old code
-    // spawned one `loginctl show-session` PER session every 10 s tick — a few
-    // hundred logins stalled the enforcement tick for everyone. One call for
-    // all of them, capped.
-    // Seated (local) sessions are inspected first so a flood of decoy SSH
-    // sessions can never push the real graphical seat past the cap.
-    const MAX_SESSIONS: usize = 64;
-    let mut rows: Vec<(&str, bool)> = listing
-        .lines()
-        .filter_map(|l| {
-            let c: Vec<&str> = l.split_whitespace().collect();
-            // columns: SESSION UID USER SEAT ...
-            c.first()
-                .map(|id| (*id, c.get(3).is_some_and(|s| *s != "-")))
-        })
-        .collect();
-    rows.sort_by_key(|(_, seated)| !*seated);
-    let sessions: Vec<&str> = rows.iter().map(|(id, _)| *id).take(MAX_SESSIONS).collect();
-    if sessions.is_empty() {
-        return Vec::new();
-    }
-    let mut args: Vec<&str> = vec!["show-session"];
-    args.extend(sessions.iter().copied());
-    args.extend(["-p", "Name", "-p", "Active", "-p", "Remote"]);
-    let state = exec.probe("loginctl", &args);
-    let mut users = Vec::new();
-    // One block per session, blank-line separated; keys in loginctl's order.
-    for block in state.split("\n\n") {
-        let (mut name, mut active, mut remote) = (None, false, false);
-        for line in block.lines() {
-            if let Some(v) = line.strip_prefix("Name=") {
-                name = Some(v.trim().to_string());
-            } else if let Some(v) = line.strip_prefix("Active=") {
-                active = v.trim() == "yes";
-            } else if let Some(v) = line.strip_prefix("Remote=") {
-                remote = v.trim() == "yes";
-            }
-        }
-        // A remote (SSH) session is that person using this computer just as
-        // much as a seat is — it used to be exempt, which made `ssh localhost`
-        // an unlimited-screen-time loophole. `Remote` is now informational.
-        let _ = remote;
-        if let Some(user) = name {
-            if active && !user.is_empty() && !users.contains(&user) {
-                users.push(user);
-            }
-        }
-    }
-    users
+/// Evaluate whether `user` should be locked at trusted local time `now`.
+pub fn evaluate<Tz: TimeZone>(
+    policy: &Policy,
+    tracker: &UsageTracker,
+    user: &str,
+    now: &DateTime<Tz>,
+) -> Option<LockReason> {
+    let v = verdict(policy, tracker, user, now, false);
+    lock_reason(&v, tracker, user, policy)
 }
 
 /// What the kernel says about a user's freezer right now: `Some(true)` if
@@ -390,99 +420,284 @@ pub fn freeze_user(exec: &Exec, username: &str, frozen: bool, hard: bool) -> Res
         Err(_) => Ok(()),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::ScreenTime;
+    use crate::clock::Reading;
+    use crate::policy::{Bedtime, ScreenTime};
+    use chrono::FixedOffset;
+    use std::time::Duration;
 
-    #[test]
-    fn bedtime_wraps_midnight() {
-        let bt = Bedtime {
-            start: "21:00".into(),
-            end: "07:00".into(),
-        };
-        assert!(in_bedtime(&bt, NaiveTime::from_hms_opt(23, 0, 0).unwrap()));
-        assert!(in_bedtime(&bt, NaiveTime::from_hms_opt(3, 0, 0).unwrap()));
-        assert!(!in_bedtime(&bt, NaiveTime::from_hms_opt(12, 0, 0).unwrap()));
+    fn tz() -> FixedOffset {
+        FixedOffset::east_opt(2 * 3600).unwrap()
     }
-
-    #[test]
-    fn daily_limit_locks_when_exhausted() {
-        let policy = Policy {
+    /// 2026-09-21 (a Monday) + `day` days, local `h:m`.
+    fn local(day: u32, h: u32, m: u32) -> DateTime<FixedOffset> {
+        tz().with_ymd_and_hms(2026, 9, 21 + day, h, m, 0).unwrap()
+    }
+    fn policy(limit: u32, bedtime: Option<(&str, &str)>) -> Policy {
+        Policy {
             screen_time: ScreenTime {
                 enabled: true,
-                daily_limit_minutes: 60,
+                daily_limit_minutes: limit,
+                bedtime: bedtime.map(|(s, e)| Bedtime {
+                    start: s.into(),
+                    end: e.into(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
-        };
-        let mut t = UsageTracker::new();
-        t.add_active("kid", 61 * 60, 1);
-        let r = evaluate(&policy, &t, "kid");
-        assert!(matches!(r, Some(LockReason::DailyLimit { .. })));
+        }
     }
+    fn reading(boot: Duration, wall: DateTime<FixedOffset>, synced: bool) -> Reading<'static> {
+        Reading {
+            boot_id: "boot-a",
+            boot,
+            wall: wall.with_timezone(&Utc),
+            ntp_synced: synced,
+        }
+    }
+    const H: Duration = Duration::from_secs(3600);
 
     #[test]
-    fn earned_time_extends_budget() {
-        let policy = Policy {
-            screen_time: ScreenTime {
-                enabled: true,
-                daily_limit_minutes: 60,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+    fn daily_limit_locks_when_exhausted_and_earned_time_extends_it() {
+        let p = policy(60, None);
         let mut t = UsageTracker::new();
+        t.roll_to(local(0, 12, 0).date_naive());
         t.add_active("kid", 61 * 60, 1);
+        let r = evaluate(&p, &t, "kid", &local(0, 12, 0));
+        assert!(matches!(
+            r,
+            Some(LockReason::DailyLimit {
+                used_min: 61,
+                limit_min: 60
+            })
+        ));
         t.add_earned("kid", 15);
-        assert!(evaluate(&policy, &t, "kid").is_none());
+        assert!(evaluate(&p, &t, "kid", &local(0, 12, 0)).is_none());
+        assert_eq!(t.remaining_minutes("kid", &p), Some(14));
     }
 
     #[test]
-    fn ledger_survives_a_restart() {
-        // A round-trip through disk must preserve the day's usage, so a restart
-        // (crash / self-update / watchdog kick) can't hand out a fresh budget.
+    fn bedtime_verdict_says_when_and_why() {
+        let p = policy(0, Some(("21:00", "07:00")));
+        let t = UsageTracker::new();
+        let v = verdict(&p, &t, "kid", &local(0, 20, 50), false);
+        assert!(v.allowed);
+        assert_eq!(v.reason, Some(StopReason::Bedtime));
+        assert_eq!(v.minutes_left, Some(10));
+        assert_eq!(
+            evaluate(&p, &t, "kid", &local(0, 23, 0)),
+            Some(LockReason::Bedtime)
+        );
+    }
+
+    #[test]
+    fn ledger_survives_a_restart_with_overrides_and_clock() {
         let dir =
             std::env::temp_dir().join(format!("openscreentime-ledger-{}", std::process::id()));
         let path = dir.join("usage_ledger.json");
         let mut t = UsageTracker::new();
+        let now = t.advance(&reading(H, local(0, 15, 0), true), &tz());
         t.add_active("kid", 40 * 60, 1);
+        assert_eq!(t.grant("cmd-1", "kid", 30, now), Grant::Applied);
         t.save_to(&path);
 
-        let reloaded = UsageTracker::load_from(&path);
-        assert_eq!(reloaded.used_minutes("kid"), 40);
+        let mut back = UsageTracker::load_from(&path);
+        assert_eq!(back.used_minutes("kid"), 40);
+        assert_eq!(back.earned_minutes("kid"), 30);
+        assert!(
+            back.override_until("kid", now).is_some(),
+            "a parent's grant survives a restart"
+        );
+        assert_eq!(back.grant("cmd-1", "kid", 30, now), Grant::Duplicate);
+        assert_eq!(back.clock, t.clock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn clock_set_back_does_not_reset_usage() {
-        // Simulate a full day's usage recorded for today, then a clock set back
-        // to yesterday. roll_day is forward-only, so the counters (and the
-        // reported minutes) must NOT reset — the set-back cheat is defused.
+    fn grants_are_idempotent_by_command_id() {
         let mut t = UsageTracker::new();
-        t.add_active("kid", 55 * 60, 1);
-        assert_eq!(t.used_minutes("kid"), 55);
-
-        // Pretend the clock jumped backward: the accounting day is now in the
-        // future relative to "today".
-        t.day = Some(Local::now().date_naive() + chrono::Duration::days(1));
-        t.add_active("kid", 60, 1); // a tick after the set-back
-                                    // Still counted against the same budget, never wiped.
-        assert!(t.used_minutes("kid") >= 55);
+        let now = local(0, 16, 0).with_timezone(&Utc);
+        t.roll_to(local(0, 16, 0).date_naive());
+        assert_eq!(t.grant("c1", "kid", 15, now), Grant::Applied);
+        // The ack was lost; the server redelivers the same command.
+        assert_eq!(t.grant("c1", "kid", 15, now), Grant::Duplicate);
+        assert_eq!(t.earned_minutes("kid"), 15);
+        // A second, distinct grant does add up.
+        assert_eq!(t.grant("c2", "kid", 15, now), Grant::Applied);
+        assert_eq!(t.earned_minutes("kid"), 30);
     }
 
     #[test]
-    fn new_day_forward_gives_fresh_budget() {
-        // The legitimate case: yesterday's totals must not bleed into today.
+    fn a_grant_beats_bedtime_for_its_minutes_then_expires() {
+        let p = policy(60, Some(("21:00", "07:00")));
         let mut t = UsageTracker::new();
-        t.day = Some(Local::now().date_naive() - chrono::Duration::days(1));
-        t.used_secs.insert("kid".into(), 60 * 60);
-        // Before any activity today, readers see 0 (stale yesterday ignored).
+        let now = local(0, 21, 30);
+        t.roll_to(now.date_naive());
+        assert_eq!(evaluate(&p, &t, "kid", &now), Some(LockReason::Bedtime));
+        t.grant("g", "kid", 15, now.with_timezone(&Utc));
+        let v = verdict(&p, &t, "kid", &now, false);
+        assert!(v.allowed && v.override_active);
+        assert_eq!(v.minutes_left, Some(15));
+        // 15 minutes later it has ended cleanly and bedtime holds again.
+        let later = local(0, 21, 45);
+        assert_eq!(evaluate(&p, &t, "kid", &later), Some(LockReason::Bedtime));
+        assert!(t.peek_override("kid", later.with_timezone(&Utc)).is_none());
+    }
+
+    #[test]
+    fn an_override_never_shortens_a_longer_one() {
+        let mut t = UsageTracker::new();
+        let now = local(0, 12, 0).with_timezone(&Utc);
+        t.set_override("kid", now + chrono::Duration::minutes(60));
+        t.set_override("kid", now + chrono::Duration::minutes(5));
+        assert_eq!(
+            t.peek_override("kid", now),
+            Some(now + chrono::Duration::minutes(60))
+        );
+    }
+
+    #[test]
+    fn the_limit_is_per_person_across_computers() {
+        let p = policy(60, None);
+        let mut t = UsageTracker::new();
+        let now = local(0, 17, 0);
+        t.roll_to(now.date_naive());
+        t.add_active("kid", 20 * 60, 1);
+        t.set_elsewhere(
+            "kid",
+            Elsewhere {
+                day: Some(now.date_naive()),
+                used_secs: 40 * 60,
+                ..Default::default()
+            },
+        );
+        // 20 here + 40 on the other laptop = the whole hour.
+        assert_eq!(t.used_minutes("kid"), 60);
+        assert!(matches!(
+            evaluate(&p, &t, "kid", &now),
+            Some(LockReason::DailyLimit { used_min: 60, .. })
+        ));
+        // Yesterday's "elsewhere" never applies to today.
+        let mut t2 = UsageTracker::new();
+        t2.roll_to(now.date_naive());
+        t2.set_elsewhere(
+            "kid",
+            Elsewhere {
+                day: Some(now.date_naive() - chrono::Days::new(1)),
+                used_secs: 60 * 60,
+                ..Default::default()
+            },
+        );
+        assert_eq!(t2.used_minutes("kid"), 0);
+        // And a new day drops it.
+        t.roll_to(now.date_naive() + chrono::Days::new(1));
         assert_eq!(t.used_minutes("kid"), 0);
-        // First active tick rolls the day and starts fresh: only the new time
-        // counts, yesterday's hour is gone.
-        t.add_active("kid", 2 * 60, 1);
-        assert_eq!(t.used_minutes("kid"), 2);
+    }
+
+    #[test]
+    fn own_grants_are_the_larger_of_device_and_server_never_the_sum() {
+        let mut t = UsageTracker::new();
+        let now = local(0, 17, 0);
+        t.roll_to(now.date_naive());
+        let here = |earned_here_secs| Elsewhere {
+            day: Some(now.date_naive()),
+            earned_here_secs,
+            ..Default::default()
+        };
+        // The server credited +15 before the command arrived.
+        t.set_elsewhere("kid", here(15 * 60));
+        assert_eq!(t.earned_minutes("kid"), 15);
+        // The command lands: still 15, not 30.
+        t.grant("c1", "kid", 15, now.with_timezone(&Utc));
+        assert_eq!(t.earned_minutes("kid"), 15);
+        // A device that lost its ledger still knows its grants.
+        let mut fresh = UsageTracker::new();
+        fresh.roll_to(now.date_naive());
+        fresh.set_elsewhere("kid", here(30 * 60));
+        assert_eq!(fresh.earned_minutes("kid"), 30);
+    }
+
+    #[test]
+    fn clock_set_back_does_not_reset_usage() {
+        let mut t = UsageTracker::new();
+        t.advance(&reading(H, local(1, 18, 0), true), &tz());
+        t.add_active("kid", 55 * 60, 1);
+        // Clock set back a day while the machine runs (unsynchronized now).
+        t.advance(
+            &reading(H + Duration::from_secs(60), local(0, 18, 1), false),
+            &tz(),
+        );
+        assert_eq!(t.day(), Some(local(1, 0, 0).date_naive()));
+        assert_eq!(t.used_minutes("kid"), 55);
+        // Even a SYNCED backward correction never un-rolls the day.
+        t.advance(
+            &reading(H + Duration::from_secs(120), local(0, 18, 2), true),
+            &tz(),
+        );
+        assert_eq!(t.used_minutes("kid"), 55);
+    }
+
+    #[test]
+    fn clock_set_forward_by_hand_does_not_mint_a_fresh_day() {
+        let p = policy(60, None);
+        let mut t = UsageTracker::new();
+        t.advance(&reading(H, local(0, 16, 0), true), &tz());
+        t.add_active("kid", 60 * 60, 1);
+        // Wi-Fi off, clock set to tomorrow 09:00 five minutes later.
+        let now = t.advance(
+            &reading(H + Duration::from_secs(300), local(1, 9, 0), false),
+            &tz(),
+        );
+        assert_eq!(t.day(), Some(local(0, 0, 0).date_naive()), "no roll");
+        assert_eq!(now, local(0, 16, 5).with_timezone(&Utc));
+        let now_local = now.with_timezone(&tz());
+        assert!(
+            evaluate(&p, &t, "kid", &now_local).is_some(),
+            "still out of time"
+        );
+        // Real midnight arrives (by boottime): the day rolls — fairly.
+        t.advance(&reading(H + 8 * H, local(1, 17, 0), false), &tz());
+        assert_eq!(t.day(), Some(local(1, 0, 0).date_naive()));
+        assert_eq!(t.used_minutes("kid"), 0);
+    }
+
+    #[test]
+    fn days_offline_roll_every_midnight_and_never_lock_the_morning() {
+        // No NTP, no server, the same boot for three days (or suspends —
+        // boottime includes them). Each real midnight gives a fresh budget.
+        let p = policy(60, None);
+        let mut t = UsageTracker::new();
+        t.advance(&reading(H, local(0, 20, 0), false), &tz());
+        t.add_active("kid", 60 * 60, 1);
+        for day in 1..=3u32 {
+            let boot = H + H * (24 * day - 12); // 08:00 on day `day`
+            let now = t.advance(&reading(boot, local(day, 8, 0), false), &tz());
+            assert_eq!(t.day(), Some(local(day, 0, 0).date_naive()), "day {day}");
+            let now_local = now.with_timezone(&tz());
+            assert!(
+                evaluate(&p, &t, "kid", &now_local).is_none(),
+                "day {day}: the morning starts with a full hour"
+            );
+            t.add_active("kid", 60 * 60, 1);
+        }
+    }
+
+    #[test]
+    fn a_reboot_the_next_morning_rolls_without_the_server() {
+        let mut t = UsageTracker::new();
+        t.advance(&reading(H, local(0, 21, 0), true), &tz());
+        t.add_active("kid", 30 * 60, 1);
+        // Powered off overnight; new boot, network down, clock honest.
+        let r = Reading {
+            boot_id: "boot-b",
+            boot: Duration::from_secs(30),
+            wall: local(1, 7, 30).with_timezone(&Utc),
+            ntp_synced: false,
+        };
+        t.advance(&r, &tz());
+        assert_eq!(t.day(), Some(local(1, 0, 0).date_naive()));
+        assert_eq!(t.used_minutes("kid"), 0);
     }
 }

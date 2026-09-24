@@ -50,33 +50,16 @@ struct Status {
     offline_hard_lockdown: bool,
     #[serde(default)]
     tamper_lockdown: bool,
-    /// When a parent's scheduled pause lands (RFC 3339), if one is coming.
-    #[serde(default)]
-    pause_at: Option<String>,
     #[serde(default)]
     users: Vec<UserStatus>,
     /// Normal (non-blocking) notifications published by the agent for the tray
     /// to deliver. Consumed by monotonic `id` so each shows exactly once.
     #[serde(default)]
     notifications: Vec<TrayNotification>,
-    /// Web sign-in prompts addressed to this user (client-first login,
-    /// CONTRACT-0.6): the tray shows an actionable notification and drops the
-    /// answer as a decision file the root agent consumes.
+    /// Sign-in / confirm codes for this user (logincode.rs): one desktop
+    /// notification each, shared with the app window so it rings once.
     #[serde(default)]
-    login_requests: Vec<LoginRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-struct LoginRequest {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    username: String,
-    /// Three numbers; the human taps the one shown in their browser.
-    #[serde(default)]
-    codes: Vec<String>,
-    #[serde(default)]
-    expires_at: String,
+    login_codes: Vec<crate::logincode::LoginCode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -336,55 +319,6 @@ fn request_more_time() {
     );
 }
 
-/// Show one actionable sign-in prompt and translate the human's click into a
-/// decision file in this user's own runtime dir (the same spoof-proof channel
-/// as the earn marker). Dismissing the notification decides nothing — the
-/// prompt simply expires server-side; only an explicit "Block" denies.
-///
-/// Runs on its own thread: `wait_for_action` blocks until the user clicks or
-/// the notification closes, and the tray loop must keep polling meanwhile.
-fn prompt_login(req: LoginRequest) {
-    std::thread::spawn(move || {
-        let decide = |verdict: &str| {
-            let uid = users::get_current_uid();
-            let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
-            if std::fs::create_dir_all(&dir).is_err() {
-                return;
-            }
-            let _ = std::fs::write(dir.join(format!("login_decision_{}", req.id)), verdict);
-        };
-        // Number-matching: the browser shows one of these three; the human taps
-        // the match. Tapping the wrong one (or Not me) is a deny server-side.
-        let mut n = notify_rust::Notification::new();
-        n.appname("OpenScreenTime")
-            .summary("Sign-in request")
-            .body(&format!(
-                "{} is signing in on the web. If it's you, tap the number shown in your browser.",
-                req.username
-            ))
-            .icon("security-high")
-            .urgency(notify_rust::Urgency::Critical)
-            .timeout(notify_rust::Timeout::Milliseconds(150_000));
-        for c in req.codes.iter().take(3) {
-            n.action(c, c);
-        }
-        n.action("deny", "Not me");
-        match n.show() {
-            Ok(handle) => handle.wait_for_action(|action| {
-                // The action key IS the tapped number (or "deny"). Forward it
-                // verbatim; the server matches it to the real code.
-                if action == "deny" {
-                    decide("deny");
-                } else if action.chars().all(|c| c.is_ascii_digit()) && !action.is_empty() {
-                    decide(action);
-                }
-                // "__closed"/anything else: no decision — let it expire.
-            }),
-            Err(e) => tracing::debug!("sign-in prompt failed to show: {e}"),
-        }
-    });
-}
-
 fn notify(summary: &str, body: &str, critical: bool) {
     let mut n = notify_rust::Notification::new();
     n.appname("OpenScreenTime")
@@ -442,10 +376,11 @@ fn parse_at(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
         .map(|t| t.with_timezone(&chrono::Local))
 }
 
-/// The stop coming up for this user, from whatever the snapshot publishes:
-/// an armed countdown, else the next stop (`stop_at` + `reason`), else the
-/// daily limit's minutes — and a parent's scheduled pause, whichever is first.
-/// `None` while they are stopped, or unmanaged.
+/// The stop coming up for this user, from what the snapshot publishes: an
+/// armed save-your-work countdown, else the rules' next stop (`stop_at` +
+/// `reason`, a parent's scheduled pause included), else — from an agent that
+/// predates those fields — the daily limit's minutes. `None` while they are
+/// stopped, or unmanaged.
 fn next_stop(
     status: &Status,
     username: &str,
@@ -458,26 +393,18 @@ fn next_stop(
     let reason = me
         .reason
         .as_deref()
-        .and_then(StopReason::parse)
+        .and_then(warn::parse_reason)
         .unwrap_or(StopReason::Limit);
-    let mine = if let Some(s) = me.freeze_in_secs {
-        Some((reason, now + chrono::Duration::seconds(s as i64)))
+    let (reason, at) = if let Some(s) = me.freeze_in_secs {
+        (reason, now + chrono::Duration::seconds(s as i64))
     } else if let Some(at) = me.stop_at.as_deref().and_then(parse_at) {
-        Some((reason, at))
+        (reason, at)
+    } else if me.reason.is_none() {
+        let m = me.remaining_minutes.filter(|m| *m > 0)?;
+        (StopReason::Limit, now + chrono::Duration::minutes(m))
     } else {
-        me.remaining_minutes
-            .filter(|m| *m > 0)
-            .map(|m| (StopReason::Limit, now + chrono::Duration::minutes(m)))
+        return None;
     };
-    let pause = status
-        .pause_at
-        .as_deref()
-        .and_then(parse_at)
-        .map(|at| (StopReason::Pause, at));
-    let (reason, at) = [mine, pause]
-        .into_iter()
-        .flatten()
-        .min_by_key(|(_, at)| *at)?;
     Some((reason, (at - now).num_seconds(), at))
 }
 
@@ -512,7 +439,7 @@ impl Warner {
         if due.is_none() {
             return;
         }
-        let ask = reason != StopReason::Pause;
+        let ask = reason != StopReason::Paused;
         match show_warning(&w, ask) {
             Some(h) if w.critical => {
                 self.shown_title = w.title;
@@ -791,12 +718,6 @@ pub fn run() -> Result<()> {
     #[cfg(feature = "gui")]
     maybe_show_intro();
 
-    // Sign-in prompts already shown, so each is asked exactly once.
-    let mut prompted_logins: std::collections::HashSet<String> = prev
-        .as_ref()
-        .map(|s| s.login_requests.iter().map(|r| r.id.clone()).collect())
-        .unwrap_or_default();
-
     let mut warner = Warner::default();
     loop {
         if let Some(n) = &prev {
@@ -814,14 +735,12 @@ pub fn run() -> Result<()> {
             // before "You're back" arrives.
             warner.observe(next_stop(n, &username, chrono::Local::now()));
             last_notif_id = deliver_notifications(&username, n, last_notif_id);
-            for req in &n.login_requests {
-                if prompted_logins.insert(req.id.clone()) {
-                    prompt_login(req.clone());
+            let now = chrono::Utc::now();
+            for c in n.login_codes.iter().filter(|c| c.is_live(now)) {
+                if crate::logincode::first_sighting(c) {
+                    crate::logincode::notify(c);
                 }
             }
-            // Forget prompts the agent no longer lists, so a later re-ask
-            // (same person, new request id) prompts again.
-            prompted_logins.retain(|id| n.login_requests.iter().any(|r| &r.id == id));
         }
         if prev != next {
             let for_tray = next.clone();
@@ -903,12 +822,17 @@ mod tests {
         // Only the old field: the daily limit's minutes.
         let s = status(r#"{"users":[{"name":"mia","remaining_minutes":12}]}"#);
         assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Limit);
-        // An armed countdown wins; a sooner pause wins over everything.
-        let pause = (now + chrono::Duration::seconds(30)).to_rfc3339();
+        // A parent's pause with a window is published as the next stop.
         let s = status(&format!(
-            r#"{{"pause_at":"{pause}","users":[{{"name":"mia","remaining_minutes":12,"freeze_in_secs":50}}]}}"#
+            r#"{{"users":[{{"name":"mia","remaining_minutes":12,"stop_at":"{at}","reason":"paused"}}]}}"#
         ));
-        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Pause);
+        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Paused);
+        // An armed countdown wins over the published stop.
+        let s = status(&format!(
+            r#"{{"users":[{{"name":"mia","stop_at":"{at}","reason":"limit","freeze_in_secs":50}}]}}"#
+        ));
+        let (_, secs, _) = next_stop(&s, "mia", now).unwrap();
+        assert!((49..=50).contains(&secs));
         // Stopped, or not managed here: nothing to warn about.
         let s = status(r#"{"users":[{"name":"mia","remaining_minutes":0,"frozen":true}]}"#);
         assert!(next_stop(&s, "mia", now).is_none());

@@ -166,6 +166,29 @@ pub async fn create_request(
 // Admin side
 // ---------------------------------------------------------------------------
 
+/// Add granted minutes to a login's ledger row for `day` (the device-local
+/// day the agent will credit them to).
+async fn credit_ledger(
+    db: &sqlx::PgPool,
+    device_user_id: Uuid,
+    day: chrono::NaiveDate,
+    minutes: i32,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (device_user_id, day)
+         DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
+                       + EXCLUDED.earned_seconds",
+    )
+    .bind(device_user_id)
+    .bind(day)
+    .bind(minutes * 60)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct CreditTimeReq {
     pub minutes: i32,
@@ -201,24 +224,18 @@ pub async fn credit_time(
     let (device_id, os_username) =
         owner.ok_or_else(|| AppError::NotFound("device user not found".into()))?;
 
-    // Credit the ledger for today (upsert on (device_user_id, day)).
-    sqlx::query(
-        "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
-         VALUES ($1, CURRENT_DATE, $2)
-         ON CONFLICT (device_user_id, day)
-         DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
-                       + EXCLUDED.earned_seconds",
-    )
-    .bind(device_user_id)
-    .bind(req.minutes * 60)
-    .execute(&st.db)
-    .await?;
+    // Credit the ledger for the device's own today (upsert on
+    // (device_user_id, day)); the command carries that day so a device that
+    // only hears about it tomorrow doesn't credit the wrong day.
+    let day = crate::ledger::device_local_day(&st.db, device_id).await?;
+    credit_ledger(&st.db, device_user_id, day, req.minutes).await?;
 
     enqueue_command(
         &st,
         device_id,
         "credit_time",
-        json!({ "os_username": os_username, "minutes": req.minutes, "request_id": null }),
+        json!({ "os_username": os_username, "minutes": req.minutes, "request_id": null,
+                "day": day }),
     )
     .await?;
 
@@ -338,18 +355,9 @@ pub async fn decide(
     };
 
     if approve {
-        // Credit the ledger for today (upsert on (device_user_id, day)).
-        sqlx::query(
-            "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
-             VALUES ($1, CURRENT_DATE, $2)
-             ON CONFLICT (device_user_id, day)
-             DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
-                           + EXCLUDED.earned_seconds",
-        )
-        .bind(device_user_id)
-        .bind(minutes * 60)
-        .execute(&st.db)
-        .await?;
+        // Credit the ledger for the device's own today (see `credit_time`).
+        let day = crate::ledger::device_local_day(&st.db, device_id).await?;
+        credit_ledger(&st.db, device_user_id, day, minutes).await?;
 
         let os_username: String =
             sqlx::query_scalar("SELECT os_username FROM device_users WHERE id = $1")
@@ -360,7 +368,8 @@ pub async fn decide(
             &st,
             device_id,
             "credit_time",
-            json!({ "os_username": os_username, "minutes": minutes, "request_id": id }),
+            json!({ "os_username": os_username, "minutes": minutes, "request_id": id,
+                    "day": day }),
         )
         .await?;
     } else {

@@ -185,6 +185,8 @@ export interface DeviceUser {
   earned_minutes_today?: number;
   /** present in mock data only; the server does not return it */
   created_at?: string;
+  /** The person this login belongs to. */
+  account_id?: string | null;
 }
 
 /** One row of a device's command queue (GET /api/devices/:id/commands). */
@@ -226,6 +228,8 @@ export interface Device {
   pending_commands?: string[];
   /** one-time recovery codes not yet used (0 when none were generated) */
   recovery_codes_unused?: number;
+  /** "This is <person>'s computer" — whose it was set up for. */
+  owner_account_id?: string | null;
 }
 
 // ---- Family (GET /api/family) ----------------------------------------------
@@ -264,6 +268,11 @@ export interface FamilyChild {
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
   limit_minutes: number | null;
+  /** the day's budget left, computed by the server exactly as the device
+   *  does (per person, across all their computers, on the device's own day) */
+  left_minutes?: number | null;
+  /** when screens stop by the rules — limit, bedtime or window end */
+  rules?: RulesVerdict | null;
   /** the person's own daily goal (minutes), or null */
   goal_minutes?: number | null;
   profile_id: string | null;
@@ -480,12 +489,31 @@ export type MemberPatch = Partial<{
   avatar: string;
 }>;
 
+/** Why screens stop (the agent's `reason`, policy::rules::StopReason). */
+export type StopReason = "limit" | "bedtime" | "outside_hours" | "paused";
+
+/** When screens stop by the rules — the same rules function the device
+ *  enforces with, on the device's clock. A code typed at the device (a local
+ *  override) isn't known to the server, so this is "by the rules". */
+export interface RulesVerdict {
+  allowed: boolean;
+  /** why they are stopped now (allowed = false) or why the next stop comes */
+  reason: StopReason | null;
+  /** minutes until the next stop, whichever comes first; null = none ahead */
+  minutes_left: number | null;
+  /** RFC 3339 */
+  stop_at: string | null;
+  /** when a current stop lifts on its own (bedtime ends, window opens…) */
+  resume_at: string | null;
+}
+
 /** GET /api/me/today — the person's own day, for their own page. */
 export interface MeToday {
   used_minutes: number;
   earned_minutes: number;
   limit_minutes: number | null;
   left_minutes: number | null;
+  rules?: RulesVerdict;
   locked: boolean;
   devices: { name: string; status: DeviceStatus; locked: boolean }[];
   blocks: AppBlocks;
@@ -574,20 +602,30 @@ export interface Me {
   tenant: Tenant;
 }
 
-// ---- Two-factor / step-up ("reading is free, changing needs a factor") -----
+// ---- Confirm it's you (the sensitive corner, docs/AUTH.md) -----------------
 
-export type SecondFactorMethod = "totp" | "telegram";
-
-/** Error code the server returns from a mutation with no valid step-up grant. */
+/** Error code the server returns from a sensitive route while the session's
+ * confirm window is shut. */
 export const STEP_UP_REQUIRED = "step_up_required";
 
-export interface TwoFactorStatus {
-  /** An authenticator-app secret is enrolled and confirmed. */
-  totp_enrolled: boolean;
-  /** @deprecated email step-up retired; kept optional during transition. */
-  email_available?: boolean;
-  /** A Telegram chat is paired — one tap on the phone is a factor. */
-  telegram_available?: boolean;
+/** GET /api/auth/confirm — is the window open, and how can this account open it. */
+export interface ConfirmStatus {
+  armed_until: string | null;
+  /** The account has a passkey. */
+  passkey: boolean;
+  /** One of the account's own computers is online to show a code. */
+  computer: boolean;
+}
+
+/** A passed confirm: the window is open until `armed_until`. */
+export interface ConfirmGrant {
+  armed_until: string;
+}
+
+/** A code on its way to a computer (sign-in or confirm). */
+export interface CodeRequest {
+  request_id: string;
+  expires_in_secs: number;
 }
 
 /** Pairing state of the account's Telegram companion. */
@@ -607,28 +645,6 @@ export interface TelegramPairing {
   bot: string | null;
   deep_link: string | null;
   expires_in_minutes: number;
-}
-
-/** Returned by TOTP enrollment start — the secret is shown exactly once. */
-export interface TotpEnrollment {
-  /** base32 secret for manual entry. */
-  secret: string;
-  /** otpauth://totp/… — render as a QR for scanning into the app. */
-  otpauth_uri: string;
-}
-
-/** A successful step-up: change mode is on until `expires_at`. */
-export interface StepUpGrant {
-  method: SecondFactorMethod;
-  expires_at: string;
-  /** the one allowed extension has been used */
-  extended: boolean;
-}
-
-/** GET /api/auth/stepup — is change mode on for this session, and until when. */
-export interface ChangeModeStatus {
-  armed_until: string | null;
-  extended: boolean;
 }
 
 // ---- Command / action responses --------------------------------------------
@@ -672,8 +688,10 @@ export interface EarnRequest {
 export interface AuthConfig {
   oidc: boolean;
   oidc_name: string;
-  /** No account exists yet → the entry page shows first-run registration. */
+  /** No account exists yet → the entry page shows "Create your household". */
   needs_setup: boolean;
+  /** …and it needs the one-time setup code (normally in the #setup= link). */
+  setup_code_required: boolean;
 }
 
 // ---- API error -------------------------------------------------------------
