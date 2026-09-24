@@ -2,57 +2,59 @@
 # Runs INSIDE the test VM (as root, via `vm.sh seat`). Gives the managed child
 # `mia` a real graphical local seat and accelerates the agent's clock.
 #
-#   * a systemd service starts Weston as mia on tty1 with PAMName=login, so
-#     logind opens a real seat0 session (Active=yes, Remote=no) — which is both
-#     what the agent counts as screen time AND where the lockout overlay looks
-#     for a Wayland socket (/run/user/1000/wayland-0);
-#   * seatd handles the seat/VT (logind's handoff to an autologin compositor is
-#     flaky under QEMU), and Weston uses the CPU (pixman) renderer because the
-#     GL/GBM path hangs on the emulated GPU;
-#   * a drop-in runs the agent with --time-accel so the daily budget is reachable
-#     in seconds.
+#   * a systemd service starts Weston as mia on tty1 with PAMName=login and
+#     TTYPath=/dev/tty1, so logind registers a real seat0 session on VT 1
+#     (Class=user, Active=yes) — what the agent counts as screen time, and
+#     what the lock needs to know who is on screen and which VT to return to;
+#   * Weston talks to logind for the seat (as on a real desktop), and uses the
+#     CPU (pixman) renderer because the GL/GBM path hangs on the emulated GPU;
+#   * cage is installed for the lock screen;
+#   * a drop-in runs the agent with --time-accel so the daily budget is
+#     reachable in seconds.
 #
 # Arg 1: time-accel factor (default 60 → 1 real second = 1 simulated minute).
 set -euo pipefail
 accel="${1:-60}"
 
-# Deterministic seat management via seatd; mia needs seat + video group access.
-systemctl enable --now seatd 2>/dev/null || true
-usermod -aG seat,video mia 2>/dev/null || true
+# What a fresh overlay lacks: the desktop (Weston, software GL) and cage, the
+# lock screen's compositor. Best-effort; an image that already has them just
+# moves on.
+pacman -Sy --noconfirm --needed weston mesa cage >/dev/null 2>&1 || true
+usermod -aG video mia 2>/dev/null || true
+# An earlier harness drove the seat with seatd; logind owns it now.
+systemctl disable --now seatd 2>/dev/null || true
 
-# Guarantee mia's XDG_RUNTIME_DIR (/run/user/1000) exists and her user manager
-# is running — without it Weston has nowhere to bind its Wayland socket and just
-# blocks. Linger creates it independently of the login PAM stack.
+# Guarantee mia's user manager is running (the lock test drives her companion
+# through it).
 loginctl enable-linger mia
 for _ in $(seq 1 10); do [ -d /run/user/1000 ] && break; sleep 1; done
 
 # tty1 belongs to Weston now — stop the getty that would fight it for the VT,
-# and drop any leftover autologin/​profile hacks from earlier attempts.
+# and drop any leftover autologin/profile hacks from earlier attempts.
 systemctl disable --now getty@tty1.service 2>/dev/null || true
 rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
 rm -f /home/mia/.bash_profile /tmp/profile-ran
 pkill -9 weston 2>/dev/null || true
 
-# Weston as a login session. PAMName=login makes logind register the seat0
-# session (so the agent counts mia's time and the overlay finds her runtime
-# dir); seatd owns the VT. Do NOT bind a controlling tty here — TTYPath/
-# StandardInput=tty stalls Weston before it can exec under QEMU. seatd handles
-# the VT switch itself. pixman = CPU renderer (GL/GBM hangs on the emulated GPU).
 cat >/etc/systemd/system/mia-weston.service <<'UNIT'
 [Unit]
-Description=Weston (managed child mia) — test VM desktop
-After=seatd.service systemd-user-sessions.service
-Wants=seatd.service
+Description=Weston (managed child mia) — test VM desktop, a real logind seat session
+After=systemd-user-sessions.service systemd-logind.service getty@tty1.service
+Conflicts=getty@tty1.service
 
 [Service]
 User=mia
 PAMName=login
-StandardInput=null
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
 StandardOutput=journal
 StandardError=journal
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=XDG_SEAT=seat0
-Environment=LIBSEAT_BACKEND=seatd
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+Environment=LIBSEAT_BACKEND=logind
 ExecStart=/usr/bin/weston --renderer=pixman --idle-time=0
 Restart=on-failure
 RestartSec=2
@@ -74,18 +76,17 @@ systemctl restart openscreentime-agent.service
 systemctl enable mia-weston.service >/dev/null 2>&1 || true
 systemctl restart mia-weston.service
 
-# Give Weston a moment to bind its socket.
+# Give Weston a moment to come up.
 for _ in $(seq 1 15); do
-    [ -e /run/user/1000/wayland-0 ] && break
+    loginctl list-sessions --no-legend | awk '$3=="mia" && $4=="seat0"' | grep -q . && break
     sleep 1
 done
 
 echo -n 'mia local seat: '
-loginctl list-sessions --no-legend | awk '$3=="mia" && $4=="seat0" {print "session "$1" on "$4}'
-if ls /run/user/1000/wayland-* >/dev/null 2>&1; then
-    echo "wayland socket: $(ls /run/user/1000/wayland-* 2>/dev/null | tr '\n' ' ')"
+loginctl list-sessions --no-legend | awk '$3=="mia" && $4=="seat0" {print "session "$1" on "$4" "$7}'
+if systemctl is-active --quiet mia-weston.service; then
     echo "weston: up"
 else
-    echo "wayland socket: NOT up — recent weston journal:"
+    echo "weston: NOT up — recent journal:"
     journalctl -u mia-weston.service --no-pager -n 12 | sed 's/^/    /'
 fi

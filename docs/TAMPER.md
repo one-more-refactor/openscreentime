@@ -92,10 +92,14 @@ Deterrence must never become a hostage situation. At every level:
 
 - **Parent code** (a per-device authenticator secret — TOTP, verified offline, single-use,
   with a wrong-attempt lockout; the old recovery PIN remains only as the *backup code*, argon2-
-  hashed and reported when used): typed into the lockout overlay (grants 30 minutes), dropped
-  via the root-only file `/run/openscreentime/unlock_pin.<user>`, used with the `ost unlock`
-  CLI, or typed at `sudo` on the managed machine (PAM). Verification **fails closed** — no secret
-  and no backup hash configured means no unlock. See `AGENT.md` → Parent code.
+  hashed and reported when used): typed at the lock screen (grants 30 minutes; the agent
+  checks it, the lock holds nothing), used with the `ost unlock` CLI, or typed at `sudo` on the
+  managed machine (PAM). Verification **fails closed** — no secret and no backup hash configured
+  means no unlock. See `AGENT.md` → Unlock code.
+- **The lock never bricks the keyboard.** It runs in its own session on its own VT (cage as
+  `ost-lock`, or the agent's text lock), so the code can always be typed even though the whole
+  frozen session — compositor included — is suspended. Agent restarts don't take it down; if
+  no lock can be shown, nobody is frozen behind a blank screen. See `AGENT.md` → The lock.
 - **`ost-admin`**: a local account by this name is exempt from every polkit denial
   (power controls, and the level-3 unit-stop mask).
 - Root can always stop the agent (`systemctl stop` at level 1; at level 3 root remains
@@ -141,9 +145,9 @@ Claims you might expect from this category of product that we deliberately do no
   `nft -f` transaction — a malformed rule can't leave the box with *no* table) and rebuilt
   on drift.
 - **Screen time:** per-user session accounting from logind (seat-active sessions only; idle
-  sessions — `IdleHint=yes` — don't burn budget). At zero balance: warnings beforehand, a
-  60-second save-your-work grace, then the user's processes are frozen via the cgroup v2
-  freezer. Screen-time freezes never fall back to killing the session; only an explicit
+  sessions — `IdleHint=yes` — don't burn budget). Every stop is announced at 15, 5 and 1
+  minute; a stop nobody saw coming gets a 60-second save-your-work countdown; then the lock
+  goes up on its own VT and the user's processes are frozen via the cgroup v2 freezer. Screen-time freezes never fall back to killing the session; only an explicit
   admin lock may terminate as a last resort.
 
 ## Remote shell — removed

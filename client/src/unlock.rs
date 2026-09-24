@@ -3,9 +3,10 @@
 //! shows, a one-time recovery code, or a profile backup code — fully offline
 //! against the cached bundle, see `parentcode`) and,
 //! on success, suspends network enforcement for a configurable window: tears
-//! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`, and
-//! un-freezes every login user. Requires root (same check every other
-//! enforcing subcommand uses).
+//! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`,
+//! un-freezes every login user and takes down the lock screen (thaw first,
+//! then back to their session, then the lock). Requires root (same check every
+//! other enforcing subcommand uses).
 //!
 //! Minimal-but-real auto-resume: spawns a detached copy of this binary running
 //! the hidden `__resume-enforcement` helper (see `main.rs`), which sleeps for
@@ -135,8 +136,13 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
         }
     }
 
+    // 4) The lock screen, after the thaw: back to the person's session, then
+    //    stop the lock. Works with the agent dead — it reads what the agent
+    //    recorded. (A live agent sees the recovery marker and agrees.)
+    crate::lock::teardown_recorded(exec, crate::runner::recorded_lock());
+
     tracing::info!(
-        "enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen"
+        "enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen, lock down"
     );
     Ok(())
 }

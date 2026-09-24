@@ -59,3 +59,7 @@ tray = ["dep:ksni", "dep:notify-rust"]
 opt-level = "z"
 lto = true
 strip = true
+
+[dev-dependencies]
+# Paused-clock tests of the lock's timeouts (tokio::time::pause).
+tokio = { version = "1", features = ["test-util"] }
