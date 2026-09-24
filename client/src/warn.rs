@@ -96,7 +96,7 @@ pub fn words(reason: StopReason, secs_left: i64, at: Option<DateTime<Local>>) ->
         .map(|t| t.format("%H:%M").to_string())
         .unwrap_or_else(|| "soon".into());
     let body = match reason {
-        StopReason::Limit => format!("Today's screen time ends at {when}."),
+        StopReason::Limit => format!("Your time for today ends at {when}."),
         StopReason::Bedtime => format!("Bedtime starts at {when}."),
         StopReason::OutsideHours => format!("Allowed hours end at {when}."),
         StopReason::Paused => format!("A parent is pausing this computer at {when}."),
@@ -105,6 +105,18 @@ pub fn words(reason: StopReason, secs_left: i64, at: Option<DateTime<Local>>) ->
         title,
         body,
         critical: mins <= 1,
+    }
+}
+
+/// "Screens come back …" — the same moment for the end of a sentence:
+/// "at 07:00", "tomorrow" (at midnight), "tomorrow at 07:00", "Monday at 07:00".
+pub fn back_words(at: DateTime<Local>, now: DateTime<Local>) -> String {
+    let t = at.format("%H:%M").to_string();
+    match (at.date_naive() - now.date_naive()).num_days() {
+        d if d <= 0 => format!("at {t}"),
+        1 if t == "00:00" => "tomorrow".to_string(),
+        1 => format!("tomorrow at {t}"),
+        _ => format!("{} at {t}", at.format("%A")),
     }
 }
 
@@ -189,5 +201,14 @@ mod tests {
         );
         let monday = at(7, 0) + chrono::Duration::days(5);
         assert_eq!(until_words(monday, now), "Monday at 07:00");
+        assert_eq!(back_words(at(23, 30), now), "at 23:30");
+        assert_eq!(
+            back_words(at(0, 0) + chrono::Duration::days(1), now),
+            "tomorrow"
+        );
+        assert_eq!(
+            back_words(at(7, 0) + chrono::Duration::days(1), now),
+            "tomorrow at 07:00"
+        );
     }
 }

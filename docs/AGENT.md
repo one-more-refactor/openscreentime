@@ -5,14 +5,14 @@ machine: what it installs, what it writes to disk, how it enforces policy,
 and how to debug it. For the server-side deploy, see `docs/DEPLOY.md`; for
 the tamper threat model, see `docs/TAMPER.md`.
 
-The agent is a single static binary. The build the server ships (and that
-`install.sh` downloads) is **headless x86_64** — no GUI, no tray. Where a
-capability requires `--features gui` or `--features tray`, this doc says so
-explicitly.
+The agent is a single binary in two builds the server ships: **headless**
+(x86_64, musl-static — no GUI, no tray) and **desktop** (x86_64 glibc,
+`--features gui,tray`); `install.sh` picks one. Where a capability requires
+`gui` or `tray`, this doc says so explicitly.
 
 ## Install & enroll
 
-### One-liner (headless, x86_64 — what the server serves)
+### One-liner (x86_64 — what the server serves)
 
 ```sh
 curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
@@ -30,8 +30,10 @@ curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token
 1. Validates args: requires `--server https://HOST` and a token
    (`OST_TOKEN` env or `--token`); refuses plain `http://` unless
    `--insecure-http` is passed (dev only); requires root and `x86_64`.
-2. `GET {server}/api/agent/latest`, parses out the artifact whose
-   `"features"` is `"headless"` (sed, not jq — the target may not have jq).
+2. `GET {server}/api/agent/latest`, parses out the artifact to install
+   (sed, not jq — the target may not have jq): `"desktop"` where a graphical
+   session exists, else `"headless"`; `--desktop` / `--headless` force it,
+   and an older server without a desktop build gets headless.
 3. Downloads the binary to a temp file **in the same directory as the final
    target** (`/usr/local/bin/.openscreentime.download.$$`) so the final `mv`
    is an atomic rename on the same filesystem — a crash mid-download can
@@ -48,8 +50,10 @@ either way.
 
 ### Manual build from source (required for `gui` / `tray`)
 
-The shipped binary is headless-only, so a desktop machine that wants the
-full-screen lockout GUI or the tray companion must be built locally:
+The server ships two builds: **headless** (musl-static, any x86_64 Linux)
+and **desktop** (glibc, `--features gui,tray` — the graphical lock, the app
+window, the companion). `install.sh` picks desktop where it finds a graphical
+session (`--desktop` / `--headless` force it). To build one yourself:
 
 ```sh
 cd client
@@ -65,8 +69,8 @@ globally and adds an XDG autostart entry, and on a `gui` build it sets up the lo
 screen (`ost-lock`, `openscreentime-lock@.service`, cage) — see
 [systemd units](#systemd-units).
 
-Self-update (below) refuses to touch a `gui`/`tray` build — it only ever
-manages the plain headless binary the server ships.
+Self-update (below) keeps a build on its own variant: a desktop build only
+ever installs the desktop artifact, a headless one the headless artifact.
 
 ## CLI reference
 
@@ -99,10 +103,9 @@ Some subcommands are intentionally hidden — not in `--help`, not real
 
 | Hidden subcommand | Who spawns it | Purpose |
 |---|---|---|
-| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`. Fails if cage is missing — the agent then draws the text lock. |
-| `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" over `/run/openscreentime/lock.sock`; holds no secret. |
+| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock. |
+| `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" / "snooze" over `/run/openscreentime/lock.sock`; holds no secret. |
 | `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
-| `__intro` | The tray, detached, on first run (`gui`+`tray` build) | Shows the skippable first-run child intro cards, then writes `intro_seen` so it never shows again. Fails with an error if the binary wasn't built `--features gui`. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
 
 ### Machine-readable output
@@ -192,7 +195,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | Path | Owner : mode | Written by | Purpose |
 |---|---|---|---|
 | `/usr/local/bin/openscreentime` | root : 0755 | `install.sh` / `install-service` / self-update | The managed binary. `ExecStart` target for the systemd unit. |
-| `/usr/local/bin/openscreentime.bak` | root : 0755 | self-update | Copy of the previous binary, kept for manual rollback after every self-update. |
+| `/usr/local/bin/openscreentime.bak` | root : 0755 | self-update | The previous binary. The watchdog puts it back automatically if a new build crash-loops or stops ticking before it confirms itself. |
 | `/usr/local/bin/.openscreentime.new` | root : 0755 | self-update (transient) | Staging path for a downloaded update; renamed over the install path once verified. |
 | `/usr/local/bin/.openscreentime.download.$$` | root : — | `install.sh` (transient) | Staging path for the initial download; renamed atomically into place, cleaned up by a trap on any exit. |
 | `/etc/openscreentime/agent.toml` | root : **0600** | `enroll` | Persisted identity: `server_url`, `device_id`, `device_token`, `poll_interval_secs`, `tamper_level`, `auto_update`. See [Config fields](#config-fields). |
@@ -216,8 +219,9 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time` / `unlock` / `ost unlock`; atomic rename via `.tmp`) | The day's ledger: per-user used and earned seconds on this device, the person's use elsewhere as last reported by the server (tagged with its day), **parent overrides** (user → end, trusted UTC), applied grant command ids (idempotency), and the **trusted-clock anchor** (boot id, boottime, wall). Reloaded on startup so a restart resumes today's usage and keeps a parent's override. The day boundary is forward-only and follows the trusted clock (see [Screen time](#screen-time)). |
 | `/var/lib/openscreentime/local_recovery` | root : default | `ost unlock` / `ost recover` | `"<unix secs> <minutes>"` — a parent recovered the device at the machine. The live agent clears every device-level lock once per marker and, when `minutes > 0`, holds the screen-time rules off for everyone on the machine for that long. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
-| `~/.config/openscreentime/intro_seen` | the desktop user : default | `__intro` (writes) / `tray` (checks) | Marker that the first-run child intro has been shown. Present = don't show it again. |
-| `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
+| `~/.config/openscreentime/intro_seen` | the desktop user : default | `app` (writes, on Done/Skip) / `tray` + `app` (check) | The first-run cards (shown inside the app window) have been seen. Absent = the companion opens the window once. |
+| `/run/user/<uid>/openscreentime/app.lock`, `app.sock` | the desktop user | `app` | One window per person: the first holds the lock; a second `ost app` rings the socket (the first comes forward) and exits. |
+| `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` or the `app` ("Ask for more time"); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
 
 ### Config fields
 
@@ -273,9 +277,9 @@ additive; `default = []`.
 
 | Feature | Adds | What you get |
 |---|---|---|
-| *(none — headless, what the server ships)* | — | Full enforcement (DNS, firewall, screen time, tamper hardening, self-update). The lock is the text lock on its own VT. No `tray` subcommand. |
+| *(none — the headless build)* | — | Full enforcement (DNS, firewall, screen time, tamper hardening, self-update). The lock is the text lock on its own VT. No `tray` subcommand. |
 | `gui` | `eframe`/`egui` | The graphical lock (`__lock-session` / `__lockscreen` inside `cage`, see [The lock](#the-lock)); `install-service` also creates `ost-lock`, the lock unit and its PAM file, and installs cage where apt/pacman/dnf has it. |
-| `tray` | `ksni` (StatusNotifierItem) + `notify-rust` | The `tray` subcommand: a per-user, non-root system tray icon + desktop notifications reading `/run/openscreentime/status.json`. In **parent mode** (after `ost pair`) a background worker also polls `/api/parent/*` to show pending time requests + alerts and approve/deny them from the menu. Self-update refuses to run on a `tray` build. |
+| `tray` | `ksni` (StatusNotifierItem) + `notify-rust` | The `tray` subcommand: a per-user, non-root system tray icon + desktop notifications reading `/run/openscreentime/status.json`. In **parent mode** (after `ost pair`) a background worker also polls `/api/parent/*` to show pending time requests + alerts and approve/deny them from the menu. A `gui`/`tray` build self-updates from the desktop artifact. |
 
 Both `gui` and `tray` can be combined (`--features gui,tray`) for a full
 desktop build. The `install-service` unit files are the same regardless of
@@ -289,11 +293,12 @@ features — the tray *user* unit is always written, it's just inert without
 `client/src/enforce/dns.rs`. Renders a dnsmasq config
 (`/etc/openscreentime/dnsmasq.d/openscreentime.conf`) and restarts the local `dnsmasq`
 (falling back to `resolvectl flush-caches` if that's what's running
-instead). Under `default_deny` (and not a `*` wildcard allowlist), only
-allowlisted domains get a `server=/domain/upstream` forward line, and a
-trailing `address=/#/` NXDOMAINs everything else. Under allow-all (or an
-explicit `*` allowlist), every query forwards to the filtered `upstream`
-instead — firewall ports and safe-search still apply. `block_tor` NXDOMAINs
+instead). Since 0.6 the network is **open by default** (`allow_all`, every
+bracket): every query forwards to the filtered `upstream`, and blocking is
+the blocklist — categories, apps, sites — sinkholed exactly. Only an old,
+hand-edited profile with an explicit `default_deny` (and not a `*`
+allowlist) gets allowlist mode: allowlisted domains forward, a trailing
+`address=/#/` NXDOMAINs the rest. `block_tor` NXDOMAINs
 `.onion` and `torproject.org`; `safe_search` rewrites the big search/video
 providers via `cname=` redirects. `/etc/resolv.conf` is pinned to
 `127.0.0.1` and set immutable (`chattr +i`); re-pinned every tick if it
@@ -305,9 +310,10 @@ drifts off the local resolver.
 applied atomically via one `nft -f -` transaction (`add table` → `delete
 table` → fresh rules) so a malformed policy aborts the whole load and
 leaves the last-known-good table in place, never a fail-open gap.
-Default-deny input/output/forward, with `established,related` and loopback
-always accepted; output also always allows the DNS upstream and (if it's a
-literal IP) the enrolled server. `NetworkLockdown` toggles add **drop**
+The chains' policy is `accept` (open by default, CONTRACT-0.6); only an
+explicit `default_deny` firewall mode makes it `drop`, with
+`established,related` and loopback always accepted and output always
+allowing the DNS upstream and (if it's a literal IP) the enrolled server. `NetworkLockdown` toggles add **drop**
 rules ahead of those generic accepts (nftables is first-match-wins):
 `block_dot` (853), `force_dns` (non-upstream port 53), `block_doh` (a
 hardcoded list of public DoH resolver IPs, excluding the configured
@@ -456,17 +462,33 @@ session on its own VT (13):
 
 - **Graphical**: `openscreentime-lock@13.service` runs `cage` (without `-s`,
   so the keyboard can't switch VTs) as the unprivileged system user
-  `ost-lock`, hosting `ost __lockscreen`. It shows the completed ring, one
-  sentence ("Time's up for today", "Bedtime until 07:00", "Paused by a
-  parent", "Outside allowed hours until 15:00"), a code field that has the
-  keyboard (digits only, grouped, Enter submits, tries left), "Ask for more
-  time", and how a parent gets you out. With no unlock code on the device it
-  says so and offers only the ask.
+  `ost-lock`, hosting `ost __lockscreen`. It is brand board 05a: the day's
+  ring completed in red with "0 min left" inside (a parent's pause: the
+  neutral dashed ring), one sentence ("Time's up for today", "Bedtime until
+  07:00", "Paused by a parent", "Outside allowed hours until 15:00") and a
+  second line ("You used all 90 minutes. Screens come back tomorrow at
+  07:00."), a code field that has the keyboard (digits only, 3+3, Enter or
+  Unlock submits), and — separately — "Ask for more time". With no unlock
+  code on the device it says so and offers only the ask.
+- **Someone who sets their own limits** (the adult bracket, or a login the
+  bundle marks `self_managed` — a self-managed member or a parent's own
+  login) has nobody to ask: at their own limit, bedtime or hours the lock
+  offers "Give me 15 more minutes" instead, usable once it has been up for
+  60 s, three times a day (counted in the usage ledger). The agent decides
+  (`snooze` over the lock socket; a child's lock is refused), writes the
+  15-minute override and files `screen_time_earned` with `via: "self"`.
+- **Software rendering**: a cage that exits within 6 s is run once more on
+  the CPU (`WLR_RENDERER=pixman`, `LIBGL_ALWAYS_SOFTWARE=1`). That is how the
+  graphical lock comes up where wlroots won't use the GPU path — current
+  wlroots refuses llvmpipe ("Software rendering detected") on virtual and
+  driverless GPUs.
 - **Text**: with no `cage`, a headless build, or a graphical lock that
-  doesn't answer within 8 s, the agent draws a plain text lock on the same
-  VT itself and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). That
-  includes a GPU cage's wlroots can't drive — e.g. Debian 12's cage 0.1.4
-  refuses QEMU's standard VGA ("PRIME import not supported").
+  doesn't answer within 14 s, the agent draws a plain text lock on the same
+  VT itself (the same sentences, the ring with its tick) and locks VT
+  switching (`VT_LOCKSWITCH`, as `vlock -a`). That still includes Debian 12:
+  its wlroots 0.15 refuses a KMS device without PRIME import (seen on QEMU's
+  standard VGA, bochs-drm) in the DRM backend, before any renderer is
+  chosen, so the software retry fails the same way.
 
 Codes are checked by the agent (root), never by the lock: the graphical lock
 sends them over `/run/openscreentime/lock.sock`, which answers only uid
@@ -570,16 +592,17 @@ downloads or a tampered cache. A v2 pinning an independent (e.g. minisign)
 signing key is called out as future work.
 
 Mechanics: `GET {server}/api/agent/latest` → a JSON manifest
-(`version`, `artifacts: [{target, features, url, sha256}]`) → if
-`version` parses as newer than the running `AGENT_VERSION` and an artifact
-matches `target == "x86_64-linux-musl"` and `features == "headless"`,
-download it, re-hash the downloaded bytes and compare to the manifest's
-`sha256` (refuses on mismatch), write to a staging path
-(`/usr/local/bin/.openscreentime.new`), `chmod 0755`, copy the *current*
-binary to `openscreentime.bak` (manual rollback — there is no automatic
-rollback), atomically rename the staged file over
-`/usr/local/bin/openscreentime`, POST an `agent_updated` tamper event, then
-`systemctl restart openscreentime-agent.service`.
+(`version`, `build`, `artifacts: [{target, features, url, sha256}]`) → if
+its build differs from this binary's (`OST_BUILD_ID`; without build ids, a
+newer version — never a downgrade, never identical bytes) and an artifact
+matches this build's variant (`x86_64-linux-musl`/`headless`, or
+`x86_64-linux-gnu`/`desktop` for a `gui`/`tray` build), download it, check
+the `sha256` of the exact bytes, stage it (`/usr/local/bin/.openscreentime.new`)
+and **preflight** it (it must run `--version` here), keep the current binary
+as `openscreentime.bak`, write an update-pending marker, swap atomically and
+restart. The new build clears the marker once it has run for a minute; if it
+crash-loops or stops ticking first, the watchdog unit restores `.bak` and
+restarts — **automatic rollback** — and that build is skipped from then on.
 
 Kill switches (any one disables it):
 
@@ -587,7 +610,7 @@ Kill switches (any one disables it):
 |---|---|
 | `auto_update = false` in `agent.toml` | Disables self-update for this device. |
 | `OST_NO_SELF_UPDATE=1` (env var on the service) | Runtime override, no config edit needed. |
-| Built with `--features gui` or `--features tray`, or a non-x86_64 target | Never enabled — the server only ships a headless x86_64 artifact, and a feature-richer local build must never be silently downgraded to it. |
+| A non-x86_64 target, or no artifact of this build's variant in the manifest | Nothing to install — a desktop build is never swapped for the headless one. |
 | Process is not literally `/usr/local/bin/openscreentime` | A `cargo run` dev build (or any binary run from elsewhere) never self-updates. |
 | `--dry-run` | Logs what it would install and restart, does nothing. |
 
@@ -666,9 +689,11 @@ black out all traffic):
   "too many wrong codes" means the lockout in `parent_code.json` is running
   (60 s, doubling); wait it out, it is not a bug.
 - **Self-update never happens**: check `auto_update` in `agent.toml`,
-  `OST_NO_SELF_UPDATE`, that the binary is a plain headless build
-  (`gui`/`tray` builds never self-update), and that it's actually running
-  from `/usr/local/bin/openscreentime` (`current_exe()` must match exactly).
-- **Tray shows "AGENT NOT RUNNING"**: `/run/openscreentime/status.json` is
+  `OST_NO_SELF_UPDATE`, that the server's manifest has an artifact of this
+  build's variant (desktop or headless), that
+  `/var/lib/openscreentime/update-rejected.json` doesn't name the build (a
+  rolled-back one is skipped), and that it's actually running from
+  `/usr/local/bin/openscreentime` (`current_exe()` must match exactly).
+- **Tray says "OpenScreenTime isn't running"**: `/run/openscreentime/status.json` is
   missing or unreadable — the root agent isn't up, or hasn't completed a
   tick yet since starting.

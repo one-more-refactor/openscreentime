@@ -626,10 +626,18 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
         .await?;
     let vpn = crate::vpn::active_for_agent(&st.db, agent.device_id).await?;
 
-    let rows: Vec<(String, String, Value)> = sqlx::query_as(
-        "SELECT du.os_username, p.kind, p.policy FROM device_users du
-         JOIN profiles p ON p.id = du.profile_id WHERE du.device_id = $1
-         ORDER BY du.os_username",
+    // `self_managed`: the person behind the login sets their own limits — a
+    // self-managed member, or a parent's own login. Their lock offers "Give
+    // me 15 more minutes" instead of "Ask for more time", and their app
+    // window says nobody else sees their apps or sites.
+    let rows: Vec<(String, String, Value, bool)> = sqlx::query_as(
+        "SELECT du.os_username, p.kind, p.policy,
+                COALESCE(a.self_managed OR a.role <> 'member', false)
+           FROM device_users du
+           JOIN profiles p ON p.id = du.profile_id
+           LEFT JOIN admins a ON a.id = du.account_id
+          WHERE du.device_id = $1
+          ORDER BY du.os_username",
     )
     .bind(agent.device_id)
     .fetch_all(&st.db)
@@ -637,7 +645,7 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
 
     let users: Vec<Value> = rows
         .into_iter()
-        .map(|(os_username, kind, policy)| {
+        .map(|(os_username, kind, policy, self_managed)| {
             // Round-trip through the shared type for forward-compat
             // normalization. A profile-level `parent_pin_hash` (set
             // deliberately by an admin) passes through untouched; the device
@@ -647,6 +655,7 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
                 "os_username": os_username,
                 "profile_kind": kind,
                 "policy": normalized,
+                "self_managed": self_managed,
             })
         })
         .collect();

@@ -292,7 +292,23 @@ def icon_svg(name):
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
             f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{ICONS[name]}</svg>\n')
 
+# ---- static Figtree weights for the device client ---------------------------
+# egui renders only a font's default instance, and the variable Figtree's
+# default is Light (300) — so every "bold" on the device was thin. The client
+# bundles these static instances instead, one per weight the board uses.
+CLIENT_WEIGHTS = [(400, "Regular"), (500, "Medium"), (600, "SemiBold"), (700, "Bold"), (800, "ExtraBold")]
+
+def client_fonts():
+    out_dir = os.path.join(HERE, "..", "client", "fonts")
+    for w, name in CLIENT_WEIGHTS:
+        f = instantiateVariableFont(TTFont(FIG), {"wght": w}, updateFontNames=True)
+        for t in ("STAT", "HVAR", "MVAR", "avar", "fvar", "gvar"):
+            if t in f:
+                del f[t]
+        f.save(os.path.join(out_dir, f"Figtree-{name}.ttf"))
+
 def main():
+    client_fonts()
     for n in ICONS:
         write(f"icons/{n}.svg", icon_svg(n))
     write("mark.svg", svg(64, 64, mark_inner(L)))

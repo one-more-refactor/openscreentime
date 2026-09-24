@@ -63,8 +63,10 @@ pub const PAM_BODY: &str = "# Managed by openscreentime — the lock screen's lo
 account  required  pam_permit.so\n\
 session  optional  pam_systemd.so\n";
 
-/// How long the graphical lock gets to say hello before the text lock takes over.
-const GUI_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long the graphical lock gets to say hello before the text lock takes
+/// over — long enough for a cage that fails on the GPU to be retried on the
+/// CPU (`screen::run_session`).
+const GUI_TIMEOUT: Duration = Duration::from_secs(14);
 /// How long the in-process text lock gets to draw.
 const TEXT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A graphical lock UI polls every second or two; this long without a word
@@ -77,16 +79,193 @@ pub fn unit_name(vt: u32) -> String {
 
 // ── What the lock says ────────────────────────────────────────────────────────
 
-/// Which ring the lock draws (DESIGN-CLIENT.md §1/§4).
+/// Which ring the lock draws (brand board 05a). Every stop is the day's ring
+/// completed — red, with "0 min left" inside — except a parent's pause, which
+/// is the neutral dashed ring: someone paused it, nothing ran out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Look {
-    /// Time's up, or a whole-device stop: full red ring, padlock.
+    /// Time's up, or a whole-device stop.
     Wall,
-    /// Bedtime / outside allowed hours: full ink ring, moon.
+    /// Bedtime / outside allowed hours (drawn as `Wall`; kept so the text
+    /// lock and an older lock UI can still tell a clock stop apart).
     Night,
-    /// A parent paused it: dashed ring, pause bars.
+    /// A parent paused it: the dashed ring.
     Paused,
+}
+
+/// Why the screen is stopped, as far as the words go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stop {
+    /// The day's time is used. `minutes` is the day's time (limit + earned);
+    /// `back` when screens come back ("tomorrow at 07:00").
+    Limit {
+        minutes: u32,
+        back: Option<String>,
+    },
+    Bedtime {
+        until: Option<String>,
+    },
+    OutsideHours {
+        until: Option<String>,
+    },
+    /// A parent paused this computer (now, or on a schedule).
+    Paused,
+    /// OpenScreenTime was changed without a parent's code.
+    Tamper,
+    /// Out of touch with the family server for too long.
+    Offline,
+}
+
+/// "90 minutes", "1 hour", "3 hours" — a day's time the way a person says it.
+pub fn span_words(minutes: u32) -> String {
+    match minutes {
+        1 => "1 minute".into(),
+        60 => "1 hour".into(),
+        m if m >= 120 && m % 60 == 0 => format!("{} hours", m / 60),
+        m => format!("{m} minutes"),
+    }
+}
+
+/// The lock's ring, title and second line for a stop (brand board 05a and
+/// the voice in 06). `self_set`: the person set these limits themselves (an
+/// adult, or anyone self-managed) — their own limit, never a parent's.
+pub fn stop_words(stop: &Stop, self_set: bool) -> (Look, String, String) {
+    let until = |t: &Option<String>, what: &str| match t {
+        Some(t) => format!("{what} until {t}"),
+        None => what.to_string(),
+    };
+    match stop {
+        Stop::Limit { minutes, back } => {
+            let used = if self_set {
+                format!(
+                    "You've used the {} you set for today.",
+                    span_words(*minutes)
+                )
+            } else {
+                format!("You used all {}.", span_words(*minutes))
+            };
+            let detail = match back {
+                Some(b) => format!("{used} Screens come back {b}."),
+                None => used,
+            };
+            (Look::Wall, "Time's up for today".into(), detail)
+        }
+        Stop::Bedtime { until: t } => (
+            Look::Night,
+            until(t, "Bedtime"),
+            if self_set {
+                "Screens are off until morning — the bedtime you set.".into()
+            } else {
+                "Screens are off until morning.".into()
+            },
+        ),
+        Stop::OutsideHours { until: t } => (
+            Look::Night,
+            until(t, "Outside allowed hours"),
+            if self_set {
+                "Screens are off at this time of day — the hours you set.".into()
+            } else {
+                "Screens are off at this time of day.".into()
+            },
+        ),
+        Stop::Paused => (
+            Look::Paused,
+            "Paused by a parent".into(),
+            "It comes back when they lift the pause.".into(),
+        ),
+        Stop::Tamper => (
+            Look::Wall,
+            "Stopped until a parent checks this computer".into(),
+            "OpenScreenTime was changed without a parent's code.".into(),
+        ),
+        Stop::Offline => (
+            Look::Wall,
+            "Stopped until this computer reaches the family server".into(),
+            "It hasn't been in touch for days.".into(),
+        ),
+    }
+}
+
+// ── The self-set escape hatch ────────────────────────────────────────────────
+
+/// Minutes "Give me 15 more minutes" buys.
+pub const SNOOZE_MINUTES: u32 = 15;
+/// How often a day.
+pub const SNOOZES_PER_DAY: u32 = 3;
+/// How long the lock has to have been up before it can be used — long enough
+/// to be a decision, not a reflex.
+pub const SNOOZE_WAIT_SECS: u64 = 60;
+
+/// Someone who set their own limits (an adult, or anyone self-managed) can
+/// give themselves a little more — after a visible wait, a few times a day.
+/// Never offered to anyone a parent sets limits for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Snooze {
+    #[default]
+    Hidden,
+    /// Offered, usable in `secs`.
+    Wait { secs: u64 },
+    /// Usable now; `left` of today's remain after this one.
+    Ready { left: u32 },
+    /// Today's are used; `back` when screens come back, if known.
+    UsedUp {
+        #[serde(default)]
+        back: Option<String>,
+    },
+}
+
+/// Why a snooze was refused. Checked by the agent — the lock UI only asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnoozeRefusal {
+    /// A parent sets this person's limits.
+    NotSelfSet,
+    /// A pause, a tamper stop or an offline stop: not theirs to skip.
+    NotTheirStop,
+    TooSoon,
+    UsedUp,
+}
+
+/// May `user` give themselves more time now? `waited`: seconds the lock has
+/// been up; `used`: snoozes already taken today.
+pub fn snooze_check(
+    self_set: bool,
+    own_rules_stop: bool,
+    waited: u64,
+    used: u32,
+) -> Result<(), SnoozeRefusal> {
+    if !self_set {
+        Err(SnoozeRefusal::NotSelfSet)
+    } else if !own_rules_stop {
+        Err(SnoozeRefusal::NotTheirStop)
+    } else if used >= SNOOZES_PER_DAY {
+        Err(SnoozeRefusal::UsedUp)
+    } else if waited < SNOOZE_WAIT_SECS {
+        Err(SnoozeRefusal::TooSoon)
+    } else {
+        Ok(())
+    }
+}
+
+/// The snooze state a face shows, from the same inputs as [`snooze_check`].
+pub fn snooze_state(
+    self_set: bool,
+    own_rules_stop: bool,
+    waited: u64,
+    used: u32,
+    back: Option<String>,
+) -> Snooze {
+    match snooze_check(self_set, own_rules_stop, waited, used) {
+        Err(SnoozeRefusal::NotSelfSet | SnoozeRefusal::NotTheirStop) => Snooze::Hidden,
+        Err(SnoozeRefusal::UsedUp) => Snooze::UsedUp { back },
+        Err(SnoozeRefusal::TooSoon) => Snooze::Wait {
+            secs: SNOOZE_WAIT_SECS - waited,
+        },
+        Ok(()) => Snooze::Ready {
+            left: SNOOZES_PER_DAY - used - 1,
+        },
+    }
 }
 
 /// Can a code be typed, and how many tries are left.
@@ -126,7 +305,17 @@ pub struct Face {
     pub who: String,
     pub code: CodeState,
     pub ask: AskState,
+    /// The self-set escape hatch ("Give me 15 more minutes").
+    #[serde(default)]
+    pub snooze: Snooze,
     pub help: String,
+    /// Under the code field.
+    #[serde(default = "code_hint")]
+    pub code_hint: String,
+}
+
+fn code_hint() -> String {
+    CODE_HINT.into()
 }
 
 impl Face {
@@ -140,14 +329,35 @@ impl Face {
             who: String::new(),
             code: CodeState::Unavailable,
             ask: AskState::Hidden,
+            snooze: Snooze::Hidden,
             help: HELP.into(),
+            code_hint: CODE_HINT.into(),
         }
     }
 }
 
-pub const HELP: &str = "A parent can unlock this from their console, or read you the unlock code.";
+/// How the way out reads: (help line, code hint). Someone who sets their
+/// own limits has no parent in it (board 05f) — the code is theirs.
+pub fn way_out(self_set: bool, has_code: bool) -> (&'static str, &'static str) {
+    match (self_set, has_code) {
+        (false, true) => (HELP, CODE_HINT),
+        (false, false) => (HELP_NO_CODE, CODE_HINT),
+        (true, true) => (HELP_SELF, CODE_HINT_SELF),
+        (true, false) => (HELP_SELF_NO_CODE, CODE_HINT_SELF),
+    }
+}
+
+pub const HELP: &str = "A parent can also unlock this computer from their console.";
 pub const HELP_NO_CODE: &str =
     "There's no unlock code on this computer yet — a parent can unlock it from their console.";
+/// Under the code field (board 05a).
+pub const CODE_HINT: &str = "A parent's code from their console, or one of the recovery codes.";
+pub const HELP_SELF: &str = "You can also unlock this computer from your console.";
+pub const HELP_SELF_NO_CODE: &str =
+    "There's no unlock code on this computer yet — you can unlock it from your console.";
+pub const CODE_HINT_SELF: &str = "The code from your console, or one of your recovery codes.";
+/// A wrong code (board 06): one line, then it settles.
+pub const WRONG_CODE: &str = "That's not the code — try again.";
 
 /// The verifier inputs for this device (moved here from the old overlay).
 #[derive(Debug, Clone, Default)]
@@ -931,6 +1141,86 @@ mod tests {
 
     fn face() -> Face {
         Face::waiting()
+    }
+
+    #[test]
+    fn every_stop_says_why_in_one_sentence() {
+        let limit = Stop::Limit {
+            minutes: 90,
+            back: Some("tomorrow at 07:00".into()),
+        };
+        let (look, title, detail) = stop_words(&limit, false);
+        assert_eq!(look, Look::Wall);
+        assert_eq!(title, "Time's up for today");
+        assert_eq!(
+            detail,
+            "You used all 90 minutes. Screens come back tomorrow at 07:00."
+        );
+        // The person set it themselves: their own limit, in their words.
+        let (_, _, detail) = stop_words(
+            &Stop::Limit {
+                minutes: 180,
+                back: None,
+            },
+            true,
+        );
+        assert_eq!(detail, "You've used the 3 hours you set for today.");
+
+        let (look, title, _) = stop_words(
+            &Stop::Bedtime {
+                until: Some("07:00".into()),
+            },
+            false,
+        );
+        assert_eq!((look, title.as_str()), (Look::Night, "Bedtime until 07:00"));
+        let (_, title, _) = stop_words(
+            &Stop::OutsideHours {
+                until: Some("15:00".into()),
+            },
+            false,
+        );
+        assert_eq!(title, "Outside allowed hours until 15:00");
+        // A parent's pause is the neutral ring, never the red one.
+        let (look, title, _) = stop_words(&Stop::Paused, false);
+        assert_eq!((look, title.as_str()), (Look::Paused, "Paused by a parent"));
+        for s in [Stop::Tamper, Stop::Offline] {
+            let (look, title, detail) = stop_words(&s, false);
+            assert_eq!(look, Look::Wall);
+            assert!(!detail.is_empty());
+            assert_ne!(title, title.to_uppercase(), "sentence case");
+        }
+        assert_eq!(span_words(60), "1 hour");
+        assert_eq!(span_words(75), "75 minutes");
+        assert_eq!(span_words(120), "2 hours");
+    }
+
+    #[test]
+    fn only_the_person_who_set_the_limit_can_snooze_it() {
+        use SnoozeRefusal::*;
+        // A child: never, whatever else is true.
+        assert_eq!(snooze_check(false, true, 600, 0), Err(NotSelfSet));
+        // An adult at their own limit, after the wait: yes.
+        assert_eq!(snooze_check(true, true, 60, 0), Ok(()));
+        // Not before the wait, not past three, not a parent's pause.
+        assert_eq!(snooze_check(true, true, 59, 0), Err(TooSoon));
+        assert_eq!(snooze_check(true, true, 600, 3), Err(UsedUp));
+        assert_eq!(snooze_check(true, false, 600, 0), Err(NotTheirStop));
+        // What the lock shows follows the same rule.
+        assert_eq!(snooze_state(false, true, 600, 0, None), Snooze::Hidden);
+        assert_eq!(
+            snooze_state(true, true, 20, 0, None),
+            Snooze::Wait { secs: 40 }
+        );
+        assert_eq!(
+            snooze_state(true, true, 90, 1, None),
+            Snooze::Ready { left: 1 }
+        );
+        assert_eq!(
+            snooze_state(true, true, 90, 3, Some("tomorrow at 07:00".into())),
+            Snooze::UsedUp {
+                back: Some("tomorrow at 07:00".into())
+            }
+        );
     }
 
     #[test]
