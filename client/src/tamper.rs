@@ -183,24 +183,6 @@ pub fn nm_guard_probe(exec: &Exec) -> Option<Event> {
     None
 }
 
-/// Clock-skew detector: a large jump vs. a monotonic reference is a tamper signal
-/// (used to evade screen-time). Skeleton returns the event; the runner tracks the
-/// reference timestamp.
-pub fn clock_skew_event(
-    expected: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<Event> {
-    let drift = (now - expected).num_seconds().abs();
-    if drift > 3600 {
-        return Some(tamper_event(
-            "clock_skew",
-            SEV_WARN,
-            &format!("system clock jumped {drift}s vs expected"),
-        ));
-    }
-    None
-}
-
 /// Boot-time clock-rollback detector: `saved` is the wall-clock persisted by
 /// the previous run's last tick, `now` is this run's startup. `now` earlier
 /// than `saved` means the clock was set back while the agent was off — the one
@@ -250,7 +232,8 @@ pub fn tamper_event(kind: &str, severity: &str, message: &str) -> Event {
 /// Deliberately NOT escalated: `clock_skew` (a laptop resuming from a long
 /// suspend jumps the wall clock exactly like a clock-set would, and an RTC-less
 /// machine's first NTP sync is a legitimate large jump — the clock cheat is
-/// instead defused in the usage ledger, see `UsageTracker::roll_day`),
+/// instead defused by the trusted clock, see `crate::clock` — `clock_skew` is
+/// now wall vs. trusted time, which a suspend never trips),
 /// `nm_disconnect` (roaming / a dropped packet), and `resolv_conf_drift`
 /// (systemd-resolved / DHCP legitimately rewrite it; we just re-pin).
 fn confirm_threshold(kind: &str) -> Option<u32> {
