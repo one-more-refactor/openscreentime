@@ -1,9 +1,11 @@
 # OpenScreenTime — Brand & voice of the on-device client
 
 > The identity and copy system for the app a person sees **on the managed
-> computer itself**: the app window (`client/src/app.rs`), the full-screen stop
-> (`client/src/lockout.rs`), the first-run intro cards (`client/src/intro.rs`),
-> and the notifications + tray (`client/src/tray.rs`).
+> computer itself**: the app window and its first-run cards
+> (`client/src/app.rs`), the lock (`client/src/lock/`), and the notifications +
+> tray (`client/src/tray.rs`). The look is the brand board
+> (`brand/board.html`, section 05); where this doc and the board disagree, the
+> board wins.
 >
 > This is the most emotionally loaded surface in the product — it is the thing
 > that tells a child *your time is up*. It builds **on** the product design
@@ -15,11 +17,10 @@
 > strings and `DESIGN.md`/`PRODUCT.md` give the rule, the rule wins; this doc is
 > the words that fill it.
 >
-> **Scope note for engineers:** several strings here still live as ALL-CAPS in
-> code (`tray.rs` "TIME LEFT"/"PAUSED"/"REQUEST MORE TIME", the `render_ascii`
-> banner in `lockout.rs`, the `SOLVE`/`WAIT`/`ENTER UNLOCK CODE` challenge
-> prompts, `App.tsx` gates). Every string below is the replacement. This doc
-> defines the words; it does not edit the code.
+> **Scope note for engineers:** the ALL-CAPS strings this doc once listed are
+> gone from the client. The words that ship are in the code: the lock's in
+> `lock::stop_words`, the footer in `glance::footer`, the first-run cards in
+> `app::intro_cards`, warnings in `warn::words`.
 
 ---
 
@@ -114,9 +115,10 @@ Worked example — the daily-limit stop, one fact across five brackets:
 
 The activity ring is the product's whole identity (`DESIGN.md` §1) and it is the
 **same mark** on the device that it is on the favicon, the console, and `/me`.
-On-device it is already drawn, not decorative, by the egui painter (`app.rs
-ring()`, `lockout.rs ring()`): a `SUNKEN`/`LINE` track circle with a `BRAND`
-green arc from twelve o'clock, clockwise, round line-caps.
+On-device it is drawn by one painter (`ui::ring`) and one rasteriser
+(`mark.rs`, for the tray, the window icon and the warning's image), both with
+`brand/gen.py`'s geometry: the tick at twelve, a track, the arc clockwise from
+the tick to a round cap.
 
 ### 3.1 What the mark does, per state
 
@@ -127,9 +129,9 @@ The ring is the emotional register of the whole client. It carries state through
 |---|---|---|---|
 | **Running / plenty of time** | fill grows with time used; a calm partial arc | `BRAND` green (`#2e7d46`) | normal, healthy, yours |
 | **Wind-down (approaching a stop)** | fill near-complete; the arc shifts to amber | `WARN` amber (`#8a6300`) | "wrap up soon" — a transition, not a threat |
-| **Time's up / stopped** | ring complete, a padlock or "Stop" glyph inside | `STOP` red (`#b3151c`), used **once** | the one clear interrupt |
+| **Time's up / stopped** | ring complete, "0 · min left" inside — no padlock | `STOP` red (`#b3151c`), used **once** | the gauge completed, not an alarm |
 | **Paused by a parent** | a dashed `--ink-3` ring, disc dimmed to ~0.6 (`DESIGN.md` §Avatar) | neutral ink, **not red** | "someone paused this, nothing is broken" |
-| **No limit set** | a plain disc, no ring (`DESIGN.md`: no target → no ring) | — | neutral; not a reward, not a gap |
+| **No limit set** | the track and the tick, minutes used today inside | — | neutral; not a reward, not a gap |
 | **Wrong unlock code** | the ring/segment flashes `STOP` once, then settles | `STOP`, momentary | "not that code" — corrective, not punitive |
 
 A calm day shows **no red at all** (`DESIGN.md` §1). Red appears at exactly two
@@ -282,14 +284,14 @@ slightly guarded, never alarming. Nothing to tap: the device only shows.
 - Surfaces: a card at the top of the app window (which comes forward), one
   desktop notification, and `ost code` in a terminal.
 
-### 4.6 First-run intro cards (`intro.rs`)
+### 4.6 First-run cards (inside the app window)
 
-The child-facing documentation — a few honest cards, skippable, shown once. The
-current `intro.rs` copy is already close to right (it matches `TRANSPARENCY.md`);
-this is the canonical set, warmed slightly and made bracket-neutral (a 10-year-old
-and a 15-year-old both read these — keep them simple enough for the younger, honest
-enough for the older). Wordmark ring on each; sentence case; "Skip" always
-available.
+The child-facing documentation — a few honest cards, skippable, shown once, as
+the app window's first state (the companion opens the window once on first
+run). What ships is `app::intro_cards`, and it is true per reader: an older
+teen's "what a parent sees" says *not the sites*, and someone who sets their
+own limits reads "your apps and sites are yours" and learns about the 15 extra
+minutes instead of asking. The list below is the original draft.
 
 1. **"This computer keeps track of screen time"**
    "It counts your screen time and blocks a few things online. Here's the honest
@@ -317,16 +319,21 @@ tabular figures, per `DESIGN.md` §3).
 
 ### 4.7 The transparency promise ("what this can and can't see")
 
-Always in view in the app window footer (`app.rs` already does this — keep it) and
-restated in the intro. It is the product's whole thesis in one sentence
-(`TRANSPARENCY.md`). Canonical wording:
+Always in view in the app window footer, and restated in the first-run cards. It
+is the product's whole thesis, so it must be true for the person reading it —
+it follows the server's exposure rules (`server/src/usage.rs`), per bracket
+(`glance::footer`):
 
-> **"OpenScreenTime counts your screen time and filters the network. It can't see
-> your screen, your messages, what you type, or the pages you visit — and it only
-> does what's listed here."**
+| Who | Footer |
+|---|---|
+| Little, kid, younger teen | "It counts your time and which apps and sites you use. It can't see your screen, your messages or what you type." (board 05c) |
+| Older teen | "…A parent sees your time and apps, not your sites." |
+| Sets their own limits (adult, self-managed, a parent's own login) | "…— for you. No one else sees your apps or sites." |
 
-The tray's "About" item and any "what is this?" affordance point at the same
-promise, never at a marketing line.
+Sites are counted per computer, so on a computer shared with someone younger the
+older teen's and the adult's footer add "This computer is shared with someone
+younger, so a parent sees the sites it looks up." The tray's "Open
+OpenScreenTime" leads to the same promise, never to a marketing line.
 
 ---
 

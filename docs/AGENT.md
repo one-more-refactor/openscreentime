@@ -99,10 +99,9 @@ Some subcommands are intentionally hidden — not in `--help`, not real
 
 | Hidden subcommand | Who spawns it | Purpose |
 |---|---|---|
-| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`. Fails if cage is missing — the agent then draws the text lock. |
-| `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" over `/run/openscreentime/lock.sock`; holds no secret. |
+| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock. |
+| `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" / "snooze" over `/run/openscreentime/lock.sock`; holds no secret. |
 | `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
-| `__intro` | The tray, detached, on first run (`gui`+`tray` build) | Shows the skippable first-run child intro cards, then writes `intro_seen` so it never shows again. Fails with an error if the binary wasn't built `--features gui`. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
 
 ### Machine-readable output
@@ -215,8 +214,9 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time` / `unlock` / `ost unlock`; atomic rename via `.tmp`) | The day's ledger: per-user used and earned seconds on this device, the person's use elsewhere as last reported by the server (tagged with its day), **parent overrides** (user → end, trusted UTC), applied grant command ids (idempotency), and the **trusted-clock anchor** (boot id, boottime, wall). Reloaded on startup so a restart resumes today's usage and keeps a parent's override. The day boundary is forward-only and follows the trusted clock (see [Screen time](#screen-time)). |
 | `/var/lib/openscreentime/local_recovery` | root : default | `ost unlock` / `ost recover` | `"<unix secs> <minutes>"` — a parent recovered the device at the machine. The live agent clears every device-level lock once per marker and, when `minutes > 0`, holds the screen-time rules off for everyone on the machine for that long. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
-| `~/.config/openscreentime/intro_seen` | the desktop user : default | `__intro` (writes) / `tray` (checks) | Marker that the first-run child intro has been shown. Present = don't show it again. |
-| `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
+| `~/.config/openscreentime/intro_seen` | the desktop user : default | `app` (writes, on Done/Skip) / `tray` + `app` (check) | The first-run cards (shown inside the app window) have been seen. Absent = the companion opens the window once. |
+| `/run/user/<uid>/openscreentime/app.lock`, `app.sock` | the desktop user | `app` | One window per person: the first holds the lock; a second `ost app` rings the socket (the first comes forward) and exits. |
+| `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` or the `app` ("Ask for more time"); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
 
 ### Config fields
 
@@ -455,12 +455,21 @@ session on its own VT (13):
 
 - **Graphical**: `openscreentime-lock@13.service` runs `cage` (without `-s`,
   so the keyboard can't switch VTs) as the unprivileged system user
-  `ost-lock`, hosting `ost __lockscreen`. It shows the completed ring, one
-  sentence ("Time's up for today", "Bedtime until 07:00", "Paused by a
-  parent", "Outside allowed hours until 15:00"), a code field that has the
-  keyboard (digits only, grouped, Enter submits, tries left), "Ask for more
-  time", and how a parent gets you out. With no unlock code on the device it
-  says so and offers only the ask.
+  `ost-lock`, hosting `ost __lockscreen`. It is brand board 05a: the day's
+  ring completed in red with "0 min left" inside (a parent's pause: the
+  neutral dashed ring), one sentence ("Time's up for today", "Bedtime until
+  07:00", "Paused by a parent", "Outside allowed hours until 15:00") and a
+  second line ("You used all 90 minutes. Screens come back tomorrow at
+  07:00."), a code field that has the keyboard (digits only, 3+3, Enter or
+  Unlock submits), and — separately — "Ask for more time". With no unlock
+  code on the device it says so and offers only the ask.
+- **Someone who sets their own limits** (the adult bracket, or a login the
+  bundle marks `self_managed` — a self-managed member or a parent's own
+  login) has nobody to ask: at their own limit, bedtime or hours the lock
+  offers "Give me 15 more minutes" instead, usable once it has been up for
+  60 s, three times a day (counted in the usage ledger). The agent decides
+  (`snooze` over the lock socket; a child's lock is refused), writes the
+  15-minute override and files `screen_time_earned` with `via: "self"`.
 - **Text**: with no `cage`, a headless build, or a graphical lock that
   doesn't answer within 8 s, the agent draws a plain text lock on the same
   VT itself and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). That

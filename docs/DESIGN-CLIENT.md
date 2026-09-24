@@ -1,11 +1,20 @@
 # OpenScreenTime — the on-device client
 
-The design of the four surfaces that run on the managed computer: the app window
-(`ost app`), the full-screen wind-down and hard-stop (`lockout.rs`), the
-first-run intro (`intro.rs`), and the tray + notifications (`tray.rs`). It
-extends [`DESIGN.md`](DESIGN.md) — the ring language — onto the Rust/egui
-client. Where this and `DESIGN.md` disagree, `DESIGN.md` §6 wins; where this is
-more specific (px, ms, tuples, per-surface layout), build to this.
+The design of the surfaces that run on the managed computer: the app window
+with its first-run cards (`ost app`, `app.rs`), the lock (`lock/`), and the
+tray + notifications (`tray.rs`). It extends [`DESIGN.md`](DESIGN.md) — the
+ring language — onto the Rust/egui client.
+
+> **Status (the house clock).** The brand board (`brand/board.html`, section
+> 05) supersedes this doc where they differ, and the client is built to it:
+> the ring has its tick at 12 and the board's geometry (`ui::ring`,
+> `mark.rs`); the lock is the ring completed with "0 · min left" inside for
+> every stop — no padlock, moon or other glyph — except a parent's pause (the
+> dashed ring); icons come from `brand/icons/*.svg` (`icons.rs`); Figtree
+> ships as static Regular/Medium/SemiBold/Bold/ExtraBold; the first run is a
+> state of the app window, not a separate one; there is no wind-down overlay
+> or challenge (warnings are notifications, `warn.rs`). Sections 3–6 below
+> describe the retired `lockout.rs`/`intro.rs` and are kept as history.
 
 > **One idea, carried to the last screen.** *Time is a ring you fill.* The same
 > ring that shows a child how much of the day is left is the ring that fills to
@@ -149,19 +158,18 @@ value. (egui has no media query; treat "reduced motion" as: if a
 | Healthy (>15 min) | `Fill` green, `frac = used/limit` | number (min left) + "minutes left" |
 | Wind-down warn (≤15 min) | `Fill` **amber**, frac near full | number + "minutes left" |
 | Save-your-work grace | `Full` **amber**, number counts the grace **down** | seconds + "pausing soon" |
-| Over / time's up | `Full` **stop red** | padlock glyph |
-| Bedtime | `Full` **ink-2** (a calm "night", not red) | crescent moon |
-| Parent-paused | `Paused` (dashed ink-3) | pause bars ‖ |
-| Offline lockdown | `Full` **stop red** | cloud-with-slash |
-| Tamper | `Full` **stop red** | shield / padlock |
-| No limit today | `None` (track only) | a green check |
+| Over / time's up | `Full` **stop red** | "0" + "min left" |
+| Bedtime / outside hours | `Full` **stop red** (screens are off: 0 min left) | "0" + "min left" |
+| Parent-paused | `Paused` (dashed ink-3) | the pause icon + "paused" |
+| Offline lockdown | `Full` **stop red** | "0" + "min left" |
+| Tamper | `Full` **stop red** | "0" + "min left" |
+| No limit today | `Track` | minutes used + "min today" |
 | Agent not running | track only, **no fill, no center glyph**, disc dimmed | — |
 | Wrong code (flash) | current ring flashes to STOP for 240ms, then back | unchanged |
 
-The stop is red, but the **reason** is told by the center glyph and the words —
-so bedtime and a parent pause read calm (moon, pause bars) while the three
-"you hit a wall" stops (time's up, offline, tamper) share the red padlock family.
-A calm night shows no alarm; only the genuine walls are red.
+The stop is the gauge completed; the **reason** is told by the words
+(`lock::stop_words`). Only a parent's pause is not red — someone paused it,
+nothing ran out.
 
 ---
 
@@ -456,11 +464,11 @@ countdown, time's-up, offline-lockdown, parent-pause and tamper are `Critical`;
 "back online / you're back / resumed / lifted" are normal. Keep transitions-only
 (no re-engagement nagging).
 
-**Tray icon = the ring.** GNOME has no SNI host, but where a tray exists the icon
-should be the mark. Ship three bundled ring icons (green ~40% arc, amber full,
-red full padlock) and use them by state; fall back to the current freedesktop
-names (`security-high/medium/low`) only if the bundled icons can't be themed.
-The tooltip: `"{time line} · {connection}"` in the new sentence-case strings.
+**Tray icon = the ring** (brand/tray-*.svg), sent as a pixmap drawn by
+`mark::tray_argb` with the real share of the day: green, amber at 15 minutes
+or less, the full red ring when stopped, the dashed ring when paused, the
+track alone with no limit. The neutral parts are a mid grey, since a pixmap
+can't follow the panel's colour. The tooltip: `"{time line} · {connection}"`.
 
 **Notification body** for the sign-in prompt is already sentence case and good —
 leave it; just ensure the summary "Sign-in request" and action "Not me" stay.
