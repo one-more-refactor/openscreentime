@@ -1,17 +1,20 @@
-//! `tray` subcommand — the per-user system tray companion (feature `tray`).
+//! `tray` subcommand — the per-user companion (feature `tray`).
 //!
-//! Runs AS THE DESKTOP USER (not root): it only reads the world-readable
-//! status snapshot the root agent writes to `/run/openscreentime/status.json`
-//! every tick, and talks to the session bus (StatusNotifierItem via `ksni`,
-//! desktop notifications via `notify-rust`).
+//! Runs AS THE DESKTOP USER (not root): it only reads the status snapshot the
+//! root agent writes to `/run/openscreentime/` every tick, and talks to the
+//! session bus (StatusNotifierItem via `ksni` where a host exists, desktop
+//! notifications via `notify-rust` everywhere — GNOME included).
 //!
-//! This is the transparency surface promised in the design docs: the person
-//! using the device can always see how much time is left, whether the device
-//! is online/locked, and — most importantly — whether a parent has a remote
-//! shell open right now. Notifications fire on state *transitions* only
-//! (previous snapshot is diffed against the next), never repeatedly.
+//! It is the one channel for warnings: 15, 5 and 1 minute before any stop
+//! (the daily limit, bedtime, the end of allowed hours, a parent's scheduled
+//! pause), the last minute as one critical notification updated in place, so
+//! the lock never arrives unannounced. It also delivers what the agent
+//! publishes ("You're back — 15 more minutes"). Started on every desktop login
+//! by an XDG autostart entry and by the systemd user unit; it keeps a single
+//! instance. Everything else fires on state *transitions* only.
 
 use crate::parent;
+use crate::warn::{self, StopReason, WarnState};
 use anyhow::Result;
 use serde::Deserialize;
 use std::sync::mpsc;
@@ -47,6 +50,9 @@ struct Status {
     offline_hard_lockdown: bool,
     #[serde(default)]
     tamper_lockdown: bool,
+    /// When a parent's scheduled pause lands (RFC 3339), if one is coming.
+    #[serde(default)]
+    pause_at: Option<String>,
     #[serde(default)]
     users: Vec<UserStatus>,
     /// Normal (non-blocking) notifications published by the agent for the tray
@@ -100,6 +106,11 @@ struct UserStatus {
     /// Countdown to an imminent session freeze, if one is pending.
     #[serde(default)]
     freeze_in_secs: Option<u64>,
+    /// The next stop (RFC 3339) and why — what the warnings count down to.
+    #[serde(default)]
+    stop_at: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 impl Status {
@@ -388,53 +399,22 @@ fn notify(summary: &str, body: &str, critical: bool) {
     }
 }
 
-/// Diff two consecutive snapshots and fire notifications for the transitions
-/// we care about. Both sides must be present: on startup (or while the agent
-/// is down) we stay silent instead of "catching up" on stale state.
-fn notify_transitions(username: &str, prev: &Status, next: &Status) {
-    // Per-user transitions.
-    if let (Some(p), Some(n)) = (prev.user(username), next.user(username)) {
-        // Low-time thresholds: treat "no limit" as infinite.
-        let pm = p.remaining_minutes.unwrap_or(i64::MAX);
-        let nm = n.remaining_minutes.unwrap_or(i64::MAX);
-        for threshold in [10, 2] {
-            if pm > threshold && nm <= threshold && !n.frozen {
-                notify(
-                    &format!("{} MIN LEFT TODAY", nm.max(0)),
-                    "SAVE YOUR WORK",
-                    threshold <= 2,
-                );
-                break; // one time-warning per tick is enough
-            }
-        }
-        if p.freeze_in_secs.is_none() {
-            if let Some(secs) = n.freeze_in_secs {
-                notify(&format!("SCREEN PAUSES IN {secs}S"), "SAVE YOUR WORK", true);
-            }
-        }
-        match (p.frozen, n.frozen) {
-            (false, true) => notify("Time's up", "Earn more or ask a parent", true),
-            (true, false) => notify("You're back", "Have fun", false),
-            _ => {}
-        }
-    }
-
-    // Device-level transitions.
+/// Diff two consecutive snapshots and fire notifications for the device-level
+/// transitions we care about. Both sides must be present: on startup (or while
+/// the agent is down) we stay silent instead of "catching up" on stale state.
+/// Warnings before a stop are the [`Warner`]'s; "You're back" comes from the
+/// agent (only it knows a thaw really happened).
+fn notify_transitions(prev: &Status, next: &Status) {
     if prev.connection != next.connection {
         if next.connection == "offline_fail_closed" {
             notify(
-                "OFFLINE TOO LONG",
-                "THE DEVICE IS RESTRICTED UNTIL IT RECONNECTS",
+                "Offline too long",
+                "This computer stays on its last rules until it reconnects.",
                 true,
             );
         } else if next.connection == "online" {
             notify("Back online", "Connection to the server restored", false);
         }
-    }
-    match (prev.device_locked, next.device_locked) {
-        (false, true) => notify("Device paused", "A parent paused this device", true),
-        (true, false) => notify("Device resumed", "This device is unlocked again", false),
-        _ => {}
     }
     match (prev.offline_hard_lockdown, next.offline_hard_lockdown) {
         (false, true) => notify("Lockdown active", "The device is in offline lockdown", true),
@@ -443,13 +423,177 @@ fn notify_transitions(username: &str, prev: &Status, next: &Status) {
     }
     match (prev.tamper_lockdown, next.tamper_lockdown) {
         (false, true) => notify(
-            "TAMPERING DETECTED",
-            "OPENSCREENTIME WAS TAMPERED WITH — ASK A PARENT (UNLOCK CODE OPENS IT)",
+            "OpenScreenTime was changed",
+            "Ask a parent — their unlock code opens it.",
             true,
         ),
         (true, false) => notify("Tamper lock lifted", "Normal use has resumed", false),
         _ => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Warnings before a stop
+// ---------------------------------------------------------------------------
+
+fn parse_at(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Local))
+}
+
+/// The stop coming up for this user, from whatever the snapshot publishes:
+/// an armed countdown, else the next stop (`stop_at` + `reason`), else the
+/// daily limit's minutes — and a parent's scheduled pause, whichever is first.
+/// `None` while they are stopped, or unmanaged.
+fn next_stop(
+    status: &Status,
+    username: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<(StopReason, i64, chrono::DateTime<chrono::Local>)> {
+    let me = status.user(username)?;
+    if me.frozen {
+        return None;
+    }
+    let reason = me
+        .reason
+        .as_deref()
+        .and_then(StopReason::parse)
+        .unwrap_or(StopReason::Limit);
+    let mine = if let Some(s) = me.freeze_in_secs {
+        Some((reason, now + chrono::Duration::seconds(s as i64)))
+    } else if let Some(at) = me.stop_at.as_deref().and_then(parse_at) {
+        Some((reason, at))
+    } else {
+        me.remaining_minutes
+            .filter(|m| *m > 0)
+            .map(|m| (StopReason::Limit, now + chrono::Duration::minutes(m)))
+    };
+    let pause = status
+        .pause_at
+        .as_deref()
+        .and_then(parse_at)
+        .map(|at| (StopReason::Pause, at));
+    let (reason, at) = [mine, pause]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(_, at)| *at)?;
+    Some((reason, (at - now).num_seconds(), at))
+}
+
+/// Shows the 15/5/1-minute warnings: the last minute as ONE critical
+/// notification, kept current in place and closed once the stop is gone.
+#[derive(Default)]
+struct Warner {
+    state: WarnState,
+    last_minute: Option<notify_rust::NotificationHandle>,
+    shown_title: String,
+}
+
+impl Warner {
+    fn observe(&mut self, stop: Option<(StopReason, i64, chrono::DateTime<chrono::Local>)>) {
+        let Some((reason, secs, at)) = stop.filter(|(_, s, _)| *s > 0) else {
+            self.state.clear();
+            if let Some(h) = self.last_minute.take() {
+                h.close();
+            }
+            return;
+        };
+        let due = self.state.observe(reason, secs);
+        let w = warn::words(reason, secs, Some(at));
+        if let Some(h) = self.last_minute.as_mut() {
+            if w.title != self.shown_title {
+                h.summary(&w.title).body(&w.body);
+                let _ = h.update();
+                self.shown_title = w.title;
+            }
+            return;
+        }
+        if due.is_none() {
+            return;
+        }
+        let ask = reason != StopReason::Pause;
+        match show_warning(&w, ask) {
+            Some(h) if w.critical => {
+                self.shown_title = w.title;
+                self.last_minute = Some(h);
+            }
+            Some(h) => {
+                std::thread::spawn(move || h.wait_for_action(on_action));
+            }
+            None => {}
+        }
+    }
+}
+
+fn on_action(action: &str) {
+    match action {
+        "ask" => request_more_time(),
+        "open" => {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe)
+                    .arg("app")
+                    .stdin(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn show_warning(w: &warn::Words, ask: bool) -> Option<notify_rust::NotificationHandle> {
+    let mut n = notify_rust::Notification::new();
+    n.appname("OpenScreenTime")
+        .summary(&w.title)
+        .body(&w.body)
+        .icon("openscreentime")
+        .hint(notify_rust::Hint::DesktopEntry("openscreentime".into()));
+    if ask {
+        n.action("ask", "Ask for more time");
+    }
+    n.action("open", "Open OpenScreenTime");
+    if w.critical {
+        n.urgency(notify_rust::Urgency::Critical)
+            .timeout(notify_rust::Timeout::Never);
+    }
+    match n.show() {
+        Ok(h) => {
+            if w.critical {
+                // Actions on the one we keep (to update and close) are heard
+                // by id, from a thread of their own.
+                let id = h.id();
+                std::thread::spawn(move || {
+                    let _ = notify_rust::handle_action(id, |r| {
+                        if let notify_rust::ActionResponse::Custom(a) = r {
+                            on_action(a);
+                        }
+                    });
+                });
+            }
+            Some(h)
+        }
+        Err(e) => {
+            tracing::debug!("warning notification failed: {e}");
+            None
+        }
+    }
+}
+
+/// One companion per person: the autostart entry and the user unit may both
+/// start one. Held for the life of the process.
+fn single_instance() -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", users::get_current_uid()));
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{dir}/openscreentime-companion.lock"))
+        .ok()?;
+    // SAFETY: flock on an fd we own.
+    let held = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    held.then_some(f)
 }
 
 /// Pure selection: the notifications this user hasn't seen yet (id above the
@@ -594,8 +738,12 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!("cannot determine the current user ($USER unset and no uid entry)")
         })?;
+    let Some(_instance) = single_instance() else {
+        tracing::info!("the companion is already running for {username}");
+        return Ok(());
+    };
     tracing::info!(
-        "tray starting for user {username} (reading {})",
+        "companion starting for {username} (reading {})",
         status_path()
     );
 
@@ -649,15 +797,22 @@ pub fn run() -> Result<()> {
         .map(|s| s.login_requests.iter().map(|r| r.id.clone()).collect())
         .unwrap_or_default();
 
+    let mut warner = Warner::default();
     loop {
+        if let Some(n) = &prev {
+            warner.observe(next_stop(n, &username, chrono::Local::now()));
+        }
         std::thread::sleep(POLL_INTERVAL);
         let next = read_status(&username);
         if let (Some(p), Some(n)) = (&prev, &next) {
             if p != n {
-                notify_transitions(&username, p, n);
+                notify_transitions(p, n);
             }
         }
         if let Some(n) = &next {
+            // A stop that's gone (a thaw) closes its last-minute notice
+            // before "You're back" arrives.
+            warner.observe(next_stop(n, &username, chrono::Local::now()));
             last_notif_id = deliver_notifications(&username, n, last_notif_id);
             for req in &n.login_requests {
                 if prompted_logins.insert(req.id.clone()) {
@@ -728,6 +883,36 @@ mod tests {
         let ids: Vec<u64> = show.iter().map(|n| n.id).collect();
         assert_eq!(ids, vec![2, 4]);
         assert_eq!(high, 4);
+    }
+
+    fn status(json: &str) -> Status {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn the_next_stop_comes_from_whatever_the_agent_publishes() {
+        let now = chrono::Local::now();
+        let at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        // stop_at + reason (bedtime)
+        let s = status(&format!(
+            r#"{{"users":[{{"name":"mia","remaining_minutes":40,"stop_at":"{at}","reason":"bedtime"}}]}}"#
+        ));
+        let (r, secs, _) = next_stop(&s, "mia", now).unwrap();
+        assert_eq!(r, StopReason::Bedtime);
+        assert!((299..=300).contains(&secs));
+        // Only the old field: the daily limit's minutes.
+        let s = status(r#"{"users":[{"name":"mia","remaining_minutes":12}]}"#);
+        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Limit);
+        // An armed countdown wins; a sooner pause wins over everything.
+        let pause = (now + chrono::Duration::seconds(30)).to_rfc3339();
+        let s = status(&format!(
+            r#"{{"pause_at":"{pause}","users":[{{"name":"mia","remaining_minutes":12,"freeze_in_secs":50}}]}}"#
+        ));
+        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Pause);
+        // Stopped, or not managed here: nothing to warn about.
+        let s = status(r#"{"users":[{"name":"mia","remaining_minutes":0,"frozen":true}]}"#);
+        assert!(next_stop(&s, "mia", now).is_none());
+        assert!(next_stop(&s, "dad", now).is_none());
     }
 
     #[test]
