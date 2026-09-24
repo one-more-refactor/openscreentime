@@ -218,8 +218,6 @@ export interface Device {
   public_ip: string | null;
   last_seen: string | null;
   created_at: string;
-  /** bumped when the device's VPN profiles change (cache-busting stamp) */
-  vpn_updated_at?: string | null;
   /** while set and in the future, being unreachable is allowed, not trouble */
   offline_allowed_until?: string | null;
   /** present on list + detail responses */
@@ -290,27 +288,6 @@ export interface FamilyResponse {
   profiles: Profile[];
   requests: EarnRequest[];
   server_time: string;
-}
-
-export type VpnKind = "wireguard" | "openvpn";
-
-/** A named VPN profile (GET /api/devices/:id/vpn). Configs render MASKED —
- * secrets appear as ••• and survive edit round-trips server-side. */
-export interface VpnProfile {
-  id: string;
-  name: string;
-  kind: VpnKind;
-  config_masked: string;
-  status: "untested" | "testing" | "active" | "failed";
-  last_error: string | null;
-  last_tested_at: string | null;
-  is_active: boolean;
-  updated_at: string;
-}
-
-export interface DeviceDetail extends Device {
-  users: DeviceUser[];
-  recent_events: Event[];
 }
 
 export type EventType =
@@ -700,16 +677,3 @@ export interface ApiErrorBody {
   error: { code: string; message: string };
 }
 
-// ---- Screen-time history ----------------------------------------------------
-
-export interface UsageDay {
-  day: string; // YYYY-MM-DD
-  used_minutes: number;
-  earned_minutes: number;
-}
-
-export interface UsageHistoryResponse {
-  days: UsageDay[];
-  /** consecutive days with any usage, counted back from today (server-computed) */
-  streak_days: number;
-}

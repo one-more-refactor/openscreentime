@@ -28,15 +28,10 @@ import type {
   UnlockCode,
   UnlockCodeRotated,
   CommandRow,
-  VpnProfile,
-  UsageHistoryResponse,
   ApiErrorBody,
   AuthConfig,
   Device,
-  DeviceDetail,
-  DeviceUser,
   EarnRequest,
-  EarnRequestStatus,
   EnrollTokenResponse,
   FamilyResponse,
   Event,
@@ -52,7 +47,6 @@ import type {
   Profile,
   Severity,
   TamperLevel,
-  VpnKind,
 } from "./types";
 
 import {
@@ -61,7 +55,6 @@ import {
   mockCreateMember,
   mockCreditTime,
   mockDeleteMember,
-  mockDeviceDetail,
   mockDevices,
   mockRegenEnrollToken,
   mockCreateDevice,
@@ -371,18 +364,6 @@ export async function listDevices(): Promise<Device[]> {
   return res.devices;
 }
 
-export async function getDevice(id: string): Promise<DeviceDetail> {
-  const res = await read<{
-    device: Device;
-    users: DeviceUser[];
-    recent_events: Event[];
-  }>(`/api/devices/${id}`, () => {
-    const m = mockDeviceDetail(id);
-    return { device: m, users: m.users, recent_events: m.recent_events };
-  });
-  return { ...res.device, users: res.users, recent_events: res.recent_events };
-}
-
 /**
  * Create a device (pending until the agent enrolls). The response carries the
  * one-time enroll token AND the device's parent code (authenticator secret),
@@ -400,10 +381,17 @@ export async function createDevice(
   });
 }
 
+/** Rename a computer (or change its tamper level). */
 export async function updateDevice(
   id: string,
   patch: { name?: string; tamper_level?: TamperLevel },
 ): Promise<Device> {
+  if (usingMock) {
+    const d = mockDevices.find((d) => d.id === id);
+    if (!d) throw new ApiError("not_found", "No such computer", 404);
+    if (patch.name) d.name = patch.name;
+    return d;
+  }
   const res = await request<{ device: Device }>(`/api/devices/${id}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
@@ -475,57 +463,18 @@ export async function regenEnrollToken(id: string): Promise<EnrollTokenResponse>
   });
 }
 
+/** Remove a computer from the household. Its logins stay on the machine,
+ * unmanaged; the agent loses its token. */
 export async function deleteDevice(id: string): Promise<void> {
-  return request<void>(`/api/devices/${id}`, { method: "DELETE" });
-}
-
-// ---- VPN profiles -----------------------------------------------------------
-
-export async function listVpnProfiles(deviceId: string): Promise<VpnProfile[]> {
-  const r = await request<{ profiles: VpnProfile[] }>(`/api/devices/${deviceId}/vpn`);
-  return r.profiles;
-}
-
-export async function createVpnProfile(
-  deviceId: string,
-  name: string,
-  config: string,
-  kind?: VpnKind,
-): Promise<void> {
-  await request<unknown>(`/api/devices/${deviceId}/vpn`, {
-    method: "POST",
-    body: JSON.stringify({ name, config, kind }),
-  });
-}
-
-export async function updateVpnProfile(id: string, name: string, config: string): Promise<void> {
-  await request<unknown>(`/api/vpn-profiles/${id}`, {
-    method: "PUT",
-    body: JSON.stringify({ name, config }),
-  });
-}
-
-export async function activateVpnProfile(id: string): Promise<void> {
-  await request<unknown>(`/api/vpn-profiles/${id}/activate`, { method: "POST" });
-}
-
-export async function deactivateVpnProfile(id: string): Promise<void> {
-  await request<unknown>(`/api/vpn-profiles/${id}/deactivate`, { method: "POST" });
-}
-
-export async function deleteVpnProfile(id: string): Promise<void> {
-  await request<unknown>(`/api/vpn-profiles/${id}`, { method: "DELETE" });
+  if (usingMock) {
+    const i = mockDevices.findIndex((d) => d.id === id);
+    if (i >= 0) mockDevices.splice(i, 1);
+    return;
+  }
+  await request<unknown>(`/api/devices/${id}`, { method: "DELETE" });
 }
 
 // ---- Device users & profile assignment -------------------------------------
-
-export async function listDeviceUsers(id: string): Promise<DeviceUser[]> {
-  const res = await read<{ users: DeviceUser[] }>(
-    `/api/devices/${id}/users`,
-    () => ({ users: mockDeviceDetail(id).users }),
-  );
-  return res.users;
-}
 
 /** Grant extra screen time today (1–240 min) to one managed user. The server
  * credits today's ledger and pushes a `credit_time` command to the agent. */
@@ -543,16 +492,6 @@ export async function creditTime(
   );
 }
 
-export async function assignProfile(
-  deviceUserId: string,
-  profile_id: string,
-): Promise<void> {
-  await request<{ ok: boolean }>(
-    `/api/device-users/${deviceUserId}/assign-profile`,
-    { method: "POST", body: JSON.stringify({ profile_id }) },
-  );
-}
-
 /** Point an OS login on a computer at a person ("dad" is me, "m2011" is Mia).
  * Inside the confirm window: it decides who that login signs in as. */
 export async function assignAccount(deviceUserId: string, account_id: string): Promise<void> {
@@ -564,36 +503,6 @@ export async function assignAccount(deviceUserId: string, account_id: string): P
 }
 
 // ---- Profiles --------------------------------------------------------------
-
-export async function listProfiles(): Promise<Profile[]> {
-  const res = await read<{ profiles: Profile[] }>("/api/profiles", () => ({
-    profiles: mockProfiles,
-  }));
-  return res.profiles;
-}
-
-/**
- * `parent_pin` is sent as a top-level field alongside (not inside) `policy`:
- * absent/undefined preserves any existing hash, "" clears it, a non-empty
- * string sets a new one. The server hashes it — the plaintext never round-
- * trips back.
- */
-export async function createProfile(
-  name: string,
-  policy: Policy,
-  parent_pin?: string,
-): Promise<Profile> {
-  const res = await request<{ profile: Profile }>("/api/profiles", {
-    method: "POST",
-    body: JSON.stringify({
-      name,
-      kind: "custom",
-      policy,
-      ...(parent_pin !== undefined ? { parent_pin } : {}),
-    }),
-  });
-  return res.profile;
-}
 
 export async function updateProfile(
   id: string,
@@ -617,26 +526,20 @@ export async function updateProfile(
   return res.profile;
 }
 
-export async function deleteProfile(id: string): Promise<void> {
-  return request<void>(`/api/profiles/${id}`, { method: "DELETE" });
-}
-
 // ---- Earn-time approval (contract §4) ---------------------------------------
 
-export async function listEarnRequests(
-  status?: EarnRequestStatus,
-): Promise<EarnRequest[]> {
-  const q = status ? `?status=${status}` : "";
-  const res = await read<{ requests: EarnRequest[] }>(
-    `/api/earn-requests${q}`,
-    () => ({
-      requests: mockEarnRequests.filter((r) => !status || r.status === status),
-    }),
-  );
-  return res.requests;
+/** Design-review mode answers a request in place, the way the server does. */
+function mockAnswer(id: string, status: "approved" | "denied"): EarnRequest {
+  const r = mockEarnRequests.find((x) => x.id === id);
+  if (!r) throw new ApiError("not_found", "No such request", 404);
+  r.status = status;
+  r.decided_at = new Date().toISOString();
+  if (status === "approved") mockCreditTime(r.device_user_id, r.minutes);
+  return r;
 }
 
 export async function approveEarnRequest(id: string): Promise<EarnRequest> {
+  if (usingMock) return mockAnswer(id, "approved");
   const res = await request<{ request: EarnRequest }>(
     `/api/earn-requests/${id}/approve`,
     { method: "POST", body: JSON.stringify({}) },
@@ -645,6 +548,7 @@ export async function approveEarnRequest(id: string): Promise<EarnRequest> {
 }
 
 export async function denyEarnRequest(id: string): Promise<EarnRequest> {
+  if (usingMock) return mockAnswer(id, "denied");
   const res = await request<{ request: EarnRequest }>(
     `/api/earn-requests/${id}/deny`,
     { method: "POST", body: JSON.stringify({}) },
@@ -769,20 +673,9 @@ export async function pingDevice(deviceId: string): Promise<PingResult> {
   return { ok: false };
 }
 
-export async function listCommands(deviceId: string): Promise<CommandRow[]> {
+async function listCommands(deviceId: string): Promise<CommandRow[]> {
   const r = await request<{ commands: CommandRow[] }>(`/api/devices/${deviceId}/commands`);
   return r.commands;
-}
-
-export async function cancelCommand(id: string): Promise<void> {
-  await request<unknown>(`/api/commands/${id}/cancel`, { method: "POST" });
-}
-
-export async function getUsageHistory(
-  deviceUserId: string,
-  days: number,
-): Promise<UsageHistoryResponse> {
-  return request<UsageHistoryResponse>(`/api/device-users/${deviceUserId}/usage?days=${days}`);
 }
 
 // ---- Catalog (apps & categories) --------------------------------------------
