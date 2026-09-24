@@ -59,6 +59,7 @@
   padding: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 16px;
 }
 @media (max-width: 760px) { .people { grid-template-columns: minmax(0, 1fr); } }
