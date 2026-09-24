@@ -8,7 +8,7 @@
 // operator, with the machinery (Devices).
 // ============================================================================
 import type { Event } from "../types";
-import { relTime } from "../lib/format";
+import { ago } from "../lib/format";
 
 /** The types a parent should ever see as a moment; everything else is
  * machinery (heartbeats, policy versions, VPN profiles → Devices). */
@@ -61,7 +61,7 @@ export function Moments({ events, max = 6 }: { events: Event[]; max?: number }) 
           <li key={e.id} className="moment" data-tone={tone(e)}>
             <span className="moment-dot" aria-hidden="true" />
             <span className="moment-text">{sentence(e)}</span>
-            <span className="moment-when">{relTime(e.created_at)}</span>
+            <span className="moment-when">{ago(e.created_at)}</span>
           </li>
         ))}
       </ul>

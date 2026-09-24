@@ -1,19 +1,17 @@
 // ============================================================================
-// SETTINGS — two rooms with very different locks.
+// SETTINGS — what a parent needs, and nothing else.
 //
-// The front room is harmless: who you are, how the app looks. It renders
-// immediately, because reading is free.
+// You and Appearance are free to read and change. The keys — each computer's
+// unlock code and recovery codes, your passkeys, a paired phone — sit behind
+// "Confirm it's you" (a passkey, or a code on your own computer; a fresh
+// sign-in counts). Their data is not even fetched until then: the server
+// answers these with 428 outside the confirm window (docs/AUTH.md). The
+// client gate is comfort; the server is the lock.
 //
-// The back room — the computers' unlock codes, passkeys, the Telegram
-// pairing, paired companions — is the set of levers that would let someone
-// take the family over. It is not rendered, and its data is NOT EVEN FETCHED,
-// until the person confirms it's them (a passkey, or a code on their own
-// computer; a fresh sign-in counts): the server (docs/AUTH.md) answers these
-// with 428 unless the session holds a live confirm window. The client gate is
-// comfort; the server is the lock.
+// Signing out lives in one place only: the rail.
 // ============================================================================
 import { useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import {
   ApiError,
   addPasskey,
@@ -23,140 +21,114 @@ import {
   listDevices,
   listParentTokens,
   listPasskeys,
-  mintParentToken,
   pairTelegram,
   revokeParentToken,
   unpairTelegram,
+  usingMock,
 } from "../api";
-import type {
-  AuthConfig,
-  Device,
-  MintedParentToken,
-  ParentToken,
-  Passkey,
-  TelegramPairing,
-  TelegramStatus,
-} from "../types";
+import type { AuthConfig, Device, ParentToken, Passkey, TelegramPairing, TelegramStatus } from "../types";
 import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
-import { FluentSlider } from "../components/FluentSlider";
 import { useConfirm } from "../lib/confirm";
-import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
+import { Button } from "../components/Button";
+import { Icon } from "../components/Icon";
+import { Modal } from "../components/Modal";
+import { CopyField } from "../components/CopyField";
+import { PasskeyButton } from "../components/PasskeyButton";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
-import { LockGlyph } from "../layout/Shell";
 import { PageHead } from "../layout/PageHead";
-import { relTime } from "../lib/format";
+import { ago } from "../lib/format";
 
 export function Settings() {
-  const { me, mock } = useSession();
-
   return (
-    <div className="dev-wrap">
-      <PageHead eyebrow="Settings" title="Your household, your rules." />
-
+    <div className="page page-narrow settings">
+      <PageHead title="Settings" sub="Your account, how the console looks, and the keys to the house." />
       <You />
       <Appearance />
       <Security />
-
-      {mock && (
-        <p className="rail-mock" style={{ marginTop: "2rem" }}>
-          DESIGN-REVIEW MODE — MOCK DATA (VITE_USE_MOCK=1) · {me?.account?.email ?? ""}
-        </p>
-      )}
     </div>
   );
 }
 
-// ---- the front room --------------------------------------------------------
+// ---- free to read -----------------------------------------------------------
 
 function You() {
-  const { me, logout } = useSession();
-  const navigate = useNavigate();
-
-  async function handleLogout() {
-    await logout();
-    navigate("/login", { replace: true });
-  }
-
+  const { me } = useSession();
+  const name = me?.account?.display_name ?? me?.admin.display_name ?? "—";
+  const handle = me?.admin.username ?? me?.account?.email;
+  const house = me?.household?.name ?? me?.tenant.name;
   return (
-    <section className="ch-section">
-      <h2 className="ch-h2">You</h2>
-      <div className="rl">
-        <div className="rl-row">
-          <div className="rl-what">
-            <p className="rl-name">{me?.account?.display_name ?? me?.admin.display_name ?? "—"}</p>
-            <p className="rl-value">
-              {me?.admin.username ?? me?.account?.email ?? "—"} ·{" "}
-              {me?.household?.name ?? me?.tenant.name ?? "your household"}
+    <section className="section">
+      <h2 className="h2">You</h2>
+      <div className="card rows">
+        <div className="row">
+          <div className="row-main">
+            <p className="row-title">{name}</p>
+            <p className="row-sub">
+              {[handle ? `Signs in as ${handle}` : null, house].filter(Boolean).join(" · ")}
             </p>
           </div>
-          <span className="rl-controls">
-            <button className="ch-btn" onClick={() => void handleLogout()}>
-              Log out
-            </button>
-          </span>
         </div>
       </div>
     </section>
   );
 }
 
-// The theme control is a three-stop slider: Light — Match my system — Dark.
-// Dragging previews the theme live; the choice sticks on release.
-const THEME_STOPS: { key: ThemeMode; label: string }[] = [
+const THEMES: { key: ThemeMode; label: string }[] = [
   { key: "light", label: "Light" },
-  { key: "system", label: "Match my system" },
   { key: "dark", label: "Dark" },
+  { key: "system", label: "Match my system" },
 ];
 
 function Appearance() {
-  const { mode, setTheme, followSystem } = useTheme();
-
-  function apply(idx: number, persist: boolean) {
-    const stop = THEME_STOPS[idx]?.key ?? "system";
-    if (stop === "system") {
-      if (persist) followSystem();
-      // Live preview of "system" = whatever the OS says right now.
-      else setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light", false);
-    } else {
-      setTheme(stop, persist);
-    }
-  }
-
+  const { mode, setMode } = useTheme();
   return (
-    <section className="ch-section">
-      <h2 className="ch-h2">Appearance</h2>
-      <div className="rl">
-        <div className="rl-row">
-          <div className="rl-what">
-            <p className="rl-name">Theme</p>
-            <p className="rl-value">Both modes are first-class — slide to pick one, or let the OS decide</p>
+    <section className="section">
+      <h2 className="h2">Appearance</h2>
+      <div className="card rows">
+        <div className="row row-wrap">
+          <div className="row-main">
+            <p className="row-title" id="theme-label">
+              Theme
+            </p>
+            <p className="row-sub">For this browser. The computers' own screens stay light.</p>
           </div>
-          <FluentSlider
-            min={0}
-            max={2}
-            step={1}
-            value={THEME_STOPS.findIndex((s) => s.key === mode)}
-            format={(v) => THEME_STOPS[v]?.label ?? ""}
-            onLive={(v) => apply(v, false)}
-            onCommit={(v) => apply(v, true)}
-            aria-label="Theme"
-          />
+          <div className="row-end">
+            <div className="seg" role="radiogroup" aria-labelledby="theme-label">
+              {THEMES.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === t.key}
+                  className="seg-btn"
+                  onClick={() => setMode(t.key)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </section>
   );
 }
 
-// ---- the back room ---------------------------------------------------------
+// ---- the keys ---------------------------------------------------------------
 
 function Security() {
   const { enter, armed } = useConfirm();
   const [checking, setChecking] = useState(false);
 
-  // The room is open exactly while the confirm window is — when it lapses,
-  // the gate closes again by itself. No stale "unlocked" state to forget.
+  // Design review only: ?mock=confirm opens the dialog for a screenshot.
+  useEffect(() => {
+    if (usingMock && new URLSearchParams(window.location.search).get("mock") === "confirm") void enter();
+  }, [enter]);
+
+  // Open exactly while the confirm window is — when it lapses, the gate
+  // closes by itself.
   async function unlock() {
     setChecking(true);
     try {
@@ -167,189 +139,28 @@ function Security() {
   }
 
   return (
-    <section className="ch-section">
-      <h2 className="ch-h2">Security &amp; access</h2>
+    <section className="section">
+      <h2 className="h2">Security</h2>
       {armed ? (
-        <SecurityPanels />
+        <div className="stack">
+          <Passkeys />
+          <UnlockCodes />
+          <Phone />
+          <Companions />
+        </div>
       ) : (
-        <div className="gate card">
-          <span className="gate-glyph" aria-hidden="true">
-            <LockGlyph open={false} size={22} />
+        <div className="card gate">
+          <span className="gate-ic" aria-hidden="true">
+            <Icon name="lock" size={22} />
           </span>
-          <p className="gate-title">Confirm it's you to see this</p>
-          <p className="gate-sub">
-            The computers' unlock codes, your passkeys and paired companions live here.
-          </p>
-          <button className="ch-btn ch-btn-yes" disabled={checking} onClick={() => void unlock()}>
+          <p className="gate-title">Confirm it's you to see the keys</p>
+          <p className="gate-sub">The computers' unlock and recovery codes, and your passkeys.</p>
+          <Button disabled={checking} onClick={() => void unlock()}>
             {checking ? "Checking…" : "Confirm it's you"}
-          </button>
+          </Button>
         </div>
       )}
     </section>
-  );
-}
-
-/** Mounted only while confirmed — these fetches never fire on an idle visit. */
-function SecurityPanels() {
-  return (
-    <div className="rl">
-      <Passkeys />
-      <UnlockCodes />
-      <Telegram />
-      <ParentAccess />
-    </div>
-  );
-}
-
-/**
- * The Telegram companion: pair once, then the phone gets alerts and can ok a
- * time request with one tap. It is not a way to sign in or confirm.
- */
-function Telegram() {
-  const tg = useAsync<TelegramStatus>(getTelegram, []);
-  const [pairing, setPairing] = useState<TelegramPairing | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-
-  // While the pairing sheet is open, watch for the bot to report the pair —
-  // the moment it lands, the sheet closes itself.
-  useEffect(() => {
-    if (!pairing) return;
-    const t = setInterval(() => tg.reload(), 3000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairing]);
-  useEffect(() => {
-    if (pairing && tg.data?.paired) {
-      setPairing(null);
-      setStatus("Phone paired ✓");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tg.data?.paired]);
-
-  async function begin() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      setPairing(await pairTelegram());
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't start pairing.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function unpair() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      await unpairTelegram();
-      setStatus("Unpaired.");
-      tg.reload();
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't unpair.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const d = tg.data;
-  return (
-    <div className="rl-row">
-      <div className="rl-what">
-        <p className="rl-name">Phone (Telegram)</p>
-        <p className="rl-value">
-          {tg.loading
-            ? "Checking…"
-            : !d?.configured
-              ? "No bot on this server — set OST_TELEGRAM_BOT_TOKEN to enable phone taps"
-              : d.paired
-                ? `Paired${d.username ? ` as @${d.username}` : ""} — alerts and one-tap time approvals go to your phone`
-                : "Pair your phone for alerts, and to ok a time request with one tap"}
-        </p>
-        {status && (
-          <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>
-            {status}
-          </p>
-        )}
-      </div>
-      <span className="rl-controls">
-        {d?.configured && !tg.loading && (
-          <button className="ch-btn" disabled={busy} onClick={() => void (d.paired ? unpair() : begin())}>
-            {d.paired ? "Unpair" : "Pair phone"}
-          </button>
-        )}
-      </span>
-
-      <Modal
-        open={!!pairing}
-        onClose={() => setPairing(null)}
-        title="Pair your phone"
-        footer={
-          <Button variant="ghost" onClick={() => setPairing(null)} disabled={busy}>
-            Cancel
-          </Button>
-        }
-      >
-        {pairing && (
-          <div className="flex flex-col gap-4">
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              Open Telegram and send this code to the bot — the sheet closes by
-              itself once the pair lands. The code works for{" "}
-              {pairing.expires_in_minutes} minutes.
-            </p>
-            {pairing.deep_link ? (
-              <a
-                className="focusable ch-btn ch-btn-yes"
-                style={{ textAlign: "center" }}
-                href={pairing.deep_link}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open @{pairing.bot} in Telegram
-              </a>
-            ) : (
-              <p className="text-sm">
-                Message your bot: <code>/start {pairing.code}</code>
-              </p>
-            )}
-            <TokenBlock token={`/start ${pairing.code}`} />
-          </div>
-        )}
-      </Modal>
-    </div>
-  );
-}
-
-/**
- * Each computer's unlock code — the 6-digit code that unlocks its screen,
- * reopens time and allows `sudo` there, verified on the device with no
- * internet. The secret behind it stays on the server: a parent reads the code
- * here when they need it. Recovery codes and replacing the key live in the
- * same row.
- */
-function UnlockCodes() {
-  const devices = useAsync<Device[]>(listDevices, []);
-  const list = devices.data ?? [];
-
-  return (
-    <div className="rl-row rl-row-stack">
-      <div className="rl-what">
-        <p className="rl-name">Unlock codes</p>
-        <p className="rl-value">
-          One per computer. The 6-digit code unlocks the screen, reopens time and allows{" "}
-          <code>sudo</code> there — verified on the device, offline. Read it here on your phone
-          when you need it; no authenticator app involved.
-          {devices.error ? ` · couldn't load: ${devices.error}` : ""}
-        </p>
-      </div>
-      {list.map((d) => (
-        <UnlockCodePanel key={d.id} device={d} />
-      ))}
-      {!devices.loading && list.length === 0 && (
-        <p className="fam-quiet">No computers yet — an unlock code is made when you set one up.</p>
-      )}
-    </div>
   );
 }
 
@@ -359,7 +170,7 @@ function Passkeys() {
   const passkeys = useAsync<Passkey[]>(listPasskeys, []);
   const [confirmDelete, setConfirmDelete] = useState<Passkey | null>(null);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ msg: string; error: boolean } | null>(null);
 
   const oidc = authConfig.data?.oidc ?? false;
   const keys = passkeys.data ?? [];
@@ -370,10 +181,10 @@ function Passkeys() {
     try {
       await addPasskey();
       passkeys.reload();
-      setStatus("Passkey added.");
+      setStatus({ msg: "Passkey added.", error: false });
     } catch (e) {
       if (e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError")) return;
-      setStatus(e instanceof Error ? e.message : "The passkey wasn't added.");
+      setStatus({ msg: e instanceof Error ? e.message : "The passkey wasn't added.", error: true });
     }
   }
 
@@ -384,15 +195,17 @@ function Passkeys() {
     try {
       await deletePasskey(key.id);
       passkeys.setData((prev) => (prev ?? []).filter((k) => k.id !== key.id));
-      setStatus(`Passkey "${key.nickname}" removed.`);
+      setStatus({ msg: `Removed ${key.nickname}.`, error: false });
     } catch (e) {
-      setStatus(
-        e instanceof ApiError && e.status === 409
-          ? "That's your last passkey — removing it would lock you out."
-          : e instanceof Error
-            ? e.message
-            : "Couldn't remove the passkey.",
-      );
+      setStatus({
+        msg:
+          e instanceof ApiError && e.status === 409
+            ? "That's your last passkey. Removing it would lock you out."
+            : e instanceof Error
+              ? e.message
+              : "Couldn't remove the passkey.",
+        error: true,
+      });
     } finally {
       setBusy(false);
       setConfirmDelete(null);
@@ -400,157 +213,288 @@ function Passkeys() {
   }
 
   return (
-    <div className="rl-row rl-row-stack">
-      <div className="rl-what">
-        <p className="rl-name">Passkeys</p>
-        <p className="rl-value">
-          {recovered
-            ? "You signed in with a recovery link. Add a passkey now, so next time is one tap."
-            : "One tap to sign in — one per phone or computer you trust"}
-          {passkeys.error ? ` · couldn't load: ${passkeys.error}` : ""}
-        </p>
-        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
-      </div>
-      {keys.map((k) => (
-        <div className="rl-app" key={k.id}>
-          <span className="rl-app-name">{k.nickname}</span>
-          <span className="rl-app-mins">
-            added {relTime(k.created_at)} · used {relTime(k.last_used_at)}
-          </span>
-          <button
-            className="chip-x"
-            disabled={lastKey}
-            title={lastKey ? "Your last passkey can't be removed — you'd lock yourself out" : undefined}
-            aria-label={`Remove passkey ${k.nickname}`}
-            onClick={() => setConfirmDelete(k)}
-          >
-            ✕
-          </button>
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <p className="row-title">Passkeys</p>
+          <p className="row-sub">
+            {recovered
+              ? "You came in with a recovery link. Add a passkey now, so next time is one tap."
+              : "One tap to sign in, on each phone or computer you trust."}
+          </p>
         </div>
-      ))}
-      <div style={{ maxWidth: "16rem" }}>
-        <PasskeyButton label="Add a passkey" onActivate={add} />
+      </div>
+      <div className="rows">
+        {passkeys.error && (
+          <div className="row">
+            <p className="hint" data-error="true">
+              Couldn't load your passkeys: {passkeys.error}
+            </p>
+          </div>
+        )}
+        {keys.map((k) => (
+          <div className="row" key={k.id}>
+            <Icon name="passkey" size={20} className="row-ic" />
+            <div className="row-main">
+              <p className="row-title">{k.nickname}</p>
+              <p className="row-sub">
+                Added {ago(k.created_at)} · {k.last_used_at ? `last used ${ago(k.last_used_at)}` : "not used yet"}
+              </p>
+            </div>
+            <div className="row-end">
+              <button
+                type="button"
+                className="btn-icon"
+                disabled={lastKey}
+                title={lastKey ? "Your last passkey can't be removed — you'd lock yourself out" : "Remove"}
+                aria-label={`Remove passkey ${k.nickname}`}
+                onClick={() => setConfirmDelete(k)}
+              >
+                <Icon name="remove" size={18} />
+              </button>
+            </div>
+          </div>
+        ))}
+        <div className="row">
+          <div className="row-main">
+            <div className="settings-add">
+              <PasskeyButton label="Add a passkey" onActivate={add} block={false} />
+            </div>
+            {status && (
+              <p className="hint" data-error={status.error} role="status">
+                {status.msg}
+              </p>
+            )}
+          </div>
+        </div>
       </div>
 
       <Modal
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
-        title="Remove passkey"
+        title="Remove this passkey?"
         danger
         footer={
           <>
-            <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
-              CANCEL
+            <Button variant="quiet" onClick={() => setConfirmDelete(null)}>
+              Cancel
             </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void remove()}>
+            <Button variant="danger-solid" disabled={busy} onClick={() => void remove()}>
               {busy ? "Removing…" : "Remove passkey"}
             </Button>
           </>
         }
       >
-        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
-          Remove <span className="dot text-fg">{confirmDelete?.nickname}</span>? Devices that
-          signed in with it will need another way back in.
+        <p className="dialog-lede">
+          <strong>{confirmDelete?.nickname}</strong> won't sign you in any more. You can add it again later.
         </p>
       </Modal>
     </div>
   );
 }
 
-function ParentAccess() {
-  const parentTokens = useAsync<ParentToken[]>(listParentTokens, []);
-  const [label, setLabel] = useState("");
-  const [minting, setMinting] = useState(false);
-  const [minted, setMinted] = useState<MintedParentToken | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
+/**
+ * Each computer's unlock code — the 6-digit code that unlocks its screen,
+ * gives time back and allows `sudo` there, checked on the computer itself
+ * with no internet. Read it here when you need it; recovery codes are the
+ * spare keys.
+ */
+function UnlockCodes() {
+  const devices = useAsync<Device[]>(listDevices, []);
+  const list = devices.data ?? [];
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <p className="row-title">Unlock codes</p>
+          <p className="row-sub">
+            One per computer. It unlocks the screen and gives time back, right there — even with no
+            internet.
+          </p>
+        </div>
+      </div>
+      <div className="rows">
+        {devices.error && (
+          <div className="row">
+            <p className="hint" data-error="true">
+              Couldn't load the computers: {devices.error}
+            </p>
+          </div>
+        )}
+        {list.map((d) => (
+          <div className="row settings-uc" key={d.id}>
+            <div className="row-main">
+              <UnlockCodePanel device={d} />
+            </div>
+          </div>
+        ))}
+        {!devices.loading && list.length === 0 && (
+          <div className="row">
+            <p className="row-sub">No computers yet. Each one gets an unlock code when you add it.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-  async function mint() {
-    setMinting(true);
+/**
+ * A paired phone (Telegram): alerts, and a one-tap yes to a request for time.
+ * Shown only when this server has a bot — otherwise there is nothing to do.
+ */
+function Phone() {
+  const tg = useAsync<TelegramStatus>(getTelegram, []);
+  const [pairing, setPairing] = useState<TelegramPairing | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<{ msg: string; error: boolean } | null>(null);
+
+  // While the pairing sheet is open, watch for the pair to land; the sheet
+  // closes by itself when it does.
+  useEffect(() => {
+    if (!pairing) return;
+    const t = setInterval(() => tg.reload(), 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairing]);
+  useEffect(() => {
+    if (pairing && tg.data?.paired) {
+      setPairing(null);
+      setStatus({ msg: "Your phone is paired.", error: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tg.data?.paired]);
+
+  async function begin() {
+    setBusy(true);
     setStatus(null);
     try {
-      setMinted(await mintParentToken(label.trim()));
-      setLabel("");
-      parentTokens.reload();
+      setPairing(await pairTelegram());
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't create the pairing token.");
+      setStatus({ msg: e instanceof Error ? e.message : "Couldn't start pairing.", error: true });
     } finally {
-      setMinting(false);
+      setBusy(false);
     }
   }
+
+  async function unpair() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await unpairTelegram();
+      setStatus({ msg: "Your phone is no longer paired.", error: false });
+      tg.reload();
+    } catch (e) {
+      setStatus({ msg: e instanceof Error ? e.message : "Couldn't unpair.", error: true });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const d = tg.data;
+  if (!d?.configured) return null;
+  return (
+    <div className="card rows">
+      <div className="row">
+        <Icon name="bell" size={20} className="row-ic" />
+        <div className="row-main">
+          <p className="row-title">Phone</p>
+          <p className="row-sub">
+            {d.paired
+              ? `Paired${d.username ? ` as @${d.username}` : ""}. Alerts and one-tap answers to requests go to your phone.`
+              : "Pair your phone for alerts, and to answer a request for time with one tap."}
+          </p>
+          {status && (
+            <p className="hint" data-error={status.error} role="status">
+              {status.msg}
+            </p>
+          )}
+        </div>
+        <div className="row-end">
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => void (d.paired ? unpair() : begin())}>
+            {d.paired ? "Unpair" : "Pair phone"}
+          </Button>
+        </div>
+      </div>
+
+      <Modal
+        open={!!pairing}
+        onClose={() => setPairing(null)}
+        title="Pair your phone"
+        footer={
+          <Button variant="quiet" onClick={() => setPairing(null)}>
+            Cancel
+          </Button>
+        }
+      >
+        {pairing && (
+          <div className="stack">
+            <p className="dialog-lede">
+              Send this to the bot in Telegram. This closes by itself once your phone is paired. The
+              code works for {pairing.expires_in_minutes} minutes.
+            </p>
+            {pairing.deep_link && (
+              <a className="btn btn-primary btn-block" href={pairing.deep_link} target="_blank" rel="noreferrer">
+                Open @{pairing.bot} in Telegram
+              </a>
+            )}
+            <CopyField value={`/start ${pairing.code}`} />
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+/**
+ * Older companion pairings. Nothing new is paired this way any more; the list
+ * appears only while one is left, so it can be revoked.
+ */
+function Companions() {
+  const tokens = useAsync<ParentToken[]>(listParentTokens, []);
+  const live = (tokens.data ?? []).filter((t) => !t.revoked);
+  const [status, setStatus] = useState<string | null>(null);
 
   async function revoke(t: ParentToken) {
     try {
       await revokeParentToken(t.id);
-      parentTokens.setData((prev) =>
-        (prev ?? []).map((x) => (x.id === t.id ? { ...x, revoked: true } : x)),
-      );
-      setStatus(`Revoked "${t.label || "pairing token"}".`);
+      tokens.setData((prev) => (prev ?? []).map((x) => (x.id === t.id ? { ...x, revoked: true } : x)));
+      setStatus(`Revoked ${t.label || "that companion"}.`);
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't revoke the token.");
+      setStatus(e instanceof Error ? e.message : "Couldn't revoke it.");
     }
   }
 
-  const tokens = parentTokens.data ?? [];
-
+  if (live.length === 0 && !status) return null;
   return (
-    <div className="rl-row rl-row-stack">
-      <div className="rl-what">
-        <p className="rl-name">Paired companions</p>
-        <p className="rl-value">
-          Your phone or tray app, approving requests without opening the console — tokens are
-          shown once and stored hashed
-        </p>
-        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
-      </div>
-      {tokens.map((t) => (
-        <div className="rl-app" key={t.id}>
-          <span className="rl-app-name" style={t.revoked ? { color: "var(--fg-faint)", textDecoration: "line-through" } : undefined}>
-            {t.label || "Pairing token"}
-          </span>
-          <span className="rl-app-mins">
-            {t.revoked
-              ? "revoked"
-              : t.last_used_at
-                ? `last used ${relTime(t.last_used_at)}`
-                : "never used"}
-          </span>
-          {!t.revoked && (
-            <button className="chip-x" aria-label={`Revoke ${t.label || "pairing token"}`} onClick={() => void revoke(t)}>
-              ✕
-            </button>
-          )}
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <p className="row-title">Paired companions</p>
+          <p className="row-sub">Apps you paired earlier to answer requests. Revoke any you no longer use.</p>
         </div>
-      ))}
-      <div className="rl-app">
-        <input
-          className="chip-input"
-          style={{ width: "14rem" }}
-          placeholder="+ companion, e.g. Mum's phone"
-          value={label}
-          disabled={minting}
-          onChange={(e) => setLabel(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && label.trim() && void mint()}
-          aria-label="New companion label"
-        />
-        {label.trim() && (
-          <button className="ch-btn" disabled={minting} onClick={() => void mint()}>
-            {minting ? "Creating…" : "Create pairing token"}
-          </button>
+      </div>
+      <div className="rows">
+        {live.map((t) => (
+          <div className="row" key={t.id}>
+            <div className="row-main">
+              <p className="row-title">{t.label || "Companion"}</p>
+              <p className="row-sub">{t.last_used_at ? `Last used ${ago(t.last_used_at)}` : "Never used"}</p>
+            </div>
+            <div className="row-end">
+              <Button size="sm" variant="danger" onClick={() => void revoke(t)}>
+                Revoke
+              </Button>
+            </div>
+          </div>
+        ))}
+        {status && (
+          <div className="row">
+            <p className="hint" role="status">
+              {status}
+            </p>
+          </div>
         )}
       </div>
-
-      <Modal
-        open={!!minted}
-        onClose={() => setMinted(null)}
-        title="Pairing token"
-        footer={<Button onClick={() => setMinted(null)}>Done</Button>}
-      >
-        <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--fg-dim)" }}>
-          Copy this now — it's shown only once. Paste it into the companion for{" "}
-          <span className="dot text-fg">{minted?.label || "this pairing"}</span>.
-        </p>
-        {minted && <TokenBlock token={minted.token} />}
-      </Modal>
     </div>
   );
 }

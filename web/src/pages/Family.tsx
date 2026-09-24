@@ -1,154 +1,31 @@
 // ============================================================================
-// FAMILY — the home screen.
+// FAMILY — the home screen, "the wall everyone reads" (brand board § e).
 //
-// This console used to open on a device list, which meant the first thing a
-// parent saw was infrastructure. The product is not a fleet. It is a handful
-// of people and how their day is going: one card per person, today's time
-// under their name, and nothing else competing. Machinery interrupts only
-// when actually broken (<Trouble/> renders nothing on a healthy day).
+// A greeting and one honest verdict sentence; Pause everything; then one card
+// per person, sorted by who needs you — their ring, their time left, and a
+// request for time answered right there on the card. The parent's own card
+// sits on the same wall. Machinery interrupts only when a computer has really
+// gone quiet.
 //
-// The one control that outranks the cards is Pause — the brief's "one tap
-// freezes every screen in the house". It sits above them, and when it fires
-// the freeze visibly sweeps across the family rather than the page silently
-// re-rendering.
+// The store under it refreshes itself (lib/family.ts), so a new request and
+// "Pausing…" → "Paused" arrive without navigating.
 // ============================================================================
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import type { Device, MeToday } from "../types";
+import type { Device, EarnRequest, MeToday } from "../types";
 import * as api from "../api";
 import { useSession } from "../lib/session";
+import { useConfirm, StepUpCancelled } from "../lib/confirm";
+import { useToast } from "../lib/toast";
 import { AvatarRing } from "../components/AvatarRing";
-import { useFamily, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
+import { Button, buttonClass } from "../components/Button";
+import { Icon } from "../components/Icon";
+import { Mark } from "../components/Wordmark";
+import { useFamily, familyChanged, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
-import { avatarColors } from "../lib/avatar";
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-export function Avatar({
-  name,
-  seed,
-  avatar,
-  size = 56,
-}: {
-  name: string;
-  seed: string;
-  /** parent-picked emoji face; falls back to the deterministic monogram */
-  avatar?: string | null;
-  size?: number;
-}) {
-  const disc = avatarColors(seed);
-  return (
-    <span
-      className="fam-avatar"
-      style={{
-        width: size,
-        height: size,
-        fontSize: avatar ? size * 0.5 : size * 0.34,
-        background: disc.bg,
-        color: disc.ink,
-      }}
-      aria-hidden="true"
-    >
-      {avatar || initials(name)}
-    </span>
-  );
-}
-
-/**
- * Today's time as a segmented bar — one cell per 15 minutes, so the diagram
- * is a picture of the day rather than decoration. The fill animates from zero
- * on mount and the minutes count up to meet it.
- */
-function TimeBar({ child }: { child: FamilyChild }) {
-  const total = minutesTotal(child);
-  const left = minutesLeft(child);
-  // Unconditional: hooks cannot sit behind the no-limit early return below.
-  const shown = useCountUp(left ?? 0);
-
-  if (total === null || left === null) {
-    return <p className="fam-time-none">{child.used_minutes} min today · no limit set</p>;
-  }
-
-  const pct = total > 0 ? Math.min(100, Math.round((child.used_minutes / total) * 100)) : 0;
-  const spent = left === 0;
-
-  return (
-    <div className="fam-time">
-      <div
-        className="fam-bar"
-        role="img"
-        aria-label={`${child.used_minutes} of ${total} minutes used`}
-        style={{ "--segs": Math.max(1, Math.round(total / 15)) } as CSSProperties}
-      >
-        <span className="fam-bar-fill" style={{ width: `${pct}%` }} data-spent={spent} />
-      </div>
-      <p className="fam-time-label">
-        {spent ? (
-          <span className="fam-spent">Time is up for today</span>
-        ) : (
-          <>
-            <strong>{shown} min</strong> left of {total}
-            {child.earned_minutes > 0 && (
-              <span className="fam-earned"> · {child.earned_minutes} earned</span>
-            )}
-          </>
-        )}
-      </p>
-    </div>
-  );
-}
-
-function since(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 60) return `${mins} min ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
-  const days = Math.round(hrs / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
-}
-
-/**
- * The only thing allowed to interrupt. Renders nothing on a healthy day.
- * A device inside an allowed-offline window is not trouble — the parent said
- * it may be away — and "pending" is normal minutes after setup.
- */
-function Trouble({ devices }: { devices: Device[] }) {
-  const dark = devices.filter(
-    (d) =>
-      d.status === "offline" &&
-      !(d.offline_allowed_until && new Date(d.offline_allowed_until).getTime() > Date.now()),
-  );
-  if (dark.length === 0) return null;
-  const ago = since(dark[0].last_seen);
-  return (
-    <p className="fam-trouble">
-      <span className="fam-trouble-dot" aria-hidden="true" />
-      {dark.length === 1
-        ? `${dark[0].name} was last seen ${ago || "a while ago"}. If it is switched off, that is normal.`
-        : `${dark.length} computers haven't been seen recently. If they are switched off, that is normal.`}
-      <Link to="/devices" className="fam-trouble-go">
-        Devices →
-      </Link>
-    </p>
-  );
-}
-
-/** "Kid · Kids" and "Little · Default" read as stutter; only show a profile
- *  name that actually says something beyond the bracket. */
-function profileWorthShowing(bracket: FamilyChild["age_bracket"], profile: string | null): boolean {
-  if (!profile) return false;
-  const norm = (s: string) => s.toLowerCase().replace(/s$/, "");
-  if (norm(profile) === "default") return false;
-  return norm(profile) !== norm(BRACKET_LABEL[bracket] ?? bracket);
-}
+import { ago, duration } from "../lib/format";
 
 const BRACKET_LABEL: Record<FamilyChild["age_bracket"], string> = {
   little: "Little",
@@ -158,160 +35,286 @@ const BRACKET_LABEL: Record<FamilyChild["age_bracket"], string> = {
   adult: "Adult",
 };
 
-function ChildCard({ child, index }: { child: FamilyChild; index: number }) {
-  // `locked` is what the devices actually report; a pause in flight is shown
-  // as exactly that, never as already done.
-  const paused = child.locked && child.devices.length > 0;
-  const pending = child.devices.some((d) => d.lock_pending);
+/** "Kid · Mia's laptop" — the bracket, then where they are. */
+function metaLine(c: FamilyChild): string {
+  const where =
+    c.devices.length === 0
+      ? "No computer yet"
+      : c.devices.length === 1
+        ? c.devices[0].name
+        : `${c.devices.length} computers`;
+  return `${BRACKET_LABEL[c.age_bracket] ?? c.age_bracket} · ${where}`;
+}
+
+/** Today's time, in one sentence. The number counts to its value. */
+function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
+  const total = minutesTotal(child);
+  const left = minutesLeft(child);
+  const shown = useCountUp(left ?? child.used_minutes);
+
+  if (paused) return <p className="pc-time">Paused by you</p>;
+  if (total === null || left === null) {
+    return (
+      <p className="pc-time">
+        <b className="num">{duration(shown)}</b> today · no limit set
+      </p>
+    );
+  }
+  if (left === 0) {
+    return (
+      <p className="pc-time" data-tone="stop">
+        <b>Time's up</b> for today · {duration(total)} used
+      </p>
+    );
+  }
   return (
-    <Link
-      to={`/child/${encodeURIComponent(child.key)}`}
-      className="fam-card"
-      data-paused={paused}
-      data-pending={pending}
-      // Staggered so the freeze sweeps across the family left-to-right
-      // instead of every card blinking at once.
-      style={{ "--i": index } as CSSProperties}
-    >
-      <AvatarRing
-        name={child.name}
-        seed={child.key}
-        avatar={child.avatar}
-        used={child.used_minutes}
-        // The ring fills toward their own goal if they've set one, else the
-        // parent's limit (+earned). No target → a plain identity disc.
-        target={child.goal_minutes ?? minutesTotal(child)}
-        paused={paused}
-      />
-      <div className="fam-card-body">
-        <p className="fam-name">{child.name}</p>
-        <p className="fam-meta">
-          {BRACKET_LABEL[child.age_bracket] ?? child.age_bracket}
-          {profileWorthShowing(child.age_bracket, child.profile_name) && ` · ${child.profile_name}`}
-          {child.devices.length > 1 && ` · ${child.devices.length} devices`}
-        </p>
-        <TimeBar child={child} />
-        {child.pending_requests > 0 && (
-          <p className="fam-waiting">
-            {child.pending_requests === 1
-              ? "1 request waiting for you"
-              : `${child.pending_requests} requests waiting for you`}
-          </p>
-        )}
-      </div>
-      {paused ? (
-        <span className="fam-card-paused" aria-label="Paused">
-          Paused
-        </span>
-      ) : pending ? (
-        <span className="fam-card-paused fam-card-pending" aria-label="Pausing">
-          Pausing…
-        </span>
-      ) : null}
-    </Link>
+    <p className="pc-time" data-tone={left <= 15 ? "warn" : undefined}>
+      <b className="num">{duration(shown)}</b> left of {duration(total)}
+      {child.earned_minutes > 0 && <span className="pc-earned"> · {child.earned_minutes} min given</span>}
+    </p>
   );
 }
 
-/**
- * The first minutes with an empty household — a real introduction, not an
- * empty grid with a lonely button (CONTRACT-0.6 §3). Three honest steps and
- * one door in.
- */
-function FirstRun() {
+/** A request for time, with its two answers right on the card. */
+function Request({ request, name }: { request: EarnRequest; name: string }) {
+  const { guard } = useConfirm();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const reason = request.task_label && request.task_label !== "Asked for more time" ? request.task_label : null;
+
+  async function answer(give: boolean) {
+    setBusy(true);
+    try {
+      await guard(() => (give ? api.approveEarnRequest(request.id) : api.denyEarnRequest(request.id)));
+      toast(give ? `Gave ${name} ${request.minutes} more minutes.` : `Told ${name} not now.`);
+      familyChanged();
+    } catch (e) {
+      if (!(e instanceof StepUpCancelled)) {
+        toast(e instanceof Error ? e.message : "That didn't go through. Try again.", "crit");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="fr card">
-      <p className="fr-hi">Welcome. This page becomes your family's day, at a glance.</p>
-      <ol className="fr-steps">
-        <li>
-          <strong>Add each person.</strong> A name and a birthdate — the age
-          decides how much they run themselves.
-        </li>
-        <li>
-          <strong>Connect their computer.</strong> One command, shown right in
-          the add flow; the software installs from GitHub and the machine
-          appears here within a minute.
-        </li>
-        <li>
-          <strong>Then mostly… look.</strong> Everything works unless you block
-          it. Rings fill, requests arrive, and this page stays quiet unless a
-          human is needed.
-        </li>
-      </ol>
-      <Link to="/add" className="fam-cta">
-        Add the first person
-      </Link>
-      <p className="fr-note">
-        Everyone you add can see exactly what you can and can't see of them —
-        that page is part of their first visit too.
-      </p>
+    <div className="pc-req">
+      <Icon name="ask" size={18} className="pc-req-ic" />
+      <div className="pc-req-text">
+        <span>
+          Asked for {request.minutes} more minutes · <span className="num">{ago(request.created_at)}</span>
+        </span>
+        {reason && <span className="pc-req-reason">“{reason}”</span>}
+      </div>
+      <div className="pc-req-actions">
+        <Button size="sm" disabled={busy} onClick={() => void answer(true)}>
+          Give {request.minutes} min
+        </Button>
+        <Button size="sm" variant="quiet" disabled={busy} onClick={() => void answer(false)}>
+          Not now
+        </Button>
+      </div>
     </div>
   );
 }
 
-/**
- * The parent, in the family — "My screen time" left the nav (CONTRACT-0.6);
- * their own day lives here as a quieter card that opens the full page.
- * Everyone in the house has a ring in this product, the hub included.
- */
-function YouCard({ index }: { index: number }) {
-  const { me } = useSession();
-  const [today, setToday] = useState<MeToday | null>(null);
-  useEffect(() => {
-    void api
-      .getMeToday()
-      .then(setToday)
-      .catch(() => setToday(null));
-  }, []);
-  const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
-  const target =
-    today?.goal_minutes ??
-    (today?.limit_minutes != null ? today.limit_minutes + today.earned_minutes : null);
+/** A paused person's card offers the way back. */
+function ResumeRow({ child }: { child: FamilyChild }) {
+  const { guard } = useConfirm();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  async function resume() {
+    setBusy(true);
+    try {
+      await guard(async () => {
+        for (const d of child.devices) if (d.locked) await api.unlockDevice(d.id);
+      });
+      toast(`Resuming ${child.name}. It shows once the computer confirms.`);
+      familyChanged();
+    } catch (e) {
+      if (!(e instanceof StepUpCancelled)) toast(e instanceof Error ? e.message : "Couldn't resume.", "crit");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <Link to="/me" className="fam-card fam-card-you" style={{ "--i": index } as CSSProperties}>
-      <AvatarRing
-        name={name}
-        seed={me?.account?.id ?? "you"}
-        avatar={me?.account?.avatar}
-        used={today?.used_minutes ?? 0}
-        target={target ?? null}
-      />
-      <div className="fam-card-body">
-        <p className="fam-name">
-          {name} <span className="fam-you-tag">you</span>
-        </p>
-        <p className="fam-meta">Your own day, private to you</p>
-        {today ? (
-          <p className="fam-time-none">
-            {today.used_minutes} min today
-            {today.limit_minutes !== null ? ` · ${Math.max(0, today.left_minutes ?? 0)} left` : ""}
-          </p>
-        ) : (
-          <p className="fam-time-none">&nbsp;</p>
-        )}
+    <div className="pc-req">
+      <Icon name="pause" size={18} className="pc-req-ic pc-req-ic-quiet" />
+      <div className="pc-req-text">Time keeps for when you resume.</div>
+      <div className="pc-req-actions">
+        <Button size="sm" variant="secondary" icon="play" disabled={busy} onClick={() => void resume()}>
+          Resume
+        </Button>
       </div>
-    </Link>
+    </div>
+  );
+}
+
+function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnRequest[] }) {
+  // `locked` is what the computers report; a pause on its way is shown as
+  // exactly that, never as already done.
+  const paused = child.locked && child.devices.length > 0;
+  const pendingDev = child.devices.find((d) => d.lock_pending);
+  const target = child.goal_minutes ?? minutesTotal(child);
+  const left = minutesLeft(child);
+
+  return (
+    <li className="pc card" data-paused={paused}>
+      <div className="pc-hd">
+        <AvatarRing
+          name={child.name}
+          seed={child.key}
+          avatar={child.avatar}
+          used={child.used_minutes}
+          target={target}
+          left={child.goal_minutes ? null : left}
+          paused={paused}
+        />
+        <div className="pc-who">
+          <Link to={`/child/${encodeURIComponent(child.key)}`} className="pc-name">
+            {child.name}
+          </Link>
+          <p className="pc-meta">{metaLine(child)}</p>
+        </div>
+        {pendingDev ? (
+          <span className="tag tag-warn">{pendingDev.locked ? "Resuming…" : "Pausing…"}</span>
+        ) : paused ? (
+          <span className="tag">Paused</span>
+        ) : left === 0 ? (
+          <span className="tag tag-stop">Time's up</span>
+        ) : null}
+      </div>
+      <TimeLine child={child} paused={paused} />
+      {requests.map((r) => (
+        <Request key={r.id} request={r} name={child.name} />
+      ))}
+      {paused && !pendingDev && <ResumeRow child={child} />}
+    </li>
   );
 }
 
 /**
- * The waiting state. Not a shimmer: the real layout, drawn in outline, so the
- * page does not jump when the data lands. One card per person we don't know
- * about yet — two is the honest guess.
+ * The parent, on the same wall — their own day, private to them, opening
+ * their own page.
  */
+function YouCard() {
+  const { me } = useSession();
+  const [today, setToday] = useState<MeToday | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getMeToday()
+      .then((t) => alive && setToday(t))
+      .catch(() => alive && setToday(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
+  const limit = today?.limit_minutes != null ? today.limit_minutes + today.earned_minutes : null;
+  const target = today?.goal_minutes ?? limit;
+  return (
+    <li className="pc card pc-you">
+      <div className="pc-hd">
+        <AvatarRing
+          name={name}
+          seed={me?.account?.id ?? "you"}
+          avatar={me?.account?.avatar}
+          used={today?.used_minutes ?? 0}
+          target={target ?? null}
+        />
+        <div className="pc-who">
+          <Link to="/me" className="pc-name">
+            {name} <span className="tag">you</span>
+          </Link>
+          <p className="pc-meta">Your own day · private to you</p>
+        </div>
+      </div>
+      <p className="pc-time">
+        {today ? (
+          <>
+            <b className="num">{duration(today.used_minutes)}</b>
+            {today.goal_minutes
+              ? ` of a ${duration(today.goal_minutes)} goal`
+              : limit != null
+                ? ` of ${duration(limit)} today`
+                : " today"}
+          </>
+        ) : (
+          " "
+        )}
+      </p>
+    </li>
+  );
+}
+
+/** Only when a computer has really gone quiet — never on a healthy day. A
+ *  computer inside an allowed-offline window is not trouble. */
+function Trouble({ devices }: { devices: Device[] }) {
+  const dark = devices.filter(
+    (d) =>
+      d.status === "offline" &&
+      !(d.offline_allowed_until && new Date(d.offline_allowed_until).getTime() > Date.now()),
+  );
+  if (dark.length === 0) return null;
+  return (
+    <div className="banner banner-warn fam-trouble">
+      <Icon name="offline" size={20} />
+      <p className="banner-main">
+        {dark.length === 1
+          ? `${dark[0].name} was last online ${ago(dark[0].last_seen)}. If it's switched off, that's fine.`
+          : `${dark.length} computers haven't been online for a while. If they're switched off, that's fine.`}
+      </p>
+      <Link to="/computers" className="btn btn-quiet btn-sm">
+        See computers
+      </Link>
+    </div>
+  );
+}
+
+/** The first minutes with an empty household: three honest steps, one door. */
+function FirstRun() {
+  return (
+    <div className="fr card">
+      <Mark size={56} />
+      <h2 className="fr-title">This page becomes your family's day.</h2>
+      <ol className="fr-steps">
+        <li>
+          <b>Add each person.</b> A name and a birthday; their age sets sensible rules.
+        </li>
+        <li>
+          <b>Set up their computer.</b> One command, shown as you go. It appears here within a
+          minute.
+        </li>
+        <li>
+          <b>Then mostly, look.</b> Rings fill, requests arrive, and this page stays quiet unless
+          someone needs you.
+        </li>
+      </ol>
+      <Link to="/add" className={buttonClass("primary")}>
+        <Icon name="add" size={18} />
+        Add the first person
+      </Link>
+    </div>
+  );
+}
+
+/** Waiting: the real layout drawn in outline, so nothing jumps when it lands. */
 function FamilyWaiting() {
   return (
-    <ul className="fam-grid" aria-busy="true" aria-label="Loading the family">
+    <ul className="people" aria-busy="true" aria-label="Loading the family">
       {[0, 1].map((i) => (
-        <li key={i}>
-          <div className="fam-card fam-card-wait" style={{ "--i": i } as CSSProperties}>
-            <span className="fam-avatar fam-wait-block" style={{ width: 56, height: 56 }} />
-            <div className="fam-card-body">
-              <span className="fam-wait-line" style={{ width: "38%", height: "1.125rem" }} />
-              <span className="fam-wait-line" style={{ width: "26%", height: "0.8rem" }} />
-              <span className="fam-wait-line" style={{ width: "100%", height: "10px", marginTop: "0.7rem" }} />
-              <span className="fam-wait-line" style={{ width: "45%", height: "0.9rem" }} />
+        <li key={i} className="pc card">
+          <div className="pc-hd">
+            <span className="wait" style={{ width: 64, height: 64, borderRadius: "50%" }} />
+            <div className="pc-who">
+              <span className="wait" style={{ width: "40%", height: 18, marginBottom: 8 }} />
+              <span className="wait" style={{ width: "60%", height: 13 }} />
             </div>
           </div>
+          <span className="wait" style={{ width: "55%", height: 16, marginTop: 16 }} />
         </li>
       ))}
     </ul>
@@ -319,91 +322,94 @@ function FamilyWaiting() {
 }
 
 export function Family() {
-  const { devices, children, error, loading, refreshing, reload } = useFamily();
+  const { devices, children, requests, error, loading, refreshing, reload } = useFamily();
   const [sweeping, setSweeping] = useState(false);
 
   const hour = new Date().getHours();
   const greeting = hour < 11 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
-  // Every device that could be paused. Pending devices have no agent yet.
+  // Every computer that could be paused; one still being set up has no agent.
   const pausable = (devices ?? []).filter((d) => d.status !== "pending");
   const allPaused = pausable.length > 0 && pausable.every((d) => d.locked);
 
-  // "Who needs me" floats to the top-left (reading order): anyone with a
-  // request waiting, then paused, then over/at limit; everyone fine settles
-  // below. Stable within a tier (keeps the household from reshuffling on every
-  // poll). This makes the grid a scannable to-do list, not just cards.
+  const requestsFor = (c: FamilyChild) => {
+    const ids = new Set(c.devices.map((d) => d.device_user_id));
+    return requests.filter((r) => ids.has(r.device_user_id));
+  };
+
+  // Who needs you floats to the top: a request waiting, then paused, then out
+  // of time; everyone fine settles below. Stable within a tier, so the wall
+  // doesn't reshuffle on every refresh.
   const needsScore = (c: FamilyChild): number => {
     if (c.pending_requests > 0) return 0;
-    if (c.locked) return 1;
+    if (c.locked && c.devices.length > 0) return 1;
     if (minutesLeft(c) === 0) return 2;
     return 3;
   };
-  const sortedChildren = [...children].sort((a, b) => needsScore(a) - needsScore(b));
+  const sorted = [...children].sort((a, b) => needsScore(a) - needsScore(b));
 
-  // The 3-second answer to "is everyone ok?" — the one honest sentence the
-  // Devices page already nails, brought to the page families actually open.
+  // The three-second answer to "is everyone OK?".
   const verdict = (): string => {
     if (children.length === 0) return "No one set up yet.";
     const asking = children.filter((c) => c.pending_requests > 0);
-    const paused = children.filter((c) => c.locked);
+    const paused = children.filter((c) => c.locked && c.devices.length > 0);
     const spent = children.filter((c) => !c.locked && minutesLeft(c) === 0);
     const parts: string[] = [];
+    if (paused.length) parts.push(paused.length === 1 ? `${paused[0].name} is paused.` : `${paused.length} people are paused.`);
+    if (spent.length) parts.push(spent.length === 1 ? `${spent[0].name} is out of time.` : `${spent.length} people are out of time.`);
+    if (!paused.length && !spent.length) parts.push("Everyone is within their time.");
     if (asking.length)
-      parts.push(
-        asking.length === 1
-          ? `${asking[0].name} asked for more time`
-          : `${asking.length} asked for more time`,
-      );
-    if (paused.length)
-      parts.push(paused.length === 1 ? `${paused[0].name} is paused` : `${paused.length} paused`);
-    if (spent.length && !paused.length)
-      parts.push(spent.length === 1 ? `${spent[0].name} is out of time` : `${spent.length} out of time`);
-    return parts.length ? parts.join(" · ") : "Everyone's within limits today.";
+      parts.push(asking.length === 1 ? `${asking[0].name} asked for more.` : `${asking.length} people asked for more.`);
+    return parts.join(" ");
   };
 
+  const hasData = devices !== null;
+
   return (
-    <div className="fam-wrap" data-sweeping={sweeping} data-refreshing={refreshing}>
+    <div className="page fam" data-sweeping={sweeping}>
+      {refreshing && <span className="refresh-bar" aria-hidden="true" />}
       <PageHead
         eyebrow="Family"
         title={greeting}
-        sub={loading && children.length === 0 ? "\u00a0" : verdict()}
+        sub={loading && !hasData ? " " : verdict()}
         actions={
-          <Link to="/add" className="focusable ph-action">
-            + Add a child
+          <Link to="/add" className={buttonClass("primary")}>
+            <Icon name="add" size={18} />
+            Add a person
           </Link>
         }
       />
 
-      {error && <p className="fam-error">{error}</p>}
+      {error && (
+        <div className="banner banner-stop fam-banner" role="alert">
+          <Icon name="warning" size={20} />
+          <p className="banner-main">
+            {hasData ? "Couldn't refresh — this is how things looked a moment ago." : "Couldn't load your family."}
+          </p>
+          <Button size="sm" variant="quiet" icon="refresh" onClick={() => void reload()}>
+            Try again
+          </Button>
+        </div>
+      )}
 
       {pausable.length > 0 && (
-        <PauseEverything
-          devices={pausable}
-          allPaused={allPaused}
-          onSweep={setSweeping}
-          onDone={reload}
-        />
+        <PauseEverything devices={pausable} allPaused={allPaused} onSweep={setSweeping} onDone={reload} />
       )}
 
       {devices && <Trouble devices={devices} />}
 
-      {loading && children.length === 0 ? (
+      {loading && !hasData ? (
         <FamilyWaiting />
       ) : children.length === 0 ? (
-        // Only invite first-run setup when the family is genuinely empty — not
-        // when the first load errored (that just shows the error above).
+        // Invite first-run setup only when the family is really empty — not
+        // when the first load failed (the banner above says that).
         error ? null : <FirstRun />
       ) : (
-        <ul className="fam-grid">
-          {sortedChildren.map((c, i) => (
-            <li key={c.key}>
-              <ChildCard child={c} index={i} />
-            </li>
+        <ul className="people">
+          {sorted.map((c) => (
+            <PersonCard key={c.key} child={c} requests={requestsFor(c)} />
           ))}
-          <li key="__you">
-            <YouCard index={children.length} />
-          </li>
+          <YouCard />
         </ul>
       )}
     </div>

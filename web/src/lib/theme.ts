@@ -1,55 +1,80 @@
+// ============================================================================
+// Light, dark, or match my system — one choice, remembered.
+//
+// A brand-new visitor gets the warm light theme (a family console should not
+// inherit a stark dark desktop by accident). Choosing "Match my system" is
+// stored as exactly that, so it survives a reload and follows the OS live.
+// The resolved theme lands on <html data-theme>, and the browser chrome's
+// theme-color follows it. index.html runs the same logic before first paint.
+// ============================================================================
 import { useSyncExternalStore } from "react";
 
 export type Theme = "dark" | "light";
+export type ThemeMode = Theme | "system";
+
 const KEY = "openscreentime-theme";
+const PAPER: Record<Theme, string> = { light: "#f4f2ee", dark: "#171614" };
 
-const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+const systemDark =
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
 
-/** Stored choice wins; otherwise follow the OS. Both modes are first-class. */
-export function getInitialTheme(): Theme {
-  const stored = localStorage.getItem(KEY);
-  if (stored === "dark" || stored === "light") return stored;
-  return systemDark.matches ? "dark" : "light";
+function readMode(): ThemeMode {
+  try {
+    const v = localStorage.getItem(KEY);
+    return v === "dark" || v === "light" || v === "system" ? v : "light";
+  } catch {
+    return "light";
+  }
 }
 
-// Module-level store so every useTheme() consumer shares one state — toggling
-// in Settings updates the Shell (and vice versa) immediately.
-//
-// The snapshot must cover mode (pinned vs system) as well as the resolved
-// theme: pinning "light" while the OS already renders light changes nothing
-// visually, but Settings still has to re-render its control.
-let current: Theme = getInitialTheme();
-const listeners = new Set<() => void>();
-let snapshot = { theme: current, mode: themeMode() };
+function resolve(mode: ThemeMode): Theme {
+  if (mode === "system") return systemDark?.matches ? "dark" : "light";
+  return mode;
+}
 
-function bump() {
-  snapshot = { theme: current, mode: themeMode() };
+let snapshot = { mode: readMode(), theme: resolve(readMode()) };
+const listeners = new Set<() => void>();
+
+function paint(theme: Theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  document
+    .querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')
+    .forEach((m) => m.setAttribute("content", PAPER[theme]));
+}
+
+/** Choose a mode; it is remembered in this browser. */
+export function setThemeMode(mode: ThemeMode) {
+  try {
+    localStorage.setItem(KEY, mode);
+  } catch {
+    /* private window: the choice lasts for this visit */
+  }
+  snapshot = { mode, theme: resolve(mode) };
+  paint(snapshot.theme);
   listeners.forEach((l) => l());
 }
 
-export function applyTheme(theme: Theme, persist = true) {
-  current = theme;
-  document.documentElement.setAttribute("data-theme", theme);
-  if (persist) localStorage.setItem(KEY, theme);
-  bump();
-}
-
-/** First paint. A brand-new visitor gets the warm LIGHT theme by default — a
- *  family dashboard shouldn't inherit a stark OS dark mode and feel austere.
- *  Any explicit prior choice (light, dark, or un-pinned follow-system) wins. */
+/** First paint (main.tsx): apply whatever was chosen before. */
 export function initTheme() {
-  if (localStorage.getItem(KEY) === null) {
-    applyTheme("light", true);
-  } else {
-    applyTheme(getInitialTheme(), false);
+  let mode = readMode();
+  // Design review only (VITE_USE_MOCK=1): ?theme=dark|light|system for
+  // screenshots, without touching the stored choice. Compiled out otherwise.
+  if (import.meta.env.VITE_USE_MOCK === "1") {
+    const q = new URLSearchParams(window.location.search).get("theme");
+    if (q === "dark" || q === "light" || q === "system") mode = q;
   }
+  snapshot = { mode, theme: resolve(mode) };
+  paint(snapshot.theme);
 }
 
-// Until the user toggles explicitly, track the OS live.
-systemDark.addEventListener("change", (e) => {
-  if (localStorage.getItem(KEY) === null) {
-    applyTheme(e.matches ? "dark" : "light", false);
-  }
+// While following the system, follow it live.
+systemDark?.addEventListener?.("change", () => {
+  if (snapshot.mode !== "system") return;
+  snapshot = { mode: "system", theme: resolve("system") };
+  paint(snapshot.theme);
+  listeners.forEach((l) => l());
 });
 
 function subscribe(listener: () => void) {
@@ -59,27 +84,7 @@ function subscribe(listener: () => void) {
   };
 }
 
-export type ThemeMode = Theme | "system";
-
-/** "system" until the user pins a mode explicitly. */
-export function themeMode(): ThemeMode {
-  const stored = localStorage.getItem(KEY);
-  return stored === "dark" || stored === "light" ? stored : "system";
-}
-
-/** Un-pin: forget the stored choice and follow the OS again, live. */
-export function followSystem() {
-  localStorage.removeItem(KEY);
-  applyTheme(systemDark.matches ? "dark" : "light", false);
-}
-
 export function useTheme() {
   const snap = useSyncExternalStore(subscribe, () => snapshot);
-  return {
-    theme: snap.theme,
-    mode: snap.mode,
-    toggle: () => applyTheme(current === "dark" ? "light" : "dark"),
-    setTheme: applyTheme,
-    followSystem,
-  };
+  return { theme: snap.theme, mode: snap.mode, setMode: setThemeMode };
 }
