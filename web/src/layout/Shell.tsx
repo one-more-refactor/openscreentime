@@ -36,11 +36,15 @@ function TodayRow({ child, onNavigate }: { child: FamilyChild; onNavigate?: () =
   const left = minutesLeft(child);
   const total = minutesTotal(child);
   const paused = child.locked && child.devices.length > 0;
-  const used = total && total > 0 ? child.used_minutes / total : total === 0 ? 1 : null;
-  const tone = left === 0 ? "stop" : left != null && left <= 15 ? "warn" : undefined;
+  // An adult keeping their own time: their limit is theirs, not the rail's.
+  const own = child.self_managed === true || child.managed === false || child.age_bracket === "adult";
+  const used = own ? null : total && total > 0 ? child.used_minutes / total : total === 0 ? 1 : null;
+  const tone = own ? undefined : left === 0 ? "stop" : left != null && left <= 15 ? "warn" : undefined;
   const meta = paused
     ? "paused"
-    : left === null
+    : own
+      ? "own rules"
+      : left === null
       ? "no limit"
       : left === 0
         ? "time's up"

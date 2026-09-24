@@ -46,6 +46,11 @@ function metaLine(c: FamilyChild): string {
   return `${BRACKET_LABEL[c.age_bracket] ?? c.age_bracket} · ${where}`;
 }
 
+/** An adult keeping their own time: the hub sees their minutes, not their rules. */
+function keepsOwnTime(c: FamilyChild): boolean {
+  return c.self_managed === true || c.managed === false || c.age_bracket === "adult";
+}
+
 /** Today's time, in one sentence. The number counts to its value. */
 function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
   const total = minutesTotal(child);
@@ -53,6 +58,13 @@ function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
   const shown = useCountUp(left ?? child.used_minutes);
 
   if (paused) return <p className="pc-time">Paused by you</p>;
+  if (keepsOwnTime(child)) {
+    return (
+      <p className="pc-time">
+        <b className="num">{duration(shown)}</b> today · keeps their own time
+      </p>
+    );
+  }
   if (total === null || left === null) {
     return (
       <p className="pc-time">
@@ -157,7 +169,9 @@ function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnReq
   // exactly that, never as already done.
   const paused = child.locked && child.devices.length > 0;
   const pendingDev = child.devices.find((d) => d.lock_pending);
-  const target = child.goal_minutes ?? minutesTotal(child);
+  // The ring fills toward the limit; someone keeping their own time shows an
+  // empty track — their limit is theirs.
+  const target = keepsOwnTime(child) ? null : minutesTotal(child);
   const left = minutesLeft(child);
 
   return (
@@ -169,7 +183,7 @@ function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnReq
           avatar={child.avatar}
           used={child.used_minutes}
           target={target}
-          left={child.goal_minutes ? null : left}
+          left={left}
           paused={paused}
         />
         <div className="pc-who">
@@ -213,8 +227,8 @@ function YouCard() {
     };
   }, []);
   const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
+  // Your own limit — the one you set on My computer.
   const limit = today?.limit_minutes != null ? today.limit_minutes + today.earned_minutes : null;
-  const target = today?.goal_minutes ?? limit;
   return (
     <li className="pc card pc-you">
       <div className="pc-hd">
@@ -223,24 +237,23 @@ function YouCard() {
           seed={me?.account?.id ?? "you"}
           avatar={me?.account?.avatar}
           used={today?.used_minutes ?? 0}
-          target={target ?? null}
+          target={limit}
+          left={today?.left_minutes ?? null}
         />
         <div className="pc-who">
           <Link to="/me" className="pc-name">
             {name} <span className="tag">you</span>
           </Link>
-          <p className="pc-meta">Your own day · private to you</p>
+          <p className="pc-meta">
+            {today && today.devices.length === 0 ? "No computer of your own yet" : "Your own day · private to you"}
+          </p>
         </div>
       </div>
       <p className="pc-time">
         {today ? (
           <>
             <b className="num">{duration(today.used_minutes)}</b>
-            {today.goal_minutes
-              ? ` of a ${duration(today.goal_minutes)} goal`
-              : limit != null
-                ? ` of ${duration(limit)} today`
-                : " today"}
+            {today.limit_minutes != null ? ` of the ${duration(today.limit_minutes)} you set` : " today"}
           </>
         ) : (
           " "
@@ -298,30 +311,63 @@ function Unsorted({ devices }: { devices: Device[] }) {
   );
 }
 
-/** The first minutes with an empty household: three honest steps, one door. */
-function FirstRun() {
+/**
+ * Nobody else in the household yet — it's just you. Say so honestly and offer
+ * both ways on: keep time for yourself (your own computer, then My computer),
+ * or look after someone else. Your own card sits beside it, so the wall is
+ * never empty.
+ */
+function JustYou({ haveMine }: { haveMine: boolean }) {
   return (
-    <div className="fr card">
-      <Mark size={56} />
-      <h2 className="fr-title">This page becomes your family's day.</h2>
-      <ol className="fr-steps">
-        <li>
-          <b>Add each person.</b> A name and a birthday; their age sets sensible rules.
-        </li>
-        <li>
-          <b>Set up their computer.</b> One command, shown as you go. It appears here within a
-          minute.
-        </li>
-        <li>
-          <b>Then mostly, look.</b> Rings fill, requests arrive, and this page stays quiet unless
-          someone needs you.
-        </li>
-      </ol>
-      <Link to="/add" className={buttonClass("primary")}>
-        <Icon name="add" size={18} />
-        Add the first person
-      </Link>
-    </div>
+    <li className="fr card">
+      <Mark size={48} />
+      <h2 className="fr-title">It's just you so far.</h2>
+      {haveMine ? (
+        <p className="fr-lede">
+          Your computer is set up. Your own limit, focus hours and the sites you block for yourself live on{" "}
+          <Link to="/me" className="link">
+            My computer
+          </Link>
+          . When there's someone else to look after, add them here.
+        </p>
+      ) : (
+        <ol className="fr-steps fr-doors">
+          <li>
+            <b>Keeping time for yourself?</b> Add your own computer, then set your own limit and focus hours on My
+            computer.
+          </li>
+          <li>
+            <b>Looking after someone?</b> Add each person — a name and a birthday; their age sets sensible rules —
+            and then their computer.
+          </li>
+        </ol>
+      )}
+      <div className="fr-actions">
+        {haveMine ? (
+          <>
+            <Link to="/add" className={buttonClass("primary")}>
+              <Icon name="add" size={18} />
+              Add a person
+            </Link>
+            <Link to="/me" className={buttonClass("secondary")}>
+              <Icon name="laptop" size={18} />
+              My computer
+            </Link>
+          </>
+        ) : (
+          <>
+            <Link to="/computers?add=mine" className={buttonClass("primary")}>
+              <Icon name="laptop" size={18} />
+              Add my computer
+            </Link>
+            <Link to="/add" className={buttonClass("secondary")}>
+              <Icon name="add" size={18} />
+              Add a person
+            </Link>
+          </>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -347,6 +393,7 @@ function FamilyWaiting() {
 
 export function Family() {
   const { devices, children, requests, error, loading, refreshing, reload } = useFamily();
+  const { me } = useSession();
   const [sweeping, setSweeping] = useState(false);
 
   const hour = new Date().getHours();
@@ -374,7 +421,7 @@ export function Family() {
 
   // The three-second answer to "is everyone OK?".
   const verdict = (): string => {
-    if (children.length === 0) return "No one set up yet.";
+    if (children.length === 0) return "It's just you here so far.";
     const asking = children.filter((c) => c.pending_requests > 0);
     const paused = children.filter((c) => c.locked && c.devices.length > 0);
     const spent = children.filter((c) => !c.locked && minutesLeft(c) === 0);
@@ -397,10 +444,14 @@ export function Family() {
         title={greeting}
         sub={loading && !hasData ? " " : verdict()}
         actions={
-          <Link to="/add" className={buttonClass("primary")}>
-            <Icon name="add" size={18} />
-            Add a person
-          </Link>
+          // Just you so far: the card below carries the ways on, and one
+          // primary action per screen is plenty.
+          children.length > 0 ? (
+            <Link to="/add" className={buttonClass("primary")}>
+              <Icon name="add" size={18} />
+              Add a person
+            </Link>
+          ) : undefined
         }
       />
 
@@ -416,7 +467,9 @@ export function Family() {
         </div>
       )}
 
-      {pausable.length > 0 && (
+      {/* A household pause needs a household: alone, your own computer's
+          limit is on My computer. */}
+      {pausable.length > 0 && children.length > 0 && (
         <PauseEverything devices={pausable} allPaused={allPaused} onSweep={setSweeping} onDone={reload} />
       )}
 
@@ -428,7 +481,12 @@ export function Family() {
       ) : children.length === 0 ? (
         // Invite first-run setup only when the family is really empty — not
         // when the first load failed (the banner above says that).
-        error ? null : <FirstRun />
+        error ? null : (
+          <ul className="people">
+            <YouCard />
+            <JustYou haveMine={(devices ?? []).some((d) => !!d.owner_account_id && d.owner_account_id === me?.account?.id)} />
+          </ul>
+        )
       ) : (
         <ul className="people">
           {sorted.map((c) => (
