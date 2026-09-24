@@ -760,6 +760,31 @@ mod tests {
         .is_ok());
     }
 
+    /// The web editor checks the same vectors (web/src/lib/schedule.test.ts).
+    #[test]
+    fn shared_schedule_vectors_agree() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/schedule-vectors.json")).unwrap();
+        for w in v["windows"].as_array().unwrap() {
+            let (s, e) = (w["start"].as_str().unwrap(), w["end"].as_str().unwrap());
+            let rules = st(0, vec![win(&WEEKDAYS, s, e)], None);
+            assert_eq!(
+                validate_screen_time(&rules).is_ok(),
+                w["valid"].as_bool().unwrap(),
+                "window {s}–{e}"
+            );
+        }
+        for b in v["bedtimes"].as_array().unwrap() {
+            let (s, e) = (b["start"].as_str().unwrap(), b["end"].as_str().unwrap());
+            let rules = st(0, vec![], Some((s, e)));
+            assert_eq!(
+                validate_screen_time(&rules).is_ok(),
+                b["valid"].as_bool().unwrap(),
+                "bedtime {s}–{e}"
+            );
+        }
+    }
+
     #[test]
     fn dst_day_is_counted_in_real_minutes() {
         // In a zone that springs forward, "minutes_left" is real time. Use a
