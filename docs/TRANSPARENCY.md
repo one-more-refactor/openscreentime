@@ -38,9 +38,9 @@ Three details that matter:
   yours included.
 - **Apps count while they're open**, not while they're in front. The computer
   can't tell which window you're looking at.
-- **"Looked up" is not "visited".** It's the name your computer asked for, so
-  it can play a page's worth of lookups for one visit, and background apps
-  look things up too. It's activity, not a history.
+- **"Looked up" is not "visited".** It's the name your computer asked for:
+  one visit can mean many lookups, and background apps look things up too.
+  It's activity, not a history.
 
 You see the same picture of your own day on your own page — except that on a
 computer you share, the site list is left off, so you don't see someone
