@@ -1,13 +1,9 @@
 # 0.5.0 build contract — "the console owns the keys"
 
-> **Historical.** Change mode and the `/api/auth/stepup/*` routes below are
-> gone: sign-in and "confirm it's you" are now docs/AUTH.md (two doors; the
-> guard is `confirm::sensitive`). The unlock-code and recovery-code parts
-> still describe what ships.
+> **Historical.** The build contract for 0.5.0. Change mode and `/api/auth/stepup/*` are gone (sign-in is [`AUTH.md`](AUTH.md)); the unlock-code and recovery-code parts still match what ships. Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
 
 Shared contract for the 0.5.0 push. Two workstreams build against this in
-parallel (A: server + client, B: web). When it disagrees with older docs, this
-wins; `docs/CONTRACT-0.4.md` still describes everything not mentioned here.
+parallel (A: server + client, B: web).
 
 Scope, in one breath: the per-device **unlock code** is owned by OpenScreenTime
 — the parent reads the rotating 6-digit code (and one-time **recovery codes**)

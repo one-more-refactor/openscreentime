@@ -1,7 +1,7 @@
 # Development
 
 ## Prerequisites
-- Rust (stable, 1.85+) + `cargo`
+- Rust 1.89+ (`rust-version` in each `Cargo.toml`) + `cargo`
 - Bun (1.1+)
 - Docker (for Postgres) or a local Postgres 15+
 - `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features postgres`)
@@ -16,8 +16,7 @@
 cd server
 docker compose up -d db          # postgres on :5432
 cp .env.example .env             # DATABASE_URL, OST_PUBLIC_URL, etc.
-sqlx migrate run
-cargo run                        # serves :8080
+cargo run                        # serves :8080; runs the migrations on start
 ```
 
 Key env:
@@ -25,7 +24,8 @@ Key env:
 - `OST_PUBLIC_URL` — the address the browser uses. RP ID, origin, CORS and cookie security derive from it; unset = `http://localhost:5173` (the Vite dev server), which gives `RP_ID=localhost` and non-Secure cookies.
 - `BIND_ADDR=0.0.0.0:8080`
 - `RP_ID` / `RP_ORIGIN` / `OST_INSECURE_COOKIES` — optional overrides of the derived values (`OST_INSECURE_COOKIES=1` forces non-Secure cookies, `0` forces Secure).
-- `OST_TRUST_PROXY` — set to `1` behind a reverse proxy so the rate limiter keys on the first `X-Forwarded-For` value instead of the peer address.
+- `OST_TRUST_PROXY` — on unless `0`: the rate limiter keys on the **last** `X-Forwarded-For` value (what your proxy appended). Set `0` only when nothing sits in front of the server.
+- `OST_BOOTSTRAP_TOKEN` — unset in dev, so first run ("Create your household") is open and the server logs that it is.
 - `OST_OIDC_ISSUER` / `OST_OIDC_CLIENT_ID` / `OST_OIDC_CLIENT_SECRET` / `OST_OIDC_NAME` — OIDC SSO (e.g. Authentik); off unless issuer/client id/secret are all set; endpoints are discovered in the background (retried; the SSO button stays hidden until then).
 - `RUST_LOG` — log filter, e.g. `openscreentime_server=debug,tower_http=info,info`.
 
@@ -38,119 +38,108 @@ bun run dev                      # :5173, proxies to server
 
 ### Mock / design-review mode
 `VITE_USE_MOCK=1 bun run dev` serves the UI from bundled sample data with no backend running at
-all — useful for design review. The gate lives in `web/src/api.ts`: the `read()` helper checks
+all — useful for design review. It is always signed in as the sample parent; add `?mock=solo`
+(a household of one) or `?mock=empty` (nobody yet) to the URL for the other households. The gate lives in `web/src/api.ts`: the `read()` helper checks
 the `VITE_USE_MOCK` env var *before* making any network call and returns fabricated data
 directly; it is not a fallback triggered by a failed request. Under the dev proxy, a dead
 backend produces an HTTP 500 (or a connection error), and neither one is caught to trigger mock
 data — so without the explicit env var, a dead backend just fails loudly instead of falling back.
 
 ## Client agent
+
 ```bash
 cd client
-cargo build --release
-# enroll against a running server (needs root for enforcement primitives)
-sudo ./target/release/ost enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
-sudo ./target/release/ost run    # or install the systemd unit
-sudo ./target/release/ost install-service   # writes + enables the hardened unit
-sudo ./target/release/ost status   # enrollment/service status — the natural post-install check
-sudo ./target/release/ost unlock --pin <PARENT_PIN>   # parent-PIN recovery: suspends enforcement (default 60 min, --minutes to override)
+cargo build --release                       # headless: what most computers run
+cargo build --release --features gui,tray   # desktop: the app window, the graphical lock, the companion
+sudo ./target/release/openscreentime enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
+sudo ./target/release/openscreentime --dry-run --time-accel 60 run   # log, don't enforce; 1 s = 1 min
+sudo ./target/release/openscreentime status
 ```
 
-Dev tip: the agent supports `--dry-run` so it logs the nft/DNS/lockout actions it *would* take
-without touching the host, for developing on your own machine.
+`--dry-run` makes every enforcement action log `WOULD RUN: …` / `WOULD WRITE …` instead of
+touching the host; without root it's the only mode enforcement will run in. `enroll` accepts
+plain `http://` only for loopback and `.local` hosts. `install-service` also creates the `ost`
+symlink the rest of the docs use.
 
-### Cargo features
-Always build from within `client/`. Feature flags (`client/Cargo.toml`):
-- default (no features enabled): headless, enforcement-complete — this is what the server's
-  agent-dist image ships. Lockout falls back to `wall` broadcasts since there's no display.
-- `--features gui`: adds the egui full-screen lockout overlay in place of the `wall` fallback.
-- `--features tray`: adds the `ost tray` subcommand, a per-user tray companion
-  (time left, connection state, managed-device disclosure).
+Features (`client/Cargo.toml`, all off by default):
+- none — headless and complete: DNS, firewall, screen time, the text lock on its own VT.
+- `gui` — the graphical lock (cage + egui as `ost-lock`) and `ost app`.
+- `tray` — `ost tray`, the per-user companion: warnings at 15/5/1 minute, notifications.
 
-## End-to-end smoke test (the vertical slice)
-1. Start server + db, run migrations (seeds nothing until a tenant exists).
-2. `bun run dev`, open `:5173`, register the first admin with a passkey.
-3. Create a device → copy the enroll token.
-4. Run the agent with `--dry-run` and that token → device appears `online`, its OS users show up,
-   each assigned the `default` profile.
-5. Assign the `kids` profile to a user → run the agent with `--time-accel 60` (1 real second = 1
-   simulated minute) so the screen-time budget is reachable in a dev session; it pulls policy,
-   logs the zero-trust DNS/firewall it would apply, and shows the lockout overlay once the
-   accelerated screen-time runs out.
-6. Click **Lock** → agent shows full-screen lock.
+## Tests
 
-## Testing
-- Client: `cd client && cargo test` (enforcement runner, usage ledger +
-  clock-set-back defense, tamper confirmation monitor, lockout challenges, PIN hashing,
-  tamper levels, self-update ordering, and more). Add `--features tray` for
-  the tray notification selection tests too.
-- Server: `cd server && cargo test` — 11 tests, including
-  `presets::tests::presets_round_trip_through_policy_without_loss` — the preset drift canary.
-  Any new field added to `Policy` must round-trip through the presets without loss, or this test
-  fails; treat a failure here as "a Policy field isn't wired into presets," not a flaky test.
-- Web: `cd web && bun run typecheck` (`tsc -b --noEmit`) and `bun run build` (`tsc -b && vite
-  build`) — both must be clean.
+```bash
+cd policy && cargo test                      # the rules function + policy/tests/schedule-vectors.json
+cd server && cargo test                      # unit tests; the DB-backed ones need a Postgres (below)
+cd client && cargo test && cargo test --features tray
+cd web && bun run check                      # tsc + bun test (Ring, Icon, Login, Person, Me, …)
+cd web && bun run build
+```
 
-### Testing an agent without a real host
-The agent enforces on the host (nftables, DNS, cgroup freezer), so don't run real
-enforcement on your workstation. Three tiers, cheapest first:
+**Database-backed server tests** (`server/src/tests_auth.rs`, `server/src/tests_rules.rs`) create
+a throwaway database per test on the Postgres at `OST_TEST_DATABASE_URL`, else `DATABASE_URL`, and
+skip themselves (with a note) when neither is set — point either at a server where the user may
+`CREATE DATABASE`. The ledger's DB tests (`server/src/ledger.rs`) read only
+`OST_TEST_DATABASE_URL`.
 
-- **`--dry-run`** — the agent logs every action it *would* take (`WOULD RUN: nft …`,
-  `WOULD WRITE /etc/resolv.conf …`) and touches nothing. Safe as non-root, anywhere.
-- **A throwaway container as root** — exercises the *full protocol* (enroll → policy pull →
-  DNS/firewall decisions → heartbeat → events). But a container usually has **no cgroup-v2
-  freezer**, so it can't prove the *lock* — the agent will report `screen_time_no_freezer`.
-  Good for the network/DNS half. `enroll` needs the tenant to have a `default` preset, or 404s:
-  ```bash
-  podman run --rm --network host -v "$PWD/client/target/debug/openscreentime":/usr/local/bin/openscreentime:ro \
-    docker.io/library/archlinux bash -c '
-      ost enroll --server http://127.0.0.1:8080 --token <ENROLL_TOKEN> &&
-      ost --dry-run --time-accel 60 run'
+`presets::tests` is the preset canary: every preset must round-trip through `Policy` byte for
+byte, so a field added to `Policy` but not to the presets (or the other way round) fails there.
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests per crate — the server job with a
+Postgres service — and the web typecheck and build. `build.yml` builds the two agent flavours
+(musl headless; glibc desktop, checked against a glibc 2.35 floor), the image, and screenshots
+of the mock console.
+
+## Trying the agent without risking a real computer
+
+The agent enforces on the host (nftables, DNS, the cgroup freezer, a VT), so don't run real
+enforcement on your workstation. Cheapest first:
+
+- **`--dry-run`**, anywhere, as anyone.
+- **The container** (`deploy/test/run.sh`, `deploy/test/Containerfile`): a rootless Debian box
+  with systemd, dnsmasq and nft, a kid and a parent user, and the musl agent. It proves the
+  protocol — enroll, the WebSocket, policy, the DNS sinkhole, the `sudo` PAM hook — but has no
+  display and usually no freezer.
+
   ```
-- **A disposable Arch VM** — the only way to prove the real cgroup-v2 freeze on a genuine
-  systemd seat, safely. `deploy/test/vm.sh` boots one on an overlay disk (instant rollback via
-  `vm.sh reset`), with a managed `mia` user and an unmanaged `rescue` user so a lock can never
-  strand you. It's an Arch (not Ubuntu) cloud image on purpose: the agent is built against the
-  host's rolling glibc, newer than any Ubuntu LTS ships, so an Arch guest runs the ordinary
-  release binary while an Ubuntu one can't. The loop:
+  run.sh build [agent-binary]        # the image, and which agent binary to use
+  run.sh up <server-url> <token>     # start and enroll (a dev server is http://ost.local:<port> inside)
+  run.sh status | dns <domain> | offline | online | logs | sh | down
   ```
-  vm.sh up                    # boot (SSH forwarded on :28022; host reachable inside as ost-host.local:8080)
-  # register a parent + add a device on the console, copy the enroll token
-  vm.sh install <token>       # build + copy + enroll + install the hardened service
-  # give mia's Kid profile a 1-minute daily limit in the console
-  vm.sh seat                  # give mia a real GRAPHICAL local seat (Weston) + accelerate the agent
-  vm.sh view                  # watch mia's SCREEN in your browser (noVNC) — see the overlay land
-  vm.sh watch                 # (text) poll mia's cgroup.freeze until it flips
-  vm.sh relock [accel]        # reset to a clean slate and re-arm, to watch the lock again
-  vm.sh thaw                  # rescue path: stop the agent + unfreeze
-  vm.sh shot [file]           # headless screenshot (QMP screendump → PNG), for eyeballing/CI
+
+- **The VM** (`deploy/test/vm.sh`): a disposable Arch VM on an overlay disk (`vm.sh reset` is an
+  instant rollback), with a managed `mia` and a `rescue` user who is never enrolled. The only
+  place that proves the real freeze and the lock on a real seat.
+
   ```
-  `install` builds the agent with `--features gui`, so the lock is the real fullscreen egui
-  **overlay** ("Time's up", a "SCREEN PAUSES IN Ns" countdown, the unlock-code field), not the
-  headless `wall` broadcast. `up` boots with a VNC display (localhost only) + a QMP socket; `seat`
-  starts a Weston (Wayland, pixman/CPU renderer — GL hangs on the emulated GPU) session for mia via
-  a systemd service (seatd + linger, not a login shell — see `deploy/test/seat-setup.sh` for why);
-  `view` serves a bundled noVNC client that points at QEMU's built-in VNC-over-websocket. Set
-  mia's Kid daily limit small in the console first (e.g. 1 min).
+  vm.sh up                  # boot (background)
+  vm.sh install <token>     # build with --features gui, copy, enroll, install the service
+  vm.sh seat [accel]        # give mia a graphical seat (Weston, via seat-setup.sh) + accelerate time
+  vm.sh view | unview       # watch mia's screen in the browser (noVNC)
+  vm.sh watch               # poll mia's cgroup.freeze
+  vm.sh type <text>         # type at the seat (e.g. an unlock code at the lock)
+  vm.sh shot [file]         # screenshot
+  vm.sh relock [accel]      # reset the day and watch the lock again
+  vm.sh thaw                # rescue: stop the agent, unfreeze
+  vm.sh ssh | rescue | console | reset | down
+  ```
 
-  Gotchas the harness encodes so you don't trip on them: (1) the agent counts every **active**
-  session of a managed user as screen time — a local seat or an SSH login alike (SSH used to be
-  exempt, which was a loophole); `vm.sh seat` gives mia a real graphical seat so the overlay has
-  somewhere to draw; (2) the lock is
-  **sticky** — hitting the daily limit locks mia for the day, and dropping back under budget does
-  *not* auto-thaw (that takes an unlock code / earn-time grant, or `vm.sh thaw`); (3) the agent
-  re-reads policy only on (re)start, so a live console/DB limit change needs an agent restart —
-  `vm.sh relock` does that as part of resetting for another watch. The software-rendered desktop is
-  heavy, so an occasional `ssh` step returns 255 under load — just re-run it. Keep tamper at Level 1
-  while testing.
+  SSH sessions never count as screen time (no seat), so use `vm.sh seat` to make the lock bite.
+  Keep tamper at level 1 in the VM.
 
-For the child **UI** with zero risk (no agent, no device), run the console in mock mode:
-`cd web && VITE_USE_MOCK=1 bun run dev` renders all three `/me` looks from sample data.
+- **A GNOME laptop** (`deploy/test/gnome-vm.sh up | view | unview | shot | ssh | console | status | down |
+  nuke`): a persistent Debian 12 + GNOME VM with the child user `emma`, not enrolled — enroll it
+  from your dev console (the host is `10.0.2.2:8080` inside). The realistic target for the app
+  window and the companion without a tray.
+
+For the child's **pages** with zero risk, run the console in mock mode (above).
 
 ## Repo conventions
-- Rust: `cargo fmt` + `cargo clippy` clean. Errors via `anyhow`/`thiserror`. Async on Tokio.
-- Web: TypeScript strict, Tailwind, components in `web/src/components`, design tokens from
-  `DESIGN.md` in `web/src/theme.css`.
-- Keep the shared `Policy` type identical across server (`serde`) and web (`types.ts`). The
-  agent deserializes the same shape.
-- Every new command/event type goes in `docs/API.md` first, then all three components.
+
+- Rust: `cargo fmt` + `cargo clippy --all-targets --all-features -- -D warnings` clean. `anyhow`
+  inside, `thiserror` at the edges. Tokio.
+- Web: TypeScript strict; tokens only from `web/src/theme.css`; icons only from `brand/icons`
+  (`components/Icon.tsx`); rings only through `components/Ring.tsx`.
+- `web/src/types.ts` mirrors `policy/src/lib.rs` and the API by hand — change them together.
+- A new command, event type or route goes in `docs/API.md` (and `docs/DATA_MODEL.md` for a CHECK
+  list) in the same change.

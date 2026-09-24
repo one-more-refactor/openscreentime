@@ -55,13 +55,13 @@ voucher.
 ## Whose login is whose
 
 Each OS login on a computer is its own person. A computer set up for someone
-("Mia's computer", or "my computer" from Devices) links **one** login to them,
+("Mia's computer", or "Add my computer" under Computers) links **one** login to them,
 settled when it enrolls: the one the installer picked when `ost enroll` asked
 "which login is Mia's?", else the only login, else — on a parent's own
 computer — the login the install ran from, else the login with Mia's name.
 Nothing is ever guessed onto a parent. Every other login becomes a person of
 its own, flagged as not sorted yet (the Family page says so, once, with a link
-to **Devices → Who's who**): on a child's computer with a child's rules, on a
+to **Computers → Who's who**): on a child's computer with a child's rules, on a
 parent's own computer with rules that enforce nothing — it may be the parent's
 own login, and a parent is never locked out by a guess — until a parent says
 otherwise under Who's who (which asks you to confirm it's you: it decides who
