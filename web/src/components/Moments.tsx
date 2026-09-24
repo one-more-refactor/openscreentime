@@ -1,17 +1,16 @@
 // ============================================================================
 // Moments — the day's story, not the log (CONTRACT-0.6 §3).
 //
-// A parent's page shows the handful of moments that mattered: a stop, a
-// pause, time earned, a tamper. Sentences with a tone dot and a time — never
-// a feed, never at the bottom as a syslog. On a healthy day this renders
-// NOTHING, which is the whole point: the raw event feed still exists for the
-// operator, with the machinery (Devices).
+// A person page shows the handful of moments that mattered: a stop, a pause,
+// time given, something poking at the rules. Sentences with a tone dot and a
+// time — never a feed. On a healthy day this renders NOTHING, which is the
+// whole point.
 // ============================================================================
 import type { Event } from "../types";
 import { ago } from "../lib/format";
 
 /** The types a parent should ever see as a moment; everything else is
- * machinery (heartbeats, policy versions, VPN profiles → Devices). */
+ * machinery. */
 const MOMENT_TYPES = new Set<Event["type"]>([
   "lock",
   "unlock",
@@ -22,23 +21,29 @@ const MOMENT_TYPES = new Set<Event["type"]>([
   "enforcement_degraded",
 ]);
 
+function detail(p: Record<string, unknown>): string | null {
+  const v = p.message ?? p.detail ?? p.kind;
+  return typeof v === "string" && v ? v : null;
+}
+
 function sentence(e: Event): string {
   const p = e.payload ?? {};
+  const d = detail(p);
   switch (e.type) {
     case "lock":
-      return "Screen paused";
+      return "Paused";
     case "unlock":
-      return "Screen resumed";
+      return "Resumed";
     case "screen_time_exceeded":
-      return "Time ran out for the day";
+      return "Time's up for the day";
     case "screen_time_earned":
-      return `Earned ${p.reward_minutes ?? "?"} minutes back (${p.task ?? "a task"})`;
+      return `Got ${p.reward_minutes ?? "some"} more minutes${p.task ? ` (${String(p.task)})` : ""}`;
     case "tamper":
-      return `Tampering: ${p.message ?? p.detail ?? p.kind ?? "something poked the protections"}`;
+      return d ? `Something tried to get around the rules: ${d}` : "Something tried to get around the rules";
     case "evasion":
-      return `Clock games: ${p.message ?? p.detail ?? "the clock was moved"}`;
+      return d ? `The clock was changed: ${d}` : "The clock was changed";
     case "enforcement_degraded":
-      return `The lock isn't biting: ${p.message ?? p.detail ?? "a protection failed silently"}`;
+      return d ? `A rule couldn't be enforced: ${d}` : "A rule couldn't be enforced";
     default:
       return String(e.type).replace(/_/g, " ");
   }
@@ -50,12 +55,18 @@ function tone(e: Event): "ok" | "warn" | "crit" {
   return "ok";
 }
 
-export function Moments({ events, max = 6 }: { events: Event[]; max?: number }) {
-  const moments = events.filter((e) => MOMENT_TYPES.has(e.type)).slice(0, max);
+/** The story of the last two days — older moments are history, not news. */
+const RECENT_MS = 48 * 3600_000;
+
+export function Moments({ events, max = 5 }: { events: Event[]; max?: number }) {
+  const since = Date.now() - RECENT_MS;
+  const moments = events
+    .filter((e) => MOMENT_TYPES.has(e.type) && new Date(e.created_at).getTime() >= since)
+    .slice(0, max);
   if (moments.length === 0) return null;
   return (
-    <section className="ch-section">
-      <h2 className="ch-h2">Moments</h2>
+    <div className="card card-pad moments-card">
+      <h3 className="wt-h">Moments</h3>
       <ul className="moments">
         {moments.map((e) => (
           <li key={e.id} className="moment" data-tone={tone(e)}>
@@ -65,6 +76,6 @@ export function Moments({ events, max = 6 }: { events: Event[]; max?: number }) 
           </li>
         ))}
       </ul>
-    </section>
+    </div>
   );
 }
