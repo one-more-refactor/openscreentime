@@ -323,16 +323,26 @@ pub async fn enroll(
     // the console after a step-up and verified by the agent. Nothing is shown
     // once on a terminal that a parent then has to write on a sticker.
     //
-    // Spend the token atomically: the WHERE re-checks it, so of two racing
-    // enrolls only one gets credentials. `last_seen = enrolled_at` is what the
-    // retry path above looks for — the first frame the agent sends moves it.
-    let spent = sqlx::query(
+    // Spend the token atomically: the WHERE re-checks everything the lookup
+    // above checked — a live token, or the same host's retry — so of two
+    // racing enrolls only one gets credentials. (Re-checking just "the token
+    // or its spent hash" let the loser of the race slip in through the retry
+    // arm from any host, re-keying the device the winner had just enrolled.)
+    // `last_seen = enrolled_at` is what the retry path looks for — the first
+    // frame the agent sends moves it.
+    let spent = sqlx::query(&format!(
         "UPDATE devices SET device_token = $1, enroll_token = NULL,
              enroll_token_expires_at = NULL, enroll_token_used = $6,
              enrolled_at = now(), status = 'online',
              hostname = $2, os = $3, agent_version = $4, last_seen = now()
-         WHERE id = $5 AND (enroll_token = $6 OR enroll_token_used = $6)",
-    )
+         WHERE id = $5
+           AND ((enroll_token = $6
+                 AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now()))
+                OR (enroll_token_used = $6
+                    AND enrolled_at > now() - interval '{ENROLL_RETRY_MINUTES} minutes'
+                    AND last_seen IS NOT DISTINCT FROM enrolled_at
+                    AND hostname = $2))",
+    ))
     .bind(&token_hash)
     .bind(&req.hostname)
     .bind(&req.os)
