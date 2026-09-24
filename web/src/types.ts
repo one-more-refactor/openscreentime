@@ -264,6 +264,11 @@ export interface FamilyChild {
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
   limit_minutes: number | null;
+  /** the day's budget left, computed by the server exactly as the device
+   *  does (per person, across all their computers, on the device's own day) */
+  left_minutes?: number | null;
+  /** when screens stop by the rules — limit, bedtime or window end */
+  rules?: RulesVerdict | null;
   /** the person's own daily goal (minutes), or null */
   goal_minutes?: number | null;
   profile_id: string | null;
@@ -480,12 +485,31 @@ export type MemberPatch = Partial<{
   avatar: string;
 }>;
 
+/** Why screens stop (the agent's `reason`, policy::rules::StopReason). */
+export type StopReason = "limit" | "bedtime" | "outside_hours" | "paused";
+
+/** When screens stop by the rules — the same rules function the device
+ *  enforces with, on the device's clock. A code typed at the device (a local
+ *  override) isn't known to the server, so this is "by the rules". */
+export interface RulesVerdict {
+  allowed: boolean;
+  /** why they are stopped now (allowed = false) or why the next stop comes */
+  reason: StopReason | null;
+  /** minutes until the next stop, whichever comes first; null = none ahead */
+  minutes_left: number | null;
+  /** RFC 3339 */
+  stop_at: string | null;
+  /** when a current stop lifts on its own (bedtime ends, window opens…) */
+  resume_at: string | null;
+}
+
 /** GET /api/me/today — the person's own day, for their own page. */
 export interface MeToday {
   used_minutes: number;
   earned_minutes: number;
   limit_minutes: number | null;
   left_minutes: number | null;
+  rules?: RulesVerdict;
   locked: boolean;
   devices: { name: string; status: DeviceStatus; locked: boolean }[];
   blocks: AppBlocks;
