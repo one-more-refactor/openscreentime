@@ -112,6 +112,46 @@ pub async fn enqueue_command_delivered(
     Ok((id, delivered))
 }
 
+/// Enqueue a command whose payload is a secret (a sign-in code) so that the
+/// queue — which more than the agent can read — never holds it longer than
+/// it must: the row is written empty, a live socket gets the payload in the
+/// frame only, and just a polling agent's row is filled in, to be emptied
+/// again the moment that agent pulls it (`pull_pending_commands`) or acks it.
+pub async fn enqueue_secret_command(
+    st: &AppState,
+    device_id: Uuid,
+    ctype: &str,
+    payload: Value,
+) -> AppResult<(Uuid, bool)> {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, '{}') RETURNING id",
+    )
+    .bind(device_id)
+    .bind(ctype)
+    .fetch_one(&st.db)
+    .await?;
+    let frame = json!({
+        "type": "command",
+        "command": { "id": id, "type": ctype, "payload": payload }
+    });
+    let delivered = st.hub.push(device_id, frame).await;
+    if delivered {
+        sqlx::query(
+            "UPDATE commands SET status = 'sent', sent_at = now() WHERE id = $1 AND status = 'queued'",
+        )
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+    } else {
+        sqlx::query("UPDATE commands SET payload = $2 WHERE id = $1 AND status = 'queued'")
+            .bind(id)
+            .bind(&payload)
+            .execute(&st.db)
+            .await?;
+    }
+    Ok((id, delivered))
+}
+
 /// `enqueue_command_delivered` for call sites that don't care about delivery.
 pub async fn enqueue_command(
     st: &AppState,
@@ -516,24 +556,37 @@ pub async fn heartbeat(
 /// commands over and over.
 const REDELIVERY_GRACE_SECS: i64 = 90;
 
-async fn pull_pending_commands(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<Value>> {
+/// The device's undelivered commands, marked `sent`. A sign-in code
+/// (`login_code`) is handed over once and its row emptied as it goes — never
+/// redelivered (its payload is gone) and never delivered stale.
+pub(crate) async fn pull_pending_commands(
+    db: &sqlx::PgPool,
+    device_id: Uuid,
+) -> AppResult<Vec<Value>> {
     let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(&format!(
         "SELECT id, type, payload FROM commands
          WHERE device_id = $1
            AND (status = 'queued'
-                OR (status = 'sent'
+                OR (status = 'sent' AND type <> 'login_code'
                     AND sent_at < now() - interval '{REDELIVERY_GRACE_SECS} seconds'))
+           AND NOT (type = 'login_code'
+                    AND created_at < now() - make_interval(mins => $2))
          ORDER BY created_at",
     ))
     .bind(device_id)
+    .bind(crate::login_code::CODE_MINUTES)
     .fetch_all(db)
     .await?;
 
     let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
-    sqlx::query("UPDATE commands SET status = 'sent', sent_at = now() WHERE id = ANY($1)")
-        .bind(&ids)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE commands SET status = 'sent', sent_at = now(),
+                payload = CASE WHEN type = 'login_code' THEN '{}'::jsonb ELSE payload END
+          WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .execute(db)
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -769,8 +822,10 @@ async fn apply_command_ack(
     // could re-ack any command id it has ever seen — replaying an old `unlock`
     // to forge its own lock state, resurrecting a `cancelled` command, or
     // rewriting acked_at/result on historical rows (audit tampering).
+    // A sign-in code has done its job once acked (or failed): empty its row.
     let ctype: Option<String> = sqlx::query_scalar(
-        "UPDATE commands SET status = $1, result = $2, acked_at = now()
+        "UPDATE commands SET status = $1, result = $2, acked_at = now(),
+                payload = CASE WHEN type = 'login_code' THEN '{}'::jsonb ELSE payload END
          WHERE id = $3 AND device_id = $4 AND status IN ('queued','sent') RETURNING type",
     )
     .bind(status)

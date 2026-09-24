@@ -342,7 +342,7 @@ pub async fn mark_recovery_code_used(db: &sqlx::PgPool, device_id: Uuid, payload
 async fn pending_command_types(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT type FROM commands
-         WHERE device_id = $1 AND status IN ('queued','sent')
+         WHERE device_id = $1 AND status IN ('queued','sent') AND type <> 'login_code'
          ORDER BY created_at",
     )
     .bind(device_id)
