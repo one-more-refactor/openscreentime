@@ -112,8 +112,20 @@ fn profile_to_json(r: ProfileRow) -> Value {
 /// (forward-compat: unknown fields are tolerated), then re-serialize so what we
 /// store is canonical.
 fn normalize_policy(v: Value) -> AppResult<Value> {
+    normalize(v, true)
+}
+
+/// `check_rules`: reject screen-time rules that can't mean anything (an empty
+/// window, a whole-day bedtime, unreadable times — `rules::validate_screen_time`)
+/// with a plain message. Off only when re-saving an already-stored policy for
+/// an unrelated change (a PIN), so an old profile never blocks that.
+fn normalize(v: Value, check_rules: bool) -> AppResult<Value> {
     let p: Policy = serde_json::from_value(v)
         .map_err(|e| AppError::BadRequest(format!("invalid policy: {e}")))?;
+    if check_rules {
+        openscreentime_policy::rules::validate_screen_time(&p.screen_time)
+            .map_err(AppError::BadRequest)?;
+    }
     // The DNS upstream is interpolated verbatim into the agent's nftables
     // ruleset (`ip daddr <upstream> ...`). Require a literal IP so a hostname,
     // typo, or injected nft syntax can't ever reach the agent — a malformed
@@ -304,7 +316,7 @@ pub async fn update_profile(
     let new_policy = if policy_change {
         let mut policy = match req.policy {
             Some(policy) => normalize_policy(policy)?,
-            None => normalize_policy(existing_policy.clone())?,
+            None => normalize(existing_policy.clone(), false)?,
         };
         apply_parent_pin(&mut policy, req.parent_pin, Some(&existing_policy)).await?;
         Some(policy)
@@ -419,6 +431,36 @@ mod tests {
         // Empty blocks vanish from the stored document.
         let v = normalize_policy(json!({ "blocks": { "apps": [] } })).unwrap();
         assert!(v.get("blocks").is_none());
+    }
+
+    #[test]
+    fn screen_time_rules_are_validated_on_save() {
+        // An empty window is rejected with a message a parent can act on.
+        let err = normalize_policy(json!({ "screen_time": { "enabled": true,
+            "schedule": [{ "days": [1,2,3,4,5], "start": "15:00", "end": "15:00" }] } }))
+        .unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("empty"), "{m}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        // A whole-day bedtime too.
+        assert!(normalize_policy(json!({ "screen_time": { "enabled": true,
+            "bedtime": { "start": "00:00", "end": "00:00" } } }))
+        .is_err());
+        // What the console sends: to midnight, across midnight, "any time"
+        // (no window for the weekend) — all fine.
+        assert!(normalize_policy(json!({ "screen_time": { "enabled": true,
+            "daily_limit_minutes": 90,
+            "schedule": [{ "days": [1,2,3,4,5], "start": "15:00", "end": "00:00" },
+                         { "days": [5], "start": "20:00", "end": "01:00" }],
+            "bedtime": { "start": "22:00", "end": "07:00" } } }))
+        .is_ok());
+        // A stored legacy policy never blocks an unrelated re-save (a PIN).
+        assert!(normalize(
+            json!({ "screen_time": { "schedule": [{ "days": [1], "start": "9:00", "end": "9:00" }] } }),
+            false
+        )
+        .is_ok());
     }
 
     #[tokio::test]

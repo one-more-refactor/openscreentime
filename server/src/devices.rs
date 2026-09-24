@@ -630,15 +630,18 @@ type DeviceUserRow = (
 );
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
-    let rows: Vec<DeviceUserRow> = sqlx::query_as(
+    // "Today" on the device's own calendar — the day its agent enforces.
+    let rows: Vec<DeviceUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
                 p.name, p.kind, \
                 COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
+         JOIN devices d ON d.id = du.device_id \
          LEFT JOIN screen_time_ledger l \
-                ON l.device_user_id = du.id AND l.day = CURRENT_DATE \
+                ON l.device_user_id = du.id AND l.day = {} \
          WHERE du.device_id = $1 ORDER BY du.os_username",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(device_id)
     .fetch_all(db)
     .await?;

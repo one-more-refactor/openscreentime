@@ -98,10 +98,16 @@ pub async fn enqueue_command_delivered(
     });
     let delivered = st.hub.push(device_id, frame).await;
     if delivered {
-        sqlx::query("UPDATE commands SET status = 'sent', sent_at = now() WHERE id = $1")
-            .bind(id)
-            .execute(&st.db)
-            .await?;
+        // Only a still-queued command becomes `sent`: on a fast link the
+        // agent's ack can land before this UPDATE, and overwriting its
+        // `acked` left the command `sent` forever — redelivered on the next
+        // reconnect (a second "+15 min" before grants were idempotent).
+        sqlx::query(
+            "UPDATE commands SET status = 'sent', sent_at = now() WHERE id = $1 AND status = 'queued'",
+        )
+        .bind(id)
+        .execute(&st.db)
+        .await?;
     }
     Ok((id, delivered))
 }
@@ -380,92 +386,9 @@ pub async fn enroll(
 // Heartbeat
 // ---------------------------------------------------------------------------
 
-/// Per-user screen-time usage reported with each heartbeat.
-#[derive(Deserialize)]
-pub struct UsageEntry {
-    pub os_username: String,
-    pub used_minutes_today: i32,
-}
-
-/// A reported daily total may dip this far below the recorded total without
-/// being flagged — absorbs clock jitter and the minute-granularity of the wire
-/// format. A larger drop is a real regression (a wiped or rolled-back client
-/// ledger) worth an `evasion` event.
-const USAGE_REGRESSION_SECS: i32 = 300;
-
-/// Upsert today's per-user usage into the screen-time ledger. Shared by the HTTP
-/// heartbeat and the WS `heartbeat` frame so both report identically. Also the
-/// server-side anti-cheat hook: the client ledger only ever moves forward within
-/// a day, so a heartbeat reporting *less* than we've already recorded means the
-/// counter was reset behind our back. The monotonic GREATEST clamp neutralizes
-/// the cheat (the total can't go down); this records it so it isn't invisible.
-async fn upsert_usage(
-    db: &sqlx::PgPool,
-    tenant_id: Uuid,
-    device_id: Uuid,
-    usage: &[UsageEntry],
-) -> Result<(), sqlx::Error> {
-    for u in usage {
-        let new_seconds = u.used_minutes_today.max(0) * 60;
-
-        // Read the recorded total for today BEFORE the GREATEST clamp hides a drop.
-        let prev: Option<(Uuid, i32)> = sqlx::query_as(
-            "SELECT stl.device_user_id, stl.used_seconds
-             FROM screen_time_ledger stl
-             JOIN device_users du ON du.id = stl.device_user_id
-             WHERE du.device_id = $1 AND du.os_username = $2 AND stl.day = CURRENT_DATE",
-        )
-        .bind(device_id)
-        .bind(&u.os_username)
-        .fetch_optional(db)
-        .await?;
-
-        if let Some((device_user_id, prev_seconds)) = prev {
-            if new_seconds + USAGE_REGRESSION_SECS < prev_seconds {
-                // Best-effort audit; a failed insert must not drop the heartbeat.
-                let _ = events::insert(
-                    db,
-                    tenant_id,
-                    Some(device_id),
-                    Some(device_user_id),
-                    "evasion",
-                    // Critical, not warn: this is the one evasion signal the
-                    // server derives independently of the device's honesty, and
-                    // the alert fan-out only pushes `critical` to the parent's
-                    // phone. A warn here means a confirmed ledger reset that
-                    // never leaves the console.
-                    "critical",
-                    json!({
-                        "kind": "usage_regression",
-                        "os_username": u.os_username,
-                        "reported_seconds": new_seconds,
-                        "ledger_seconds": prev_seconds,
-                        "message": "reported usage dropped below the recorded daily total; \
-                                    counter clamped (possible client-ledger reset)",
-                    }),
-                )
-                .await;
-            }
-        }
-
-        sqlx::query(
-            // used_seconds is monotonic within a day: take the max so an agent
-            // whose in-memory counter reset (reboot / process restart) reports a
-            // low number and can't erase the day's real total.
-            "INSERT INTO screen_time_ledger (device_user_id, day, used_seconds)
-             SELECT du.id, CURRENT_DATE, $3 FROM device_users du
-             WHERE du.device_id = $1 AND du.os_username = $2
-             ON CONFLICT (device_user_id, day)
-             DO UPDATE SET used_seconds = GREATEST(screen_time_ledger.used_seconds, EXCLUDED.used_seconds)",
-        )
-        .bind(device_id)
-        .bind(&u.os_username)
-        .bind(new_seconds)
-        .execute(db)
-        .await?;
-    }
-    Ok(())
-}
+/// Per-user screen-time usage reported with each heartbeat — filed by
+/// `crate::ledger` under the device-local day.
+pub use crate::ledger::UsageEntry;
 
 #[derive(Deserialize)]
 pub struct HeartbeatReq {
@@ -561,8 +484,10 @@ pub async fn heartbeat(
         apply_state(&st.db, agent.device_id, state).await;
     }
 
-    // Persist today's per-user usage into the screen-time ledger.
-    upsert_usage(&st.db, agent.tenant_id, agent.device_id, &req.usage).await?;
+    // File the device's per-user usage under its local day, and learn each
+    // person's day on their other computers (one daily budget per person).
+    let person_days =
+        crate::ledger::upsert_usage(&st.db, agent.tenant_id, agent.device_id, &req.usage).await?;
 
     // Return queued/sent (undelivered-or-unacked) commands and mark them sent.
     let cmds = pull_pending_commands(&st.db, agent.device_id).await?;
@@ -571,6 +496,8 @@ pub async fn heartbeat(
     Ok(Json(json!({
         "commands": cmds,
         "policy_version": version,
+        "usage": person_days,
+        "server_time": Utc::now(),
     })))
 }
 
@@ -1103,7 +1030,24 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             // the ledger stays current in the normal (non-poll) path.
             if let Some(usage) = v.get("usage") {
                 if let Ok(entries) = serde_json::from_value::<Vec<UsageEntry>>(usage.clone()) {
-                    let _ = upsert_usage(&st.db, agent.tenant_id, agent.device_id, &entries).await;
+                    if let Ok(users) = crate::ledger::upsert_usage(
+                        &st.db,
+                        agent.tenant_id,
+                        agent.device_id,
+                        &entries,
+                    )
+                    .await
+                    {
+                        // Answer on the bus: the person's day elsewhere and the
+                        // server's clock (agents before 0.7 ignore the frame).
+                        let _ = st
+                            .hub
+                            .push(
+                                agent.device_id,
+                                json!({ "type": "usage", "server_time": Utc::now(), "users": users }),
+                            )
+                            .await;
+                    }
                 }
             }
         }

@@ -17,6 +17,7 @@ mod earn;
 mod error;
 mod events;
 mod family;
+mod ledger;
 mod login_code;
 mod members;
 mod ops;

@@ -10,6 +10,7 @@ mod app;
 mod attrib;
 mod childcli;
 mod client;
+mod clock;
 mod config;
 mod earn;
 mod enforce;
