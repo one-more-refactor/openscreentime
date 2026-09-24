@@ -1,11 +1,37 @@
-# Lightweight watchdog (TAMPER.md level 1): restart the agent if its heartbeat file
-# goes stale. Driven by openscreentime-watchdog.timer. This is the "second lightweight
-# unit" option; alternatively enable WatchdogSec in openscreentime-agent.service.
+# Lightweight watchdog (TAMPER.md level 1), driven by openscreentime-watchdog.timer:
+#
+#  1. Self-update rollback. The updater writes update-pending.json just before
+#     restarting into a new build, and the new build deletes it once it has run
+#     for a minute (client/src/update.rs). If the marker is still there while
+#     the agent crash-loops (3+ automatic restarts) or has stopped ticking, the
+#     new build is broken on this machine: put the previous binary back, move
+#     the marker aside as update-rejected.json (so that build is skipped), and
+#     restart. Plain shell on purpose — it must work when the new binary can't
+#     even be executed.
+#  2. Restart the agent if its heartbeat file goes stale (older than 90 s).
+#
+# Refreshed automatically by a newly updated agent (service.rs). No ${...} in
+# the script below: systemd would expand it. %% is a literal %.
 [Unit]
-Description=OpenScreenTime agent watchdog (restart on stale heartbeat)
+Description=OpenScreenTime agent watchdog (restart on stale heartbeat, roll back a failed update)
 After=openscreentime-agent.service
 
 [Service]
 Type=oneshot
-# If the heartbeat file is older than 90s (or missing), kick the agent.
-ExecStart=/bin/sh -c 'f=/run/openscreentime/heartbeat; if [ ! -e "$f" ] || [ "$(( $(date +%%s) - $(stat -c %%Y "$f" 2>/dev/null || echo 0) ))" -gt 90 ]; then systemctl restart openscreentime-agent.service; fi'
+ExecStart=/bin/sh -c '\
+f=/run/openscreentime/heartbeat; \
+m=/var/lib/openscreentime/update-pending.json; \
+stale=0; \
+if [ ! -e "$f" ] || [ "$(( $(date +%%s) - $(stat -c %%Y "$f" 2>/dev/null || echo 0) ))" -gt 90 ]; then stale=1; fi; \
+if [ -e "$m" ]; then \
+  n=$(systemctl show -p NRestarts --value openscreentime-agent.service 2>/dev/null); \
+  [ -n "$n" ] || n=0; \
+  if [ "$stale" = 1 ] || [ "$n" -ge 3 ]; then \
+    if [ -e /usr/local/bin/openscreentime.bak ]; then mv -f /usr/local/bin/openscreentime.bak /usr/local/bin/openscreentime; fi; \
+    mv -f "$m" /var/lib/openscreentime/update-rejected.json; \
+    echo "openscreentime: the updated agent did not start properly; rolled back to the previous binary"; \
+    systemctl restart openscreentime-agent.service; \
+    exit 0; \
+  fi; \
+fi; \
+if [ "$stale" = 1 ]; then systemctl restart openscreentime-agent.service; fi'

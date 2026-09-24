@@ -1,49 +1,74 @@
 //! Agent self-update: once shortly after startup and then once a day, check
-//! for a newer build and swap it in atomically, then restart the service.
+//! for a different build and swap it in atomically, then restart the service.
 //!
-//! Distribution moved to **GitHub releases** (CONTRACT-0.6 §5): the newest
-//! release's `manifest.json` + artifacts, fetched straight from
-//! `github.com/<repo>/releases`, sha256-verified. The enrolled server's
-//! bundled `/api/agent/latest` remains the fallback for air-gapped installs
-//! (and whenever GitHub is unreachable).
+//! **The enrolled server is the release channel.** Its `/api/agent/latest`
+//! describes the agent build bundled with the server image, so a device runs
+//! what its own server ships — no split between "what GitHub says" and "what
+//! the server expects". GitHub releases are only asked when the server has no
+//! bundled build at all (a dev server answering 404).
 //!
-//! Trust model: the manifest's sha256 over TLS — from GitHub (repo slug
-//! pinned at compile time; `OST_UPDATE_REPO` exists for forks) or from the
-//! enrolled server. Either origin could compromise the fleet — the server
-//! already can (it pushes root commands); v2 should pin a minisign key so
-//! binaries verify independently of any transport.
+//! **Builds, not version numbers.** A fix merged without a version bump must
+//! still reach devices, so the manifest's `build` (a hash of the agent's
+//! source, see Containerfile) is compared with the one compiled into this
+//! binary (`OST_BUILD_ID`). Without build ids on both sides it falls back to
+//! "newer version". Never downgrades; never re-installs identical bytes.
+//!
+//! Trust model: the manifest's sha256 over TLS from the enrolled server (which
+//! can already push root commands) — v2 should pin a signing key.
 //!
 //! Safety rails:
 //!   * only runs when this process IS `/usr/local/bin/openscreentime` (never
-//!     self-updates a dev `cargo run`),
-//!   * gated by `auto_update = true` in agent.toml AND the
-//!     `OST_NO_SELF_UPDATE=1` env kill switch,
-//!   * only for a headless x86_64 build (the only artifact the image ships),
-//!   * download → verify sha256 of the exact bytes → chmod 0755 → keep the old
-//!     binary as `openscreentime.bak` (manual rollback) → atomic rename,
+//!     self-updates a dev `cargo run`), gated by `auto_update = true` in
+//!     agent.toml and the `OST_NO_SELF_UPDATE=1` kill switch, x86_64 only,
+//!   * download → verify sha256 of the exact bytes → **preflight**: the staged
+//!     binary must run `--version` (a build that can't even load here — say,
+//!     it needs a newer glibc — is refused before it replaces anything),
+//!   * the old binary is kept as `openscreentime.bak`, and an update-pending
+//!     marker is written before the restart. The new build removes the marker
+//!     once it has run for a minute. If it crash-loops or stops ticking first,
+//!     the watchdog unit puts `.bak` back and restarts — **automatic
+//!     rollback** — and that build is skipped from then on,
+//!   * a freshly started build refreshes the systemd units if the ones it
+//!     carries differ from the installed ones (service.rs),
 //!   * restart goes through `Exec` so `--dry-run` is honored end to end.
 
 use crate::client::ServerClient;
 use crate::config::AgentConfig;
-use crate::protocol::SEV_INFO;
+use crate::protocol::{SEV_INFO, SEV_WARN};
 use crate::util::Exec;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 /// Where install.sh / install-service put the managed binary.
 const INSTALL_PATH: &str = "/usr/local/bin/openscreentime";
 const STAGING_PATH: &str = "/usr/local/bin/.openscreentime.new";
 const BACKUP_PATH: &str = "/usr/local/bin/openscreentime.bak";
+/// Written just before restarting into a new build; removed by that build once
+/// it has proven itself. The watchdog unit reads it (keep the paths in step
+/// with systemd/openscreentime-watchdog.service).
+const PENDING_PATH: &str = "/var/lib/openscreentime/update-pending.json";
+/// A build that was rolled back (by the watchdog) or failed its preflight.
+const REJECTED_PATH: &str = "/var/lib/openscreentime/update-rejected.json";
 
 /// First check ~2 minutes after startup (catch up quickly after an offline
 /// stretch), then once a day.
-pub const FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(120);
-pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+pub const FIRST_CHECK: Duration = Duration::from_secs(120);
+pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// A new build that has run this long is kept.
+const CONFIRM_AFTER: Duration = Duration::from_secs(60);
+
+/// Identity of this build's source (set by the Containerfile / CI when
+/// building release artifacts; absent in dev builds).
+pub const BUILD_ID: Option<&str> = option_env!("OST_BUILD_ID");
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
     version: String,
+    /// Hash of the agent source the artifacts were built from.
+    #[serde(default)]
+    build: Option<String>,
     #[serde(default)]
     artifacts: Vec<Artifact>,
 }
@@ -54,6 +79,17 @@ struct Artifact {
     features: String,
     url: String,
     sha256: String,
+}
+
+/// The update-pending marker, and (renamed by the watchdog) the rejected one.
+#[derive(Debug, Serialize, Deserialize)]
+struct Pending {
+    from: String,
+    to: String,
+    sha256: String,
+    /// Whether the server has been told about a rejection.
+    #[serde(default)]
+    reported: bool,
 }
 
 /// The (target, features) pair this build must update *from* — a desktop
@@ -70,9 +106,8 @@ const SELF_TARGET: &str = "x86_64-linux-musl";
 #[cfg(not(any(feature = "gui", feature = "tray")))]
 const SELF_FEATURES: &str = "headless";
 
-/// Where releases live. A fork can point its fleet elsewhere with
-/// `OST_UPDATE_REPO=owner/repo`; with root on the device that env var is not
-/// a new trust surface.
+/// Where releases live — only consulted when the enrolled server bundles no
+/// agent. A fork can point its fleet elsewhere with `OST_UPDATE_REPO`.
 const GITHUB_REPO: &str = "one-more-refactor/openscreentime";
 
 fn github_repo() -> String {
@@ -83,8 +118,7 @@ fn github_repo() -> String {
 }
 
 /// The newest GitHub release's manifest and its download base
-/// (`https://github.com/<repo>/releases/download/<tag>`). Newest by list
-/// order, prereleases included — every release of this project is one.
+/// (`https://github.com/<repo>/releases/download/<tag>`).
 async fn github_manifest(http: &reqwest::Client) -> Result<(Manifest, String)> {
     let repo = github_repo();
     let releases: serde_json::Value = http
@@ -131,6 +165,27 @@ async fn github_manifest(http: &reqwest::Client) -> Result<(Manifest, String)> {
     ))
 }
 
+/// The enrolled server's manifest; GitHub's only if the server has none.
+/// Returns the GitHub download base when that is where it came from.
+async fn fetch_manifest(http: &reqwest::Client, base: &str) -> Result<(Manifest, Option<String>)> {
+    let resp = http
+        .get(format!("{base}/api/agent/latest"))
+        .send()
+        .await
+        .context("GET /api/agent/latest")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::debug!("the server bundles no agent build; asking GitHub releases");
+        let (m, dl_base) = github_manifest(http).await?;
+        return Ok((m, Some(dl_base)));
+    }
+    let m = resp
+        .error_for_status()?
+        .json()
+        .await
+        .context("decoding agent manifest")?;
+    Ok((m, None))
+}
+
 /// Whether this build/process is allowed to self-update at all.
 fn enabled(cfg: &AgentConfig) -> bool {
     if !cfg.auto_update {
@@ -141,17 +196,15 @@ fn enabled(cfg: &AgentConfig) -> bool {
         return false;
     }
     // Only x86_64 is built; another arch must never overwrite itself with it.
-    // The gui/tray builds DO self-update now (from the desktop artifact) — the
-    // desktop build is what the managed laptop actually runs, and pinning it to
-    // its install-time version is how devices keep known lockout bugs forever.
     if cfg!(not(target_arch = "x86_64")) {
         return false;
     }
-    // Never self-update a dev `cargo run` — only the installed binary.
-    match std::env::current_exe() {
-        Ok(p) => p == std::path::Path::new(INSTALL_PATH),
-        Err(_) => false,
-    }
+    is_installed_binary()
+}
+
+/// Never touch a dev `cargo run` — only the installed binary.
+fn is_installed_binary() -> bool {
+    matches!(std::env::current_exe(), Ok(p) if p == std::path::Path::new(INSTALL_PATH))
 }
 
 /// Simple semver-ish parse: "1.2.3" → (1, 2, 3). Anything unparsable sorts as
@@ -171,6 +224,79 @@ fn parse_version(v: &str) -> (u64, u64, u64) {
     )
 }
 
+/// What this device runs, as far as the update decision is concerned.
+struct Running<'a> {
+    version: &'a str,
+    build: Option<&'a str>,
+    sha256: Option<&'a str>,
+}
+
+/// Should the offered artifact replace what is running?
+fn should_update(
+    running: &Running,
+    offered_version: &str,
+    offered_build: Option<&str>,
+    offered_sha: &str,
+) -> bool {
+    // Identical bytes: nothing to do, whatever the labels say.
+    if running
+        .sha256
+        .is_some_and(|s| s.eq_ignore_ascii_case(offered_sha.trim()))
+    {
+        return false;
+    }
+    // Never step back (a server rolled back to an older image, a stale mirror).
+    if parse_version(offered_version) < parse_version(running.version) {
+        return false;
+    }
+    match (running.build, offered_build) {
+        // Same version number, different source: a fix without a version bump.
+        (Some(mine), Some(theirs)) => !mine.eq_ignore_ascii_case(theirs.trim()),
+        _ => parse_version(offered_version) > parse_version(running.version),
+    }
+}
+
+fn sha256_file(path: &str) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|b| hex::encode(Sha256::digest(&b)))
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_json<T: Serialize>(path: &str, v: &T) -> Result<()> {
+    std::fs::write(path, serde_json::to_vec(v)?).with_context(|| format!("writing {path}"))
+}
+
+/// Run the staged binary's `--version`: it must load and answer. Catches a
+/// build that needs a newer glibc (or a library this machine lacks) before it
+/// replaces the one that works.
+async fn preflight(path: &str) -> Result<()> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(path)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("the new build did not answer --version within 15 s")?
+    .context("the new build could not be started")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || !stdout.contains("openscreentime") {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!(
+            "the new build does not run here ({}): {}",
+            out.status,
+            stderr.trim().chars().take(300).collect::<String>()
+        );
+    }
+    Ok(())
+}
+
 /// One update check. Returns `Ok(true)` when an update was installed and a
 /// restart was issued (the current process is about to die).
 pub async fn check_and_update(
@@ -187,36 +313,10 @@ pub async fn check_and_update(
     // download on a slow line. Same TLS stack (rustls via reqwest).
     let http = reqwest::Client::builder()
         .user_agent(format!("openscreentime/{}", crate::client::AGENT_VERSION))
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(Duration::from_secs(300))
         .build()?;
 
-    // GitHub first (CONTRACT-0.6 §5); the enrolled server's bundle covers
-    // air-gapped installs and GitHub outages.
-    let (manifest, github_base): (Manifest, Option<String>) = match github_manifest(&http).await {
-        Ok((m, dl_base)) => (m, Some(dl_base)),
-        Err(e) => {
-            tracing::debug!("github update check unavailable ({e}); asking the enrolled server");
-            let m: Manifest = http
-                .get(format!("{base}/api/agent/latest"))
-                .send()
-                .await
-                .context("GET /api/agent/latest")?
-                .error_for_status()?
-                .json()
-                .await
-                .context("decoding agent manifest")?;
-            (m, None)
-        }
-    };
-
-    let current = crate::client::AGENT_VERSION;
-    if parse_version(&manifest.version) <= parse_version(current) {
-        tracing::debug!(
-            "self-update: server has {} — already on {current}",
-            manifest.version
-        );
-        return Ok(false);
-    }
+    let (manifest, github_base) = fetch_manifest(&http, base).await?;
     let Some(art) = manifest
         .artifacts
         .iter()
@@ -227,6 +327,37 @@ pub async fn check_and_update(
         );
         return Ok(false);
     };
+
+    let current = crate::client::AGENT_VERSION;
+    let my_sha = sha256_file(INSTALL_PATH);
+    let running = Running {
+        version: current,
+        build: BUILD_ID,
+        sha256: my_sha.as_deref(),
+    };
+    if !should_update(
+        &running,
+        &manifest.version,
+        manifest.build.as_deref(),
+        &art.sha256,
+    ) {
+        tracing::debug!(
+            "self-update: server offers {} ({:?}) — keeping {current} ({:?})",
+            manifest.version,
+            manifest.build,
+            BUILD_ID
+        );
+        return Ok(false);
+    }
+    if let Some(rej) = read_json::<Pending>(REJECTED_PATH) {
+        if rej.sha256.eq_ignore_ascii_case(art.sha256.trim()) {
+            tracing::info!(
+                "self-update: {} was rolled back here before — waiting for a newer build",
+                manifest.version
+            );
+            return Ok(false);
+        }
+    }
 
     // The binary must come from the origin the manifest did — GitHub's
     // release download path, or the ENROLLED server. A manifest must not be
@@ -292,27 +423,58 @@ pub async fn check_and_update(
         return Ok(false);
     }
 
-    // Stage next to the target (same filesystem → atomic rename), 0755, keep
-    // the old binary as .bak for manual rollback.
+    // Stage next to the target (same filesystem → atomic rename), 0755.
     std::fs::write(STAGING_PATH, &bytes).with_context(|| format!("writing {STAGING_PATH}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(STAGING_PATH, std::fs::Permissions::from_mode(0o755))?;
     }
+    let pending = Pending {
+        from: current.to_string(),
+        to: manifest.version.clone(),
+        sha256: got.clone(),
+        reported: false,
+    };
+    if let Err(e) = preflight(STAGING_PATH).await {
+        let _ = std::fs::remove_file(STAGING_PATH);
+        // Remember it, so this build isn't downloaded (and refused) daily.
+        let _ = write_json(
+            REJECTED_PATH,
+            &Pending {
+                reported: true,
+                ..pending
+            },
+        );
+        report(
+            client,
+            "agent_update_refused",
+            SEV_WARN,
+            &format!(
+                "update to {} not installed — it does not run on this device: {e:#}",
+                manifest.version
+            ),
+        )
+        .await;
+        return Err(e);
+    }
+
+    // Keep the old binary for the rollback, mark the update pending, swap.
     std::fs::copy(INSTALL_PATH, BACKUP_PATH).with_context(|| format!("writing {BACKUP_PATH}"))?;
-    std::fs::rename(STAGING_PATH, INSTALL_PATH)
-        .with_context(|| format!("renaming into {INSTALL_PATH}"))?;
+    write_json(PENDING_PATH, &pending)?;
+    if let Err(e) = std::fs::rename(STAGING_PATH, INSTALL_PATH) {
+        let _ = std::fs::remove_file(PENDING_PATH);
+        return Err(e).with_context(|| format!("renaming into {INSTALL_PATH}"));
+    }
 
     // Tell the server BEFORE restarting (the restart kills this process).
-    let ev = crate::tamper::tamper_event(
+    report(
+        client,
         "agent_updated",
         SEV_INFO,
         &format!("agent self-updated {current} → {}", manifest.version),
-    );
-    if let Err(e) = client.post_events(&[ev]).await {
-        tracing::warn!("could not report agent_updated event: {e}");
-    }
+    )
+    .await;
 
     tracing::info!(
         "self-update installed {} — restarting service",
@@ -322,15 +484,58 @@ pub async fn check_and_update(
     Ok(true)
 }
 
-/// Background task: first check after [`FIRST_CHECK`], then every
-/// [`CHECK_INTERVAL`]. Spawned by `runner::run`.
+/// Best-effort audit line to the server.
+async fn report(client: &ServerClient, kind: &str, severity: &str, message: &str) {
+    let ev = crate::tamper::tamper_event(kind, severity, message);
+    if let Err(e) = client.post_events(&[ev]).await {
+        tracing::warn!("could not report {kind}: {e}");
+    }
+}
+
+/// Right after starting: if this build was just swapped in, keep it once it
+/// has been up for [`CONFIRM_AFTER`]; and tell the server (once) if the
+/// watchdog had to roll an update back.
+async fn settle_previous_update(client: &ServerClient) {
+    if std::path::Path::new(PENDING_PATH).exists() {
+        tokio::time::sleep(CONFIRM_AFTER).await;
+        // Still here: the new build works. (If it had crash-looped, the
+        // watchdog would have restored .bak and moved the marker aside.)
+        if std::fs::remove_file(PENDING_PATH).is_ok() {
+            tracing::info!("self-update confirmed: this build has been running fine");
+        }
+    }
+    if let Some(mut rej) = read_json::<Pending>(REJECTED_PATH) {
+        if !rej.reported {
+            report(
+                client,
+                "agent_update_rolled_back",
+                SEV_WARN,
+                &format!(
+                    "update {} → {} did not start properly on this device and was rolled back",
+                    rej.from, rej.to
+                ),
+            )
+            .await;
+            rej.reported = true;
+            let _ = write_json(REJECTED_PATH, &rej);
+        }
+    }
+}
+
+/// Background task: settle a just-installed update, refresh stale systemd
+/// units, then check after [`FIRST_CHECK`] and every [`CHECK_INTERVAL`].
+/// Spawned by `runner::run`.
 pub async fn update_loop(cfg: AgentConfig, client: ServerClient, exec: Exec) {
+    if is_installed_binary() && !exec.dry_run() {
+        crate::service::refresh_units_if_stale(&exec);
+        settle_previous_update(&client).await;
+    }
     tokio::time::sleep(FIRST_CHECK).await;
     loop {
         match check_and_update(&cfg, &client, &exec).await {
             Ok(true) => return, // restart issued; nothing left to do
             Ok(false) => {}
-            Err(e) => tracing::warn!("self-update check failed: {e}"),
+            Err(e) => tracing::warn!("self-update check failed: {e:#}"),
         }
         tokio::time::sleep(CHECK_INTERVAL).await;
     }
@@ -338,7 +543,7 @@ pub async fn update_loop(cfg: AgentConfig, client: ServerClient, exec: Exec) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::{parse_version, should_update, Running};
 
     #[test]
     fn version_ordering() {
@@ -349,5 +554,44 @@ mod tests {
         // Pre-release-ish suffixes only keep the leading digits; garbage → 0.
         assert_eq!(parse_version("0.1.2-rc1"), parse_version("0.1.2"));
         assert_eq!(parse_version("junk"), (0, 0, 0));
+    }
+
+    fn running<'a>(v: &'a str, b: Option<&'a str>, s: Option<&'a str>) -> Running<'a> {
+        Running {
+            version: v,
+            build: b,
+            sha256: s,
+        }
+    }
+
+    #[test]
+    fn a_fix_without_a_version_bump_is_installed() {
+        let r = running("0.6.1", Some("aaaa"), Some("11"));
+        assert!(should_update(&r, "0.6.1", Some("bbbb"), "22"));
+        // Same source rebuilt elsewhere: no churn.
+        assert!(!should_update(&r, "0.6.1", Some("aaaa"), "22"));
+    }
+
+    #[test]
+    fn identical_bytes_are_never_reinstalled() {
+        let r = running("0.6.1", Some("aaaa"), Some("abcd"));
+        assert!(!should_update(&r, "0.7.0", Some("bbbb"), "ABCD"));
+    }
+
+    #[test]
+    fn never_downgrades() {
+        let r = running("0.7.0", Some("aaaa"), Some("11"));
+        assert!(!should_update(&r, "0.6.9", Some("bbbb"), "22"));
+    }
+
+    #[test]
+    fn without_build_ids_it_goes_by_version() {
+        let r = running("0.6.1", None, Some("11"));
+        assert!(should_update(&r, "0.6.2", None, "22"));
+        assert!(!should_update(&r, "0.6.1", None, "22"));
+        // An older server's manifest (no build field) and a new agent.
+        let r = running("0.6.1", Some("aaaa"), Some("11"));
+        assert!(!should_update(&r, "0.6.1", None, "22"));
+        assert!(should_update(&r, "0.6.2", None, "22"));
     }
 }

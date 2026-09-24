@@ -219,6 +219,12 @@ async fn main() -> Result<()> {
     // after the suspend window elapses. Not a real subcommand (kept out of
     // --help / clap's Cmd enum) since it's an implementation detail, not
     // something an operator should invoke directly.
+    // Hidden: rewrite stale systemd units after a self-update (service.rs).
+    // Spawned via systemd-run by the agent, whose sandbox can't write them.
+    if raw_args.get(1).map(String::as_str) == Some("__refresh-units") {
+        return service::refresh_units();
+    }
+
     if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
         let secs: u64 = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3600);
         return unlock::resume_after(secs);

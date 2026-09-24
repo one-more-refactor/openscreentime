@@ -61,6 +61,11 @@ pub struct Command {
 /// An agent → server event (`POST /agent/events` element).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
+    /// Minted once when the event is created and kept across retries, so the
+    /// server stores it at most once even when a delivered batch's response
+    /// was lost and the batch is sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub ev_type: String,
     pub severity: String,
@@ -72,6 +77,7 @@ pub struct Event {
 impl Event {
     pub fn new(ev_type: &str, severity: &str, payload: Value) -> Self {
         Event {
+            id: Some(uuid::Uuid::new_v4().to_string()),
             ev_type: ev_type.to_string(),
             severity: severity.to_string(),
             device_user: None,
