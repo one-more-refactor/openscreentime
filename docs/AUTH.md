@@ -60,16 +60,20 @@ settled when it enrolls: the one the installer picked when `ost enroll` asked
 "which login is Mia's?", else the only login, else — on a parent's own
 computer — the login the install ran from, else the login with Mia's name.
 Nothing is ever guessed onto a parent. Every other login becomes a person of
-its own with a child's rules until a parent says otherwise under
-**Devices → Who's who** (which asks you to confirm it's you: it decides who
+its own, flagged as not sorted yet (the Family page says so, once, with a link
+to **Devices → Who's who**): on a child's computer with a child's rules, on a
+parent's own computer with rules that enforce nothing — it may be the parent's
+own login, and a parent is never locked out by a guess — until a parent says
+otherwise under Who's who (which asks you to confirm it's you: it decides who
 that login signs in as). Pointing a login at the computer's owner there makes
 it the owner's login — how a parent settles theirs.
 
 Servers before these two doors (migration 0030) linked *every* unmatched
 login on "my computer" to the parent. The upgrade keeps the owner's login only where exactly one login was
 linked to the parent; where several were, it can't tell whose is whose, so it
-unlinks them all (each becomes its own person) and that parent gets no code
-or voucher on that computer until they pick their login again in Who's who.
+unlinks them all (each becomes its own unsorted person, under rules that
+enforce nothing) and that parent gets no code or voucher on that computer
+until they pick their login again in Who's who.
 
 ## Confirm it's you
 

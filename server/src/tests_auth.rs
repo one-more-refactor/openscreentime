@@ -439,11 +439,40 @@ async fn a_parents_code_only_goes_to_the_parents_own_computer() {
         .await
         .expect("sent to the parent's computer");
     assert_eq!(os_users, vec!["philip".to_string()]);
-    // The child's login there is a person of its own, not the parent.
+    // The child's login there is a person of its own, not the parent — with
+    // rules that enforce nothing on a parent's computer until a parent sorts
+    // it out, and flagged for them to.
     let (leo, role, bracket) = env.linked_to(desk, "leo").await;
     assert_ne!(leo, philip);
-    assert_eq!((role.as_str(), bracket.as_str()), ("member", "kid"));
+    assert_eq!((role.as_str(), bracket.as_str()), ("member", "adult"));
+    assert!(unsorted(&env, desk, "leo").await);
+    assert!(!unsorted(&env, desk, "philip").await);
     env.drop_db().await;
+}
+
+async fn unsorted(env: &Env, device: Uuid, login: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT unsorted FROM device_users WHERE device_id = $1 AND os_username = $2",
+    )
+    .bind(device)
+    .bind(login)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap()
+}
+
+/// What rules a login is under: (profile kind, screen time enforced?).
+async fn rules_of(env: &Env, device: Uuid, login: &str) -> (String, bool) {
+    sqlx::query_as(
+        "SELECT p.kind, COALESCE((p.policy->'screen_time'->>'enabled')::boolean, false)
+           FROM device_users du JOIN profiles p ON p.id = du.profile_id
+          WHERE du.device_id = $1 AND du.os_username = $2",
+    )
+    .bind(device)
+    .bind(login)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -881,14 +910,68 @@ async fn attack_upgrading_does_not_make_a_childs_login_the_parent() {
     for login in ["philip", "leo"] {
         let (who, role, bracket) = env.linked_to(shared, login).await;
         assert_ne!(who, philip, "{login} is still the parent");
+        // Never brick: one of them is the parent's own login, so neither is
+        // put under a child's rules by a guess — nothing is enforced on them
+        // until a parent sorts them out.
         assert_eq!(
             (role.as_str(), bracket.as_str()),
-            ("member", "kid"),
+            ("member", "adult"),
             "{login}"
         );
+        assert_eq!(rules_of(&env, shared, login).await, ("adult".into(), false));
+        assert!(unsorted(&env, shared, login).await, "{login}");
     }
     assert_eq!(owner_login(&env, own).await.as_deref(), Some("philip"));
     assert_eq!(env.linked_to(own, "philip").await.0, philip);
+
+    // …and the parent gets no code on either of them until it's settled.
+    sqlx::query("UPDATE devices SET agent_features = '{login_code}'")
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    let targets = login_code::code_targets(&env.st.db, philip, tenant)
+        .await
+        .unwrap();
+    assert_eq!(targets, vec![(own, "philip".to_string())]);
+
+    // The Family page asks them to: two logins nobody has sorted, there.
+    let (jar, me) = session_for(&env, philip, tenant).await;
+    let unsorted_on = |family: &Value, device: Uuid| {
+        family["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == device.to_string().as_str())
+            .unwrap()["unsorted_logins"]
+            .as_i64()
+            .unwrap()
+    };
+    let family = crate::family::get_family(State(env.st.clone()), me.clone())
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(unsorted_on(&family, shared), 2);
+    assert_eq!(unsorted_on(&family, own), 0);
+
+    // The parent says which is theirs (Who's who): that one is sorted and
+    // gets their codes; the other still waits to be sorted.
+    open_confirm_window(&env, &jar).await;
+    let who = device_user(&env, shared, "philip").await;
+    let uri = format!("/api/device-users/{who}/assign-account");
+    let body = serde_json::json!({ "account_id": philip });
+    assert_eq!(call(&env, &jar, "POST", &uri, body).await.0, 200);
+    let family = crate::family::get_family(State(env.st.clone()), me)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(unsorted_on(&family, shared), 1);
+    let mut targets = login_code::code_targets(&env.st.db, philip, tenant)
+        .await
+        .unwrap();
+    targets.sort();
+    let mut expected = vec![(own, "philip".to_string()), (shared, "philip".to_string())];
+    expected.sort();
+    assert_eq!(targets, expected);
     env.drop_db().await;
 }
 
