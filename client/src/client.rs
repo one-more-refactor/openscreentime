@@ -23,6 +23,12 @@ pub struct EnrollRequest {
     pub os: String,
     pub agent_version: String,
     pub os_users: Vec<OsUser>,
+    /// The login the install ran from (`SUDO_USER`), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installer: Option<String>,
+    /// The login the person at the keyboard picked as the owner's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_login: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,10 +37,48 @@ pub struct EnrollResponse {
     pub device_token: String,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
+    /// Who each OS login turned out to be.
+    #[serde(default)]
+    pub users: Vec<EnrolledUser>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnrolledUser {
+    pub os_username: String,
+    pub person: String,
+    #[serde(default)]
+    pub parent: bool,
+}
+
+/// Whose computer an enroll token is for (`/agent/enroll/preview`).
+#[derive(Debug, Default, Deserialize)]
+pub struct EnrollPreview {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub owner_is_parent: bool,
 }
 
 fn default_poll() -> u64 {
     30
+}
+
+/// POST /agent/enroll/preview — whose computer this is, without using the
+/// token up. Older servers don't have it; the caller treats any error as
+/// "don't ask".
+pub async fn enroll_preview(base_url: &str, token: &str) -> Result<EnrollPreview> {
+    let base = base_url.trim_end_matches('/');
+    let http = reqwest::Client::builder()
+        .user_agent(format!("openscreentime/{AGENT_VERSION}"))
+        .build()?;
+    let resp = http
+        .post(format!("{base}/agent/enroll/preview"))
+        .json(&json!({ "enroll_token": token }))
+        .send()
+        .await
+        .context("POST /agent/enroll/preview")?
+        .error_for_status()?;
+    Ok(resp.json().await?)
 }
 
 /// POST /agent/enroll — consumes the one-time enroll token, returns identity.
@@ -164,32 +208,6 @@ impl ServerClient {
             .context("POST /agent/earn-request")?
             .error_for_status()?;
         Ok(resp.json().await?)
-    }
-
-    /// POST /agent/login-decision — the human at this machine answered a
-    /// web sign-in prompt (CONTRACT-0.6 client-first login). `code` is the
-    /// number they tapped (number-matching); `None` = "not me". The server
-    /// decides approve vs deny by matching it to the real code.
-    pub async fn post_login_decision(
-        &self,
-        request_id: &str,
-        code: Option<&str>,
-        os_username: &str,
-    ) -> Result<()> {
-        let body = json!({
-            "request_id": request_id,
-            "code": code,
-            "os_username": os_username,
-        });
-        self.http
-            .post(format!("{}/agent/login-decision", self.base))
-            .header("Authorization", self.bearer())
-            .json(&body)
-            .send()
-            .await
-            .context("POST /agent/login-decision")?
-            .error_for_status()?;
-        Ok(())
     }
 
     /// POST /agent/usage — where-the-time-goes slices (CONTRACT-0.6 §3).

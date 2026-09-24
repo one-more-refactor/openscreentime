@@ -137,8 +137,8 @@ async fn policy_version(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<String>
 }
 
 /// Every OS login becomes a `device_users` row linked to a person
-/// (`members::link_os_user`): name-match, else the device's owner, else a new
-/// member. Nothing stays unlinked.
+/// (`members::link_os_user`): the owner's login to the owner, a member by
+/// name, else a person of its own. Nothing stays unlinked.
 async fn upsert_os_users(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -183,6 +183,56 @@ pub struct EnrollReq {
     pub agent_version: String,
     #[serde(default)]
     pub os_users: Vec<OsUser>,
+    /// The OS login the install was run from (`SUDO_USER`), if the agent
+    /// could tell. On "my computer" that login is the parent's own.
+    #[serde(default)]
+    pub installer: Option<String>,
+    /// The login the person at the keyboard picked as the owner's, when the
+    /// agent asked ("which login is Mia's?").
+    #[serde(default)]
+    pub owner_login: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct EnrollPreviewReq {
+    pub enroll_token: String,
+}
+
+/// Look up a pending device by its (hashed) enroll token.
+async fn pending_by_token(db: &sqlx::PgPool, token: &str) -> AppResult<Option<(Uuid, Uuid)>> {
+    Ok(sqlx::query_as(
+        "SELECT id, tenant_id FROM devices WHERE enroll_token = $1
+           AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now())",
+    )
+    // Stored hashed (like device/parent/voucher tokens); compare the hash.
+    .bind(hash_token(token))
+    .fetch_optional(db)
+    .await?)
+}
+
+/// `POST /agent/enroll/preview` — whose computer this enroll token is for,
+/// without using it up, so the installer can ask "which login is Mia's?"
+/// before enrolling. Only the token holder learns the name, and the token
+/// holder can enroll anyway.
+pub async fn enroll_preview(
+    State(st): State<AppState>,
+    Json(req): Json<EnrollPreviewReq>,
+) -> AppResult<Json<Value>> {
+    let (device_id, tenant_id) = pending_by_token(&st.db, &req.enroll_token)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("invalid, used or expired enroll token".into()))?;
+    let owner: Option<(String, String)> = sqlx::query_as(
+        "SELECT a.display_name, a.role FROM devices d JOIN admins a ON a.id = d.owner_account_id
+          WHERE d.id = $1 AND a.tenant_id = $2",
+    )
+    .bind(device_id)
+    .bind(tenant_id)
+    .fetch_optional(&st.db)
+    .await?;
+    Ok(Json(json!({
+        "owner": owner.as_ref().map(|o| &o.0),
+        "owner_is_parent": owner.as_ref().is_some_and(|o| o.1 != "member"),
+    })))
 }
 
 pub async fn enroll(
@@ -194,14 +244,7 @@ pub async fn enroll(
     }
     // Consume the one-time enroll token. An expired token is rejected exactly
     // like a consumed one (24 h TTL; the admin can regenerate while pending).
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, tenant_id FROM devices WHERE enroll_token = $1
-           AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now())",
-    )
-    // Stored hashed (like device/parent/voucher tokens); compare the hash.
-    .bind(hash_token(&req.enroll_token))
-    .fetch_optional(&st.db)
-    .await?;
+    let row = pending_by_token(&st.db, &req.enroll_token).await?;
     let (device_id, tenant_id) =
         row.ok_or_else(|| AppError::Unauthorized("invalid, used or expired enroll token".into()))?;
 
@@ -226,7 +269,40 @@ pub async fn enroll(
     .execute(&st.db)
     .await?;
 
+    let logins: Vec<String> = req
+        .os_users
+        .iter()
+        .map(|u| u.username.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
+    let clean = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .map(str::to_string)
+    };
+    let (installer, chosen) = (clean(&req.installer), clean(&req.owner_login));
+    crate::members::settle_owner_login(
+        &st.db,
+        tenant_id,
+        device_id,
+        &logins,
+        installer.as_deref(),
+        chosen.as_deref(),
+    )
+    .await?;
     upsert_os_users(&st.db, tenant_id, device_id, &req.os_users).await?;
+    // Who each login turned out to be, for the installer to print — so the
+    // person at the keyboard sees straight away if a login landed on the
+    // wrong person (they fix it in the console, under Devices).
+    let people: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT du.os_username, a.display_name, a.role
+           FROM device_users du JOIN admins a ON a.id = du.account_id
+          WHERE du.device_id = $1 ORDER BY du.os_username",
+    )
+    .bind(device_id)
+    .fetch_all(&st.db)
+    .await?;
 
     events::insert(
         &st.db,
@@ -243,6 +319,12 @@ pub async fn enroll(
         "device_id": device_id,
         "device_token": device_token,
         "poll_interval_secs": POLL_INTERVAL_SECS,
+        "users": people
+            .into_iter()
+            .map(|(os_username, person, role)| json!({
+                "os_username": os_username, "person": person, "parent": role != "member",
+            }))
+            .collect::<Vec<_>>(),
     })))
 }
 

@@ -199,13 +199,16 @@ pub async fn auth_config(State(st): State<AppState>) -> Json<Value> {
         Some(o) => (true, o.name.clone()),
         None => (false, "SSO".to_string()),
     };
-    // needs_setup: no admin exists yet → the console should show registration.
+    // needs_setup: no account exists yet → the console shows "Create your
+    // household". setup_code_required: …and it needs the one-time setup code
+    // (normally carried in the #setup= link the installer printed).
     let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
         .fetch_one(&st.db)
         .await
         .unwrap_or(1);
     Json(json!({
         "needs_setup": admins == 0,
+        "setup_code_required": admins == 0 && st.bootstrap_token.is_some(),
         "auth": { "oidc": enabled, "oidc_name": name },
     }))
 }
@@ -451,7 +454,7 @@ pub async fn setup_finish(
         .unwrap_or(pending.suggested_name);
 
     let (tenant_id, admin_id) =
-        create_tenant_with_admin(&st.db, &username, &display_name, true).await?;
+        create_tenant_with_admin(&st.db, None, &username, &display_name, true).await?;
     sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
         .bind(&pending.email)
         .bind(admin_id)

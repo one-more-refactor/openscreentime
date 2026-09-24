@@ -4,30 +4,28 @@
 // The front room is harmless: who you are, how the app looks. It renders
 // immediately, because reading is free.
 //
-// The back room — the computers' unlock codes, passkeys, second factors,
-// paired companions — is the set of levers that would let someone take the
-// family over. It is not rendered, and its data is NOT EVEN FETCHED, until
-// the person confirms it's them: the fetches run only then, and the server
-// (docs/AUTH.md) answers them with 428 unless the session holds a live
-// confirm window. The client gate is comfort; the server is the lock.
+// The back room — the computers' unlock codes, passkeys, the Telegram
+// pairing, paired companions — is the set of levers that would let someone
+// take the family over. It is not rendered, and its data is NOT EVEN FETCHED,
+// until the person confirms it's them (a passkey, or a code on their own
+// computer; a fresh sign-in counts): the server (docs/AUTH.md) answers these
+// with 428 unless the session holds a live confirm window. The client gate is
+// comfort; the server is the lock.
 // ============================================================================
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ApiError,
-  auth,
-  confirmTotpEnrollment,
+  addPasskey,
   deletePasskey,
   getAuthConfig,
   getTelegram,
-  getTwoFactorStatus,
   listDevices,
   listParentTokens,
   listPasskeys,
   mintParentToken,
   pairTelegram,
   revokeParentToken,
-  startTotpEnrollment,
   unpairTelegram,
 } from "../api";
 import type {
@@ -38,17 +36,13 @@ import type {
   Passkey,
   TelegramPairing,
   TelegramStatus,
-  TotpEnrollment,
-  TwoFactorStatus,
 } from "../types";
-import { QrCode } from "../components/QrCode";
 import { useAsync } from "../lib/useAsync";
 import { useSession } from "../lib/session";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { FluentSlider } from "../components/FluentSlider";
 import { useConfirm } from "../lib/confirm";
 import { Button, Modal, PasskeyButton, TokenBlock } from "../components";
-import { CodeRing } from "../components/CodeRing";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
 import { LockGlyph } from "../layout/Shell";
 import { PageHead } from "../layout/PageHead";
@@ -184,8 +178,7 @@ function Security() {
           </span>
           <p className="gate-title">Confirm it's you to see this</p>
           <p className="gate-sub">
-            The computers' unlock codes, your passkeys, second factors and paired companions
-            live here. The server only hands them to a session that has proved it's you.
+            The computers' unlock codes, your passkeys and paired companions live here.
           </p>
           <button className="ch-btn ch-btn-yes" disabled={checking} onClick={() => void unlock()}>
             {checking ? "Checking…" : "Confirm it's you"}
@@ -200,18 +193,17 @@ function Security() {
 function SecurityPanels() {
   return (
     <div className="rl">
-      <UnlockCodes />
-      <TwoFactor />
-      <Telegram />
       <Passkeys />
+      <UnlockCodes />
+      <Telegram />
       <ParentAccess />
     </div>
   );
 }
 
 /**
- * The Telegram companion: pair once, then the phone gets alerts, can ok a
- * time request with one tap, and answers the confirm dialog's "send a tap".
+ * The Telegram companion: pair once, then the phone gets alerts and can ok a
+ * time request with one tap. It is not a way to sign in or confirm.
  */
 function Telegram() {
   const tg = useAsync<TelegramStatus>(getTelegram, []);
@@ -272,8 +264,8 @@ function Telegram() {
             : !d?.configured
               ? "No bot on this server — set OST_TELEGRAM_BOT_TOKEN to enable phone taps"
               : d.paired
-                ? `Paired${d.username ? ` as @${d.username}` : ""} — alerts, one-tap chore approvals, and confirm checks go to your phone`
-                : "Pair your phone: get alerts, ok a chore, and confirm it's you with one tap"}
+                ? `Paired${d.username ? ` as @${d.username}` : ""} — alerts and one-tap time approvals go to your phone`
+                : "Pair your phone for alerts, and to ok a time request with one tap"}
         </p>
         {status && (
           <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>
@@ -361,115 +353,8 @@ function UnlockCodes() {
   );
 }
 
-function TwoFactor() {
-  const { me } = useSession();
-  const twofa = useAsync<TwoFactorStatus>(getTwoFactorStatus, []);
-  const [enrolling, setEnrolling] = useState<TotpEnrollment | null>(null);
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-
-  async function begin() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      setEnrolling(await startTotpEnrollment());
-      setCode("");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Couldn't start enrollment.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function confirm() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      await confirmTotpEnrollment(code);
-      setEnrolling(null);
-      setStatus("Authenticator connected.");
-      twofa.reload();
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "That code didn't match.");
-      setCode("");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const enrolled = twofa.data?.totp_enrolled ?? false;
-
-  return (
-    <div className="rl-row">
-      <div className="rl-what">
-        <p className="rl-name">Second factor</p>
-        <p className="rl-value">
-          {twofa.loading
-            ? "Checking…"
-            : enrolled
-              ? "Authenticator app connected"
-              : "No authenticator yet — set one up to protect the keys"}
-        </p>
-        {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
-      </div>
-      <span className="rl-controls">
-        {!enrolled && !twofa.loading && (
-          <button className="ch-btn" disabled={busy} onClick={() => void begin()}>
-            Connect authenticator
-          </button>
-        )}
-      </span>
-
-      <Modal
-        open={!!enrolling}
-        onClose={() => setEnrolling(null)}
-        title="Connect authenticator"
-        footer={
-          <Button variant="ghost" onClick={() => setEnrolling(null)} disabled={busy}>
-            CANCEL
-          </Button>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-            Add this secret to your authenticator app (Google Authenticator, Aegis, 1Password …),
-            then enter the 6-digit code it shows for{" "}
-            <span style={{ color: "var(--fg)" }}>{me?.account?.display_name ?? "your account"}</span>.
-          </p>
-          {enrolling && (
-            <div className="tf-enrol">
-              <QrCode value={enrolling.otpauth_uri} size={148} label="Scan into your authenticator app" />
-              <div className="tf-enrol-text">
-                <p className="add-secret-label">Can't scan? Type the secret</p>
-                <TokenBlock token={enrolling.secret} />
-              </div>
-            </div>
-          )}
-          <div className="cr-wrap">
-            <CodeRing
-              value={code}
-              disabled={busy}
-              error={!!status && !!enrolling}
-              aria-label="Code from the app"
-              onChange={(v) => {
-                setCode(v);
-                if (status) setStatus(null);
-              }}
-              onComplete={() => void confirm()}
-            />
-            <p className="cr-note" data-error={!!status && !!enrolling} role={status ? "alert" : undefined}>
-              {busy ? "Checking…" : (status ?? "The 6 digits the app shows")}
-            </p>
-          </div>
-        </div>
-      </Modal>
-    </div>
-  );
-}
-
 function Passkeys() {
-  const { me, refresh } = useSession();
+  const recovered = (useLocation().state as { recovered?: boolean } | null)?.recovered === true;
   const authConfig = useAsync<AuthConfig>(getAuthConfig, []);
   const passkeys = useAsync<Passkey[]>(listPasskeys, []);
   const [confirmDelete, setConfirmDelete] = useState<Passkey | null>(null);
@@ -481,19 +366,14 @@ function Passkeys() {
   const lastKey = keys.length <= 1 && !oidc;
 
   async function add() {
-    if (!me) return;
     setStatus(null);
-    if (!me.admin.username) {
-      setStatus("This account has no username to attach a passkey to.");
-      return;
-    }
     try {
-      await auth.register(me.admin.username, me.admin.display_name);
-      await refresh();
+      await addPasskey();
       passkeys.reload();
       setStatus("Passkey added.");
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Passkey registration failed.");
+      if (e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError")) return;
+      setStatus(e instanceof Error ? e.message : "The passkey wasn't added.");
     }
   }
 
@@ -524,7 +404,9 @@ function Passkeys() {
       <div className="rl-what">
         <p className="rl-name">Passkeys</p>
         <p className="rl-value">
-          How you sign in — one per device you trust
+          {recovered
+            ? "You signed in with a recovery link. Add a passkey now, so next time is one tap."
+            : "One tap to sign in — one per phone or computer you trust"}
           {passkeys.error ? ` · couldn't load: ${passkeys.error}` : ""}
         </p>
         {status && <p className="dev-inline-status" role="status" style={{ marginTop: "0.35rem" }}>{status}</p>}
@@ -547,7 +429,7 @@ function Passkeys() {
         </div>
       ))}
       <div style={{ maxWidth: "16rem" }}>
-        <PasskeyButton label="+ Add passkey" onActivate={add} />
+        <PasskeyButton label="Add a passkey" onActivate={add} />
       </div>
 
       <Modal

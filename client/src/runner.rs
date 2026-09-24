@@ -362,10 +362,10 @@ pub struct Agent {
     notifications: VecDeque<UserNotification>,
     /// Monotonic id for the next notification (so the tray shows each once).
     notif_seq: u64,
-    /// Web sign-in requests waiting for a human at this machine to answer
-    /// (CONTRACT-0.6 client-first login). Published per target user in the
-    /// status snapshot; answered via a marker file in `/run/user/<uid>`.
-    pending_logins: Vec<PendingLogin>,
+    /// Sign-in / confirm codes for people on this computer, with the OS logins
+    /// each is for (logincode.rs). Published only in those logins' private
+    /// status files; dropped when they expire.
+    login_codes: Vec<(crate::logincode::LoginCode, Vec<String>)>,
     /// Where-the-time-goes sampler (apps by /proc, sites by dnsmasq log).
     attrib: crate::attrib::Attrib,
     /// Ticks since the last usage post (posts every 6 ticks ≈ 1 min).
@@ -379,29 +379,6 @@ pub struct Agent {
     /// Consecutive ticks the upstream has been unreachable while a block was in
     /// force — relax only after this is sustained, so a blip doesn't flap.
     dns_unreach_ticks: u32,
-}
-
-/// One outstanding "approve this web sign-in?" prompt.
-#[derive(Debug, Clone)]
-struct PendingLogin {
-    /// The server's `login_requests.id` (opaque here).
-    id: String,
-    /// Display name of the person signing in — what the prompt shows.
-    username: String,
-    /// The OS logins on this device that belong to that person; only their
-    /// sessions see the prompt, and only their decision files are honored.
-    os_users: Vec<String>,
-    /// Three 4-digit codes to show the human (number-matching); the browser
-    /// shows the one real code and the human taps the match. The device is not
-    /// told which is real — the server decides on the tapped value.
-    codes: Vec<String>,
-    /// The number the human tapped, once read from the decision file — held in
-    /// MEMORY so a transient POST failure is retried from here, never
-    /// re-written back into the child-owned runtime dir (that write followed a
-    /// child-planted symlink → root file write; the retry-via-file is gone).
-    /// `Some("")` = "not me" (deny); `Some(code)` = tapped that number.
-    decision: Option<String>,
-    expires: chrono::DateTime<chrono::Utc>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -589,7 +566,7 @@ impl Agent {
             pending_events,
             notifications: VecDeque::new(),
             notif_seq: 0,
-            pending_logins: Vec::new(),
+            login_codes: Vec::new(),
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
             probe_reported: HashMap::new(),
@@ -1593,8 +1570,9 @@ impl Agent {
         // On-demand "request more time" markers dropped by users' trays.
         self.check_ondemand_earn().await;
 
-        // Web sign-in decisions dropped by users' trays (client-first login).
-        self.check_login_decisions().await;
+        // Sign-in codes run out after a few minutes; stop publishing them.
+        let now = chrono::Utc::now();
+        self.login_codes.retain(|(c, _)| c.is_live(now));
 
         // Persist the freeze/grant state every tick, like the usage ledger
         // above — a power-cycle at any moment must resume, not reset.
@@ -1603,108 +1581,6 @@ impl Agent {
         }
         self.write_status_file();
         events
-    }
-
-    /// Collect the sign-in decisions users' trays dropped in their own
-    /// `/run/user/<uid>/openscreentime` (the same spoof-proof channel as the
-    /// earn marker: only that user and root can write there), report them to
-    /// the server, and expire prompts nobody answered.
-    async fn check_login_decisions(&mut self) {
-        if self.pending_logins.is_empty() {
-            return;
-        }
-        let now = chrono::Utc::now();
-        let pending = self.pending_logins.clone();
-        let mut done: Vec<String> = Vec::new();
-        for p in &pending {
-            if p.expires < now {
-                done.push(p.id.clone());
-                continue;
-            }
-            // The request id is interpolated into a filesystem path, so it must
-            // be an opaque token — never a traversal or a weird name.
-            if !p
-                .id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            {
-                done.push(p.id.clone());
-                continue;
-            }
-            for u in &p.os_users {
-                let Some(uid) = crate::sysusers::uid_of(u) else {
-                    continue;
-                };
-                // The verdict lives in memory once read. If we already have it
-                // (a prior tick read the file but the POST failed), retry the
-                // POST — we do NOT touch the child-owned file again.
-                let tapped = match &p.decision {
-                    Some(d) => d.clone(),
-                    None => {
-                        let path = std::path::PathBuf::from(format!(
-                            "/run/user/{uid}/openscreentime/login_decision_{}",
-                            p.id
-                        ));
-                        // O_NOFOLLOW: the runtime dir is owned by the child, so
-                        // a symlink there must never be followed by this root
-                        // read. A symlink or missing file simply means "no
-                        // answer yet". The file is deleted (also O_NOFOLLOW via
-                        // remove_file, which does not follow the final
-                        // component) the moment we have the verdict.
-                        use std::os::unix::fs::OpenOptionsExt;
-                        let Ok(f) = std::fs::OpenOptions::new()
-                            .read(true)
-                            .custom_flags(libc::O_NOFOLLOW)
-                            .open(&path)
-                        else {
-                            continue;
-                        };
-                        use std::io::Read;
-                        let mut raw = String::new();
-                        if f.take(64).read_to_string(&mut raw).is_err() {
-                            continue;
-                        }
-                        let _ = std::fs::remove_file(&path);
-                        // The tapped number, or "deny"/empty for "not me". Only
-                        // digits are kept; the server matches it to the real code.
-                        let d: String = raw.trim().chars().filter(|c| c.is_ascii_digit()).collect();
-                        // Record in memory so a POST failure retries from here.
-                        if let Some(m) = self.pending_logins.iter_mut().find(|x| x.id == p.id) {
-                            m.decision = Some(d.clone());
-                        }
-                        d
-                    }
-                };
-                // The agent never judges: it forwards the tapped code and the
-                // server decides approve vs deny by matching it.
-                let code_opt = if tapped.is_empty() {
-                    None
-                } else {
-                    Some(tapped.as_str())
-                };
-                match self.client.post_login_decision(&p.id, code_opt, u).await {
-                    Ok(()) => {
-                        self.notify_user(
-                            Some(u),
-                            "Answered",
-                            "Your answer was sent. If it was you, the web session opens.",
-                            false,
-                        );
-                        done.push(p.id.clone());
-                    }
-                    Err(e) => {
-                        // Transient: the verdict is safe in memory; next tick
-                        // re-POSTs it. Nothing is written to disk.
-                        tracing::warn!("login decision for {} failed, will retry: {e}", p.id);
-                    }
-                }
-                break;
-            }
-        }
-        if !done.is_empty() {
-            self.pending_logins.retain(|p| !done.contains(&p.id));
-            self.write_status_file();
-        }
     }
 
     /// Probe that enforcement is real, not just logged (CONTRACT-0.6 §4).
@@ -2077,22 +1953,39 @@ impl Agent {
                     d.saturating_duration_since(Instant::now()).as_secs()),
             }]);
             view["notifications"] = json!(notifs);
-            // Sign-in prompts addressed to this user's sessions — the tray
-            // renders these as actionable notifications and answers via a
-            // decision file (client-first login, CONTRACT-0.6).
-            view["login_requests"] = json!(self
-                .pending_logins
-                .iter()
-                .filter(|l| l.os_users.iter().any(|x| x == u))
-                .map(|l| json!({
-                    "id": l.id,
-                    "username": l.username,
-                    "codes": l.codes,
-                    "expires_at": l.expires.to_rfc3339(),
-                }))
-                .collect::<Vec<_>>());
+            view["login_codes"] = self.login_codes_for(u);
             write_private_status(dir, u, uid, &view.to_string());
         }
+        // A code can be for a login with no rules on this computer (yet): it
+        // still gets its own private file, with the code and nothing else.
+        let mut extra: Vec<&String> = self
+            .login_codes
+            .iter()
+            .flat_map(|(_, users)| users)
+            .filter(|u| !self.policies.contains_key(*u))
+            .collect();
+        extra.sort();
+        extra.dedup();
+        for u in extra {
+            let Some(uid) = crate::sysusers::uid_of(u) else {
+                continue;
+            };
+            let mut view = base.clone();
+            view["users"] = json!([]);
+            view["notifications"] = json!(device_notifs);
+            view["login_codes"] = self.login_codes_for(u);
+            write_private_status(dir, u, uid, &view.to_string());
+        }
+    }
+
+    /// The live codes for one OS login, as its status file carries them.
+    fn login_codes_for(&self, user: &str) -> serde_json::Value {
+        json!(self
+            .login_codes
+            .iter()
+            .filter(|(_, users)| users.iter().any(|x| x == user))
+            .map(|(c, _)| c)
+            .collect::<Vec<_>>())
     }
 
     /// Consume any on-demand "request more time" markers a user's tray dropped
@@ -2251,71 +2144,30 @@ impl Agent {
                 ));
                 json!({ "locked": false })
             }
-            CMD_LOGIN_APPROVE => {
-                let request_id = cmd
-                    .payload
-                    .get("request_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let username = cmd
-                    .payload
-                    .get("username")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("someone")
-                    .to_string();
-                let os_users: Vec<String> = cmd
-                    .payload
-                    .get("os_users")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let secs = cmd
-                    .payload
-                    .get("expires_in_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(120);
-                let codes: Vec<String> = cmd
-                    .payload
-                    .get("codes")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if request_id.is_empty() || os_users.is_empty() || codes.is_empty() {
-                    return (ack_failed(&cmd.id, "bad login_approve payload"), events);
-                }
-                for u in &os_users {
-                    self.notify_user(
-                        Some(u),
-                        "Sign-in request",
-                        &format!(
-                            "{username} is signing in on the web. If it's you, tap the \
-                             number shown in your browser — otherwise tap Not me."
-                        ),
-                        false,
-                    );
-                }
-                self.pending_logins.retain(|p| p.id != request_id);
-                self.pending_logins.push(PendingLogin {
-                    id: request_id,
-                    username,
-                    os_users: os_users.clone(),
-                    codes,
-                    decision: None,
-                    expires: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
-                });
-                // Snappy: the tray polls the snapshot every 5 s — publish now
-                // rather than waiting for the next tick.
+            CMD_LOGIN_CODE => {
+                let Some((code, os_users)) =
+                    crate::logincode::LoginCode::from_command(&cmd.payload, chrono::Utc::now())
+                else {
+                    return (ack_failed(&cmd.id, "bad login_code payload"), events);
+                };
+                // Only logins that really exist here; the server named them.
+                let os_users: Vec<String> = os_users
+                    .into_iter()
+                    .filter(|u| crate::sysusers::uid_of(u).is_some())
+                    .collect();
+                self.login_codes.retain(|(c, _)| c.id != code.id);
+                self.login_codes.push((code, os_users.clone()));
+                // Publish now, not at the next tick — someone is waiting.
                 self.write_status_file();
-                json!({ "prompted": os_users })
+                // Bring the window up where there's a desktop (no tray on
+                // GNOME, and the window may be closed); `ost code` otherwise.
+                #[cfg(feature = "gui")]
+                if !self.exec.dry_run() {
+                    for u in &os_users {
+                        crate::logincode::open_app_for(u);
+                    }
+                }
+                json!({ "shown_to": os_users })
             }
             CMD_APPLY_POLICY => match self.client.get_policy().await {
                 Ok(bundle) => {

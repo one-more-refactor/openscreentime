@@ -1,116 +1,162 @@
 // ============================================================================
-// LOGIN / FIRST-RUN REGISTRATION — the front door, kept small on purpose.
+// SIGN IN — two doors, nothing else (docs/AUTH.md).
 //
-// Fresh install (no account yet): a single passkey-only registration — pick a
-// username, create your passkey. That is the ONLY option; there is no email,
-// no password, no code, and nothing third-party.
+//   Your name → Continue → a 6-digit code shows up on your own computer →
+//   type it here.
+//   Sign in with a passkey → one tap, no name first.
+//   (Sign in with SSO — only when the server has it.)
 //
-// Otherwise (login): type your username and your own computer asks "is this
-// you?" — one tap on its notification signs this browser in (the client-code /
-// number-match flow). Beneath it, a small "Log in with passkey" for phones and
-// unmanaged browsers. SSO stays available when the server has it configured.
+// A fresh server shows "Create your household" instead: your name, then a
+// passkey. The setup link the installer printed carries the one-time setup
+// code in its fragment (#setup=…); only without it does a code field appear.
 // ============================================================================
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
+import { takeFromFragment } from "../lib/fragment";
 import { ApiError, getAuthConfig } from "../api";
 import type { AuthConfig } from "../types";
-import { Wordmark, PasskeyButton, TextInput, Button } from "../components";
+import { Wordmark } from "../components/Wordmark";
+import { PasskeyButton } from "../components/PasskeyButton";
+import { TextInput } from "../components/TextInput";
+import { Button } from "../components/Button";
+import { CodeRing } from "../components/CodeRing";
+import { sentence } from "../lib/format";
 
-type Phase = "idle" | "waiting";
+const SETUP_KEY = "ost-setup";
 
-const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
+/** The setup code from the installer's link — kept for this tab only, so a
+ * reload mid-setup doesn't lose it. */
+function takeSetupToken(): string {
+  const fromLink = takeFromFragment("setup");
+  try {
+    if (fromLink) sessionStorage.setItem(SETUP_KEY, fromLink);
+    return fromLink ?? sessionStorage.getItem(SETUP_KEY) ?? "";
+  } catch {
+    return fromLink ?? "";
+  }
+}
+
+function forgetSetupToken() {
+  try {
+    sessionStorage.removeItem(SETUP_KEY);
+  } catch {
+    /* nothing kept */
+  }
+}
+
+/** The browser's passkey prompt was dismissed — not an error worth shouting. */
+function dismissed(e: unknown): boolean {
+  return e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError");
+}
+
+type Step = "name" | "code";
 
 export function Login() {
-  const { login, register, deviceLogin, mock } = useSession();
+  const { createHousehold, signInWithPasskey, sendCode, enterCode } = useSession();
   const navigate = useNavigate();
   const [params] = useSearchParams();
 
   const [config, setConfig] = useState<AuthConfig | null>(null);
-  const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [userError, setUserError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [matchCode, setMatchCode] = useState("");
+  const [setupToken, setSetupToken] = useState<string>(takeSetupToken);
+  const [askSetupCode, setAskSetupCode] = useState(false);
+  const [name, setName] = useState("");
+  const [step, setStep] = useState<Step>("name");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(() =>
-    params.get("error") ? "Sign-in failed. If your computer never asked, use “Log in with passkey” below." : null,
+    params.get("error") ? "That sign-in didn't work. Try again." : null,
   );
 
   useEffect(() => {
     let alive = true;
     getAuthConfig()
       .then((c) => alive && setConfig(c))
-      .catch(() => alive && setConfig({ oidc: false, oidc_name: "SSO", needs_setup: false }));
+      .catch(
+        () =>
+          alive &&
+          setConfig({ oidc: false, oidc_name: "SSO", needs_setup: false, setup_code_required: false }),
+      );
     return () => {
       alive = false;
     };
   }, []);
 
-  const registering = config?.needs_setup === true;
+  const firstRun = config?.needs_setup === true;
+  const showSetupCode = firstRun && (askSetupCode || (config?.setup_code_required && !setupToken));
 
-  function validUsername(): string | null {
-    const u = username.trim().toLowerCase();
-    if (!USERNAME_RE.test(u)) {
-      setUserError("3–32 characters: a–z, 0–9, dot, underscore, hyphen.");
-      return null;
-    }
-    setUserError(null);
-    return u;
-  }
-
-  // LOGIN: type your username → your own computer approves (number match).
-  async function runDeviceLogin() {
-    const who = username.trim();
-    if (!who) return;
-    setError(null);
-    setPhase("waiting");
-    try {
-      await deviceLogin(who, setMatchCode);
-      navigate("/", { replace: true });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "That didn't work. Check the username, or use “Log in with passkey” below.");
-      setPhase("idle");
-      setMatchCode("");
-    }
-  }
-
-  // LOGIN fallback: passkey for this username.
-  async function runPasskeyLogin() {
-    const who = username.trim();
-    if (!who) {
-      setUserError("Enter your username first.");
-      return;
-    }
+  async function create() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
     setError(null);
     try {
-      await login(who);
+      await createHousehold(name.trim(), setupToken || undefined);
+      forgetSetupToken();
       navigate("/", { replace: true });
     } catch (e) {
+      if (dismissed(e)) {
+        setError("No passkey was made. Try again when you're ready.");
+      } else if (e instanceof ApiError && e.code === "registration_closed") {
+        setError("This server already has a household. Sign in instead.");
+        setConfig((c) => (c ? { ...c, needs_setup: false } : c));
+      } else if (e instanceof ApiError && e.status === 401) {
+        setAskSetupCode(true);
+        setError("That setup code isn't right. Open the link the installer printed, or type the code.");
+      } else {
+        setError(e instanceof Error && e.message ? sentence(e.message) : "That didn't work. Try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function askForCode() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await sendCode(name.trim());
+      setCode("");
+      setStep("code");
+    } catch (e) {
+      setError(e instanceof Error && e.message ? sentence(e.message) : "That didn't work. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verify(full: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await enterCode(full);
+      navigate("/", { replace: true });
+    } catch (e) {
+      setCode("");
       setError(
-        e instanceof Error && e.message ? e.message : "The passkey didn't match — try again.",
+        e instanceof ApiError && e.code === "code_expired"
+          ? "That code has run out. Ask for a new one."
+          : e instanceof Error && e.message
+            ? sentence(e.message)
+            : "That code didn't match. Try again.",
       );
+    } finally {
+      setBusy(false);
     }
   }
 
-  // FIRST-RUN: passkey-only account creation.
-  async function runRegister() {
-    const u = validUsername();
-    if (!u) return;
+  async function passkey() {
     setError(null);
     try {
-      await register(u, displayName.trim() || undefined);
+      await signInWithPasskey();
       navigate("/", { replace: true });
     } catch (e) {
-      if (e instanceof ApiError && e.code === "registration_closed") {
-        setError("An account already exists on this server — sign in instead.");
-        return;
-      }
-      if (e instanceof ApiError && e.status === 409) {
-        setUserError("That username is taken — pick another.");
-        return;
-      }
       setError(
-        e instanceof Error && e.message ? e.message : "Creating your passkey failed. Try once more — and if your browser never asked, check that passkeys are allowed for this site.",
+        dismissed(e)
+          ? null
+          : e instanceof Error && e.message
+            ? sentence(e.message)
+            : "That passkey didn't work. Try again.",
       );
     }
   }
@@ -125,155 +171,127 @@ export function Login() {
           Screen time for the whole family.
         </p>
 
-        {phase === "waiting" ? (
-          <div className="flex flex-col gap-4" role="status" aria-live="polite">
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Check your computer.</p>
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              A notification on your computer is showing three numbers. Tap the one that matches
-              this:
-            </p>
-            <p
-              style={{
-                fontSize: "2.4rem",
-                fontWeight: 600,
-                letterSpacing: "0.3em",
-                color: "var(--fg-display)",
-                fontVariantNumeric: "tabular-nums",
-                textAlign: "center",
-              }}
-            >
-              {matchCode}
-            </p>
-            <span className="login-wait-bar" aria-hidden="true" />
-            <Button variant="ghost" onClick={() => window.location.reload()}>
-              Cancel
-            </Button>
-          </div>
-        ) : registering ? (
-          // ---- First-run registration: passkey only, the only option. ----
-          // A real <form> with named fields so a password manager (1Password,
-          // the browser's own) recognises this as a sign-up and offers to fill
-          // and save the username + passkey.
+        {!config ? null : firstRun ? (
+          // ---- First run: your name, then a passkey. ----
           <form
             className="flex flex-col gap-4"
             onSubmit={(e) => {
               e.preventDefault();
-              void runRegister();
+              void create();
             }}
           >
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create the first account.</p>
+            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create your household</p>
             <TextInput
-              label="Username"
-              name="username"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={username}
-              autoComplete="username webauthn"
-              onChange={(e) => {
-                setUsername(e.target.value);
-                if (userError) setUserError(null);
-              }}
-              placeholder="e.g. dad"
-              aria-invalid={!!userError}
-              hint={userError ?? "This is how you'll sign in. No email, ever."}
-            />
-            <TextInput
-              label="Display name (optional)"
+              label="Your name"
               name="name"
               autoComplete="name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Parent"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
             />
-            <PasskeyButton label="Create account" onActivate={runRegister} disabled={!username.trim()} />
-          </form>
-        ) : (
-          // ---- Login: username → your computer approves; passkey beneath. ----
-          // Wrapped in a <form> with an autocomplete="username webauthn" field so
-          // a password manager surfaces the saved sign-in (and the passkey) here.
-          <form
-            className="flex flex-col gap-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void runDeviceLogin();
-            }}
-          >
-            <TextInput
-              label="Username"
-              name="username"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={username}
-              autoComplete="username webauthn"
-              onChange={(e) => {
-                setUsername(e.target.value);
-                if (userError) setUserError(null);
-              }}
-              placeholder="e.g. dad"
-              aria-invalid={!!userError}
-              hint={userError ?? undefined}
-            />
-            <Button type="submit" disabled={!username.trim()}>
-              Continue
+            {showSetupCode && (
+              <TextInput
+                label="Setup code"
+                name="setup-code"
+                autoComplete="off"
+                spellCheck={false}
+                value={setupToken}
+                onChange={(e) => setSetupToken(e.target.value.trim())}
+                hint="It's in the link the installer printed."
+              />
+            )}
+            <Button type="submit" className="w-full" disabled={!name.trim() || busy}>
+              {busy ? "Waiting for your passkey…" : "Create passkey"}
             </Button>
-            <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
-              Your own computer approves the sign-in — nothing to type, nothing to remember.
+          </form>
+        ) : step === "code" ? (
+          // ---- Door one, part two: the code from your computer. ----
+          <div className="flex flex-col gap-4">
+            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>
+              Enter the code from your computer
             </p>
-            <button
-              type="button"
-              className="focusable text-xs login-link"
-              style={{
-                color: "var(--fg-dim)",
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                padding: "0.25rem 0",
-                textAlign: "left",
-              }}
-              onClick={() => void runPasskeyLogin()}
-            >
-              Log in with passkey →
-            </button>
-            {config?.oidc && (
-              <button
-                type="button"
-                className="focusable text-xs login-link"
-                style={{
-                  color: "var(--fg-dim)",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "0.25rem 0",
-                  textAlign: "left",
+            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
+              It's in the OpenScreenTime window on your computer.
+            </p>
+            <div className="cr-wrap">
+              <CodeRing
+                value={code}
+                disabled={busy}
+                error={!!error}
+                aria-label="The code from your computer"
+                onChange={(v) => {
+                  setCode(v);
+                  if (error) setError(null);
                 }}
+                onComplete={(full) => void verify(full)}
+              />
+              <p className="cr-note" data-error={!!error} role={error ? "alert" : "status"}>
+                {busy ? "Checking…" : (error ?? "It works for 5 minutes.")}
+              </p>
+            </div>
+            <div className="flex justify-between">
+              <Button variant="ghost" size="sm" onClick={() => void askForCode()} disabled={busy}>
+                Send a new code
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setStep("name");
+                  setError(null);
+                }}
+              >
+                Back
+              </Button>
+            </div>
+          </div>
+        ) : (
+          // ---- The two doors. ----
+          <div className="flex flex-col gap-4">
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void askForCode();
+              }}
+            >
+              <TextInput
+                label="Your name"
+                name="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="username"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+              />
+              <Button type="submit" className="w-full" disabled={!name.trim() || busy}>
+                Continue
+              </Button>
+            </form>
+            <p className="text-xs text-center" style={{ color: "var(--fg-dim)" }}>
+              or
+            </p>
+            <PasskeyButton label="Sign in with a passkey" onActivate={passkey} />
+            {config.oidc && (
+              <Button
+                variant="ghost"
+                className="w-full"
                 onClick={() => {
                   window.location.href = "/api/auth/oidc/start";
                 }}
               >
-                Sign in with {config.oidc_name} →
-              </button>
+                Sign in with {config.oidc_name}
+              </Button>
             )}
-          </form>
-        )}
-
-        {error && (
-          <div
-            className="mt-4 flex items-start gap-2 border rounded px-3 py-2"
-            style={{ borderColor: "var(--accent)" }}
-            role="alert"
-          >
-            <span className="text-xs" style={{ color: "var(--accent)" }}>
-              {error}
-            </span>
           </div>
         )}
 
-        {mock && (
-          <Button variant="ghost" onClick={() => navigate("/devices", { replace: true })}>
-            Enter design review (skip auth) →
-          </Button>
+        {error && step === "name" && (
+          <p className="mt-4 text-sm" style={{ color: "var(--accent)" }} role="alert">
+            {error}
+          </p>
         )}
       </div>
     </div>

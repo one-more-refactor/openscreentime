@@ -34,6 +34,81 @@ fn ensure_secure_server(server: &str) -> Result<()> {
     )
 }
 
+/// The login the install ran from: `sudo` records it in `SUDO_USER`; a root
+/// shell reached through `su` still carries the login uid in
+/// `/proc/self/loginuid`. On "my computer" that login is the parent's own.
+fn installer() -> Option<String> {
+    if let Ok(u) = std::env::var("SUDO_USER") {
+        if !u.is_empty() && u != "root" {
+            return Some(u);
+        }
+    }
+    let uid: u32 = std::fs::read_to_string("/proc/self/loginuid")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if uid == 0 || uid == u32::MAX {
+        return None;
+    }
+    users::get_user_by_uid(uid).map(|u| u.name().to_string_lossy().into_owned())
+}
+
+/// Parse the answer to "which login is Mia's?": a number from the list, or
+/// nothing (0, blank, nonsense) = "none of these".
+fn pick(answer: &str, logins: &[String]) -> Option<String> {
+    let n: usize = answer.trim().parse().ok()?;
+    logins.get(n.checked_sub(1)?).cloned()
+}
+
+/// Ask the person at the keyboard which login belongs to whoever this
+/// computer is for — only when it matters (more than one login) and when
+/// there is a terminal to ask on. Reads `/dev/tty`, never stdin: `install.sh`
+/// is piped into `sh`, so stdin is the script.
+fn ask_owner_login(
+    preview: &client::EnrollPreview,
+    logins: &[String],
+    installer: Option<&str>,
+) -> Option<String> {
+    use std::io::{BufRead, Write};
+    if logins.len() < 2 {
+        return None;
+    }
+    let owner = preview.owner.as_deref()?;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut out = &tty;
+    let whose = if preview.owner_is_parent {
+        "yours".to_string()
+    } else {
+        format!("{owner}'s")
+    };
+    let _ = writeln!(
+        out,
+        "\nThis computer is being set up for {owner}. Which login on it is {whose}?"
+    );
+    for (i, l) in logins.iter().enumerate() {
+        let now = if Some(l.as_str()) == installer {
+            "   (the one you're using now)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "  {}) {l}{now}", i + 1);
+    }
+    let _ = writeln!(
+        out,
+        "  0) none of these — every login stays a person of its own"
+    );
+    let _ = write!(out, "Number: ");
+    let _ = out.flush();
+    let mut line = String::new();
+    std::io::BufReader::new(&tty).read_line(&mut line).ok()?;
+    pick(&line, logins)
+}
+
 pub async fn run(server: &str, token: &str) -> Result<()> {
     ensure_secure_server(server)?;
     let hostname = hostname::get()
@@ -47,16 +122,39 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         os_users.len()
     );
 
+    // Whose computer is this, and which login is theirs? Only that login is
+    // linked to them; every other login is its own person (docs/AUTH.md).
+    let installer = installer();
+    let logins: Vec<String> = os_users.iter().map(|u| u.username.clone()).collect();
+    let owner_login = match client::enroll_preview(server, token).await {
+        Ok(preview) => ask_owner_login(&preview, &logins, installer.as_deref()),
+        Err(e) => {
+            tracing::debug!("no enroll preview ({e}); not asking whose login is whose");
+            None
+        }
+    };
+
     let req = EnrollRequest {
         enroll_token: token.to_string(),
         hostname,
         os: "linux".to_string(),
         agent_version: client::AGENT_VERSION.to_string(),
         os_users,
+        installer,
+        owner_login,
     };
 
     let resp = client::enroll(server, &req).await?;
     tracing::info!("enrolled: device_id={}", resp.device_id);
+    if !resp.users.is_empty() {
+        println!("Who's who on this computer:");
+        for u in &resp.users {
+            let role = if u.parent { " (parent)" } else { "" };
+            println!("  {} → {}{role}", u.os_username, u.person);
+        }
+        println!("  Wrong? Change it in the console, under Devices.");
+        println!();
+    }
 
     let cfg = AgentConfig {
         server_url: server.trim_end_matches('/').to_string(),
@@ -83,7 +181,18 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_secure_server;
+    use super::{ensure_secure_server, pick};
+
+    #[test]
+    fn the_answer_picks_a_login_or_none() {
+        let l = vec!["dad".to_string(), "mia".to_string()];
+        assert_eq!(pick("2\n", &l).as_deref(), Some("mia"));
+        assert_eq!(pick(" 1 ", &l).as_deref(), Some("dad"));
+        assert_eq!(pick("0", &l), None);
+        assert_eq!(pick("", &l), None);
+        assert_eq!(pick("3", &l), None);
+        assert_eq!(pick("mia", &l), None);
+    }
 
     #[test]
     fn https_is_accepted() {

@@ -23,12 +23,18 @@ pub enum AppError {
     /// and `OST_OPEN_REGISTRATION` isn't set (see docs/DEPLOY.md).
     #[error("{0}")]
     RegistrationClosed(String),
-    /// 428 with the stable code `step_up_required`: the session is valid but
-    /// has no live second-factor grant (docs/AUTH.md). The client's contract is
-    /// to run a step-up flow and retry the same request — which is why this is
-    /// its own status and not a 403.
+    /// 428 with the stable code `step_up_required`: the route is in the
+    /// sensitive corner and the session's confirm window is shut (docs/AUTH.md).
+    /// The client's contract is to confirm it's you (a passkey, or a code from
+    /// your computer) and retry the same request — hence not a 403.
     #[error("{0}")]
     StepUpRequired(String),
+    /// 401 `wrong_code`: a sign-in / confirm code didn't match; type it again.
+    #[error("{0}")]
+    WrongCode(String),
+    /// 410 `code_expired`: the code ran out (time or tries); ask for a new one.
+    #[error("{0}")]
+    CodeExpired(String),
     /// 403 with the stable code `forbidden_for_member`: a member session
     /// (a child, or a self-tracking adult) asked for something only the hub
     /// (owner/parent) may do. The member layer in `members.rs` fails closed.
@@ -52,6 +58,8 @@ impl AppError {
             AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::RegistrationClosed(_) => (StatusCode::FORBIDDEN, "registration_closed"),
             AppError::StepUpRequired(_) => (StatusCode::PRECONDITION_REQUIRED, "step_up_required"),
+            AppError::WrongCode(_) => (StatusCode::UNAUTHORIZED, "wrong_code"),
+            AppError::CodeExpired(_) => (StatusCode::GONE, "code_expired"),
             AppError::ForbiddenForMember(_) => (StatusCode::FORBIDDEN, "forbidden_for_member"),
             AppError::NoAccount(_) => (StatusCode::NOT_FOUND, "no_account"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),

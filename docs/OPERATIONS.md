@@ -157,18 +157,13 @@ configured channel.
 
 ## Recovering access
 
-**Lost all admin passkeys.** Registration locks the moment the first admin
-exists (`403 registration_closed`, `server/src/auth.rs`). To get back in:
-
-1. Add `OST_OPEN_REGISTRATION=1` to `.env`.
-2. `podman-compose -f compose.yaml up -d server` to pick it up.
-3. Register a new admin (email + passkey) from the login page.
-4. **Remove it from `.env` and recreate again immediately.**
-
-While that variable is set, registration is open to anyone who can reach
-your public URL, not just you — treat steps 2–4 as one uninterrupted
-operation. If you can still log in and just want a second passkey on your
-own account, don't use this path — add it from **Settings** instead.
+**Lost all admin passkeys.** As root inside the server container, run
+`podman exec openscreentime-server /app/openscreentime-server recover <name>`
+(your name or login name). It prints a one-time sign-in link for your existing
+account — single use, 30 minutes — that signs you in with "confirm it's you"
+already done; add a new passkey under **Settings → Security & access** right
+away. (If one of your computers is set up, typing your name on the sign-in page
+and the code it shows works too.)
 
 **Lost the parent PIN.** It's stored per-profile
 (`policy.parent_pin_hash`, Argon2-hashed, never returned as plaintext), not
@@ -203,10 +198,9 @@ console by IP, or sit behind a proxy that rewrites Host. Fix `.env`, then
 **Port conflict on startup.** Something else has `OST_PORT` (default
 8080). Change it in `.env`, `up -d`, and repoint your reverse proxy.
 
-**`registration_closed` adding a second admin.** Expected once an admin
-exists — it's the register endpoint, not a bug. If you're logged in, use
-**Settings** to add a passkey to your account instead; only use
-`OST_OPEN_REGISTRATION=1` (above) for a genuinely new, separate admin.
+**`registration_closed` adding a second admin.** Expected once an account
+exists — first run happens once. If you're signed in, add another passkey to
+your account under **Settings** instead.
 
 **Rate limiting collapses everyone onto one bucket (mass 429s).** The
 limiter keys on the last `X-Forwarded-For` hop only when
