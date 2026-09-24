@@ -20,7 +20,7 @@ use crate::policy::Policy;
 use crate::sysusers;
 use crate::util::Exec;
 use anyhow::Result;
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use openscreentime_policy::rules::{self, StopReason, Verdict};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -361,27 +361,6 @@ pub fn evaluate<Tz: TimeZone>(
     lock_reason(&v, tracker, user, policy)
 }
 
-/// Minutes until bedtime starts (handles start times past midnight relative to
-/// `now`). `Some(0)` while bedtime is already in effect; `None` if the policy's
-/// times don't parse. Used for the pre-bedtime wind-down nudge.
-pub fn minutes_until_bedtime(bt: &crate::policy::Bedtime, now: NaiveTime) -> Option<i64> {
-    let start = i64::from(rules::parse_hm(&bt.start)?);
-    let end = i64::from(match rules::parse_hm(&bt.end)? {
-        0 => 24 * 60,
-        e => e,
-    });
-    let m = i64::from(now.hour() * 60 + now.minute());
-    let inside = if start < end {
-        m >= start && m < end
-    } else {
-        m >= start || m < end
-    };
-    if inside {
-        return Some(0);
-    }
-    Some((start - m).rem_euclid(24 * 60))
-}
-
 /// What the kernel says about a user's freezer right now: `Some(true)` if
 /// `cgroup.freeze` reads back 1, `Some(false)` if 0, `None` if the slice does
 /// not exist (user not logged in) or cannot be read. This — never the agent's
@@ -511,24 +490,6 @@ mod tests {
             evaluate(&p, &t, "kid", &local(0, 23, 0)),
             Some(LockReason::Bedtime)
         );
-    }
-
-    #[test]
-    fn minutes_until_bedtime_handles_wrap_and_in_effect() {
-        let bt = Bedtime {
-            start: "22:30".into(),
-            end: "06:30".into(),
-        };
-        let at = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
-        assert_eq!(minutes_until_bedtime(&bt, at(22, 15)), Some(15));
-        assert_eq!(minutes_until_bedtime(&bt, at(23, 0)), Some(0));
-        assert_eq!(minutes_until_bedtime(&bt, at(3, 0)), Some(0));
-        assert_eq!(minutes_until_bedtime(&bt, at(7, 30)), Some(15 * 60));
-        let bad = Bedtime {
-            start: "late".into(),
-            end: "06:30".into(),
-        };
-        assert_eq!(minutes_until_bedtime(&bad, at(12, 0)), None);
     }
 
     #[test]

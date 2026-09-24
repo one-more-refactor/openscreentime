@@ -44,7 +44,7 @@ pub fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
 
 /// Bundle Figtree + Space Mono into the binary and register them, so the client
 /// looks the same as the console with no network and no fontconfig — the
-/// overlay runs as root with a scrubbed $HOME and cannot use system fonts.
+/// lock runs as `ost-lock`, with no home and no system fonts to rely on.
 pub fn install(cc: &eframe::CreationContext<'_>) {
     let ctx = &cc.egui_ctx;
 
