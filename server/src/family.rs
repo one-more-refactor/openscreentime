@@ -134,8 +134,20 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }
     }
 
-    // Devices, with liveness, pending chips and spare keys folded in.
+    // Devices, with liveness, pending chips and spare keys folded in — and
+    // how many of their logins nobody has said who they are (Who's who).
     let recovery = crate::devices::recovery_unused_by_device(&st.db, admin.tenant_id).await?;
+    let unsorted: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT du.device_id, count(*) FROM device_users du
+           JOIN devices d ON d.id = du.device_id
+          WHERE d.tenant_id = $1 AND du.unsorted
+          GROUP BY du.device_id",
+    )
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
     let mut devices_json = Vec::with_capacity(device_rows.len());
     let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
     for r in &device_rows {
@@ -146,6 +158,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         let lp = lock_pending(&p, r.14.as_ref());
         d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
+        d["unsorted_logins"] = json!(unsorted.get(&r.0).copied().unwrap_or(0));
         device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lp));
         devices_json.push(d);
     }

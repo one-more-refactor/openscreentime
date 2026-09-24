@@ -53,15 +53,21 @@ CREATE TABLE signin_links (
 -- linked a child's login to the parent. Now exactly one login is the owner's,
 -- settled at enrollment; every other login is its own person.
 ALTER TABLE devices ADD COLUMN owner_os_username text;
+-- A login that became a person of its own because nobody could say whose it
+-- is. The Family page asks a parent to sort it (Devices → Who's who); on a
+-- parent's own computer such a person's rules enforce nothing meanwhile.
+ALTER TABLE device_users ADD COLUMN unsorted boolean NOT NULL DEFAULT false;
 
 -- A parent is sent codes and vouchers only for the owner's login, so the old
 -- links must not carry over as "the owner's": on a parent's own computer with
 -- ONE login linked to the parent, that login is the owner's. With several
 -- nobody can say which one is theirs (the child's login got linked the same
 -- way), so none is: all of them are unlinked, and the startup backfill makes
--- each a person of its own — a member by name, else with a child's rules —
--- until the parent points their own login back at themselves under Devices →
--- Who's who (behind confirm-it's-you). Nothing is guessed onto a parent.
+-- each a person of its own — a member by name, else an unsorted person whose
+-- rules enforce nothing (one of them is the parent's own login: never lock a
+-- parent out) — until the parent points their own login back at themselves
+-- under Devices → Who's who (behind confirm-it's-you). Nothing is guessed onto
+-- a parent, and no child's rules are guessed onto anyone.
 UPDATE devices d
    SET owner_os_username = one.os_username
   FROM (SELECT du.device_id, min(du.os_username) AS os_username

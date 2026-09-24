@@ -635,6 +635,7 @@ type DeviceUserRow = (
     i32,
     i32,
     Option<Uuid>,
+    bool,
 );
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
@@ -642,7 +643,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
     let rows: Vec<DeviceUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
                 p.name, p.kind, \
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id, \
+                du.unsorted \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
          JOIN devices d ON d.id = du.device_id \
          LEFT JOIN screen_time_ledger l \
@@ -667,6 +669,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "used_minutes_today": r.7 / 60,
                 "earned_minutes_today": r.8 / 60,
                 "account_id": r.9,
+                // Nobody has said who this login is yet (Who's who).
+                "unsorted": r.10,
             })
         })
         .collect();
@@ -716,7 +720,7 @@ pub async fn assign_profile(
             .await?;
     prof.ok_or_else(|| AppError::NotFound("profile not found".into()))?;
 
-    sqlx::query("UPDATE device_users SET profile_id = $1 WHERE id = $2")
+    sqlx::query("UPDATE device_users SET profile_id = $1, unsorted = false WHERE id = $2")
         .bind(req.profile_id)
         .bind(device_user_id)
         .execute(&st.db)
@@ -769,7 +773,8 @@ pub async fn assign_account(
 
     let mut tx = st.db.begin().await?;
     let login: String = sqlx::query_scalar(
-        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id)
+        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id),
+                unsorted = false
           WHERE id = $3 RETURNING os_username",
     )
     .bind(req.account_id)
