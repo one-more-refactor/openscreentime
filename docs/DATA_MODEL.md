@@ -152,7 +152,7 @@ rows for that day (a daily limit is one budget per person — `docs/TRACKING.md`
 | streak_days     | int         | unused                                    |
 | UNIQUE(device_user_id, day)                                                |
 
-Migration `0026_device_local_day.sql` adds `devices.utc_offset_secs` (int,
+Migration `0027_device_local_day.sql` adds `devices.utc_offset_secs` (int,
 nullable): the device's UTC offset as last reported, so the console knows
 which date is "today" for each device.
 
