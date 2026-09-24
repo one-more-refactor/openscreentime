@@ -257,13 +257,13 @@ Next steps:
          }
      }
 
-2. Open https://${domain} and register the FIRST admin passkey. The page asks
-   for a one-time setup code — it is in .env as OST_BOOTSTRAP_TOKEN:
+2. Open this one-time setup link and create your household (your name, then
+   a passkey):
 
-       $(grep -E '^OST_BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
+       https://${domain}/#setup=$(grep -E '^OST_BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
 
-   Registration auto-locks the moment that first admin account exists —
-   nobody else can self-register after you.
+   Setup closes the moment that first account exists — nobody else can
+   take the server after you.
 
 3. In the console, click ADD DEVICE — it gives you a copy-paste installer
    one-liner to enroll each device.

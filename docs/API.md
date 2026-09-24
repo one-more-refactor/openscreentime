@@ -17,58 +17,57 @@ Base URL in dev: `http://localhost:8080`.
 
 ---
 
-## Auth (passkey / WebAuthn + optional OIDC SSO)
+## Auth (docs/AUTH.md)
 
-Uses `webauthn-rs`. Registration is first-boot only: while zero admins exist, any email can
-register the first admin (bootstrapping the tenant). Once at least one admin exists,
-`register/start` and `register/finish` refuse with **403 `{ error: { code:
-"registration_closed" } }`** unless `OST_OPEN_REGISTRATION=1` is set (see
-docs/DEPLOY.md). A logged-in admin adding another passkey to their *own* account (the
-Settings page reuses the register ceremony) is always allowed.
+Two doors — a name and a code shown on your own computer, or a passkey — plus
+OIDC SSO when configured. First run (zero accounts) creates the household; it
+needs the setup code (`OST_BOOTSTRAP_TOKEN`) when the server has one, and
+refuses with **403 `registration_closed`** once an account exists.
 
 | Method | Path                        | Body / Notes                                            |
 |--------|-----------------------------|---------------------------------------------------------|
-| GET    | `/api/auth/config`          | public → `{ auth: { oidc: bool, oidc_name } }`          |
-| POST   | `/api/auth/register/start`  | `{ email, display_name }` → `CreationChallengeResponse` |
-| POST   | `/api/auth/register/finish` | `{ email, credential }` → sets session, `{ admin }`     |
-| POST   | `/api/auth/login/start`     | `{ email }` → `RequestChallengeResponse`                |
-| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie, `{ admin }`     |
+| GET    | `/api/auth/config`          | public → `{ needs_setup, setup_code_required, auth: { oidc, oidc_name } }` |
+| POST   | `/api/auth/register/start`  | first run: `{ name, setup_token? }` → `CreationChallengeResponse` (resident key required) |
+| POST   | `/api/auth/register/finish` | `{ credential, setup_token? }` → household + session, `{ admin }` |
+| POST   | `/api/auth/code/start`      | `{ name, code_challenge }` → `{ request_id, expires_in_secs }`; the code goes to that person's own computer (identical answer for unknown names) |
+| POST   | `/api/auth/code/verify`     | `{ request_id, code_verifier, code }` → session; `401 wrong_code` (type again) or `410 code_expired` (5 min / 5 tries) |
+| POST   | `/api/auth/login/start`     | → `RequestChallengeResponse` for a discoverable passkey (no name) |
+| POST   | `/api/auth/login/finish`    | `{ credential }` → session, `{ admin }`                 |
 | GET    | `/api/auth/oidc/start`      | 302 to the provider's authorize URL                     |
 | GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
+| POST   | `/api/auth/voucher`         | `{ voucher }` → session (`ost login`, 7 days)           |
+| POST   | `/api/auth/link`            | `{ token }` → session (recovery link from `openscreentime-server recover`) |
 | POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
-| GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
-| GET    | `/api/me/2fa`               | → `{ totp_enrolled, email_available, locked_until }`     |
-| POST   | `/api/me/2fa/totp/start`    | → `{ secret, otpauth_uri }`; 409 once an authenticator is confirmed |
-| POST   | `/api/me/2fa/totp/confirm`  | `{ code }` → `{ ok, expires_at }` — confirming is itself a step-up |
-| POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `OST_STEPUP_WEBHOOK`) |
-| POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at, extended: false }`, rotates the session |
-| GET    | `/api/auth/stepup`          | → `{ armed_until, extended }` — is this session in change mode (plain read, survives a reload) |
-| POST   | `/api/auth/stepup/lock`     | leave change mode now → `{ armed_until: null }` (exempt from the guard) |
-| POST   | `/api/auth/stepup/extend`   | another 15 min from now, once per grant → `{ armed_until, extended: true }`; 409 `already_extended` (guarded: only works while live) |
-| POST   | `/api/auth/voucher`         | `{ voucher }` → session (device-voucher autologin); the session can read but never starts stepped up |
+| GET    | `/api/me`                   | → `{ account, household, admin, tenant }`               |
+| GET    | `/api/auth/confirm`         | → `{ armed_until, passkey, computer }`                  |
+| POST   | `/api/auth/confirm/passkey/start` / `finish` | a passkey assertion → `{ armed_until }` |
+| POST   | `/api/auth/confirm/code/start` | a code to your own computer → `{ request_id, expires_in_secs }`; 409 if none is online |
+| POST   | `/api/auth/confirm/code/verify` | `{ request_id, code }` → `{ armed_until }`         |
+| GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
+| POST   | `/api/me/passkeys/new/start` / `finish` | add a passkey to your account          |
+| DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
 
-### Step-up 2FA
+### Confirm it's you
 
-Reading is free; **every mutating `/api/*` request needs a live step-up grant**,
-enforced by a layer (`server/src/stepup.rs`) rather than per-handler, so routes
-added later are guarded automatically. Without a grant: **`428
-step_up_required`** — the client's contract is to run a step-up flow and retry
-the same request. Exempt (they are how a grant is obtained): the register/login
-ceremonies, logout, `/api/auth/voucher`, the two `/api/me/2fa/totp/*` calls,
-`/api/auth/stepup/email/start`, `/verify` and `/lock` (`/extend` is guarded).
-
-A grant — **change mode** in the console — lasts 15 minutes, can be extended
-once, and is bound to the session row. Verifying rotates the
-session token, keeping the old one valid for 2 minutes so in-flight requests and
-second tabs survive. TOTP codes are single-use (a spent counter is dead even
-inside its window); five wrong factors start a doubling lockout, capped at 15
-minutes, counted in the database so a restart does not clear it.
+Signing in is the proof; ordinary changes need nothing more. The **sensitive
+corner** — unlock codes, recovery codes, passkeys, pairing tokens, Telegram
+pairing, `assign-account`, `enroll-token`, VPN configs — answers **`428
+step_up_required`** until the session has a live 15-minute confirm window,
+opened by a fresh sign-in, a passkey, or a code from your own computer. It's a
+layer (`server/src/confirm.rs`), so routes added later are guarded
+automatically. Confirming rotates the session token, keeping the old one valid
+for 2 minutes so in-flight requests and second tabs survive.
 
 ### Agent
 
 | POST   | `/agent/voucher`            | mint a one-time (2 min) voucher for a local surface on that machine to exchange at `/api/auth/voucher` |
-| GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
-| DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
+| POST   | `/agent/enroll/preview`     | `{ enroll_token }` → `{ owner, owner_is_parent }` without using the token (so `ost enroll` can ask which login is the owner's) |
+
+`POST /agent/enroll` also takes `installer` (the login the install ran from)
+and `owner_login` (the one the installer picked), and answers with `users:
+[{ os_username, person, parent }]`. Commands include **`login_code`**
+`{ request_id, name, os_users, code, purpose, site, expires_in_secs }` — show
+the code to exactly those OS logins (docs/AUTH.md).
 
 Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
 `ost_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
@@ -350,7 +349,7 @@ with `#[serde(default)]` on optional sub-objects.
 - `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],
   apps:[{id,name,category,has_native_client}] }`.
 - **Member sessions** may reach only `/api/me`, `/api/me/today`, `/api/me/ask`,
-  `/api/catalog`, `/api/me/2fa*`, `/api/auth/*`. Anything else under `/api/` →
+  `/api/catalog`, `/api/auth/*` (and a few more `/api/me/*` reads). Anything else under `/api/` →
   `403 forbidden_for_member` (a layer; fails closed for new routes).
 
 **Unlock code (per-device TOTP) and recovery codes.** The secret behind the
