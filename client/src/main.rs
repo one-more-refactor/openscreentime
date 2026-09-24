@@ -19,6 +19,7 @@ mod intro;
 mod lockout;
 mod login;
 mod loginbroker;
+mod logincode;
 mod pam;
 mod parent;
 mod parentcode;
@@ -52,6 +53,7 @@ use config::AgentCtx;
                   Everyday commands need no special permissions:\n  \
                   ost time     how much is left today\n  \
                   ost ask      ask a parent for more\n  \
+                  ost code     the code for signing in on the web\n  \
                   ost login    open the console, already signed in\n\n\
                   Every read command also takes --json.",
     after_help = "Setup and recovery need root: enroll, run, install-service, unlock."
@@ -102,11 +104,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show the code for signing in on the web. Type your name on the sign-in
+    /// page (on any device); the code shows up here, and in the app window.
+    Code {
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the console in a browser, already signed in.
     ///
     /// Uses this computer's own enrollment as proof of identity: no password,
-    /// no passkey prompt. The session can read everything; changing anything
-    /// still asks for a second factor.
+    /// no passkey prompt.
     Login {
         /// Print the sign-in URL instead of opening a browser (headless boxes,
         /// or opening it on another machine). stdout is the URL and nothing else.
@@ -283,6 +290,7 @@ async fn main() -> Result<()> {
             | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
+            | Cmd::Code { .. }
             | Cmd::Login { .. }
             | Cmd::Status { .. }
     );
@@ -293,6 +301,7 @@ async fn main() -> Result<()> {
             | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
+            | Cmd::Code { .. }
             | Cmd::Login { .. }
             | Cmd::Status { .. }
     );
@@ -324,6 +333,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Time { json } => childcli::time(json),
         Cmd::Ask { json } => childcli::ask(json),
+        Cmd::Code { json } => logincode::cli(json),
         Cmd::Login { print_url, json } => login::run(print_url, json).await,
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]

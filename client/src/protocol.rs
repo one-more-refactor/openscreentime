@@ -20,10 +20,10 @@ pub const CMD_CREDIT_TIME: &str = "credit_time";
 /// Lets the agent clear its once-per-day dedupe so the teen can re-ask, and
 /// tell them they were denied instead of leaving "WAITING FOR APPROVAL" up all day.
 pub const CMD_DENY_EARN: &str = "deny_earn";
-/// Client-first login (CONTRACT-0.6 §2): `{request_id, username, os_users,
-/// expires_in_secs}` — prompt exactly those OS logins to approve or deny a
-/// web sign-in as `username`.
-pub const CMD_LOGIN_APPROVE: &str = "login_approve";
+/// A sign-in / confirm code to show (docs/AUTH.md, logincode.rs):
+/// `{request_id, name, os_users, code, purpose, site, expires_in_secs}` —
+/// shown only to exactly those OS logins.
+pub const CMD_LOGIN_CODE: &str = "login_code";
 /// A liveness probe from the console: the agent acks with a pong (version +
 /// enforcement summary), so a parent can see the client is alive and working.
 pub const CMD_PING: &str = "ping";
