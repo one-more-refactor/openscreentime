@@ -38,8 +38,9 @@ curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token
    never leave a truncated binary at `/usr/local/bin/openscreentime`.
 4. Verifies `sha256sum` against the hash pinned in the manifest; refuses to
    install on mismatch.
-5. `chmod 0755`, `mv -f` into place, then runs `ost enroll
-   --server ... --token ...` followed by `ost install-service`.
+5. `chmod 0755`, `mv -f` into place, then runs `OST_TOKEN=… ost enroll
+   --server ...` (the token in the environment, never in argv) followed by
+   `ost install-service`.
 
 Prefer the `OST_TOKEN=xxx` env form over `--token xxx`: the installer
 warns you if you use `--token`, because it can linger in shell history and
@@ -55,7 +56,7 @@ full-screen lockout GUI or the tray companion must be built locally:
 cd client
 cargo build --release --features gui,tray
 sudo install -m 0755 target/release/ost /usr/local/bin/openscreentime
-sudo ost enroll --server https://HOST --token <ENROLL_TOKEN>
+sudo OST_TOKEN=<ENROLL_TOKEN> ost enroll --server https://HOST
 sudo ost install-service
 ```
 
@@ -82,7 +83,7 @@ Subcommands:
 
 | Subcommand | Flags | What it does |
 |---|---|---|
-| `enroll` | `--server <URL>` `--token <TOKEN>` | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
+| `enroll` | `--server <URL>`, the token in `OST_TOKEN` (or `--token -` to read it from stdin; `--token <TOKEN>` works but shows in `ps`) | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
 | `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload` + enables/starts `openscreentime-agent.service` and `openscreentime-watchdog.timer`. Requires root. |
 | `status` | `--json` | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active openscreentime-agent.service`. Safe non-root. |

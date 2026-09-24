@@ -64,7 +64,7 @@ case "${1:-}" in
         podman exec "$name" systemctl is-system-running --wait >/dev/null 2>&1 || true
         podman exec "$name" systemctl is-active dnsmasq
         echo "==> enrolling against $server"
-        podman exec "$name" openscreentime enroll --server "$server" --token "$token"
+        podman exec -e OST_TOKEN="$token" "$name" openscreentime enroll --server "$server"
         echo "==> installing the hardened unit (+ PAM/sudoers parent code)"
         podman exec "$name" openscreentime install-service || true
         sleep 3
