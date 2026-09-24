@@ -42,7 +42,7 @@ use crate::auth::{
     take_auth_challenge, CONFIRM_MINUTES,
 };
 use crate::error::{AppError, AppResult};
-use crate::login_code::{self, Purpose, Recipient, CODE_MINUTES};
+use crate::login_code::{self, Held, Purpose, Recipient, CODE_MINUTES};
 use crate::state::{AppState, AuthAdmin, PasskeyCeremony, AUTH_COOKIE, SESSION_COOKIE};
 
 // ── the layer ───────────────────────────────────────────────────────────────
@@ -296,7 +296,9 @@ pub async fn code_start(
         ));
     }
     let session_id = session_id_for(&st, &jar).await?;
-    let id = login_code::issue(
+    // The same caps as the sign-in door: five codes per ten minutes, and none
+    // at all after the hour's wrong codes are spent.
+    let (id, held) = login_code::issue(
         &st,
         Purpose::Confirm { session_id },
         Some(Recipient {
@@ -306,6 +308,21 @@ pub async fn code_start(
         }),
     )
     .await?;
+    match held {
+        None => {}
+        Some(Held::TooOften) => {
+            return Err(AppError::RateLimited(
+                "your computer was asked for a code a lot just now — wait a few minutes, \
+                 or use your passkey"
+                    .into(),
+            ))
+        }
+        Some(Held::TooManyWrong) => {
+            return Err(AppError::RateLimited(
+                "too many wrong codes this hour — use your passkey, or wait a while".into(),
+            ))
+        }
+    }
     Ok(Json(json!({
         "request_id": id,
         "expires_in_secs": CODE_MINUTES * 60,

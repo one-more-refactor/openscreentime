@@ -22,7 +22,10 @@
 //!
 //! Brute force: a 6-digit code, 5 tries per code, 5 minutes, and the auth
 //! rate limit on both calls. The person's computer is also asked at most five
-//! times in ten minutes, so a stranger typing their name can't flood it.
+//! times in ten minutes (sign-in and confirm codes together, counted under a
+//! per-person lock so parallel asks can't all slip under the cap), and after
+//! ten wrong codes for one person in an hour their code door goes quiet —
+//! decoys — for the rest of that hour, with one alert to the household.
 //!
 //! **The code is never readable from the database** by anything but the
 //! agent it is for: a live socket gets it in the frame and the queue row
@@ -49,10 +52,28 @@ use crate::state::AppState;
 pub const CODE_MINUTES: i32 = 5;
 /// Wrong codes before the request is gone.
 pub const MAX_ATTEMPTS: i32 = 5;
-/// Codes a person's computer is asked to show per ten minutes.
-const MAX_RECENT_PER_ACCOUNT: i64 = 5;
+/// Codes a person's computer is asked to show per ten minutes — sign-in and
+/// confirm codes together.
+pub const MAX_RECENT_PER_ACCOUNT: i64 = 5;
+/// Wrong codes typed for one person in an hour, across all their codes,
+/// before their code door answers only with decoys until the hour is up.
+pub const WRONG_PER_HOUR: i64 = 10;
 
 pub const CMD_LOGIN_CODE: &str = "login_code";
+
+/// Advisory-lock class for one person's code bookkeeping (count + insert, and
+/// the one warning per incident); the second key is `hashtext(account id)`.
+const CODE_LOCK_CLASS: i32 = 0x0C0DE;
+
+/// Serialize code bookkeeping for one person until `tx` ends.
+async fn lock_person(tx: &mut sqlx::PgConnection, account_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2::text))")
+        .bind(CODE_LOCK_CLASS)
+        .bind(account_id)
+        .execute(tx)
+        .await?;
+    Ok(())
+}
 
 pub fn challenge_of(verifier: &str) -> String {
     let digest = sha2::Sha256::digest(verifier.as_bytes());
@@ -167,15 +188,56 @@ pub struct Recipient {
     pub targets: Vec<(Uuid, String)>,
 }
 
+/// Why a code for a real person went nowhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// Their computer was asked [`MAX_RECENT_PER_ACCOUNT`] times in ten
+    /// minutes.
+    TooOften,
+    /// [`WRONG_PER_HOUR`] wrong codes were typed for them this hour.
+    TooManyWrong,
+}
+
 /// Store a code and send it. `to = None` makes a decoy: same row, same
-/// shape, a code nobody will ever see. Returns the request id.
-pub async fn issue(st: &AppState, purpose: Purpose<'_>, to: Option<Recipient>) -> AppResult<Uuid> {
+/// shape, a code nobody will ever see. A real person over their caps gets a
+/// decoy too, and the reason comes back. Returns the request id.
+///
+/// The count and the insert happen in one transaction under a per-person
+/// advisory lock: sixty parallel asks for one name still send five codes.
+/// Decoys take the same lock (on the nil id) and run the same queries, so a
+/// real request costs what a decoy costs.
+pub async fn issue(
+    st: &AppState,
+    purpose: Purpose<'_>,
+    to: Option<Recipient>,
+) -> AppResult<(Uuid, Option<Held>)> {
     let id = Uuid::new_v4();
     let code = gen_code();
     let (kind, challenge, session_id) = match purpose {
         Purpose::Login { code_challenge } => ("login", Some(code_challenge), None),
         Purpose::Confirm { session_id } => ("confirm", None, Some(session_id)),
     };
+    let who = to.as_ref().map_or(Uuid::nil(), |r| r.account_id);
+
+    let mut tx = st.db.begin().await?;
+    lock_person(&mut tx, who).await?;
+    // Rows outlive their use (marked `used_at`) until an hour past expiry, so
+    // both windows see every ask and every wrong try, not just open ones.
+    let (recent, wrong): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE created_at > now() - interval '10 minutes'),
+                COALESCE(sum(attempts) FILTER (WHERE created_at > now() - interval '1 hour'), 0)
+           FROM login_codes WHERE account_id = $1",
+    )
+    .bind(who)
+    .fetch_one(&mut *tx)
+    .await?;
+    let held = match to {
+        None => None,
+        Some(_) if wrong >= WRONG_PER_HOUR => Some(Held::TooManyWrong),
+        Some(_) if recent >= MAX_RECENT_PER_ACCOUNT => Some(Held::TooOften),
+        Some(_) => None,
+    };
+    let to = to.filter(|_| held.is_none());
     let (tenant_id, account_id) = match &to {
         Some(r) => (Some(r.tenant_id), Some(r.account_id)),
         None => (None, None),
@@ -193,10 +255,9 @@ pub async fn issue(st: &AppState, purpose: Purpose<'_>, to: Option<Recipient>) -
     .bind(session_id)
     .bind(code_hash(id, &code))
     .bind(CODE_MINUTES)
-    .execute(&st.db)
+    .execute(&mut *tx)
     .await?;
-    // Rows outlive their use (marked `used_at`) until an hour past expiry, so
-    // the per-person cap in `start` counts every ask, not just the open ones.
+    tx.commit().await?;
     let _ = sqlx::query("DELETE FROM login_codes WHERE expires_at < now() - interval '1 hour'")
         .execute(&st.db)
         .await;
@@ -217,7 +278,7 @@ pub async fn issue(st: &AppState, purpose: Purpose<'_>, to: Option<Recipient>) -
             }
         });
     }
-    Ok(id)
+    Ok((id, held))
 }
 
 /// Take codes out of the command queue once nobody can use them: past their
@@ -359,6 +420,12 @@ pub async fn check(
             .bind(id)
             .fetch_optional(db)
             .await?;
+            // A decoy does the same bookkeeping, on nobody: a wrong code must
+            // cost a real request no more than a decoy.
+            let (tenant, account) = (tenant.unwrap_or_default(), account.unwrap_or_default());
+            if let Err(e) = note_wrong_code(db, tenant, account).await {
+                tracing::warn!(error = %e, "could not count a wrong sign-in code");
+            }
             if tries.is_none_or(|t| t >= MAX_ATTEMPTS) {
                 scrub_request(db, id).await;
                 Err(Refusal::StartAgain.into())
@@ -367,6 +434,68 @@ pub async fn check(
             }
         }
     }
+}
+
+/// A wrong code was typed for `account`. On the one that uses up the hour's
+/// budget ([`WRONG_PER_HOUR`]) the household hears about it — once per
+/// incident: while the hour's warning stands, no second one.
+async fn note_wrong_code(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    account_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    lock_person(&mut tx, account_id).await?;
+    let wrong: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(attempts), 0) FROM login_codes
+          WHERE account_id = $1 AND created_at > now() - interval '1 hour'",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if wrong < WRONG_PER_HOUR {
+        return Ok(());
+    }
+    // Server-written only (no device): an agent can push `account_login`
+    // events too, and must not be able to pre-empt this one.
+    let warned: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events
+                         WHERE tenant_id = $1 AND device_id IS NULL AND type = 'account_login'
+                           AND payload->>'kind' = 'code_guessing'
+                           AND payload->>'account_id' = $2
+                           AND created_at > now() - interval '1 hour')",
+    )
+    .bind(tenant_id)
+    .bind(account_id.to_string())
+    .fetch_one(&mut *tx)
+    .await?;
+    if warned {
+        return Ok(());
+    }
+    let name: String = sqlx::query_scalar("SELECT display_name FROM admins WHERE id = $1")
+        .bind(account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or_else(|| "someone".into());
+    // Critical: the alert worker phones it out like any other sign-in alert.
+    sqlx::query(
+        "INSERT INTO events (tenant_id, type, severity, payload)
+         VALUES ($1, 'account_login', 'critical', $2)",
+    )
+    .bind(tenant_id)
+    .bind(json!({
+        "message": format!(
+            "Someone typed {WRONG_PER_HOUR} wrong sign-in codes for {name} within an hour. \
+             Signing in with a code is off for {name} until the hour is up; a passkey \
+             still works."
+        ),
+        "account_id": account_id,
+        "kind": "code_guessing",
+    }))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// A refusal, or the database failing underneath it.
@@ -425,21 +554,13 @@ pub async fn start(
         .map(|(a, t, _)| (*a, *t))
         .unwrap_or((Uuid::nil(), Uuid::nil()));
     let targets = code_targets(&st.db, account_id, tenant_id).await?;
-    let recent: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM login_codes
-          WHERE account_id = $1 AND created_at > now() - interval '10 minutes'",
-    )
-    .bind(account_id)
-    .fetch_one(&st.db)
-    .await?;
 
-    let to = (person.is_some() && !targets.is_empty() && recent < MAX_RECENT_PER_ACCOUNT)
-        .then_some(Recipient {
-            account_id,
-            tenant_id,
-            targets,
-        });
-    let id = issue(
+    let to = (person.is_some() && !targets.is_empty()).then_some(Recipient {
+        account_id,
+        tenant_id,
+        targets,
+    });
+    let (id, held) = issue(
         &st,
         Purpose::Login {
             code_challenge: &req.code_challenge,
@@ -447,6 +568,9 @@ pub async fn start(
         to,
     )
     .await?;
+    if let Some(why) = held {
+        tracing::info!(account = %account_id, ?why, "sign-in code held back — answered with a decoy");
+    }
     Ok(Json(json!({
         "request_id": id,
         "expires_in_secs": CODE_MINUTES * 60,
