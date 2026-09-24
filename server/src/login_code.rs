@@ -119,8 +119,11 @@ async fn resolve_name(db: &sqlx::PgPool, name: &str) -> AppResult<Option<(Uuid, 
 
 /// The online computers where `account` may be shown a code, with the OS
 /// logins that are theirs there. A member: any computer they use. A parent:
-/// only a computer declared as theirs — root on a child's laptop must not be
-/// able to read a parent's code off a login it linked to the parent.
+/// only a computer declared as theirs, and there only **the owner's login**
+/// (`devices.owner_os_username`) — root on a child's laptop must not be able
+/// to read a parent's code off a login it linked to the parent, and neither
+/// must a child's login that an older server linked to the parent on the
+/// parent's own computer. No owner login settled yet: no code there.
 pub async fn code_targets(
     db: &sqlx::PgPool,
     account_id: Uuid,
@@ -132,7 +135,9 @@ pub async fn code_targets(
            JOIN devices d ON d.id = du.device_id
            JOIN admins a ON a.id = du.account_id
           WHERE du.account_id = $1 AND d.tenant_id = $2 AND d.status = 'online'
-            AND (a.role = 'member' OR d.owner_account_id = a.id)
+            AND (a.role = 'member'
+                 OR (d.owner_account_id = a.id
+                     AND lower(du.os_username) = lower(d.owner_os_username)))
           ORDER BY d.id, du.os_username",
     )
     .bind(account_id)
