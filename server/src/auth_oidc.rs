@@ -464,12 +464,20 @@ pub struct SetupFinishReq {
     username: String,
     #[serde(default)]
     display_name: Option<String>,
+    /// The one-time setup code (`#setup=` link), exactly as the passkey first
+    /// run needs it: being able to sign in at the IdP is not the same as
+    /// being the person who installed this server.
+    #[serde(default)]
+    setup_token: Option<String>,
 }
 
 /// POST /api/auth/oidc/setup/:token — create the first-run account with the
 /// chosen username, stamp the verified email, and sign them in. Consumes the
-/// token. `create_tenant_with_admin(require_first = true)` still guards the
-/// zero-admin race, so a second concurrent finisher is refused.
+/// token. Like the passkey first run it needs the server's setup code when it
+/// has one (`auth::ensure_first_run`) — otherwise anyone the IdP lets sign in
+/// could claim a fresh server. `create_tenant_with_admin(require_first =
+/// true)` still guards the zero-admin race, so a second concurrent finisher
+/// is refused.
 pub async fn setup_finish(
     State(st): State<AppState>,
     jar: CookieJar,
@@ -482,6 +490,8 @@ pub async fn setup_finish(
         .ok_or_else(|| AppError::NotFound("sso is not configured".into()))?;
 
     let username = crate::auth::normalize_username(&req.username)?;
+    // Before the parked identity is taken: a wrong code must not burn it.
+    crate::auth::ensure_first_run(&st, req.setup_token.as_deref()).await?;
 
     // Take the parked identity out (single-use) only once the username validates,
     // so a bad name lets them try again rather than burning the link.
