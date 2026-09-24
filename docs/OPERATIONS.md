@@ -107,7 +107,7 @@ want to hear about the one thing the server can't report itself: being down.
 **Phone alerts.** Point OpenScreenTime at a chat channel — a Discord/Slack
 incoming webhook (`OST_ALERT_WEBHOOK`) or a Telegram bot
 (`OST_TELEGRAM_BOT_TOKEN`, then pair your phone in Settings) — and it sends
-short one-way messages for:
+short messages for (Telegram can also answer a time request with one tap):
 
 - confirmed tamper / device lockdown and new time requests (the household),
 - a device that hasn't been in touch for 24 hours (the household),
@@ -134,25 +134,30 @@ every 6 s; one that goes quiet for 60 s is dropped and shows offline. Polling
 devices heartbeat about every 15 s; a sweep every 30 s marks any device
 unheard for 90 s offline.
 
-**Events feed is the audit trail.** `GET /api/events` (console: Events page):
-enrollment, policy changes, tamper, lock/unlock, self-updates. Pruned after
-90 days; usage slices after 21 days.
+**Events are the audit trail.** `GET /api/events?device_id=&type=&severity=`:
+enrollment, rule changes, tamper, pause/resume, codes typed, sign-ins,
+self-updates. The console shows a person's recent moments on their page; the
+full list is the API. Events are pruned after 90 days, usage slices after 21.
+
 ## Recovering access
 
 **Lost all admin passkeys.** As root inside the server container, run
 `podman exec openscreentime-server /app/openscreentime-server recover <name>`
 (your name or login name). It prints a one-time sign-in link for your existing
 account — single use, 30 minutes — that signs you in with "confirm it's you"
-already done; add a new passkey under **Settings → Security & access** right
-away. (If one of your computers is set up, typing your name on the sign-in page
+already done; add a new passkey under **Settings → Security** right away. (If one of your computers is set up, typing your name on the sign-in page
 and the code it shows works too.)
 
-**Lost the parent PIN.** It's stored per-profile
-(`policy.parent_pin_hash`, Argon2-hashed, never returned as plaintext), not
-one global secret. Reset it as a logged-in admin: open the profile on the
-**Profiles** page and set a new PIN (clearing the field removes the PIN
-requirement — `server/src/profiles.rs`). The admin session already proves
-access; the PIN itself only gates local, on-device unlock.
+**Need a computer's unlock code.** It's in the console, not on anyone's
+phone: **Settings → Security → Unlock codes**, or the person's page → Keys.
+It works offline. No console to hand? Use one of that computer's recovery
+codes. If a code may have leaked, **Replace** it there (the recovery codes
+are cleared with it; make new ones).
+
+**Locked out of a managed computer entirely** (no code, no console): as root
+on it, `ost recover` masks the agent, stops the watchdog and tears enforcement
+down; `systemctl unmask openscreentime-agent && systemctl start
+openscreentime-agent openscreentime-watchdog.timer` re-arms it.
 
 ## Common failures & fixes
 
@@ -179,14 +184,12 @@ exists — first run happens once. If you're signed in, add another passkey to
 your account under **Settings** instead.
 
 **Rate limiting collapses everyone onto one bucket (mass 429s).** The
-limiter keys on the last `X-Forwarded-For` hop only when
-`OST_TRUST_PROXY=1` (`server/src/rate_limit.rs`); otherwise it uses the
-raw peer address, which behind a reverse proxy is the proxy itself — one
-shared bucket for every visitor. `compose.yaml` defaults it to `1` because
-this stack only ever sits behind your reverse proxy. If you see mass 429s
-anyway, check that `OST_TRUST_PROXY` wasn't overridden to `0` in `.env`
-and that your proxy actually appends `X-Forwarded-For` (see DEPLOY.md's
-reverse-proxy requirements).
+limiter keys on the last `X-Forwarded-For` hop unless `OST_TRUST_PROXY=0`
+(`server/src/rate_limit.rs`), when it uses the raw peer address — behind a
+reverse proxy that's the proxy itself, one shared bucket for every visitor.
+Check that `OST_TRUST_PROXY` isn't `0` in `.env` and that your proxy
+actually appends `X-Forwarded-For` (see DEPLOY.md's reverse-proxy
+requirements).
 
 **Stale container/pod name conflicts on Podman.** `podman-compose` names
 the pod after the project directory (`pod_openscreentime` for a checkout named
@@ -204,46 +207,30 @@ versions, on-box build layers). To reclaim more: `podman image prune -a`
 (keep `localhost/openscreentime-server:current` and `:previous`), and trim
 `backups/` if you keep copies elsewhere.
 
-## Uninstalling a device
+## Uninstalling a computer
 
-There's no `ost uninstall` subcommand (`client/src/main.rs` has
-only `enroll`, `run`, `install-service`, `status`, `unlock`) — this is the
-honest manual path.
+As root on the computer:
 
-**Release enforcement first, if you can.** The agent applies state directly
-to the host outside the systemd unit: an `nft` table (`inet openscreentime`) and a
-pinned/immutable `/etc/resolv.conf`. Stopping the service does not tear
-these down. If you know the parent PIN, run as root on the device:
 ```sh
-ost unlock --pin <PARENT_PIN> --minutes 0
-```
-`--minutes 0` suspends enforcement with no scheduled re-apply — tears down
-the nft table, un-pins `resolv.conf`, un-freezes any frozen users
-(`client/src/unlock.rs`). Without the PIN, do the same by hand:
-```sh
-nft delete table inet openscreentime   # ignore "No such file" if already gone
-nft delete table inet sentinel         # only on a box upgraded from the old name
-chattr -i /etc/resolv.conf
-# then repoint /etc/resolv.conf at whatever resolver the host should use
-```
-
-Then remove the agent:
-```sh
-systemctl disable --now openscreentime-agent.service openscreentime-watchdog.timer
-rm -f /etc/systemd/system/openscreentime-agent.service \
-      /etc/systemd/system/openscreentime-watchdog.service \
-      /etc/systemd/system/openscreentime-watchdog.timer \
-      /etc/systemd/user/openscreentime-tray.service \
-      /etc/polkit-1/rules.d/49-openscreentime.rules
-systemctl daemon-reload
-rm -f /usr/local/bin/ost /usr/local/bin/openscreentime.bak
+ost recover       # tears enforcement down: the nft table, the resolv.conf pin, frozen users
+ost uninstall     # the units, the lock and its ost-lock user, the sudo/PAM hook, the companion
+rm -f /etc/polkit-1/rules.d/49-openscreentime.rules \
+      /etc/systemd/logind.conf.d/50-openscreentime.conf
+rm -f /usr/local/bin/ost /usr/local/bin/openscreentime /usr/local/bin/openscreentime.bak
 rm -rf /etc/openscreentime /var/lib/openscreentime
+systemctl daemon-reload
+# then point /etc/resolv.conf at the resolver the host should use
 ```
+
+`ost uninstall` keeps the enrollment and state on purpose (re-running
+`install-service` picks them back up); the last two `rm` lines are what
+really forgets the server.
 
 On a machine that ran the product under its previous name, the installer
 retires the old units for you, but a manual uninstall should sweep them too —
 leaving `sentinel-agent.service` enabled means a second agent still enforcing:
 ```sh
+nft delete table inet sentinel 2>/dev/null
 systemctl disable --now sentinel-agent.service sentinel-watchdog.timer 2>/dev/null
 rm -f /etc/systemd/system/sentinel-agent.service \
       /etc/systemd/system/sentinel-watchdog.service \
@@ -255,11 +242,9 @@ systemctl daemon-reload
 rm -rf /etc/sentinel /var/lib/sentinel
 ```
 
-Finally, **delete the device in the console** (device detail page, or
-`DELETE /api/devices/:id`). The server has no way to know the agent is gone
-until you tell it — until then it sits there, eventually swept `offline`
-and, after 7 days, flagged gone-dark. Deleting it removes it from the fleet
-outright; nothing server-side keeps pointing at that device afterward.
+Finally, **remove it in the console** (Computers → Details → Remove). The
+server can't know the agent is gone until you say so; until then it just
+shows offline.
 
 ## Port 8080 answers nothing although the container is "Up" (netavark stale rules)
 
@@ -303,8 +288,10 @@ health check and rollback as the daily update.
 
 ## Login options on the hosted instance
 
-Passkey registration is open only while the instance has zero admins; after
-that, sign in with a passkey or with the configured OIDC provider
+First run is open only while the instance has no accounts (and needs the
+setup code when `OST_BOOTSTRAP_TOKEN` is set); after that, sign in with a
+code on your own computer, a passkey, or the configured OIDC provider
 (`OST_OIDC_*`). On cr3do the provider is Authentik (`login.cr3do.net`,
 application `ost`, bound to the `authentik Admins` group) — the first OIDC
-login on an empty instance creates the household and its owner.
+login on an empty instance goes to `/welcome` to pick a name and needs the
+setup code too.
