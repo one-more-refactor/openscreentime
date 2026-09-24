@@ -112,6 +112,46 @@ pub async fn enqueue_command_delivered(
     Ok((id, delivered))
 }
 
+/// Enqueue a command whose payload is a secret (a sign-in code) so that the
+/// queue — which more than the agent can read — never holds it longer than
+/// it must: the row is written empty, a live socket gets the payload in the
+/// frame only, and just a polling agent's row is filled in, to be emptied
+/// again the moment that agent pulls it (`pull_pending_commands`) or acks it.
+pub async fn enqueue_secret_command(
+    st: &AppState,
+    device_id: Uuid,
+    ctype: &str,
+    payload: Value,
+) -> AppResult<(Uuid, bool)> {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO commands (device_id, type, payload) VALUES ($1, $2, '{}') RETURNING id",
+    )
+    .bind(device_id)
+    .bind(ctype)
+    .fetch_one(&st.db)
+    .await?;
+    let frame = json!({
+        "type": "command",
+        "command": { "id": id, "type": ctype, "payload": payload }
+    });
+    let delivered = st.hub.push(device_id, frame).await;
+    if delivered {
+        sqlx::query(
+            "UPDATE commands SET status = 'sent', sent_at = now() WHERE id = $1 AND status = 'queued'",
+        )
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+    } else {
+        sqlx::query("UPDATE commands SET payload = $2 WHERE id = $1 AND status = 'queued'")
+            .bind(id)
+            .bind(&payload)
+            .execute(&st.db)
+            .await?;
+    }
+    Ok((id, delivered))
+}
+
 /// `enqueue_command_delivered` for call sites that don't care about delivery.
 pub async fn enqueue_command(
     st: &AppState,
@@ -323,16 +363,26 @@ pub async fn enroll(
     // the console after a step-up and verified by the agent. Nothing is shown
     // once on a terminal that a parent then has to write on a sticker.
     //
-    // Spend the token atomically: the WHERE re-checks it, so of two racing
-    // enrolls only one gets credentials. `last_seen = enrolled_at` is what the
-    // retry path above looks for — the first frame the agent sends moves it.
-    let spent = sqlx::query(
+    // Spend the token atomically: the WHERE re-checks everything the lookup
+    // above checked — a live token, or the same host's retry — so of two
+    // racing enrolls only one gets credentials. (Re-checking just "the token
+    // or its spent hash" let the loser of the race slip in through the retry
+    // arm from any host, re-keying the device the winner had just enrolled.)
+    // `last_seen = enrolled_at` is what the retry path looks for — the first
+    // frame the agent sends moves it.
+    let spent = sqlx::query(&format!(
         "UPDATE devices SET device_token = $1, enroll_token = NULL,
              enroll_token_expires_at = NULL, enroll_token_used = $6,
              enrolled_at = now(), status = 'online',
              hostname = $2, os = $3, agent_version = $4, last_seen = now()
-         WHERE id = $5 AND (enroll_token = $6 OR enroll_token_used = $6)",
-    )
+         WHERE id = $5
+           AND ((enroll_token = $6
+                 AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now()))
+                OR (enroll_token_used = $6
+                    AND enrolled_at > now() - interval '{ENROLL_RETRY_MINUTES} minutes'
+                    AND last_seen IS NOT DISTINCT FROM enrolled_at
+                    AND hostname = $2))",
+    ))
     .bind(&token_hash)
     .bind(&req.hostname)
     .bind(&req.os)
@@ -403,11 +453,29 @@ pub struct HeartbeatReq {
     /// Optional `state` (same shape as the WS frame) for poll-mode agents.
     #[serde(default)]
     pub state: Option<Value>,
+    /// What the agent understands beyond the basics (`["login_code"]`); an
+    /// agent that says nothing understands nothing extra.
+    #[serde(default)]
+    pub features: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
 // Presence: the agent's `state` frame
 // ---------------------------------------------------------------------------
+
+/// The `features` an agent declared (`state` frame or heartbeat), bounded:
+/// `None` when it declared none — an agent from before features existed.
+fn agent_features(v: Option<&Value>) -> Option<Vec<String>> {
+    let list = v?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(Value::as_str)
+            .filter(|f| !f.is_empty() && f.len() <= 32)
+            .take(16)
+            .map(str::to_string)
+            .collect(),
+    )
+}
 
 /// Apply an agent `state` frame — what the device *is*, read back from the
 /// kernel, not what we asked for: `{ locked, frozen_users, enforcing, gaps,
@@ -438,13 +506,14 @@ async fn apply_state(db: &sqlx::PgPool, device_id: Uuid, state: &Value) {
         .map(str::to_string);
     let _ = sqlx::query(
         "UPDATE devices SET locked = $2, last_state = $3, last_seen = now(), status = 'online',
-                agent_version = COALESCE($4, agent_version)
+                agent_version = COALESCE($4, agent_version), agent_features = $5
           WHERE id = $1",
     )
     .bind(device_id)
     .bind(locked)
     .bind(&stored)
     .bind(version)
+    .bind(agent_features(state.get("features")))
     .execute(db)
     .await;
 }
@@ -469,11 +538,13 @@ pub async fn heartbeat(
     sqlx::query(
         "UPDATE devices SET last_seen = now(),
              public_ip = COALESCE($2::inet, public_ip),
-             status = 'online'
+             status = 'online',
+             agent_features = $3
          WHERE id = $1",
     )
     .bind(agent.device_id)
     .bind(req.public_ip)
+    .bind(agent_features(req.features.as_ref()))
     .execute(&st.db)
     .await?;
 
@@ -506,24 +577,37 @@ pub async fn heartbeat(
 /// commands over and over.
 const REDELIVERY_GRACE_SECS: i64 = 90;
 
-async fn pull_pending_commands(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<Value>> {
+/// The device's undelivered commands, marked `sent`. A sign-in code
+/// (`login_code`) is handed over once and its row emptied as it goes — never
+/// redelivered (its payload is gone) and never delivered stale.
+pub(crate) async fn pull_pending_commands(
+    db: &sqlx::PgPool,
+    device_id: Uuid,
+) -> AppResult<Vec<Value>> {
     let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(&format!(
         "SELECT id, type, payload FROM commands
          WHERE device_id = $1
            AND (status = 'queued'
-                OR (status = 'sent'
+                OR (status = 'sent' AND type <> 'login_code'
                     AND sent_at < now() - interval '{REDELIVERY_GRACE_SECS} seconds'))
+           AND NOT (type = 'login_code'
+                    AND created_at < now() - make_interval(mins => $2))
          ORDER BY created_at",
     ))
     .bind(device_id)
+    .bind(crate::login_code::CODE_MINUTES)
     .fetch_all(db)
     .await?;
 
     let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
-    sqlx::query("UPDATE commands SET status = 'sent', sent_at = now() WHERE id = ANY($1)")
-        .bind(&ids)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE commands SET status = 'sent', sent_at = now(),
+                payload = CASE WHEN type = 'login_code' THEN '{}'::jsonb ELSE payload END
+          WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .execute(db)
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -759,8 +843,10 @@ async fn apply_command_ack(
     // could re-ack any command id it has ever seen — replaying an old `unlock`
     // to forge its own lock state, resurrecting a `cancelled` command, or
     // rewriting acked_at/result on historical rows (audit tampering).
+    // A sign-in code has done its job once acked (or failed): empty its row.
     let ctype: Option<String> = sqlx::query_scalar(
-        "UPDATE commands SET status = $1, result = $2, acked_at = now()
+        "UPDATE commands SET status = $1, result = $2, acked_at = now(),
+                payload = CASE WHEN type = 'login_code' THEN '{}'::jsonb ELSE payload END
          WHERE id = $3 AND device_id = $4 AND status IN ('queued','sent') RETURNING type",
     )
     .bind(status)

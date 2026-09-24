@@ -260,9 +260,15 @@ pub async fn settle_owner_login(
 /// 3. a **member** whose name is the login's name or display name — never a
 ///    parent: the agent declares these names, and a login linked to a parent
 ///    can ask for that parent's sign-in codes;
-/// 4. a new person of their own, named after the login, with a child's
-///    rules until a parent says otherwise (fail closed: an unknown login is
-///    never quietly unmanaged).
+/// 4. a new person of their own, named after the login, marked **unsorted**
+///    (`device_users.unsorted`: the Family page asks a parent to sort it
+///    under Devices → Who's who). On a child's computer they get a child's
+///    rules until a parent says otherwise (fail closed: an unknown login on
+///    a managed computer is never quietly unmanaged). On a parent's own
+///    computer — or re-linked by the startup backfill — they get the adult
+///    rules, which enforce nothing: that login may well be the parent's own,
+///    and a parent is never locked out of their computer by a guess. A parent
+///    assigns child rules deliberately.
 ///
 /// Always leaves `device_users.profile_id` equal to the person's rules.
 pub async fn link_os_user(
@@ -271,6 +277,27 @@ pub async fn link_os_user(
     device_id: Uuid,
     os_username: &str,
     os_display_name: Option<&str>,
+) -> AppResult<Uuid> {
+    link_os_user_as(
+        db,
+        tenant_id,
+        device_id,
+        os_username,
+        os_display_name,
+        false,
+    )
+    .await
+}
+
+/// [`link_os_user`]; `backfill`: re-linking a login that lost its person
+/// (startup), whose new person never gets enforcing rules by default.
+async fn link_os_user_as(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_id: Uuid,
+    os_username: &str,
+    os_display_name: Option<&str>,
+    backfill: bool,
 ) -> AppResult<Uuid> {
     let os_username = os_username.trim();
     if os_username.is_empty() {
@@ -290,6 +317,8 @@ pub async fn link_os_user(
     .fetch_optional(db)
     .await?;
 
+    // `None`: keep whatever the row says; `Some`: this call decided it.
+    let mut unsorted: Option<bool> = None;
     let account: AccountRow = match existing.flatten() {
         Some(id) => get_account(db, id, tenant_id).await?,
         None => {
@@ -321,12 +350,25 @@ pub async fn link_os_user(
                     .await?
                 }
             };
+            unsorted = Some(owner.is_none() && by_name.is_none());
             match (owner, by_name) {
                 (Some(id), _) => get_account(db, id, tenant_id).await?,
                 (None, Some(a)) => a,
                 // 4. A person of their own.
                 (None, None) => {
-                    let bracket = AgeBracket::Kid;
+                    let parents_computer: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM devices d
+                                          JOIN admins a ON a.id = d.owner_account_id
+                                         WHERE d.id = $1 AND a.role <> 'member')",
+                    )
+                    .bind(device_id)
+                    .fetch_one(db)
+                    .await?;
+                    let bracket = if backfill || parents_computer {
+                        AgeBracket::Adult
+                    } else {
+                        AgeBracket::Kid
+                    };
                     let pid = create_profile_for(db, tenant_id, bracket, display).await?;
                     let id: Uuid = sqlx::query_scalar(
                         "INSERT INTO admins (tenant_id, display_name, role, age_bracket,
@@ -360,11 +402,13 @@ pub async fn link_os_user(
 
     let profile_id = ensure_profile(db, &account).await?;
     sqlx::query(
-        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id,
+                                   unsorted)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6, false))
          ON CONFLICT (device_id, os_username)
          DO UPDATE SET account_id = $5,
                        profile_id = $4,
+                       unsorted = COALESCE($6, device_users.unsorted),
                        display_name = COALESCE(device_users.display_name, EXCLUDED.display_name)",
     )
     .bind(device_id)
@@ -372,6 +416,7 @@ pub async fn link_os_user(
     .bind(os_display_name)
     .bind(profile_id)
     .bind(account.0)
+    .bind(unsorted)
     .execute(db)
     .await?;
     Ok(account.0)
@@ -387,7 +432,9 @@ pub async fn backfill_links(db: &sqlx::PgPool) -> AppResult<()> {
     .fetch_all(db)
     .await?;
     for (tenant_id, device_id, user, display) in rows {
-        if let Err(e) = link_os_user(db, tenant_id, device_id, &user, display.as_deref()).await {
+        if let Err(e) =
+            link_os_user_as(db, tenant_id, device_id, &user, display.as_deref(), true).await
+        {
             tracing::warn!(error = %e, %device_id, %user, "could not link OS user to an account");
         }
     }
@@ -617,6 +664,13 @@ pub async fn patch_member(
             .await?;
         sync_device_users(&st, id, pid).await?;
     }
+
+    // A parent has looked at this person and decided something: their logins
+    // are sorted.
+    sqlx::query("UPDATE device_users SET unsorted = false WHERE account_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
 
     let row = get_account(&st.db, id, admin.tenant_id).await?;
     Ok(Json(json!({ "member": account_json(&row) })))

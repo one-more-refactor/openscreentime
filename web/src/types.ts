@@ -187,6 +187,8 @@ export interface DeviceUser {
   created_at?: string;
   /** The person this login belongs to. */
   account_id?: string | null;
+  /** nobody has said who this login is yet (Devices → Who's who) */
+  unsorted?: boolean;
 }
 
 /** One row of a device's command queue (GET /api/devices/:id/commands). */
@@ -224,6 +226,8 @@ export interface Device {
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
   pending_commands?: string[];
+  /** /api/family: logins on it nobody has sorted yet (Devices → Who's who) */
+  unsorted_logins?: number;
   /** one-time recovery codes not yet used (0 when none were generated) */
   recovery_codes_unused?: number;
   /** "This is <person>'s computer" — whose it was set up for. */

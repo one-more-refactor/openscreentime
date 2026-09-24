@@ -1,5 +1,10 @@
 # 0.5.0 build contract — "the console owns the keys"
 
+> **Historical.** Change mode and the `/api/auth/stepup/*` routes below are
+> gone: sign-in and "confirm it's you" are now docs/AUTH.md (two doors; the
+> guard is `confirm::sensitive`). The unlock-code and recovery-code parts
+> still describe what ships.
+
 Shared contract for the 0.5.0 push. Two workstreams build against this in
 parallel (A: server + client, B: web). When it disagrees with older docs, this
 wins; `docs/CONTRACT-0.4.md` still describes everything not mentioned here.
@@ -30,7 +35,7 @@ QR, no `otpauth://`, no `secret` field in any API response.
 
 - `POST /api/devices` no longer returns `parent_code`.
 - `GET /api/devices/{id}/unlock-code` — sensitive read (step-up gated, like
-  `/parent-code` was; replace that path in `stepup::sensitive_read`) →
+  `/parent-code` was; today `confirm::sensitive`) →
   ```json
   { "code": "123456", "seconds_left": 17, "period": 30, "device_name": "Kid laptop" }
   ```

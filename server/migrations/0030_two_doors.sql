@@ -53,6 +53,45 @@ CREATE TABLE signin_links (
 -- linked a child's login to the parent. Now exactly one login is the owner's,
 -- settled at enrollment; every other login is its own person.
 ALTER TABLE devices ADD COLUMN owner_os_username text;
+-- A login that became a person of its own because nobody could say whose it
+-- is. The Family page asks a parent to sort it (Devices → Who's who); on a
+-- parent's own computer such a person's rules enforce nothing meanwhile.
+ALTER TABLE device_users ADD COLUMN unsorted boolean NOT NULL DEFAULT false;
+
+-- A parent is sent codes and vouchers only for the owner's login, so the old
+-- links must not carry over as "the owner's": on a parent's own computer with
+-- ONE login linked to the parent, that login is the owner's. With several
+-- nobody can say which one is theirs (the child's login got linked the same
+-- way), so none is: all of them are unlinked, and the startup backfill makes
+-- each a person of its own — a member by name, else an unsorted person whose
+-- rules enforce nothing (one of them is the parent's own login: never lock a
+-- parent out) — until the parent points their own login back at themselves
+-- under Devices → Who's who (behind confirm-it's-you). Nothing is guessed onto
+-- a parent, and no child's rules are guessed onto anyone.
+UPDATE devices d
+   SET owner_os_username = one.os_username
+  FROM (SELECT du.device_id, min(du.os_username) AS os_username
+          FROM device_users du
+          JOIN devices dv ON dv.id = du.device_id
+          JOIN admins a ON a.id = dv.owner_account_id
+         WHERE du.account_id = dv.owner_account_id AND a.role <> 'member'
+         GROUP BY du.device_id
+        HAVING count(*) = 1) one
+ WHERE d.id = one.device_id;
+
+UPDATE device_users du
+   SET account_id = NULL
+  FROM devices d
+  JOIN admins a ON a.id = d.owner_account_id
+ WHERE du.device_id = d.id
+   AND du.account_id = d.owner_account_id
+   AND a.role <> 'member'
+   AND d.owner_os_username IS NULL;
+
+-- What the agent says it understands beyond the basics (`login_code`, …),
+-- from its `state` frame or heartbeat. NULL: it never said — an agent from
+-- before sign-in codes, which a code is never sent to.
+ALTER TABLE devices ADD COLUMN agent_features text[];
 
 -- ── 4. Gone ─────────────────────────────────────────────────────────────────
 -- Authenticator apps (TOTP) and their failure counters, the Telegram confirm

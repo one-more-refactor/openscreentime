@@ -183,6 +183,12 @@ application code when a tenant is created (see `PROFILES.md`).
 - `devices` += `parent_totp_secret` (base32 — the per-device parent code),
   `owner_account_id`, `locked` (bool), `last_state` (jsonb). `status` CHECK is
   now `pending|online|offline`; old `'locked'` rows became `offline`+`locked`.
+  (0030:) `owner_os_username` — the one login that is the owner's; a parent's
+  sign-in codes and vouchers go to it alone. `agent_features text[]` — what
+  the agent declared it understands (`login_code`); NULL = an agent from before
+  features, never sent a code. `device_users.unsorted` — the login became a
+  person of its own because nobody could say whose it is; cleared when a
+  parent sorts it (Who's who, its rules, or that person's details).
 - `device_vouchers` += `account_id`.
 - `profiles.kind` CHECK accepts the five bracket ids (+ the legacy three and
   `custom`). Five bracket presets per tenant; a member's rules are a non-preset
