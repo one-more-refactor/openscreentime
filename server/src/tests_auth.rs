@@ -1,9 +1,11 @@
 //! Database-backed tests for sign-in, confirm, recovery and OS-login linking.
 //!
 //! They need a Postgres they may create databases in: `OST_TEST_DATABASE_URL`,
-//! else `DATABASE_URL` (CI sets it). Each test makes its own throwaway
+//! else `DATABASE_URL` (CI sets both). Each test makes its own throwaway
 //! database and drops it at the end; without either they skip with a note
-//! instead of failing.
+//! instead of failing — unless `OST_REQUIRE_TEST_DB` is set (CI), when
+//! skipping is a failure. `ledger.rs` and `tests_rules.rs` use the same
+//! harness ([`Env`]).
 //!
 //! The second half re-runs, as tests, the attacks an adversarial review
 //! reproduced against a live server (docs/AUTH.md holds the design they
@@ -52,6 +54,11 @@ impl Env {
         let Ok(url) =
             std::env::var("OST_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
         else {
+            // CI sets this: there, a database test that skips is a failure.
+            assert!(
+                std::env::var_os("OST_REQUIRE_TEST_DB").is_none(),
+                "OST_REQUIRE_TEST_DB is set but neither OST_TEST_DATABASE_URL nor DATABASE_URL is"
+            );
             eprintln!("DATABASE_URL not set — skipping a database test");
             return None;
         };
