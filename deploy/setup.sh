@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# OpenScreenTime — one-command first-time production setup.
+# OpenScreenTime — first-time production setup. Run it once; after that the
+# server looks after itself:
 #
-# Generates .env with fresh secrets (unless one already exists), builds the
-# compose stack's images, brings it up, and waits for the server to report
-# healthy. Safe to re-run: an existing .env is never overwritten, so running
-# this again just rebuilds/restarts (handy after `git pull`).
+#   * .env with fresh secrets and ONE setting you choose: the public address
+#     (OST_PUBLIC_URL — the passkey domain and cookie security follow from it),
+#   * the server image (pulled; built here only if pulling isn't possible),
+#   * the stack started and checked healthy, and a first database backup,
+#   * systemd units: start at boot, nightly backup (7 kept), daily update
+#     that rolls itself back if the new version isn't healthy.
+#
+# Safe to re-run: an existing .env is never overwritten.
 #
 # Usage:
-#   deploy/setup.sh --domain ost.example.com [--port 8080] [--bind 127.0.0.1]
+#   deploy/setup.sh [--domain ost.example.com] [--port 8080] [--bind 127.0.0.1]
+#                   [--no-auto-update]
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: deploy/setup.sh --domain <domain> [--port <port>] [--bind <address>]
+Usage: deploy/setup.sh [--domain <domain>] [--port <port>] [--bind <address>] [--no-auto-update]
 
   --domain   the public domain your reverse proxy serves OpenScreenTime on
-             (e.g. ost.example.com). Required.
+             (e.g. ost.example.com). Asked for when not given.
   --port     host port to publish the server on (default: 8080).
              Your reverse proxy forwards to this port.
   --bind     host address to publish that port on (default: 127.0.0.1).
@@ -23,204 +29,113 @@ Usage: deploy/setup.sh --domain <domain> [--port <port>] [--bind <address>]
              machine — then use the LAN/VPN address it can reach, e.g.
              192.168.8.131. Never 0.0.0.0: the server trusts X-Forwarded-For,
              so a directly reachable port is a rate-limiter bypass.
+  --no-auto-update
+             don't install the daily update timer (you run deploy/update.sh).
+
+Rootless Podman: run as the user that should own the stack (not with sudo).
+Rootful Podman: run as root.
 EOF
 }
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=deploy/lib.sh
+source deploy/lib.sh
+repo_root="$(pwd)"
 
 domain=""
 port="8080"
 bind=""
+auto_update=1
 
+need_value() { [[ -n "${2:-}" ]] || { usage >&2; ost_die "$1 requires a value"; }; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --domain)
-            domain="${2:-}"
-            [[ -n "$domain" ]] || { echo "error: --domain requires a value" >&2; usage >&2; exit 1; }
-            shift 2
-            ;;
-        --domain=*)
-            domain="${1#--domain=}"
-            shift
-            ;;
-        --port)
-            port="${2:-}"
-            [[ -n "$port" ]] || { echo "error: --port requires a value" >&2; usage >&2; exit 1; }
-            shift 2
-            ;;
-        --port=*)
-            port="${1#--port=}"
-            shift
-            ;;
-        --bind)
-            bind="${2:-}"
-            [[ -n "$bind" ]] || { echo "error: --bind requires a value" >&2; usage >&2; exit 1; }
-            shift 2
-            ;;
-        --bind=*)
-            bind="${1#--bind=}"
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "error: unknown argument: $1" >&2
-            usage >&2
-            exit 1
-            ;;
+        --domain) need_value "$1" "${2:-}"; domain="$2"; shift 2 ;;
+        --domain=*) domain="${1#--domain=}"; shift ;;
+        --port) need_value "$1" "${2:-}"; port="$2"; shift 2 ;;
+        --port=*) port="${1#--port=}"; shift ;;
+        --bind) need_value "$1" "${2:-}"; bind="$2"; shift 2 ;;
+        --bind=*) bind="${1#--bind=}"; shift ;;
+        --no-auto-update) auto_update=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; ost_die "unknown argument: $1" ;;
     esac
 done
 
-if [[ -z "$domain" ]]; then
-    echo "error: --domain is required" >&2
-    usage >&2
-    exit 1
-fi
-
-# Strip a pasted scheme (http://, https://) and any trailing slash/path so
-# --domain ost.example.com and --domain https://ost.example.com/
-# both work — RP_ID must be the bare domain.
-domain="${domain#http://}"
-domain="${domain#https://}"
-domain="${domain%%/*}"
-
-if [[ -z "$domain" ]]; then
-    echo "error: --domain resolved to an empty string after stripping scheme/path" >&2
-    exit 1
-fi
-
-if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-    echo "error: --port must be numeric, got: $port" >&2
-    exit 1
-fi
-
-# 0.0.0.0 is refused rather than warned about: the server trusts the
-# X-Forwarded-For its proxy appends, so anything that can reach the port
-# directly can also claim to be any client IP and walk past the rate limiter.
-if [[ "$bind" == "0.0.0.0" || "$bind" == "::" ]]; then
-    echo "error: --bind $bind would expose the app port on every interface." >&2
-    echo "       The server trusts X-Forwarded-For, so a directly reachable" >&2
-    echo "       port lets anyone forge their client IP past the rate limiter." >&2
-    echo "       Use the specific address your reverse proxy reaches instead." >&2
-    exit 1
-fi
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
-
-echo "==> domain: ${domain}   port: ${port}"
-
 if [[ -f .env ]]; then
-    echo "==> .env already exists — reusing it (not overwriting secrets). Re-run with a fresh checkout if you want new ones."
+    ost_log ".env already exists — reusing it (secrets are never regenerated)"
+    domain="$(ost_env OST_PUBLIC_URL "$(ost_env RP_ORIGIN)")"
+    domain="${domain#https://}"; domain="${domain#http://}"; domain="${domain%%/*}"
+    port="$(ost_env OST_PORT 8080)"
+    bind="$(ost_env OST_BIND_ADDR)"
 else
-    echo "==> generating .env with fresh secrets"
-
-    # Prefer openssl for the Postgres password; fall back to /dev/urandom on
-    # minimal systems that don't have it.
-    if command -v openssl >/dev/null 2>&1; then
-        pg_password="$(openssl rand -hex 24)"
-    else
-        pg_password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    if [[ -z "$domain" && -t 0 ]]; then
+        read -r -p "Public domain for OpenScreenTime (e.g. ost.example.com): " domain
+    fi
+    # Accept a pasted URL too: RP_ID must be the bare host.
+    domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%%/*}"
+    [[ -n "$domain" ]] || { echo "error: --domain is required" >&2; usage >&2; exit 1; }
+    [[ "$port" =~ ^[0-9]+$ ]] || ost_die "--port must be numeric, got: $port"
+    # 0.0.0.0 is refused rather than warned about: the server trusts the
+    # X-Forwarded-For its proxy appends, so anything that can reach the port
+    # directly can also claim to be any client IP and walk past the rate limiter.
+    if [[ "$bind" == "0.0.0.0" || "$bind" == "::" ]]; then
+        ost_die "--bind $bind would expose the app port on every interface; the server trusts X-Forwarded-For, so use the specific address your reverse proxy reaches."
     fi
 
-    if command -v openssl >/dev/null 2>&1; then
-        bootstrap_token="$(openssl rand -hex 12)"
-    else
-        bootstrap_token="$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    fi
-    cat > .env <<EOF
-# Generated by deploy/setup.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ). Keep this file secret.
+    ost_log "generating .env with fresh secrets"
+    rand() { openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+    umask 077
+    cat >.env <<EOF
+# Generated by deploy/setup.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ). Keep this file secret —
+# the database password below exists nowhere else (backups copy it to backups/env.backup).
 POSTGRES_USER=openscreentime
 POSTGRES_DB=openscreentime
-POSTGRES_PASSWORD=${pg_password}
+POSTGRES_PASSWORD=$(rand 24)
 
-RP_ID=${domain}
-RP_ORIGIN=https://${domain}
+# The one setting: the public https address. The passkey domain (RP_ID), the
+# origin and secure cookies are derived from it.
 OST_PUBLIC_URL=https://${domain}
 OST_PORT=${port}
 
-# The stack sits behind a reverse proxy, so the rate limiter must key clients
-# by the X-Forwarded-For hop that proxy appends. Without it every visitor
-# shares one bucket keyed by the proxy's own address — spurious 429 lockouts
-# for everyone. Set to 0 only if you publish the port with no proxy in front.
-OST_TRUST_PROXY=1
-
 # The one-time setup code the first parent types when registering. Without
 # it, a fresh internet-facing install belongs to whoever finds it first.
-OST_BOOTSTRAP_TOKEN=${bootstrap_token}
-
-RUST_LOG=openscreentime_server=info,tower_http=info,info
+OST_BOOTSTRAP_TOKEN=$(rand 12)
 EOF
-
-    # Only written when asked for: compose.yaml owns the loopback default, and
-    # an absent value keeps following it if it ever changes.
+    # Only written when asked for: compose.yaml owns the loopback default.
     if [[ -n "$bind" ]]; then
-        echo "OST_BIND_ADDR=${bind}" >> .env
+        echo "OST_BIND_ADDR=${bind}" >>.env
     fi
-
-    # .env holds the DB password — keep it readable only by the owner.
     chmod 600 .env
-
-    echo "==> secrets generated and written to ${repo_root}/.env (mode 600)"
+    umask 022
+    ost_log "secrets written to ${repo_root}/.env (mode 600)"
 fi
 
-compose_bin=""
-compose_args=()
+ost_detect_engine
+ost_log "using ${ENGINE} with ${COMPOSE[*]}"
 
-if command -v podman-compose >/dev/null 2>&1; then
-    compose_bin="podman-compose"
-elif command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
-    compose_bin="podman"
-    compose_args=("compose")
-elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    compose_bin="docker"
-    compose_args=("compose")
-else
-    echo "error: none of podman-compose, 'podman compose', or 'docker compose' found." >&2
-    echo "       install podman-compose (rootless Podman recommended for the VPS)." >&2
-    exit 1
-fi
-
-echo "==> using: ${compose_bin} ${compose_args[*]}"
-
-echo "==> building images (server + web, see Containerfile)"
-"${compose_bin}" "${compose_args[@]}" -f compose.yaml build
-
-echo "==> starting the stack"
-"${compose_bin}" "${compose_args[@]}" -f compose.yaml up -d
-
-# Poll wherever the port was actually published: with --bind set, nothing is
-# listening on loopback and a 127.0.0.1 poll would fail a healthy deploy.
 health_host="${bind:-127.0.0.1}"
-echo "==> waiting for the server to report healthy on ${health_host}:${port}"
+if [[ -n "$(ost_running_image_id)" ]]; then
+    # Already set up: a re-run must not swap the image without a backup and
+    # a way back, so it goes through the update path.
+    ost_log "the stack already exists — bringing it up to date with deploy/update.sh"
+    deploy/update.sh || ost_warn "the update did not go through (see above); the stack keeps running."
+else
+    image="$(ost_fetch_image)" || ost_die "could not pull or build the server image."
+    "$ENGINE" tag "$image" "$OST_IMAGE_CURRENT"
 
-health_url="http://${health_host}:${port}/health"
-healthy=""
-for _ in $(seq 1 90); do
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fsS "$health_url" >/dev/null 2>&1; then
-            healthy="1"
-            break
-        fi
-    elif command -v wget >/dev/null 2>&1; then
-        if wget -q -O /dev/null "$health_url" >/dev/null 2>&1; then
-            healthy="1"
-            break
-        fi
-    else
-        echo "error: neither curl nor wget found — cannot poll /health." >&2
-        exit 1
+    ost_log "starting the stack"
+    ost_compose up -d >/dev/null
+    ost_log "waiting for the server to report healthy on ${health_host}:${port}"
+    if ! ost_wait_healthy 180; then
+        ost_die "the server did not become healthy within 3 minutes — check: ${ENGINE} logs ${OST_SERVER}"
     fi
-    printf '.'
-    sleep 1
-done
-echo
 
-if [[ -z "$healthy" ]]; then
-    echo "error: server did not become healthy within 90s." >&2
-    echo "       check logs: ${compose_bin} ${compose_args[*]} -f compose.yaml logs server" >&2
-    exit 1
+    ost_log "taking the first database backup"
+    deploy/backup.sh initial >/dev/null || ost_warn "the first backup failed — check deploy/backup.sh by hand."
 fi
+
+ost_install_units "$auto_update"
 
 cat <<EOF
 
@@ -232,13 +147,11 @@ Next steps:
    The app itself does not terminate TLS — your proxy must. It also must
    forward WebSocket upgrades (used by the agent channel).
 
-   Minimal Caddy example:
+   Minimal Caddy example (Caddy gets the certificate and handles WebSockets):
 
      ${domain} {
          reverse_proxy ${health_host}:${port}
      }
-
-   (Caddy forwards WebSocket upgrades automatically.)
 
    Minimal nginx example:
 
@@ -257,17 +170,18 @@ Next steps:
          }
      }
 
-2. Open https://${domain} and register the FIRST admin passkey. The page asks
-   for a one-time setup code — it is in .env as OST_BOOTSTRAP_TOKEN:
+2. Open https://${domain} and create the first parent account. The page asks
+   for a one-time setup code:
 
-       $(grep -E '^OST_BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
+       $(ost_env OST_BOOTSTRAP_TOKEN)
 
-   Registration auto-locks the moment that first admin account exists —
-   nobody else can self-register after you.
+   Registration locks the moment that first account exists.
 
 3. In the console, click ADD DEVICE — it gives you a copy-paste installer
    one-liner to enroll each device.
 
-See docs/DEPLOY.md for the full operator guide. Use deploy/update.sh to
-update later.
+From here on it runs by itself: it starts at boot, backs up nightly to
+backups/ (copy that folder off this machine now and then), and updates daily
+with an automatic rollback. For phone alerts when something needs you, see
+docs/OPERATIONS.md ("Phone alerts").
 EOF
