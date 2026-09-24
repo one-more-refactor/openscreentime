@@ -54,6 +54,34 @@ CREATE TABLE signin_links (
 -- settled at enrollment; every other login is its own person.
 ALTER TABLE devices ADD COLUMN owner_os_username text;
 
+-- A parent is sent codes and vouchers only for the owner's login, so the old
+-- links must not carry over as "the owner's": on a parent's own computer with
+-- ONE login linked to the parent, that login is the owner's. With several
+-- nobody can say which one is theirs (the child's login got linked the same
+-- way), so none is: all of them are unlinked, and the startup backfill makes
+-- each a person of its own — a member by name, else with a child's rules —
+-- until the parent points their own login back at themselves under Devices →
+-- Who's who (behind confirm-it's-you). Nothing is guessed onto a parent.
+UPDATE devices d
+   SET owner_os_username = one.os_username
+  FROM (SELECT du.device_id, min(du.os_username) AS os_username
+          FROM device_users du
+          JOIN devices dv ON dv.id = du.device_id
+          JOIN admins a ON a.id = dv.owner_account_id
+         WHERE du.account_id = dv.owner_account_id AND a.role <> 'member'
+         GROUP BY du.device_id
+        HAVING count(*) = 1) one
+ WHERE d.id = one.device_id;
+
+UPDATE device_users du
+   SET account_id = NULL
+  FROM devices d
+  JOIN admins a ON a.id = d.owner_account_id
+ WHERE du.device_id = d.id
+   AND du.account_id = d.owner_account_id
+   AND a.role <> 'member'
+   AND d.owner_os_username IS NULL;
+
 -- ── 4. Gone ─────────────────────────────────────────────────────────────────
 -- Authenticator apps (TOTP) and their failure counters, the Telegram confirm
 -- tap, the long-retired emailed codes, change-mode extension, and untrusted

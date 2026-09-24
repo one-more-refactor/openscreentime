@@ -726,11 +726,11 @@ pub struct AssignAccountReq {
 }
 
 /// `POST /api/device-users/{id}/assign-account` — relink an OS login to a
-/// different person in the household. Enrollment links unmatched logins to the
-/// device's owner; a second account on a child's laptop (a parent's, say) ends
-/// up with the child's rules until it is moved here. The login takes the new
-/// person's rules immediately (profile_id follows the account) and the agent
-/// re-pulls.
+/// different person in the household (Devices → Who's who; behind confirm,
+/// since it decides who that login signs in as). Every login but the owner's
+/// enrolls as a person of its own; this is where "that one's me" goes. The
+/// login takes the new person's rules immediately (profile_id follows the
+/// account) and the agent re-pulls.
 pub async fn assign_account(
     State(st): State<AppState>,
     admin: AuthAdmin,
@@ -759,14 +759,34 @@ pub async fn assign_account(
         .ok_or_else(|| AppError::NotFound("person not found".into()))?
         .0;
 
-    sqlx::query(
-        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id) WHERE id = $3",
+    let mut tx = st.db.begin().await?;
+    let login: String = sqlx::query_scalar(
+        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id)
+          WHERE id = $3 RETURNING os_username",
     )
     .bind(req.account_id)
     .bind(profile_id)
     .bind(device_user_id)
-    .execute(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
+    // The owner's login is the one last pointed at the computer's owner here —
+    // which is how a parent settles theirs on their own computer (it is what
+    // their sign-in codes and `ost login` go to). Pointing it at someone else
+    // unsettles it.
+    sqlx::query(
+        "UPDATE devices
+            SET owner_os_username = CASE
+                    WHEN owner_account_id = $2 THEN $3
+                    WHEN lower(owner_os_username) = lower($3) THEN NULL
+                    ELSE owner_os_username END
+          WHERE id = $1",
+    )
+    .bind(device_id)
+    .bind(req.account_id)
+    .bind(&login)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
     Ok(Json(json!({ "ok": true })))
