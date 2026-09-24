@@ -35,8 +35,16 @@
 //! keeps using the screen from now on — so `minutes_left` already honours
 //! bedtime, the end of the allowed window, the end of an override, and the
 //! daily limit, whichever comes first.
+//!
+//! ## Focus hours (a self-managed person's own site blocks)
+//!
+//! [`focus_blocking`] answers "are my self-blocked sites blocked right now?".
+//! The focus window reads exactly like an allowed-hours window (midnight,
+//! crossing midnight, end exclusive). No hours = blocked all day; an empty or
+//! unreadable window counts as no hours — the person asked for the block, the
+//! hours only narrow it. A focus window never stops a screen.
 
-use crate::ScreenTime;
+use crate::{Focus, ScreenTime};
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
@@ -352,6 +360,74 @@ pub fn in_bedtime(st: &ScreenTime, t: &NaiveDateTime) -> bool {
     .clock_reason(t)
         == Some(StopReason::Bedtime)
 }
+
+/// Are the person's self-blocked sites blocked at this local time?
+///
+/// False with no sites. True with no focus hours (all day, every day) or with
+/// hours that can't mean anything. Otherwise true exactly inside the window,
+/// read like an allowed-hours window: `00:00` as an end is midnight,
+/// `00:00 – 00:00` is the whole day, an end before the start crosses midnight
+/// (the tail belongs to the next weekday), and the end itself is outside.
+pub fn focus_blocking(f: &Focus, t: &NaiveDateTime) -> bool {
+    if f.sites.is_empty() {
+        return false;
+    }
+    let Some(w) = f.hours.as_ref() else {
+        return true;
+    };
+    let days: Vec<usize> = w
+        .days
+        .iter()
+        .filter(|d| **d < 7)
+        .map(|d| *d as usize)
+        .collect();
+    let Some((s, e)) = span(&w.start, &w.end).filter(|_| !days.is_empty()) else {
+        return true; // unreadable hours narrow nothing
+    };
+    let m = (t.hour() * 60 + t.minute()) as u16;
+    let today = t.weekday().num_days_from_sunday() as usize;
+    let yesterday = (today + 6) % 7;
+    if s < e {
+        days.contains(&today) && m >= s && m < e
+    } else {
+        (days.contains(&today) && m >= s) || (days.contains(&yesterday) && m < e)
+    }
+}
+
+/// Server-side validation of focus hours and sites, run on every save of a
+/// person's own rules. Same window rules as allowed hours.
+pub fn validate_focus(f: &Focus) -> Result<(), String> {
+    if f.sites.len() > MAX_FOCUS_SITES {
+        return Err(format!(
+            "that's {} sites — keep it to {MAX_FOCUS_SITES} or fewer",
+            f.sites.len()
+        ));
+    }
+    if let Some(w) = &f.hours {
+        let label = format!("focus hours {} – {}", w.start, w.end);
+        if parse_hm(&w.start).is_none() || parse_hm(&w.end).is_none() {
+            return Err(format!("{label}: times must be HH:MM, like 09:00"));
+        }
+        if w.days.is_empty() {
+            return Err(format!("{label}: pick at least one day"));
+        }
+        if let Some(d) = w.days.iter().find(|d| **d > 6) {
+            return Err(format!(
+                "{label}: day {d} doesn't exist (0 = Sunday … 6 = Saturday)"
+            ));
+        }
+        if span(&w.start, &w.end).is_none() {
+            return Err(format!(
+                "{label}: start and end are the same, so the window is empty. \
+                 Pick real hours, or remove them to block the sites all day"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How many sites a person may block for themselves.
+pub const MAX_FOCUS_SITES: usize = 200;
 
 /// Server-side validation of the screen-time rules, run on every save. The
 /// agent never turns a bad rule into a lockout, but a parent should hear
@@ -783,6 +859,72 @@ mod tests {
                 "bedtime {s}–{e}"
             );
         }
+        // Focus hours: the same windows, read as "are my sites blocked now?".
+        // A window valid for allowed hours is valid for focus hours too.
+        for w in v["windows"].as_array().unwrap() {
+            let f = Focus {
+                sites: vec!["x.org".into()],
+                hours: Some(win(
+                    &WEEKDAYS,
+                    w["start"].as_str().unwrap(),
+                    w["end"].as_str().unwrap(),
+                )),
+            };
+            assert_eq!(validate_focus(&f).is_ok(), w["valid"].as_bool().unwrap());
+        }
+        let focus = v["focus"].as_array().unwrap();
+        assert!(!focus.is_empty());
+        for row in focus {
+            let hours: Option<Window> = serde_json::from_value(row["hours"].clone()).unwrap();
+            let f = Focus {
+                sites: vec!["reddit.com".into()],
+                hours,
+            };
+            // 2026-09-20 is a Sunday: day 0 → the 20th, day 6 → the 26th.
+            let day = row["at"]["day"].as_u64().unwrap() as u32;
+            let (h, m) = row["at"]["time"].as_str().unwrap().split_once(':').unwrap();
+            let t = NaiveDate::from_ymd_opt(2026, 9, 20 + day)
+                .unwrap()
+                .and_hms_opt(h.parse().unwrap(), m.parse().unwrap(), 0)
+                .unwrap();
+            assert_eq!(
+                focus_blocking(&f, &t),
+                row["blocking"].as_bool().unwrap(),
+                "focus {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_blocks_only_what_was_asked_for() {
+        let t = mon(10, 0).naive_local();
+        // No sites: nothing to block, whatever the hours.
+        let none = Focus {
+            sites: vec![],
+            hours: None,
+        };
+        assert!(!focus_blocking(&none, &t));
+        // Unreadable or empty hours never unblock the sites.
+        for (s, e) in [("late", "12:00"), ("15:00", "15:00")] {
+            let f = Focus {
+                sites: vec!["x.org".into()],
+                hours: Some(win(&WEEKDAYS, s, e)),
+            };
+            assert!(focus_blocking(&f, &mon(20, 0).naive_local()), "{s}–{e}");
+            assert!(validate_focus(&f).is_err(), "{s}–{e}");
+        }
+        let f = Focus {
+            sites: vec!["x.org".into()],
+            hours: Some(win(&[], "09:00", "12:00")),
+        };
+        assert!(validate_focus(&f).unwrap_err().contains("day"));
+        let many = Focus {
+            sites: (0..=MAX_FOCUS_SITES).map(|i| format!("s{i}.org")).collect(),
+            hours: None,
+        };
+        assert!(validate_focus(&many).is_err());
+        // A focus window never stops a screen: evaluate ignores it.
+        assert!(eval(&st(0, vec![], None), mon(10, 0), used(0)).allowed);
     }
 
     #[test]
