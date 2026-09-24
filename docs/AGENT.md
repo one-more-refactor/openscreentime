@@ -59,10 +59,11 @@ sudo ost enroll --server https://HOST --token <ENROLL_TOKEN>
 sudo ost install-service
 ```
 
-`install-service` also drops the per-user tray unit
-(`/etc/systemd/user/openscreentime-tray.service`) regardless of which features the
-binary was built with — it's a no-op unless you built with `--features
-tray` and a desktop user opts in (see [systemd units](#systemd-units)).
+`install-service` also drops the per-user companion unit
+(`/etc/systemd/user/openscreentime-tray.service`); on a `tray` build it enables it
+globally and adds an XDG autostart entry, and on a `gui` build it sets up the lock
+screen (`ost-lock`, `openscreentime-lock@.service`, cage) — see
+[systemd units](#systemd-units).
 
 Self-update (below) refuses to touch a `gui`/`tray` build — it only ever
 manages the plain headless binary the server ships.
@@ -93,12 +94,13 @@ Subcommands:
 | `unlock` | `--code <CODE>` `--minutes <N>` (default 60) | Parent recovery: verifies the **unlock code** (the 6 digits the console shows, a one-time recovery code, or a profile backup code) fully offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Omit `--code` and it is read from the terminal (`--pin` is a hidden alias). Requires root. See [Parent code](#parent-code). |
 | `uninstall` | — | Disables and removes the systemd units, the sudo/PAM unlock-code hook and nothing else (enrollment config, state and the binary stay). Requires root. |
 
-Two subcommands are intentionally hidden — not in `--help`, not real
+Some subcommands are intentionally hidden — not in `--help`, not real
 `clap::Subcommand` variants, invoked only by the agent itself:
 
 | Hidden subcommand | Who spawns it | Purpose |
 |---|---|---|
-| `__lockout <base64 LockSpec>` | The running agent, detached, when presenting a lockout overlay on a `gui` build | Runs the blocking `eframe`/`egui` event loop in a subprocess so it never stalls the enforcement tick. Fails with an error if the binary wasn't built `--features gui`. |
+| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`. Fails if cage is missing — the agent then draws the text lock. |
+| `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" over `/run/openscreentime/lock.sock`; holds no secret. |
 | `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
 | `__intro` | The tray, detached, on first run (`gui`+`tray` build) | Shows the skippable first-run child intro cards, then writes `intro_seen` so it never shows again. Fails with an error if the binary wasn't built `--features gui`. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
@@ -194,8 +196,8 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/usr/local/bin/.openscreentime.download.$$` | root : — | `install.sh` (transient) | Staging path for the initial download; renamed atomically into place, cleaned up by a trap on any exit. |
 | `/etc/openscreentime/agent.toml` | root : **0600** | `enroll` | Persisted identity: `server_url`, `device_id`, `device_token`, `poll_interval_secs`, `tamper_level`, `auto_update`. See [Config fields](#config-fields). |
 | `/etc/openscreentime/policy_cache.json` | root : **0600** | `run` (after every applied policy bundle) | Last-applied effective `Policy`, JSON. Not read by enforcement itself (that's in-memory); exists only so `unlock` knows what to tear down without a live agent process. |
-| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code` (TOTP secret + unused recovery-code MACs). The boot fallback when the server is unreachable, and what `unlock` / `pam-auth` / the overlay verify unlock codes against. |
-| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run`, `unlock`, `pam-auth`, the `__lockout` overlay (whoever verifies a code) | Unlock-code replay counter (last accepted TOTP step — a code is single-use), the ids of recovery codes already spent on this device, and the wrong-attempt counter / lockout deadline. |
+| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code` (TOTP secret + unused recovery-code MACs). The boot fallback when the server is unreachable, and what `unlock` / `pam-auth` / the agent (for codes typed at the lock) verify unlock codes against. |
+| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run` (codes typed at the lock), `unlock`, `pam-auth` | Unlock-code replay counter (last accepted TOTP step — a code is single-use), the ids of recovery codes already spent on this device, and the wrong-attempt counter / lockout deadline. |
 | `/etc/pam.d/openscreentime-parent` | root : default | `install-service` | PAM service: `auth required pam_exec.so expose_authtok quiet /usr/local/bin/openscreentime pam-auth`. Removed by `uninstall`. |
 | `/etc/sudoers.d/10-openscreentime` | root : **0440** | `install-service`, then `run` on every policy apply (staged under a dot-name, `visudo -c -f` validated, renamed into place) | `Defaults:<managed users> pam_service=openscreentime-parent, timestamp_timeout=0` + `<managed users> ALL=(ALL:ALL) ALL`. Managed = every OS user whose profile kind is not `adult`/`default`. Removed by `uninstall`. |
 | `/etc/openscreentime/dnsmasq.d/openscreentime.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
@@ -206,8 +208,8 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
 | `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Transparency snapshot for the tray: connection state, device-lock / offline-lockdown / tamper-lockdown flags, per-user used/remaining minutes, frozen state, freeze countdown, and a short queue of agent-published notifications (id, title, body, urgency, target user) for the tray to deliver as desktop notifications. |
-| `/run/openscreentime/unlock_pin.<user>` | dropped by a companion tool acting for the parent | consumed by `run` every tick | An **unlock-code attempt** (plaintext), single-use — read once and deleted regardless of outcome. Verified through the parent verifier (TOTP, then recovery code, then backup code); grants `PIN_OVERRIDE_GRANT_MIN` (30) minutes on match and emits the `parent_code_*` event. This is the headless (no-GUI) override path. |
-| `/run/openscreentime/unlock_grant.<user>` | root-only dir (0755) — no managed user can write here | written by the `__lockout` GUI subprocess on a verified dismissal; consumed by `run` every tick | An **already-verified** unlock, trusted at face value (safe only because `/run/openscreentime` is root-owned). `<kind>:<minutes>`, clamped to 1–240: `pin:30` for an unlock code, `recovery#<id>:30` for a one-time recovery code (the runner reports `parent_code_backup_used` with the id so the server retires it), `backup:30` for a profile backup code (reported as `parent_code_backup_used`), `challenge:5` for a solved math challenge, single-use. |
+| `/run/openscreentime/lock.sock` | root : group `ost-lock`, **0660** | `run` | The graphical lock's line to the agent. The agent answers only a peer whose `SO_PEERCRED` uid is `ost-lock`; one JSON request (`face` / `code` / `ask`) and one reply per connection. |
+| `/var/lib/openscreentime/freeze_state.json` | root : default | `run` (every tick) | Who is stopped (or inside a save-your-work countdown), a confirmed-evasion lockdown, and the lock on screen (`lock`: subject, VT, mode, boot id) — so a restarted agent adopts the lock instead of forgetting it. |
 | `/var/lib/openscreentime/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
@@ -234,7 +236,8 @@ Installed by `install-service` (source in `client/systemd/`):
 |---|---|---|
 | `openscreentime-agent.service` | `/etc/systemd/system/` | The agent itself: `ExecStart=/usr/local/bin/ost run`. |
 | `openscreentime-watchdog.service` + `.timer` | `/etc/systemd/system/` | Oneshot check every 30s (after a 60s boot delay): if `/run/openscreentime/heartbeat` is missing or older than 90s, `systemctl restart openscreentime-agent.service`. |
-| `openscreentime-tray.service` | `/etc/systemd/user/` | Per-user unit, **not auto-enabled** — a desktop user opts in with `systemctl --user enable --now openscreentime-tray`. Only does anything useful on a `--features tray` build. |
+| `openscreentime-tray.service` | `/etc/systemd/user/` | The per-user companion (warnings, "You're back"). Enabled globally on a `tray` build (`WantedBy=graphical-session.target`); `/etc/xdg/autostart/openscreentime-companion.desktop` starts it where there is no systemd user session. One instance per person. |
+| `openscreentime-lock@.service` | `/etc/systemd/system/` | The lock screen on VT `%i` (the agent uses 13): `cage` as `ost-lock` with its own logind session (`PAMName=openscreentime-lock`, `TTYPath=/dev/tty%i`). Started and stopped by the agent, never enabled; separate from the agent unit so restarts never take a lock down. `gui` build only. |
 
 `openscreentime-agent.service` hardening highlights (tamper level 1 baseline, see
 `docs/TAMPER.md`):
@@ -267,8 +270,8 @@ additive; `default = []`.
 
 | Feature | Adds | What you get |
 |---|---|---|
-| *(none — headless, what the server ships)* | — | Full enforcement (DNS, firewall, screen time, tamper hardening, self-update). Lockout/nudge screens render as a `wall`-broadcast text overlay (see `render_ascii`) instead of a graphical window. No `tray` subcommand. |
-| `gui` | `eframe`/`egui` | The `__lockout` subprocess renders a real fullscreen window (black bg, monospace, accent-red CTA) instead of falling back to `wall`. Enables the parent-PIN / math-challenge typed-input box and the verified-unlock grant flow (`unlock_grant.<user>`). Self-update refuses to run on a `gui` build. |
+| *(none — headless, what the server ships)* | — | Full enforcement (DNS, firewall, screen time, tamper hardening, self-update). The lock is the text lock on its own VT. No `tray` subcommand. |
+| `gui` | `eframe`/`egui` | The graphical lock (`__lock-session` / `__lockscreen` inside `cage`, see [The lock](#the-lock)); `install-service` also creates `ost-lock`, the lock unit and its PAM file, and installs cage where apt/pacman/dnf has it. |
 | `tray` | `ksni` (StatusNotifierItem) + `notify-rust` | The `tray` subcommand: a per-user, non-root system tray icon + desktop notifications reading `/run/openscreentime/status.json`. In **parent mode** (after `ost pair`) a background worker also polls `/api/parent/*` to show pending time requests + alerts and approve/deny them from the menu. Self-update refuses to run on a `tray` build. |
 
 Both `gui` and `tray` can be combined (`--features gui,tray`) for a full
@@ -340,12 +343,13 @@ midnight; `earned` minutes (approved earn-time requests) extend the daily
 budget. `evaluate()` checks bedtime first, then the allowed-hours schedule,
 then the daily limit.
 
-**Freeze grace**: the first tick a lock reason fires, the runner shows the
-overlay (with an earn-time offer, auto-requested, if it's a daily-limit
-run-out) and arms a 60s (`FREEZE_GRACE`) countdown — the cgroup freeze
-itself only lands once that expires, so it never looks like a sudden kernel
-hang. An **admin lock** (`lock` command, or offline hard-lockdown) skips
-the grace and freezes immediately.
+**Warnings and grace**: every stop is announced at 15, 5 and 1 minute
+(see [The lock](#the-lock)). A stop whose 1-minute warning went out, or that
+someone logs into, lands at T-0. A stop nobody saw coming (a rule changed, a
+code's 30 minutes ran out) gets a 60 s save-your-work countdown (120 s for
+teens) that the companion counts down as a notification. An **admin lock**
+(`lock` command, or offline hard-lockdown) is immediate. Someone who isn't
+logged in is never frozen; they meet the lock when they log in.
 
 The freeze writes `1`/`0` to
 `/sys/fs/cgroup/user.slice/user-<uid>.slice/cgroup.freeze`. If that write
@@ -354,40 +358,51 @@ terminate-user`; a screen-time freeze (`hard=false`) never escalates to
 terminating the session — unsaved work must never be destroyed over a time
 limit, so it just logs and stays best-effort.
 
-Verified unlocks (an overlay grant, or a headless parent-code file drop) are
-consumed every tick for every managed user, including already-frozen ones,
-so a parent standing at the machine can always get someone out. While an
-unlock grace window is active, screen-time AND an admin device lock are
-both suspended for that user (the parent always wins).
+A code typed at the lock grants 30 minutes: while that window is active,
+screen time AND an admin device lock are both suspended for that user (the
+parent always wins).
 
-### Lockout GUI + wall fallback
+### The lock
 
-`client/src/lockout.rs`. `present()` always renders a `LockSpec` (headline,
-detail, challenge, optional big-number) as ASCII art (`render_ascii`) for
-logging. On a `gui` build it additionally spawns the `__lockout` subprocess
-detached (so the blocking `egui` event loop never stalls the tick), which
-shows a real fullscreen window and, on a verified dismissal, writes
-`/run/openscreentime/unlock_grant.<user>`. If spawning fails, or the build has no
-`gui` feature, it falls back to `wall -n` broadcasting the message to every
-TTY plus logging it — nothing is ever silently dropped.
+`client/src/lock/`. The freeze suspends the whole user slice, compositor
+included, so the lock never lives inside the session it stops. It is its own
+session on its own VT (13):
 
-Challenge types: `Math` (a×b, solved answer grants 5 min on `gui`), `Wait`
-(cooldown, no typed input, grants nothing early), `ParentPin` (the parent
-code, grants 30 min), `None` (a nudge, no gate). The parent code, when
-configured, is always accepted as a master escape regardless of the active
-challenge. The headless file-drop override
-(`/run/openscreentime/unlock_pin.<user>`) intentionally does **not** route
-through the generic `Challenge::verify` — it goes straight to the parent
-verifier, because `Challenge::None` verifies unconditionally and routing an
-override through it would let a dropped file bypass even an admin lock with
-no code configured.
+- **Graphical**: `openscreentime-lock@13.service` runs `cage` (without `-s`,
+  so the keyboard can't switch VTs) as the unprivileged system user
+  `ost-lock`, hosting `ost __lockscreen`. It shows the completed ring, one
+  sentence ("Time's up for today", "Bedtime until 07:00", "Paused by a
+  parent", "Outside allowed hours until 15:00"), a code field that has the
+  keyboard (digits only, grouped, Enter submits, tries left), "Ask for more
+  time", and how a parent gets you out. With no unlock code on the device it
+  says so and offers only the ask.
+- **Text**: with no `cage`, a headless build, or a graphical lock that
+  doesn't answer within 8 s, the agent draws a plain text lock on the same
+  VT itself and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`).
 
-The words on the overlay are plain and bracket-aware (`runner::lock_copy`):
-little/kid get the short form ("Time's up" / "You've used 60 of 60 minutes
-today."), teens the same fact plus the wind-down ("The screen stops in
-2 min — save your work."). Everyone keeps the 60 s save-your-work grace;
-younger/older teens get `AgeBracket::wind_down_secs` (120 s). No ALL-CAPS,
-no euphemism: when it stops, it says it stopped.
+Codes are checked by the agent (root), never by the lock: the graphical lock
+sends them over `/run/openscreentime/lock.sock`, which answers only uid
+`ost-lock` (`SO_PEERCRED`); the text lock hands them over in-process. Both go
+through `parentcode`, `via: lock_screen`.
+
+Order of operations: **lock** = start the lock → switch to its VT while the
+person's compositor is still alive → freeze. **Unlock** = thaw → switch back
+to their session → stop the lock. The agent reconciles the lock after every
+tick, command, lock request and VT change, so every thaw path (a code, a
+console Resume / grant, midnight, bedtime's end, a window opening,
+`ost unlock`) takes it down, and switching or logging in to a stopped
+session brings it up at once. The lock on screen is recorded in
+`freeze_state.json`; a restarted agent adopts it (and the kernel's frozen
+set) instead of forgetting it. If no lock can be shown, nobody is frozen
+behind a blank screen — the console gets `lock_screen_unavailable`.
+Needs virtual terminals (`CONFIG_VT`), which every desktop distro has.
+
+Warnings: the per-user companion (`ost tray`) announces every stop — limit,
+bedtime, end of allowed hours, a scheduled pause — at 15, 5 and 1 minute,
+from `stop_at`/`reason`/`pause_at`/`freeze_in_secs` in the status snapshot;
+the last minute is one critical notification updated in place. Actions: "Ask
+for more time", "Open OpenScreenTime". It works without a tray host (GNOME).
+Someone with no desktop hears the same words on their own terminals only.
 
 ### Unlock code
 
@@ -409,13 +424,11 @@ never sent. A match is `Verdict::Recovery(id)`: the id is remembered in
 profile-level **backup code** (`parent_pin_hash`, argon2) still opens the
 door, reported as `parent_code_backup_used` without an id. Every attempt emits
 `parent_code_ok` / `parent_code_failed` / `parent_code_backup_used` with
-payload `{ via: overlay|unlock|pam, user, detail[, recovery_id] }`.
+payload `{ via: lock_screen|unlock|pam, user, detail[, recovery_id] }`.
 
-Where it is asked for: the lockout overlay's "Unlock code (from the
-OpenScreenTime console, or a recovery code)" field, `ost unlock`, the headless
-file drop, and `sudo` on a managed machine (below). Secrets never travel on
-argv; the GUI overlay receives them through the root-only staged spec file as
-before.
+Where it is asked for: the lock's code field, `ost unlock`, and `sudo` on a
+managed machine (below). Secrets never leave the agent: the lock only
+forwards what was typed.
 
 ### Parent sudo (PAM)
 
@@ -510,8 +523,8 @@ handling never black out all traffic):
    `/var/lib/openscreentime/last_contact` (throttled to at most one disk write per
    60s), so it correctly survives reboots — a device offline for days has
    almost certainly rebooted at least once. Once exceeded, every user is
-   frozen immediately (no freeze grace, treated like an admin lock) with a
-   plain "Stopped — no contact with the family server for days" overlay.
+   frozen immediately (no freeze grace, treated like an admin lock) behind
+   the lock ("Stopped until this computer reaches the family server").
    **The parent code always unlocks** — a dead or
    unreachable server can never permanently brick the family's laptop. An
    `offline_hard_lockdown_lifted` event fires once contact resumes.

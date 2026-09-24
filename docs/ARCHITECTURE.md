@@ -114,8 +114,10 @@ defenses, and reports usage. Enforcement primitives:
 Two Cargo features gate optional local UI, both off by default so the fleet
 build stays minimal:
 
-- `gui` (eframe/egui) — the full-screen lockout overlay, spawned as a detached
-  `__lockout` subprocess so its blocking event loop never stalls the tick.
+- `gui` (eframe/egui) — the graphical lock: its own session on its own VT
+  (`cage` as `ost-lock` in `openscreentime-lock@.service`), asking the agent to
+  check codes over a peer-checked socket. Without it the agent draws a text lock
+  on the same VT. See AGENT.md → The lock.
 - `tray` (ksni + notify-rust) — a per-user StatusNotifierItem companion that
   reads the world-readable status snapshot and surfaces desktop notifications.
   It runs as the desktop user, never root.
