@@ -320,7 +320,7 @@ impl LockWindow {
         let mut buf = group(&self.typed);
         let out = egui::TextEdit::singleline(&mut buf)
             .font(ui::mono(30.0))
-            .hint_text("123 456")
+            .hint_text(egui::RichText::new("123 456").color(col(ui::LINE_2)))
             .desired_width(250.0)
             .horizontal_align(egui::Align::Center)
             .interactive(!busy)
