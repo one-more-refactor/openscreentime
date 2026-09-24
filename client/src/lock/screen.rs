@@ -498,8 +498,14 @@ impl LockWindow {
             ui.fonts(|f| f.layout_job(ui::job(text, ui::mono(20.0), col(ui::INK), 0.06)))
         };
         let inner = rect.shrink2(egui::vec2(14.0, 0.0));
-        let out = uic.put(
+        // A child Ui inside the field: the row's own layout (field, gap,
+        // Unlock) stays as allocated.
+        let mut field = uic.child_ui(
             inner,
+            egui::Layout::left_to_right(egui::Align::Center),
+            None,
+        );
+        let out = field.add(
             egui::TextEdit::singleline(&mut buf)
                 .id(id)
                 .frame(false)

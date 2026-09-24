@@ -289,7 +289,9 @@ pub fn ring_center(
     label_size: f32,
     gap: f32,
 ) {
-    let num = painter.layout_job(job(big, font(big_size, W::ExtraBold), big_color, -0.03));
+    // No number (a pause, nothing known): the label alone. Never lay out a
+    // zero-size font — egui panics on it.
+    let big = if big_size > 0.0 { big } else { "" };
     let lab = painter.layout_job(job(label, font(label_size, W::Regular), col(INK_2), 0.0));
     // The number's box is taller than its digits (line height ~1.2 em):
     // centre on cap height, not on the box.
@@ -301,6 +303,7 @@ pub fn ring_center(
     };
     let top = c.y - block / 2.0;
     if !big.is_empty() {
+        let num = painter.layout_job(job(big, font(big_size, W::ExtraBold), big_color, -0.03));
         let digits_top = top - (num.size().y - big_size) / 2.0 - big_size * 0.14;
         painter.galley(
             Pos2::new(c.x - num.size().x / 2.0, digits_top),
