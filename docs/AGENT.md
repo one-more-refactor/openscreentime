@@ -463,7 +463,9 @@ session on its own VT (13):
   says so and offers only the ask.
 - **Text**: with no `cage`, a headless build, or a graphical lock that
   doesn't answer within 8 s, the agent draws a plain text lock on the same
-  VT itself and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`).
+  VT itself and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). That
+  includes a GPU cage's wlroots can't drive — e.g. Debian 12's cage 0.1.4
+  refuses QEMU's standard VGA ("PRIME import not supported").
 
 Codes are checked by the agent (root), never by the lock: the graphical lock
 sends them over `/run/openscreentime/lock.sock`, which answers only uid
