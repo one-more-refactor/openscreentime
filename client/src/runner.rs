@@ -1251,6 +1251,7 @@ impl Agent {
                     day: Some(p.day),
                     used_secs: p.used_elsewhere_secs,
                     earned_secs: p.earned_elsewhere_secs,
+                    earned_here_secs: p.earned_here_secs,
                 },
             );
         }
@@ -2342,6 +2343,10 @@ impl Agent {
     /// Dispatch one server command.
     async fn handle_command(&mut self, cmd: Command) -> (CommandAck, Vec<Event>) {
         let mut events = Vec::new();
+        // Commands land between ticks: take "now" fresh, so a "+15 min" is
+        // 15 minutes from when it arrived, not from the last tick.
+        let reading = crate::clock::read(&self.boot_id);
+        self.trusted_now = self.tracker.advance(&reading, &chrono::Local);
         let result = match cmd.cmd_type.as_str() {
             CMD_LOCK => {
                 self.device_locked = true;
@@ -2845,10 +2850,21 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
 
     let client = agent.client.clone();
     let agent: Shared = Arc::new(tokio::sync::Mutex::new(agent));
-    tokio::spawn(tick_loop(agent.clone()));
+    let tick = tokio::spawn(tick_loop(agent.clone()));
 
-    // Reconnect with jittered exponential backoff (1 s → 60 s). A server that
-    // answers HTTP but not WS keeps the backoff short: the poll round succeeded.
+    // The tick never returns; if it dies (a panic), exit so systemd restarts
+    // the agent now — a process with a live network loop and no enforcement
+    // would otherwise sit there until the watchdog noticed the heartbeat.
+    tokio::select! {
+        r = tick => anyhow::bail!("the enforcement tick stopped: {r:?}"),
+        _ = network_loop(&agent, &client) => unreachable!("the network loop never returns"),
+    }
+}
+
+/// Reconnect with jittered exponential backoff (1 s → 60 s). A server that
+/// answers HTTP but not WS keeps the backoff short: the poll round succeeded.
+async fn network_loop(agent: &Shared, client: &ServerClient) {
+    let agent = agent.clone();
     let mut backoff_secs = BACKOFF_MIN_SECS;
     loop {
         match client.connect_ws().await {

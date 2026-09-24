@@ -119,6 +119,11 @@ pub struct PersonDay {
     pub used_elsewhere_secs: u64,
     #[serde(default)]
     pub earned_elsewhere_secs: u64,
+    /// Grants the server has on record for THIS login today. The agent uses
+    /// the larger of this and its own count (a device that lost its ledger
+    /// still knows its grants; never counted twice).
+    #[serde(default)]
+    pub earned_here_secs: u64,
 }
 
 /// A command ack (`POST /agent/commands/:id/ack`).
