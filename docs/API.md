@@ -229,11 +229,31 @@ The `enroll_token` is consumed (single use) and expires 24 h after issue
 ### Heartbeat (poll model, fallback for WS)
 ```
 POST /agent/heartbeat
-Body: { status, public_ip?, usage: [{ os_username, used_minutes_today }], os_users: [...] }
-→ 200 { commands: [Command...], policy_version: string }
+Body: { status, public_ip?, os_users: [...],
+        usage: [{ os_username, used_minutes_today, used_seconds_today?, day?, utc_offset_secs? }] }
+→ 200 { commands: [Command...], policy_version: string,
+        usage: [PersonDay...], server_time: RFC3339 }
+
+PersonDay = { os_username, day, used_elsewhere_secs, earned_elsewhere_secs, earned_here_secs }
 ```
-`usage` is upserted into `screen_time_ledger.used_seconds` for today's row per device user.
+`usage` is **this device's own** use today. It is filed in `screen_time_ledger` under the
+**device-local `day`** the agent enforces (0.7+; an implausible or missing day falls back to the
+device's local date from `utc_offset_secs`, else UTC), `GREATEST`-clamped within that day. A
+drop of more than 300 s within the *same* day raises one critical `evasion` / `usage_regression`
+event per device user per day (never for an agent that doesn't send `day`). The reply's
+`PersonDay` is what the same person used and was granted on their **other** logins that day —
+a daily limit is one budget per person — plus the grants on record for this login
+(`earned_here_secs`; the agent takes the larger of that and its own count). `server_time` is a
+clock the agent trusts when its own isn't NTP-synchronized. See `docs/TRACKING.md`.
 Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
+
+`credit_time` commands carry `{ os_username, minutes, request_id, day }` (`day` = the device-local
+day the grant was filed under). The agent applies a grant once per command id (a redelivery is
+acked `{ credited: true, duplicate: true }`), ignores one for an earlier day
+(`{ credited: false, stale_day }`), and turns it into N minutes on today's budget plus an override
+for N minutes. `unlock` accepts an optional `{ minutes }` or `{ until: "end_of_day" }` (and
+`os_username`) to hold the screen-time rules off; without them, whoever a rule is stopping gets
+30 minutes.
 
 ### Earn-time request
 ```
@@ -258,7 +278,7 @@ Body: { events: [{ type, severity, device_user?, payload }] }
 ```
 The agent posts *all* events this way, in both WS and poll mode — there is no separate "event
 delivery only over WS" path. Batches that fail to POST (server unreachable, etc.) are buffered in
-memory (`client/src/runner.rs` `flush_events`, capped) and retried on the next tick rather than
+memory (`client/src/runner.rs` `flush_queued`, capped) and retried by the network loop rather than
 dropped. The WS `event` frame (see below) is still accepted by the server for compatibility but is
 not how the current agent sends events.
 
@@ -268,10 +288,12 @@ GET /agent/ws   (Upgrade)
 ```
 Bidirectional JSON frames, tagged with `"type"`:
 
-- server → agent: `command { command }`,
-  `ping` (reserved — accepted by the agent, not currently sent by the server)
+- server → agent: `command { command }`, `ping` (keepalive),
+  `usage { server_time, users: [PersonDay...] }` (the reply to each `heartbeat` frame — see the
+  HTTP heartbeat above; agents before 0.7 ignore it)
 - agent → server: `event { event }` (accepted for compatibility; the agent now sends events over
-  HTTP, see below), `ack { ack }`, `pong`
+  HTTP, see below), `ack { ack }`, `state { … }`, `heartbeat { usage }` (same `usage` entries as
+  the HTTP heartbeat, every 30 s), `pong`
 
 Falls back to heartbeat polling if WS is unavailable.
 
@@ -343,9 +365,15 @@ with `#[serde(default)]` on optional sub-objects.
   `device_users` and queues `apply_policy` on their devices.
 - `DELETE /api/members/{id}` (members only).
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
-  left_minutes|null, locked, devices:[{id,name,status,locked}], blocks,
+  left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name }`.
+  windows, display_name }`. "Today" is each device's own local day (the day
+  its agent enforces); `left_minutes` is the person's budget left computed
+  like the device does (seconds, rounded up). `rules` = `{ allowed, reason:
+  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at }`
+  from the agent's own rules function — when screens stop, whichever of the
+  budget, bedtime or the window end comes first. `GET /api/family` children
+  carry the same `left_minutes` and `rules`.
 - `POST /api/me/ask {minutes, reason?}` → `{ request }` (an `earn_request`
   with `task_id: "ask"`, one open per day; not step-up guarded).
 - `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],

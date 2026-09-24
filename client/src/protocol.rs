@@ -93,10 +93,43 @@ impl Event {
 /// One user's screen-time usage as of "now" (CONTRACT-PROD.md §5). Reported both
 /// in the HTTP heartbeat body and in the WS `heartbeat` frame; the server upserts
 /// it into `screen_time_ledger`.
+///
+/// Only THIS device's use is reported; the server sums a person's devices and
+/// answers with [`PersonDay`]. Numbers are filed under the device-local `day`
+/// the agent enforces, never the server's UTC date.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReport {
     pub os_username: String,
+    /// Whole minutes (kept for servers that predate `used_seconds_today`).
     pub used_minutes_today: u32,
+    /// The same, in seconds (no flooring lag on the console).
+    #[serde(default)]
+    pub used_seconds_today: u64,
+    /// The device-local accounting day these numbers belong to.
+    #[serde(default)]
+    pub day: Option<chrono::NaiveDate>,
+    /// The device's UTC offset right now (local − UTC), so the server knows
+    /// which date is "today" for this device.
+    #[serde(default)]
+    pub utc_offset_secs: Option<i32>,
+}
+
+/// The server's answer to a usage report: what the same person used (and was
+/// granted) on their other computers on `day`. The daily limit is one budget
+/// per person; the agent enforces its own use plus this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonDay {
+    pub os_username: String,
+    pub day: chrono::NaiveDate,
+    #[serde(default)]
+    pub used_elsewhere_secs: u64,
+    #[serde(default)]
+    pub earned_elsewhere_secs: u64,
+    /// Grants the server has on record for THIS login today. The agent uses
+    /// the larger of this and its own count (a device that lost its ledger
+    /// still knows its grants; never counted twice).
+    #[serde(default)]
+    pub earned_here_secs: u64,
 }
 
 /// A command ack (`POST /agent/commands/:id/ack`).
@@ -123,6 +156,14 @@ pub enum ServerFrame {
     },
     /// Keepalive.
     Ping,
+    /// Reply to a `heartbeat` frame: the person's day on their other
+    /// computers, plus the server's clock (a time source the agent trusts).
+    Usage {
+        #[serde(default)]
+        server_time: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        users: Vec<PersonDay>,
+    },
 }
 
 /// Agent → server frames on the WS bus. See `ServerFrame` doc for the `"type"` tag note.

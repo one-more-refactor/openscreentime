@@ -2,6 +2,7 @@
 //! primitives (Linux)"). Each submodule shells out through `util::Exec`, so every
 //! action honors `--dry-run` and refuses to run as non-root outside dry-run.
 
+pub mod activity;
 pub mod apps;
 pub mod dns;
 pub mod firewall;

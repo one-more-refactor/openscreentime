@@ -63,6 +63,14 @@ describe("minutes maths", () => {
     // Over budget clamps at zero rather than showing "-20 min left".
     expect(minutesLeft(child({ used_minutes: 80 }))).toBe(0);
   });
+
+  test("the server's left_minutes wins — it is the number the device uses", () => {
+    // 29:30 used of 60: the device (seconds, rounded up) says 31, not 30.
+    expect(minutesLeft(child({ used_minutes: 29, left_minutes: 31 }))).toBe(31);
+    expect(minutesLeft(child({ left_minutes: -3 }))).toBe(0);
+    // No limit stays no limit, whatever else is sent.
+    expect(minutesLeft(child({ limit_minutes: null, left_minutes: null }))).toBeNull();
+  });
 });
 
 describe("the shared store", () => {
