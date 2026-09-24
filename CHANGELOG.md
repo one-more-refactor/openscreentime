@@ -95,6 +95,10 @@ for just themselves; and the server looks after itself.
   stop. The only rule left is level 3's "can't stop the agent" (root and
   `ost-admin` exempt, and nothing else granted); below level 3 the agent
   deletes the old rule file on its next start.
+- **"What can a parent see?" tells the truth for older teens.** It said
+  "apps and sites" to everyone; a parent sees an older teen's apps only. The
+  page now says what the server returns in `parent_sees` — the same rule
+  that decides what the parent's view shows.
 
 ### Upgrading
 

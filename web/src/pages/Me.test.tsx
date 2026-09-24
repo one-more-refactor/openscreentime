@@ -30,6 +30,7 @@ function today(p: Partial<MeToday> = {}): MeToday {
     bedtime: { start: "20:00", end: "07:00" },
     windows: [],
     self_managed: false,
+    parent_sees: { apps: true, sites: true },
     ...p,
   };
 }
@@ -89,6 +90,25 @@ describe("my day (a child)", () => {
     expect(screen.getByText("20:00 – 07:00")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ask for 15 more minutes" })).toBeTruthy();
     expect(screen.queryByText("My daily limit")).toBeNull();
+  });
+
+  test("what a parent sees is what the server says: a kid's apps and sites", async () => {
+    apiImpl.getMeToday = () => Promise.resolve(today());
+    setup();
+    const see = (await screen.findByText("What can a parent see?")).closest("details") as HTMLElement;
+    expect(see.textContent).toMatch(/which apps were open, which sites it looked up/);
+  });
+
+  test("an older teen is told the sites aren't shown", async () => {
+    apiImpl.getMeToday = () =>
+      Promise.resolve(today({ bracket: "older_teen", parent_sees: { apps: true, sites: false } }));
+    setup();
+    const see = (await screen.findByText("What can a parent see?")).closest("details") as HTMLElement;
+    expect(see.textContent).toMatch(/which apps were open/);
+    expect(see.textContent).not.toMatch(/which sites/);
+    expect(see.textContent).toMatch(/not the sites you looked up/);
+    // The first-visit banner says the same, not the old "apps and sites".
+    expect(document.body.textContent ?? "").not.toMatch(/apps and sites/);
   });
 });
 

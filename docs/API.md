@@ -488,6 +488,10 @@ with `#[serde(default)]` on optional sub-objects.
   from the agent's own rules function — when screens stop, whichever of the
   budget, bedtime or the window end comes first; plus `goal_minutes`, and
   for a self-managed person `self_managed` and `focus: { hours, sites }`.
+  `parent_sees: { apps, sites }` is what a parent sees of this person's day
+  besides the minutes — the same rule `/api/usage/where` enforces
+  (`usage.rs` `hub_exposure`); both false = minutes only. The page's "What
+  can a parent see?" is said from it.
   `GET /api/family` children carry the same `left_minutes` and `rules`.
 - `GET /api/me/history` → the last 14 days `{ days: [{ day, used_minutes,
   earned_minutes }], today_by_device: [{ name, used_minutes }], goal_minutes,

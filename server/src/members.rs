@@ -952,6 +952,9 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         // They set their own rules (/api/me/rules): the hub for themselves,
         // an adult, or someone who manages themselves.
         "self_managed": manages_self(&acct),
+        // What a parent sees of their day beyond the minutes — the very rule
+        // `/api/usage/where` enforces, so "What can a parent see?" is true.
+        "parent_sees": crate::usage::parent_sees(bracket, acct.8),
         // Sites they block for themselves and the hours those hold.
         "focus": { "hours": policy.focus.hours, "sites": policy.focus.sites },
     })))
