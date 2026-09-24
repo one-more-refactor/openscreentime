@@ -51,7 +51,7 @@ data — so without the explicit env var, a dead backend just fails loudly inste
 cd client
 cargo build --release                       # headless: what most computers run
 cargo build --release --features gui,tray   # desktop: the app window, the graphical lock, the companion
-sudo ./target/release/openscreentime enroll --server http://localhost:8080 --token <ENROLL_TOKEN>
+sudo OST_TOKEN=<ENROLL_TOKEN> ./target/release/openscreentime enroll --server http://localhost:8080
 sudo ./target/release/openscreentime --dry-run --time-accel 60 run   # log, don't enforce; 1 s = 1 min
 sudo ./target/release/openscreentime status
 ```
