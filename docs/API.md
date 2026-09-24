@@ -1,14 +1,17 @@
-# API Contract
+# API contract
 
-Two surfaces:
+Every route is registered in `server/src/main.rs`. Three surfaces:
 
-- **Admin API** (`/api/*`) — used by the web control center. Authenticated with a session
-  cookie issued after a passkey login.
-- **Agent API** (`/agent/*`) — used by the Linux agent. Authenticated with a bearer
-  `device_token` (except enrollment, which uses a one-time `enroll_token`).
+- **Console API** (`/api/*`) — the web console. A session cookie from any
+  sign-in door (docs/AUTH.md).
+- **Agent API** (`/agent/*`) — the Linux agent. Bearer `device_token`, except
+  enrollment, which spends a one-time `enroll_token`.
+- **Companion API** (`/api/parent/*`) — a paired companion (the tray's parent
+  mode). Bearer parent access token.
 
-All request/response bodies are JSON. Errors use `{ "error": { "code": string, "message": string } }`
-with an appropriate HTTP status.
+All bodies are JSON. Errors are `{ "error": { "code": string, "message": string } }`
+with a matching status. Any other path under `/api/` or `/agent/` is a JSON
+`404`, never the console's HTML.
 
 Base URL in dev: `http://localhost:8080`.
 
@@ -32,15 +35,16 @@ refuses with **403 `registration_closed`** once an account exists.
 | POST   | `/api/auth/register/start`  | first run: `{ name, setup_token? }` → `CreationChallengeResponse` (resident key required) |
 | POST   | `/api/auth/register/finish` | `{ credential, setup_token? }` → household + session, `{ admin }` |
 | POST   | `/api/auth/code/start`      | `{ name, code_challenge }` → `{ request_id, expires_in_secs }`; the code goes to that person's own computer (identical answer for unknown names) |
-| POST   | `/api/auth/code/verify`     | `{ request_id, code_verifier, code }` → session; `401 wrong_code` (type again) or `410 code_expired` (5 min / 5 tries) |
+| POST   | `/api/auth/code/verify`     | `{ request_id, code_verifier, code }` → session, `{ ok, role }`; `401 wrong_code` (type again) or `410 code_expired` (5 min / 5 tries) |
 | POST   | `/api/auth/login/start`     | → `RequestChallengeResponse` for a discoverable passkey (no name) |
 | POST   | `/api/auth/login/finish`    | `{ credential }` → session, `{ admin }`                 |
 | GET    | `/api/auth/oidc/start`      | 302 to the provider's authorize URL                     |
 | GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
+| GET    | `/api/auth/oidc/setup/:token` | SSO first run: the parked identity behind a `/welcome` link; 404 once used or expired |
+| POST   | `/api/auth/oidc/setup/:token` | `{ username, display_name?, setup_token? }` → creates the first account and a session |
 | POST   | `/api/auth/voucher`         | `{ voucher }` → session (`ost login`, 7 days)           |
 | POST   | `/api/auth/link`            | `{ token }` → session (recovery link from `openscreentime-server recover`) |
 | POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
-| GET    | `/api/me`                   | → `{ account, household, admin, tenant }`               |
 | GET    | `/api/auth/confirm`         | → `{ armed_until, passkey, computer }`                  |
 | POST   | `/api/auth/confirm/passkey/start` / `finish` | a passkey assertion → `{ armed_until }` |
 | POST   | `/api/auth/confirm/code/start` | a code to your own computer → `{ request_id, expires_in_secs }`; 409 if none is online |
@@ -60,8 +64,10 @@ layer (`server/src/confirm.rs`), so routes added later are guarded
 automatically. Confirming rotates the session token, keeping the old one valid
 for 2 minutes so in-flight requests and second tabs survive.
 
-### Agent
+### Agent side of sign-in
 
+| Method | Path | Notes |
+|--------|------|-------|
 | POST   | `/agent/voucher`            | mint a one-time (2 min) voucher for a local surface on that machine to exchange at `/api/auth/voucher` |
 | POST   | `/agent/enroll/preview`     | `{ enroll_token }` → `{ owner, owner_is_parent }` without using the token (so `ost enroll` can ask which login is the owner's) |
 
@@ -86,31 +92,36 @@ are all set (`OST_OIDC_NAME` optionally labels the login button, default "SSO").
 are discovered at startup from `<issuer>/.well-known/openid-configuration`; authorization-code
 flow with scopes `openid email profile`; redirect URI is
 `<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL`; `RP_ORIGIN` if only that is set).
-The callback matches the verified userinfo email against existing admins (any tenant). Fresh
-installs (no admins at all) bootstrap a tenant + admin; an unknown email on a non-empty install
-redirects to `/login?error=sso_unknown_account` (no auto-provisioning); other failures redirect
-to `/login?error=sso_failed`.
+The callback needs `email_verified: true` and matches that email against an
+account's username or email (case-insensitive, any household). On a server
+with no accounts it parks the identity and redirects to `/welcome?setup=<token>`,
+where the first parent picks a name (`/api/auth/oidc/setup/:token`, which needs
+the setup code like the passkey first run). An unknown email on a server that
+has accounts → `/login?error=sso_unknown_account` (no auto-provisioning); other
+failures → `/login?error=sso_failed`.
 
 ### Rate limiting
 
-Fixed-window, in-memory, per client IP (**last** `X-Forwarded-For` value when
-`OST_TRUST_PROXY=1`, else the peer address). A trusted reverse proxy appends the real peer
+Fixed-window, in-memory, per client IP: the **last** `X-Forwarded-For` value,
+unless `OST_TRUST_PROXY=0`, when it's the peer address (`rate_limit.rs`; trust
+is on by default because the supported deploy sits behind a proxy). A trusted reverse proxy appends the real peer
 IP to the end of XFF, so the last hop is the only element the client can't forge — keying on the
 first value would let an attacker rotate `X-Forwarded-For` per request and land each one in a
 fresh bucket, defeating the limiter entirely. Over-limit requests get a 429 error envelope.
-`OST_TRUST_PROXY` defaults to `1` in the prod compose stack (`compose.yaml`), since the
-supported deploy always sits behind the bundled reverse proxy.
 
-- auth attempt endpoints (register/login/OIDC start + finish): 10 req / 60 s / IP
-- `/agent/enroll`: 5 req / 60 s / IP
-- agent distribution (`/install.sh`, `/api/agent/latest`, `/api/agent/download/:file`): 30 req / 60 s / IP
+- `auth` — 10 req / 60 s: register, code start/verify, passkey login, confirm
+  code start/verify, voucher, link, OIDC start/callback/setup
+- `enroll` — 5 req / 60 s: `/agent/enroll`, `/agent/enroll/preview`
+- `dist` — 30 req / 60 s: `/install.sh`, `/api/agent/latest`, `/api/agent/download/:file`
+- `parent` — 60 req / 60 s: `/api/parent/*`
 
 ---
 
 ## Agent distribution (public, no auth)
 
-The production image bundles the headless musl-static agent under `/app/agent`
-(`OST_AGENT_DIR`); a dev `cargo run` has no bundle and these return 404. The binary is
+The production image bundles two agent builds under `/app/agent`
+(`OST_AGENT_DIR`): headless (musl, static) and desktop (glibc, `gui,tray`). A
+dev `cargo run` has no bundle; `install.sh` then falls back to GitHub releases. The binary is
 not a secret — enrollment (one-time token) is the auth boundary.
 
 | Method | Path                        | Notes                                                     |
@@ -126,45 +137,51 @@ token out of argv/shell history):
 curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
-The script verifies the manifest's sha256 before installing to
-`/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The installed agent
-self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by default;
-`OST_NO_SELF_UPDATE=1` disables) — trust model in docs/CONTRACT-PROD.md §13.
+The script picks the desktop build when the machine has a graphical session
+(`--headless` / `--desktop` force it), verifies the manifest's sha256, installs
+to `/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The
+agent then updates itself from the same `/api/agent/latest` (docs/AGENT.md →
+Self-update).
 
 ---
 
-## Devices
+## Computers (devices)
 
 | Method | Path                          | Notes                                                        |
 |--------|-------------------------------|-------------------------------------------------------------|
-| GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users, per-device `online: bool`) |
-| GET    | `/api/devices/:id`            | detail incl. device_users, recent events, `online: bool`     |
-| POST   | `/api/devices`                | `{ name, account_id? }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }`; for a parent's own computer (`account_id` = a parent) `428` unless the confirm window is open |
-| PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
-| POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
-| POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
-| POST   | `/api/devices/:id/unlock`     | enqueue `unlock` command → same response shape as lock       |
-| DELETE | `/api/devices/:id`            | de-enroll                                                    |
+| GET    | `/api/devices`                | → `{ devices: [...] }`; each with `status` (presence), `locked`, `lock_pending`, `last_state`, `owner_account_id`, `recovery_codes_unused`, users |
+| GET    | `/api/devices/:id`            | detail incl. device users and recent events                  |
+| POST   | `/api/devices`                | `{ name, account_id? }` → a `pending` device + a 24 h one-time enroll token → `{ device, enroll_token }`. `account_id` = "this is that person's computer". For a parent's own computer `428` unless the confirm window is open |
+| PATCH  | `/api/devices/:id`            | `{ name?, tamper_level? }` — `tamper_level` is 1 or 3        |
+| DELETE | `/api/devices/:id`            | remove it                                                    |
+| POST   | `/api/devices/:id/enroll-token` | a fresh one-time token (24 h) → `{ device, enroll_token }`; 409 unless `pending`. Confirm-gated |
+| POST   | `/api/devices/:id/lock`       | Pause: enqueue `lock` → `{ command_id, queued: true, delivered: bool }` |
+| POST   | `/api/devices/:id/unlock`     | Resume: enqueue `unlock` (payload `{}`) → same shape         |
+| POST   | `/api/devices/:id/ping`       | enqueue `ping`; the console reads the round trip off the command list ("Is it answering?") |
+| PUT    | `/api/devices/:id/offline-window` | `{ minutes \| null }` — allowed to be offline for that long (null ends it); such a computer isn't flagged on the Family page |
+| GET    | `/api/devices/:id/users`      | → `{ users: [...] }` (see below)                             |
+| GET    | `/api/devices/:id/commands`   | the queue, pending first, then recent history. `login_code` commands are never listed |
+| POST   | `/api/commands/:id/cancel`    | withdraw a command that hasn't been acked (best-effort once `sent`) |
+| GET    | `/api/devices/:id/unlock-code` | confirm-gated → `{ code, seconds_left, period: 30, device_name }` |
+| POST   | `/api/devices/:id/unlock-code/rotate` | confirm-gated; a new secret, recovery codes cleared → same shape + `recovery_codes_cleared: true` |
+| GET    | `/api/devices/:id/recovery-codes` | confirm-gated → `{ unused, total, generated_at }`       |
+| POST   | `/api/devices/:id/recovery-codes` | confirm-gated; replaces the set → `{ codes: ["1234 5678", …8], generated_at }`, plaintext exactly once |
+| GET    | `/api/devices/:id/vpn`        | confirm-gated; the computer's VPN profiles, secrets masked   |
+| POST   | `/api/devices/:id/vpn`        | confirm-gated; store a named WireGuard/OpenVPN profile (inactive) |
+| PUT / DELETE | `/api/vpn-profiles/:id` | confirm-gated; edit through the mask / delete           |
+| POST   | `/api/vpn-profiles/:id/activate`, `/deactivate` | confirm-gated; one active profile per computer |
 
-### Truthful lock state
+The console has no tamper-level or VPN screens; those routes are API-only.
 
-`devices.status` only flips to `locked`/`online` when the lock/unlock actually takes effect:
-immediately when the command was pushed to a live agent WS (`delivered: true`), otherwise the
-command stays queued (`delivered: false`) and the status flips when the agent reconnects and
-**acks** the command. The UI shows a "LOCK PENDING" chip for queued locks.
+### Presence and pause state
 
-### Offline sweeper
-
-A background task (every 60 s) marks devices `offline` whose `status = 'online'` and
-`last_seen` is older than 3 minutes — this catches dead poll-mode agents that never had a WS
-disconnect. `locked` and `pending` are never touched. The web UI escalates devices offline
-for 7+ days to a red "GONE DARK Nd" badge (tamper signal).
-
-## Remote SSH — removed
-
-The remote-shell feature (browser terminal, `/api/devices/:id/ssh`, `/api/ssh/*` routes)
-was removed in v0.4 — everything a parent can do is UI-only now. Historical events of
-`type = 'ssh'` remain readable in the event log as the record of past sessions.
+`status` is presence only: `pending | online | offline`. A WS open marks the
+computer online and a close offline at once; a sweep every 30 s marks `online`
+computers whose `last_seen` is older than 90 s offline. `locked` is what the
+agent last reported (its `state` frame: a lock intended **and** every present
+managed user frozen); `lock_pending` means a `lock`/`unlock` is queued or sent.
+Pause and Resume never flip anything themselves — the agent's ack or `state`
+frame does, so the console shows "Pausing…" until the computer confirms.
 
 ## Device users & profile assignment
 
@@ -172,19 +189,23 @@ was removed in v0.4 — everything a parent can do is UI-only now. Historical ev
 |--------|----------------------------------------------|------------------------------------|
 | GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
 | POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }` → `{ ok: true }`  |
-| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; parent grants extra screen time today: credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id: null }`; audited as an `earn_request` event with `action: "granted"` |
+| POST   | `/api/device-users/:id/assign-account`       | `{ account_id }` — Who's who: move this OS login to another person (their rules follow). Confirm-gated. Pointing it at the computer's owner makes it the owner's login (`devices.owner_os_username`) |
+| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; Give time: credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id: null, day }`; audited as an `earn_request` event, `action: "granted"` |
+| GET    | `/api/device-users/:id/usage`                | `?days=` (default 30, max 90) → per-day `{ day, used_minutes, earned_minutes }` for that login, plus a computed `streak` (the console doesn't show it) |
 
 ## Earn-time requests
 
-Filed by the agent when a user picks an earn offer on the lockout screen; decided by a parent
-in the web UI. One open request per (user, task) per day (agent-side duplicates return the
+Filed by the agent when someone asks for more time on their computer (the
+request names the first earn task, else a plain 15 minutes), or by `/api/me/ask`
+from their own page; answered by a parent on the Family page, from Telegram, or
+through the companion API. One open request per (user, task) per day (agent-side duplicates return the
 existing pending row). Requests and decisions are audited with `earn_request` events.
 
 | Method | Path                              | Notes                                             |
 |--------|-----------------------------------|---------------------------------------------------|
 | GET    | `/api/earn-requests`              | `?status=pending` → `{ requests: [...] }` (joined with device name + user display name) |
-| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues a `credit_time` command `{ os_username, minutes, request_id }` |
-| POST   | `/api/earn-requests/:id/deny`     | → `{ request }`; enqueues a `deny_earn` command `{ os_username, task_id, request_id }` so the agent clears its once-per-day dedupe and replaces the stale "WAITING FOR APPROVAL" copy with an honest answer |
+| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id, day }` |
+| POST   | `/api/earn-requests/:id/deny`     | → `{ request }`; enqueues `deny_earn` `{ os_username, task_id, request_id }` so the agent clears its once-per-day dedupe and says "not this time" instead of "waiting" |
 
 A request: `{ id, device_id, device_name, device_user_id, os_username, user_display_name, task_id,
 task_label, minutes, status, created_at, decided_at }` with `status` one of
@@ -194,10 +215,10 @@ task_label, minutes, status, created_at, decided_at }` with `status` one of
 
 | Method | Path                    | Notes                                         |
 |--------|-------------------------|-----------------------------------------------|
-| GET    | `/api/profiles`         | list (3 presets + custom)                     |
-| POST   | `/api/profiles`         | `{ name, kind:"custom", policy, parent_pin? }` — `parent_pin` (string, min 4 chars) is optional; hashed server-side (Argon2) into `policy.parent_pin_hash`; omitted = no PIN |
+| GET    | `/api/profiles`         | list: the five bracket presets, each person's own rules, custom and legacy rows |
+| POST   | `/api/profiles`         | `{ name, kind:"custom", policy, parent_pin? }`; `parent_pin` (≥ 4 chars) is hashed (Argon2) into `policy.parent_pin_hash`, a legacy **backup code** the console no longer sets |
 | GET    | `/api/profiles/:id`     |                                               |
-| PUT    | `/api/profiles/:id`     | update policy (presets are cloneable, editable); accepts optional `parent_pin` — omitted preserves the existing hash, empty string `""` clears it, non-empty (min 4 chars) sets a new hash |
+| PUT    | `/api/profiles/:id`     | update the policy; `parent_pin` omitted keeps the hash, `""` clears it. Invalid windows, a whole-day bedtime or a non-IP `dns.upstream` → 400 |
 | DELETE | `/api/profiles/:id`     | custom only                                   |
 
 A self-managed person's own profile (an adult or `self_managed` member's
@@ -242,16 +263,36 @@ it changed — `daily_limit`/`focus_hours` as booleans and a count of `sites` �
 never the sites themselves. `GET /api/me/today` adds `self_managed` and
 `focus: { hours, sites }`.
 
-## Discovery
-
-| Method | Path                    | Notes                                                       |
-|--------|-------------------------|-------------------------------------------------------------|
-
 ## Events / audit
 
 | Method | Path                | Notes                                             |
 |--------|---------------------|---------------------------------------------------|
-| GET    | `/api/events`       | `?device_id=&type=&severity=&limit=` paginated    |
+| GET    | `/api/events`       | `?device_id=&type=&severity=&limit=` → newest first; `limit` default 100, max 500 (no paging) |
+
+Events older than 90 days are pruned. `where the time went` and the rest of a
+person's day are under "People" below.
+
+## Companion API (`/api/parent/*`)
+
+For a paired companion (the tray's parent mode, `ost pair`). A scoped bearer
+token minted in the console; it reaches only these routes — not rules,
+computers or settings.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET / POST | `/api/parent-tokens` | (console, confirm-gated) list / mint → the raw token exactly once |
+| DELETE | `/api/parent-tokens/:id` | (console, confirm-gated) revoke |
+| GET    | `/api/parent/earn-requests` | (bearer) pending requests |
+| POST   | `/api/parent/earn-requests/:id/approve`, `/deny` | (bearer) answer one |
+| GET    | `/api/parent/alerts` | (bearer) recent warnings and criticals |
+
+## Telegram
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET    | `/api/me/telegram` | confirm-gated; pairing state |
+| POST   | `/api/me/telegram/pair` | confirm-gated; a short single-use code and a deep link to the bot |
+| DELETE | `/api/me/telegram` | confirm-gated; unpair every chat of this account |
 
 ---
 
@@ -262,19 +303,21 @@ Auth: `Authorization: Bearer <device_token>` unless noted.
 ### Enrollment
 ```
 POST /agent/enroll
-Body: { enroll_token, hostname, os, agent_version, os_users: [{ username, display_name }] }
-→ 200 { device_id, device_token, poll_interval_secs }
+Body: { enroll_token, hostname, os, agent_version, os_users: [{ username, display_name }],
+        installer?, owner_login? }
+→ 200 { device_id, device_token, poll_interval_secs, users: [{ os_username, person, parent }] }
 ```
-The `enroll_token` is consumed (single use) and expires 24 h after issue
-(`devices.enroll_token_expires_at`); an expired token is rejected exactly like a consumed one
-(401). While the device is still `pending`, an admin can regenerate a fresh token via
-`POST /api/devices/:id/enroll-token`. Server creates `device_users` rows for reported
-`os_users`, each assigned the tenant's **default** profile until an admin changes it.
+The `enroll_token` is spent once and expires 24 h after issue; an expired or
+spent token is a 401. A retry with the same token from the same host within
+15 minutes gets the same enrollment back (a lost reply doesn't strand the
+install). Each reported login is linked to a person — see docs/AUTH.md "Whose
+login is whose"; an unsorted login gets Kid rules on a child's computer and
+rules that enforce nothing on a parent's own.
 
 ### Heartbeat (poll model, fallback for WS)
 ```
 POST /agent/heartbeat
-Body: { status, public_ip?, os_users: [...],
+Body: { status, public_ip?, os_users: [...], features?, state?,
         usage: [{ os_username, used_minutes_today, used_seconds_today?, day?, utc_offset_secs? }] }
 → 200 { commands: [Command...], policy_version: string,
         usage: [PersonDay...], server_time: RFC3339 }
@@ -296,9 +339,13 @@ Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
 day the grant was filed under). The agent applies a grant once per command id (a redelivery is
 acked `{ credited: true, duplicate: true }`), ignores one for an earlier day
 (`{ credited: false, stale_day }`), and turns it into N minutes on today's budget plus an override
-for N minutes. `unlock` accepts an optional `{ minutes }` or `{ until: "end_of_day" }` (and
-`os_username`) to hold the screen-time rules off; without them, whoever a rule is stopping gets
+for N minutes. The agent's `unlock` also understands `{ minutes }` or `{ until: "end_of_day" }`
+(and `os_username`), but the console's Resume always sends `{}`: whoever a rule is stopping gets
 30 minutes.
+
+**Commands** (`commands.type`): `lock` (`{}`, or `{ reason, grace_secs }`
+when an account is suspended), `unlock`, `apply_policy`, `set_tamper_level
+{ level }`, `credit_time`, `deny_earn`, `login_code` (below), `ping`.
 
 ### Earn-time request
 ```
@@ -312,15 +359,33 @@ existing row.
 ### Policy pull
 ```
 GET /agent/policy
-→ 200 { policy_version, device_tamper_level, users: [{ os_username, profile_kind, policy: Policy }] }
+→ 200 { policy_version, device_tamper_level,
+        users: [{ os_username, profile_kind, policy: Policy }],
+        parent_code: { totp_secret, recovery_codes: [{ id, mac }] },
+        vpn: { … } | null }
 ```
+`parent_code` is what the agent checks unlock codes against offline (unused
+recovery codes only; `mac` = hex HMAC-SHA256 keyed by the decoded secret over
+the 8 digits). An agent event `parent_code_backup_used { recovery_id }` retires
+one. `vpn` is the computer's active VPN profile, if any.
+
+### Usage slices
+```
+POST /agent/usage
+Body: { slices: [{ os_username, hour, kind: "app" | "site", key, amount }] }   // ≤ 500
+```
+Where the time went: seconds an app was open per login per hour (`kind: "app"`),
+and lookups per site per hour for the whole computer (`kind: "site"`,
+`os_username: ""`). Summed server-side, kept 21 days.
 
 ### Events push
 ```
 POST /agent/events
-Body: { events: [{ type, severity, device_user?, payload }] }
+Body: { events: [{ id?, type, severity, device_user?, payload }] }   // ≤ 100 per batch
 → 202
 ```
+`id` is the agent's own event id; a redelivered event with the same id is
+stored once.
 The agent posts *all* events this way, in both WS and poll mode — there is no separate "event
 delivery only over WS" path. Batches that fail to POST (server unreachable, etc.) are buffered in
 memory (`client/src/runner.rs` `flush_queued`, capped) and retried by the network loop rather than
@@ -336,79 +401,71 @@ Bidirectional JSON frames, tagged with `"type"`:
 - server → agent: `command { command }`, `ping` (keepalive),
   `usage { server_time, users: [PersonDay...] }` (the reply to each `heartbeat` frame — see the
   HTTP heartbeat above; agents before 0.7 ignore it)
-- agent → server: `event { event }` (accepted for compatibility; the agent now sends events over
-  HTTP, see below), `ack { ack }`, `state { … }`, `heartbeat { usage }` (same `usage` entries as
-  the HTTP heartbeat, every 30 s), `pong`
+- agent → server: `ack { ack }`, `state { state: { locked, lock_intent, frozen_users,
+  enforcing, gaps, agent_version, active_users, features } }` (on connect, on change,
+  and at least every 60 s), `heartbeat { usage }` (same entries as the HTTP heartbeat,
+  every 30 s), `pong`. `event { event }` is still accepted but the agent sends events
+  over HTTP.
 
-Falls back to heartbeat polling if WS is unavailable.
+The server pings every few seconds and drops a socket silent for 60 s. The
+agent falls back to heartbeat polling while the WS is down.
 
 ---
 
 ## Policy (the jsonb document)
 
-This is the single most important shared type. Server stores it, web edits it, agent enforces it.
+The shared type (`policy/src/lib.rs`); field by field in docs/PROFILES.md.
+The Kid preset, as the server seeds it:
 
 ```jsonc
 {
   "version": 1,
-  "dns": {
-    "mode": "default_deny",          // zero-trust: block unless allowed
-    "allowlist": ["school.edu", "wikipedia.org"],
-    "blocklist": [],                 // extra explicit blocks (redundant under default_deny)
-    "safe_search": true,
-    "upstream": "1.1.1.2"            // filtered upstream resolver
-  },
-  "firewall": {
-    "mode": "default_deny",
-    "allow_outbound_ports": [53, 80, 443],
-    "allow_inbound_ports": []
-  },
+  "dns": { "mode": "allow_all", "allowlist": ["*"], "blocklist": [],
+           "safe_search": true, "upstream": "1.1.1.3" },   // upstream: a literal IP
+  "firewall": { "mode": "allow_all", "allow_outbound_ports": [], "allow_inbound_ports": [22] },
   "screen_time": {
     "enabled": true,
-    "daily_limit_minutes": 120,
-    "schedule": [                     // allowed windows, per weekday (0=Sun)
-      { "days": [1,2,3,4,5], "start": "15:00", "end": "20:00" },
-      { "days": [0,6],       "start": "09:00", "end": "21:00" }
+    "daily_limit_minutes": 60,                              // 0 = no limit
+    "schedule": [                                           // allowed windows; 0 = Sunday
+      { "days": [1,2,3,4,5], "start": "07:00", "end": "20:00" },
+      { "days": [0,6],       "start": "09:00", "end": "20:00" }
     ],
-    "bedtime": { "start": "21:00", "end": "07:00" }
+    "bedtime": { "start": "20:00", "end": "07:00" }
   },
   "gamification": {
-    "earn_time": {
-      "enabled": true,
-      "tasks": [
-        { "id": "reading", "label": "Read for 20 min", "reward_minutes": 15 }
-      ]
-    },
-    "lockout": {
-      "enabled": true,
-      "unlock_challenge": "math"      // "math" | "wait" | "parent_pin"
-    }
+    "earn_time": { "enabled": true, "tasks": [
+      { "id": "reading", "label": "Read for 20 min", "reward_minutes": 15 },
+      { "id": "chores",  "label": "Finish chores",   "reward_minutes": 15 } ] },
+    "lockout": { "enabled": true, "unlock_challenge": "parent_pin" }  // ignored by the agent
   },
-  "focus": {                          // optional; a self-managed person's own (/api/me/rules)
-    "sites": ["reddit.com"],          // blocked for themselves…
-    "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }  // …inside these; null = all day
-  }
+  "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true,
+                "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
+  "blocks": { "apps": [], "categories": ["adult","gambling","dating","proxies"],
+              "custom_domains": [] }
 }
 ```
 
-`focus` is absent when empty. The agent adds `focus.sites` to the host's
-blocks while `rules::focus_blocking` holds and removes them when the window
-ends; a focus window never stops a screen.
+`lockdown`, `blocks`, `focus` (a self-managed person's own sites and hours)
+and `parent_pin_hash` are absent when empty. The agent adds `focus.sites` to
+the computer's blocks while `rules::focus_blocking` holds; a focus window never
+stops a screen. `mode: "default_deny"` still parses, but the server opens any
+profile using it at startup.
 
 Every component MUST treat unknown fields leniently (forward-compat). The Rust side models this
 with `#[serde(default)]` on optional sub-objects.
 
 
-## 0.4 additions (docs/CONTRACT-0.4.md)
+## People
 
 **Accounts.** `admins` rows carry `role` (`owner|parent|member`), `age_bracket`
 (`little|kid|younger_teen|older_teen|adult`), `birthdate`, `theme`
 (`playful|calm|plain`, null = auto by bracket), `self_managed`, `profile_id`.
 
-- `GET /api/me` → `{ account: {id, household_id, display_name, email, role,
-  age_bracket, birthdate, theme, effective_theme, self_managed, profile_id,
-  created_at}, household: {id, name, created_at}, admin, tenant }` (the last two
-  are deprecated aliases).
+- `GET /api/me` → `{ account: {id, household_id, tenant_id, display_name,
+  username, email, role, age_bracket, birthdate, theme, effective_theme,
+  self_managed, profile_id, avatar, goal_minutes, blocked, created_at},
+  household: {id, name, created_at}, admin, tenant }` (the last two are
+  deprecated aliases).
 - `GET /api/members` (hub) → `{ members: [account…] }`
 - `POST /api/members {display_name, birthdate?, age_bracket?, theme?, email?}`
   → `{ member }` — rules cloned from the bracket preset into a profile owned by
@@ -417,6 +474,10 @@ with `#[serde(default)]` on optional sub-objects.
   profile_id?}` → `{ member }`. `profile_id` re-points all of the person's
   `device_users` and queues `apply_policy` on their devices.
 - `DELETE /api/members/{id}` (members only).
+- `POST /api/members/{id}/block` / `unblock` (members only) — suspend an
+  account: it can't sign in, live sessions end, and its computers get `lock`
+  `{ reason: "paused_by_parent", grace_secs: 120 }`. Unblock doesn't resume the
+  computers. The console only offers "Lift the block" for an old block.
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
   left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
@@ -425,67 +486,52 @@ with `#[serde(default)]` on optional sub-objects.
   like the device does (seconds, rounded up). `rules` = `{ allowed, reason:
   "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at }`
   from the agent's own rules function — when screens stop, whichever of the
-  budget, bedtime or the window end comes first. `GET /api/family` children
-  carry the same `left_minutes` and `rules`.
+  budget, bedtime or the window end comes first; plus `goal_minutes`, and
+  for a self-managed person `self_managed` and `focus: { hours, sites }`.
+  `GET /api/family` children carry the same `left_minutes` and `rules`.
+- `GET /api/me/history` → the last 14 days `{ days: [{ day, used_minutes,
+  earned_minutes }], today_by_device: [{ name, used_minutes }], goal_minutes,
+  goal_streak }` (the console shows neither goal nor streak).
+- `POST /api/me/goal { minutes }` (0 or absent clears it) — the person's own daily goal (API
+  only; the console no longer sets one).
+- `GET /api/me/where` — where your own time went today (below).
 - `POST /api/me/ask {minutes, reason?}` → `{ request }` (an `earn_request`
-  with `task_id: "ask"`, one open per day; not step-up guarded).
+  with `task_id: "ask"`, one open per day; no confirm).
 - `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],
   apps:[{id,name,category,has_native_client}] }`.
-- **Member sessions** may reach only `/api/me`, `/api/me/today`, `/api/me/ask`,
-  `/api/me/rules`, `/api/catalog`, `/api/auth/*` (and a few more `/api/me/*` reads). Anything else under `/api/` →
-  `403 forbidden_for_member` (a layer; fails closed for new routes).
+- **Member sessions** may reach only `/api/me`, `/api/me/today`,
+  `/api/me/history`, `/api/me/where`, `/api/me/goal`, `/api/me/ask`,
+  `/api/me/rules`, `/api/catalog` and `/api/auth/*`. Anything else under
+  `/api/` → `403 forbidden_for_member` (a layer; fails closed for new routes).
+- **A suspended (blocked) account** can read but not change anything (`403`).
 
-**Unlock code (per-device TOTP) and recovery codes.** The secret behind the
-code is held by the server and the agent only; a parent reads codes off the
-console (0.5, `docs/CONTRACT-0.5.md` §1).
-- `POST /api/devices {name, account_id?}` → `{ device, enroll_token }`.
-  `account_id` = "this is <person>'s computer": OS logins without a name match
-  link to that person on enroll.
-- `GET /api/devices/{id}/unlock-code` (sensitive read → 428 without change
-  mode) → `{ code, seconds_left, period: 30, device_name }` — the 6 digits that
-  open that computer right now.
-- `POST /api/devices/{id}/unlock-code/rotate` → same shape plus
-  `recovery_codes_cleared: true`; new secret, recovery codes deleted (they are
-  keyed by it), queues `apply_policy`.
-- `POST /api/devices/{id}/recovery-codes` → `{ codes: ["1234 5678", …8],
-  generated_at }` — replaces the set; plaintext exactly once. Queues
-  `apply_policy`. `GET` (sensitive read) → `{ unused, total, generated_at }`.
-- Device JSON everywhere carries `recovery_codes_unused` (0 = none generated
-  or all spent).
-- Agent pull `GET /agent/policy` adds top-level
-  `parent_code: { totp_secret, recovery_codes: [{id, mac}] }` (unused only;
-  `mac` = hex HMAC-SHA256 keyed by the decoded secret over the 8 digits). An
-  agent event `parent_code_backup_used {recovery_id}` retires that code. A
-  profile-level `parent_pin_hash` is still served as a **backup code**; the
-  enroll-time device recovery PIN is no longer minted.
+**Where the time went.** `GET /api/usage/where?account_id=` (the hub) and
+`GET /api/me/where` (yourself) → `{ apps: [{ key, seconds }], sites: [{ key,
+hits }], hours: [{ hour, amount }], sites_hidden_shared, sites_hidden_age }`,
+today, top 12 each. What the hub gets depends on the person's bracket
+(`usage.rs` `Exposure`): little, kid and younger teen → apps, hours and sites;
+older teen → apps and hours, `sites_hidden_age: true`; adult or self-managed →
+`403 forbidden_for_member`. Your own view hides the site list when one of your
+computers is shared with someone else (`sites_hidden_shared`).
 
-**Presence.** Device JSON everywhere: `status` is presence only
-(`pending|online|offline`); `locked` (bool) is what the agent last reported;
-`lock_pending` (bool) = a `lock`/`unlock` command is queued or sent;
-`last_state` = the agent's last `state` frame; `owner_account_id`. Lock/unlock
-no longer flip any status — the agent's ack or `state` frame does.
-- WS `{ type:"state", locked, frozen_users, enforcing, gaps, agent_version,
-  active_users }` (also accepted nested under `state`, and as `state` inside
-  an HTTP/WS `heartbeat`). WS open → online; WS close → offline immediately;
-  sweep: `online` + `last_seen` older than 90 s → offline.
+**Unlock codes.** Each computer's TOTP secret is held by the server and its
+agent only; a parent reads the live code off the console (the routes under
+Computers above), and rotating the secret clears the recovery codes, which are
+keyed by it. Both queue `apply_policy`. A profile's `parent_pin_hash` is still
+served as a legacy backup code.
 
 **Voucher.** `POST /agent/voucher {os_username}` → voucher bound to the account
 linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
 {voucher}` → session for that account, `{ ok, via, account_id, role }`.
 
-**Family.** `GET /api/family` children are **members** (key = account id) with
-the account fields plus `name, used_minutes, earned_minutes, limit_minutes,
+**Family.** `GET /api/family` → `{ children, devices, profiles, requests,
+server_time }` — the whole home screen in one request. `children` are the
+**members** (`key` = account id) with the account fields plus `name, avatar,
+used_minutes, earned_minutes, limit_minutes, left_minutes, rules, goal_minutes,
 profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
-os_username}], pending_requests, locked, blocks, blocked_apps, can_ask, managed`.
+os_username}], pending_requests, locked, blocked, blocks, blocked_apps,
+can_ask, managed, self_managed`. `devices` carry `pending_commands` and
+`unsorted_logins`. Parents aren't in `children`.
 For an adult or `self_managed` member the hub gets their minutes but not their
 rules: `limit_minutes`, `left_minutes` and `rules` are null, `blocks` and
 `blocked_apps` empty, and their profile is not in `profiles`.
-
-### `POST /api/device-users/{id}/assign-account` (0.4)
-
-Body `{ "account_id": "<uuid>" }`. Moves an OS login to another person in the
-household; the login takes that person's rules (`profile_id` follows) and the
-agent is told to re-pull. Needs the confirm window (`428` without). Pointing
-a login at the computer's owner makes it the owner's login
-(`devices.owner_os_username`) — how a parent settles theirs on their own
-computer.
