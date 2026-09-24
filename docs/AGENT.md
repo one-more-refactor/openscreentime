@@ -228,7 +228,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `server_url` | — | The enrolled server's base URL. |
 | `device_id` / `device_token` | — | Issued by the server at enroll time. |
 | `poll_interval_secs` | `30` | Heartbeat interval used by the polling fallback (when the WS bus is unavailable). |
-| `tamper_level` | `1` | Persisted tamper ceiling; the effective level is `max(this, 3 if --tamper-max else 1)`, and can be raised further by a `set_tamper_level` command up to that ceiling. |
+| `tamper_level` | `1` | Persisted starting level; the effective level is `max(this, 3 if --tamper-max else 1)`, never above the computer's ceiling (3 with `--tamper-max`, else 1). A `set_tamper_level` command moves it within that ceiling; a request above it is capped and reported (`capped` in the ack, a `tamper_level_capped` event). |
 | `auto_update` | `true` | Daily self-update from the enrolled server. `false` disables it; see [Self-update](#self-update) for the other kill switches. |
 
 ## systemd units

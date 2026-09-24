@@ -320,8 +320,12 @@ pub struct Agent {
     frozen: HashSet<String>,
     /// Whole-device lock (from a `lock` command).
     device_locked: bool,
-    /// Effective tamper level (max of device policy and --tamper-max).
+    /// Effective tamper level: what the server asked for, within this
+    /// computer's ceiling (`tamper::clamp_tamper_level`).
     tamper_level: u8,
+    /// The requested level last reported as capped, so a bundle carrying the
+    /// same capped request on every pull says so once, not every time.
+    tamper_cap_reported: Option<u8>,
     policy_version: String,
     /// This boot's id (the trusted clock's boottime is only valid within it).
     boot_id: String,
@@ -538,6 +542,13 @@ impl Agent {
         // tamper lockdown must not reset because someone held the power button.
         let carried = load_freeze_state();
         let mut pending_events = Vec::new();
+        // `--tamper-max` starts the computer at 3; agent.toml can't raise it
+        // past the local ceiling any more than the server can.
+        let start_level =
+            tamper::clamp_tamper_level(cfg.tamper_level.max(ctx.tamper_max), ctx.tamper_max);
+        if start_level.capped() {
+            pending_events.push(tamper::tamper_level_capped_event(&start_level));
+        }
         if let Some(saved) = carried.saved_at {
             if let Some(ev) = tamper::clock_rollback_event(saved, chrono::Utc::now()) {
                 pending_events.push(ev);
@@ -558,9 +569,8 @@ impl Agent {
         // A lock this boot's previous run left on screen is adopted, not forgotten.
         let lock = LockScreen::new(Box::new(host), lock_shared.clone(), carried.lock.clone());
         Ok(Agent {
-            tamper_level: cfg
-                .tamper_level
-                .max(if ctx.tamper_max >= 3 { 3 } else { 1 }),
+            tamper_level: start_level.applied,
+            tamper_cap_reported: start_level.capped().then_some(start_level.requested),
             ctx,
             cfg,
             client,
@@ -991,10 +1001,18 @@ impl Agent {
     fn apply_bundle(&mut self, bundle: crate::policy::PolicyBundle) -> Result<Vec<Event>> {
         let cacheable = bundle.clone();
         self.policy_version = bundle.policy_version.clone();
-        if bundle.device_tamper_level > self.tamper_level && self.ctx.tamper_max >= 3 {
-            self.tamper_level = bundle.device_tamper_level;
-        } else if bundle.device_tamper_level > self.tamper_level {
-            self.tamper_level = bundle.device_tamper_level.min(3);
+        // The bundle only ever raises the level (a `set_tamper_level` command
+        // is how it comes down), and never past this computer's ceiling.
+        let mut tamper_events = Vec::new();
+        if bundle.device_tamper_level > self.tamper_level {
+            let (_, evs, polkit) = self.adopt_tamper_level(bundle.device_tamper_level);
+            if let Err(e) = polkit {
+                tracing::warn!(
+                    "polkit rule not updated for level {}: {e}",
+                    self.tamper_level
+                );
+            }
+            tamper_events = evs;
         }
         self.policies.clear();
         self.kinds.clear();
@@ -1051,7 +1069,42 @@ impl Agent {
         )];
         events.extend(degraded_events(&gaps));
         events.extend(vpn_report_event(vpn_report));
+        events.extend(tamper_events);
         Ok(events)
+    }
+
+    /// Move to the tamper level the server asked for, within this computer's
+    /// ceiling, and re-apply that level's hardening. A request above the
+    /// ceiling is capped and reported (once per requested level) — never
+    /// applied, and never dropped without a word. The last value is whether
+    /// the level's polkit rule could be written.
+    fn adopt_tamper_level(
+        &mut self,
+        requested: u8,
+    ) -> (tamper::TamperLevel, Vec<Event>, Result<()>) {
+        let level = tamper::clamp_tamper_level(requested, self.ctx.tamper_max);
+        let mut events = Vec::new();
+        if level.capped() {
+            if self.tamper_cap_reported != Some(level.requested) {
+                tracing::warn!(
+                    "server asked for tamper level {}; running at {} (level 3 needs --tamper-max)",
+                    level.requested,
+                    level.applied
+                );
+                events.push(tamper::tamper_level_capped_event(&level));
+                self.tamper_cap_reported = Some(level.requested);
+            }
+        } else {
+            self.tamper_cap_reported = None;
+        }
+        let raised_to_3 = level.applied >= 3 && self.tamper_level < 3;
+        self.tamper_level = level.applied;
+        let polkit = tamper::install_polkit(&self.exec, self.tamper_level);
+        if raised_to_3 {
+            let _ = tamper::apply_level3_tty_lockdown(&self.exec);
+            events.push(tamper::level3_boot_guidance_event());
+        }
+        (level, events, polkit)
     }
 
     /// Merge every user's network policy into ONE host-global ruleset — dnsmasq
@@ -2712,24 +2765,21 @@ impl Agent {
                 Err(e) => return (ack_failed(&cmd.id, &e.to_string()), events),
             },
             CMD_SET_TAMPER_LEVEL => {
-                let level = cmd
+                let requested = cmd
                     .payload
                     .get("level")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as u8;
-                let level = level.min(3);
-                if level >= 3 && self.ctx.tamper_max < 3 {
-                    tracing::warn!("server asked for level 3 but --tamper-max not set; capping at active ceiling");
-                }
-                self.tamper_level = level.min(if self.ctx.tamper_max >= 3 { 3 } else { level });
-                if let Err(e) = tamper::install_polkit(&self.exec, self.tamper_level) {
+                    .unwrap_or(1)
+                    .min(u64::from(u8::MAX)) as u8;
+                // A fresh request deserves a fresh answer, even if the same
+                // cap was already reported from a bundle.
+                self.tamper_cap_reported = None;
+                let (level, evs, polkit) = self.adopt_tamper_level(requested);
+                events.extend(evs);
+                if let Err(e) = polkit {
                     return (ack_failed(&cmd.id, &e.to_string()), events);
                 }
-                if self.tamper_level >= 3 {
-                    let _ = tamper::apply_level3_tty_lockdown(&self.exec);
-                    events.push(tamper::level3_boot_guidance_event());
-                }
-                json!({ "tamper_level": self.tamper_level })
+                tamper_level_ack(&level)
             }
             CMD_CREDIT_TIME => {
                 let os_username = cmd
@@ -2951,6 +3001,19 @@ fn next_warning<Tz: chrono::TimeZone>(
         .iter()
         .map(|m| stop.clone() - chrono::Duration::minutes(*m))
         .find(|w| *w > now)
+}
+
+/// The `set_tamper_level` ack result: the level this computer really runs at,
+/// and — when that isn't what was asked — that it was capped, and why.
+fn tamper_level_ack(level: &tamper::TamperLevel) -> serde_json::Value {
+    let mut out = json!({ "tamper_level": level.applied });
+    if level.capped() {
+        out["requested"] = json!(level.requested);
+        out["capped"] = json!(true);
+        out["ceiling"] = json!(level.ceiling);
+        out["detail"] = json!("level 3 needs --tamper-max on this computer");
+    }
+    out
 }
 
 fn ack_failed(id: &str, msg: &str) -> CommandAck {
@@ -3739,6 +3802,74 @@ mod tests {
         assert!(a.lock.shown().is_none());
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
+    }
+
+    fn tamper_agent(tamper_max: bool, cfg_level: u8) -> Agent {
+        let ctx = AgentCtx::new(true, tamper_max, 1);
+        let cfg = AgentConfig {
+            server_url: "http://127.0.0.1:9".into(),
+            device_id: "d".into(),
+            device_token: "t".into(),
+            poll_interval_secs: 30,
+            tamper_level: cfg_level,
+            auto_update: false,
+        };
+        Agent::new(ctx, cfg).unwrap()
+    }
+
+    fn capped_events(evs: &[Event]) -> usize {
+        evs.iter()
+            .filter(|e| e.payload["kind"] == "tamper_level_capped")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn set_tamper_level_3_without_the_flag_is_capped_and_says_so() {
+        // agent.toml can't smuggle level 3 in either.
+        let mut a = tamper_agent(false, 3);
+        assert_eq!(a.tamper_level, 1);
+        assert_eq!(capped_events(&a.pending_events), 1);
+        let (ack, evs) = a
+            .handle_command(Command {
+                id: "c1".into(),
+                cmd_type: CMD_SET_TAMPER_LEVEL.into(),
+                payload: json!({ "level": 3 }),
+            })
+            .await;
+        assert_eq!(ack.status, "acked");
+        assert_eq!(a.tamper_level, 1);
+        assert_eq!(ack.result["tamper_level"], 1);
+        assert_eq!(ack.result["requested"], 3);
+        assert_eq!(ack.result["capped"], true);
+        assert_eq!(capped_events(&evs), 1);
+        // No level-3 hardening happened, so no level-3 guidance either.
+        assert!(!evs.iter().any(|e| e.payload["kind"] == "boot_guidance"));
+
+        // The same capped request riding every policy bundle is said once.
+        let (_, evs, _) = a.adopt_tamper_level(3);
+        assert_eq!(capped_events(&evs), 0);
+        assert_eq!(a.tamper_level, 1);
+    }
+
+    #[tokio::test]
+    async fn set_tamper_level_3_with_the_flag_is_applied() {
+        let mut a = tamper_agent(true, 1);
+        assert_eq!(a.tamper_level, 3, "--tamper-max starts at 3");
+        let lower = |level: u8| Command {
+            id: "c1".into(),
+            cmd_type: CMD_SET_TAMPER_LEVEL.into(),
+            payload: json!({ "level": level }),
+        };
+        let (ack, _) = a.handle_command(lower(1)).await;
+        assert_eq!(
+            (a.tamper_level, &ack.result),
+            (1, &json!({ "tamper_level": 1 }))
+        );
+        let (ack, evs) = a.handle_command(lower(3)).await;
+        assert_eq!(a.tamper_level, 3);
+        assert_eq!(ack.result, json!({ "tamper_level": 3 }));
+        assert_eq!(capped_events(&evs), 0);
+        assert!(evs.iter().any(|e| e.payload["kind"] == "boot_guidance"));
     }
 }
 

@@ -83,6 +83,12 @@ for just themselves; and the server looks after itself.
 - Event ingest is idempotent and enrollment retry-safe; a half-finished
   install can simply be run again.
 
+**Fixed**
+- **Tamper level 3 needs `--tamper-max` on the computer.** The server (or
+  `agent.toml`) could raise a computer to level 3 without it. Now a request
+  above the computer's ceiling is capped at 1 and says so: the ack carries
+  `capped: true` and the console gets a `tamper_level_capped` event.
+
 ### Upgrading
 
 - **Migrations run by themselves** on start (0026, 0027, 0030; 0028 and 0029

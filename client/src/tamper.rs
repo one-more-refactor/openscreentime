@@ -20,6 +20,59 @@ pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-openscreentime.rule
 /// The recovery account that must always retain power/stop rights at every level.
 pub const ADMIN_USER: &str = "ost-admin";
 
+/// A tamper level the server asked for, against the one this computer runs at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TamperLevel {
+    /// What the server asked for (1..=3).
+    pub requested: u8,
+    /// This computer's own ceiling (`AgentCtx::tamper_max`: 3 with
+    /// `--tamper-max`, 1 without).
+    pub ceiling: u8,
+    /// What this computer actually runs at.
+    pub applied: u8,
+}
+
+impl TamperLevel {
+    /// The server asked for more than this computer allows.
+    pub fn capped(&self) -> bool {
+        self.requested > self.applied
+    }
+}
+
+/// The tamper level to run at for a `requested` one. Level 3 can lock a
+/// household out of its own machine (VT lockdown, unstoppable units), so it
+/// needs `--tamper-max` on the computer itself: without it a server — or a
+/// stolen console session — can ask for 3 and gets the ceiling, reported as
+/// capped rather than quietly applied or quietly dropped.
+pub fn clamp_tamper_level(requested: u8, ceiling: u8) -> TamperLevel {
+    let requested = requested.clamp(1, 3);
+    let ceiling = ceiling.clamp(1, 3);
+    TamperLevel {
+        requested,
+        ceiling,
+        applied: requested.min(ceiling),
+    }
+}
+
+/// The honest answer to a capped request, as a tamper event for the console.
+pub fn tamper_level_capped_event(t: &TamperLevel) -> Event {
+    Event::new(
+        EV_TAMPER,
+        SEV_WARN,
+        json!({
+            "kind": "tamper_level_capped",
+            "requested": t.requested,
+            "applied": t.applied,
+            "ceiling": t.ceiling,
+            "message": format!(
+                "Asked for tamper level {}, running at level {}: level 3 needs \
+                 `--tamper-max` on this computer.",
+                t.requested, t.applied
+            ),
+        }),
+    )
+}
+
 /// Write/update the watchdog heartbeat file (mtime = liveness). The watchdog unit
 /// restarts the agent if this goes stale (TAMPER.md L1).
 pub fn touch_heartbeat(exec: &Exec) {
@@ -339,6 +392,32 @@ mod tests {
         assert!(clock_rollback_event(saved, saved + chrono::Duration::days(3)).is_none());
         // Small backward steps (NTP correcting a fast clock) stay quiet.
         assert!(clock_rollback_event(saved, saved - chrono::Duration::seconds(120)).is_none());
+    }
+
+    #[test]
+    fn level3_needs_the_local_flag() {
+        // No --tamper-max (ceiling 1): a request for 3 is capped, and says so.
+        let t = clamp_tamper_level(3, 1);
+        assert_eq!(t.applied, 1);
+        assert!(t.capped());
+        let ev = tamper_level_capped_event(&t);
+        assert_eq!(ev.payload["kind"], "tamper_level_capped");
+        assert_eq!(ev.payload["requested"], 3);
+        assert_eq!(ev.payload["applied"], 1);
+        // Anything the server can send is capped the same way.
+        assert_eq!(clamp_tamper_level(u8::MAX, 1).applied, 1);
+        assert_eq!(clamp_tamper_level(2, 1).applied, 1);
+        // Within the ceiling nothing is capped.
+        let t = clamp_tamper_level(1, 1);
+        assert_eq!((t.applied, t.capped()), (1, false));
+        // With --tamper-max (ceiling 3), 3 is 3 — and never more.
+        let t = clamp_tamper_level(3, 3);
+        assert_eq!((t.applied, t.capped()), (3, false));
+        assert_eq!(clamp_tamper_level(9, 3).applied, 3);
+        // The flag raises the ceiling; it doesn't stop the server lowering it.
+        assert_eq!(clamp_tamper_level(1, 3).applied, 1);
+        // 0 isn't a level: it's the default, 1.
+        assert_eq!(clamp_tamper_level(0, 3).applied, 1);
     }
 
     #[test]

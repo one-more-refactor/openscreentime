@@ -20,7 +20,11 @@ system to the person being managed.
 Per computer, `devices.tamper_level`: **1** (the default) or **3** (opt-in). There is
 no level 2. The console has no control for it; it is set through the API
 (`PATCH /api/devices/:id { tamper_level }`), which sends `set_tamper_level`.
-`ost --tamper-max` on the agent raises the ceiling to 3.
+Level 3 needs `ost --tamper-max` on the computer itself, which raises its ceiling
+to 3. Without the flag a request for 3 — from the server or `agent.toml` — is
+capped at 1 and said so: the command's ack carries `capped: true` with the level
+asked for, and a `tamper_level_capped` event reaches the console
+(`client/src/tamper.rs` `clamp_tamper_level`).
 
 ### Level 1 — Strong deterrence + alerting (DEFAULT)
 
