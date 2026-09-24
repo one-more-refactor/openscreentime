@@ -85,7 +85,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     let cmd_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT c.device_id, c.type FROM commands c
            JOIN devices d ON d.id = c.device_id
-          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent')
+          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent') AND c.type <> 'login_code'
           ORDER BY c.created_at",
     )
     .bind(admin.tenant_id)

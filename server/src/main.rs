@@ -552,6 +552,8 @@ async fn prune(db: &sqlx::PgPool) {
             tracing::warn!(what, error = %e, "retention prune failed");
         }
     }
+    // Sign-in codes nobody picked up: out of the command queue.
+    login_code::scrub_commands(db).await;
 }
 
 /// `GET /health` — liveness AND the one dependency that matters: 200

@@ -23,6 +23,12 @@
 //! Brute force: a 6-digit code, 5 tries per code, 5 minutes, and the auth
 //! rate limit on both calls. The person's computer is also asked at most five
 //! times in ten minutes, so a stranger typing their name can't flood it.
+//!
+//! **The code is never readable from the database** by anything but the
+//! agent it is for: a live socket gets it in the frame and the queue row
+//! stays empty; a polling agent's row holds it only until that agent pulls
+//! it, and every code row is wiped once acked, used up or expired
+//! (`agent::enqueue_secret_command`, `scrub_commands`).
 
 use axum::{extract::State, Json};
 use axum_extra::extract::cookie::CookieJar;
@@ -34,7 +40,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use uuid::Uuid;
 
-use crate::agent::enqueue_command_delivered;
+use crate::agent::enqueue_secret_command;
 use crate::auth::{constant_time_eq, create_session, hash_token, session_cookie};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -194,6 +200,7 @@ pub async fn issue(st: &AppState, purpose: Purpose<'_>, to: Option<Recipient>) -
     let _ = sqlx::query("DELETE FROM login_codes WHERE expires_at < now() - interval '1 hour'")
         .execute(&st.db)
         .await;
+    scrub_commands(&st.db).await;
 
     if let Some(Recipient {
         account_id,
@@ -211,6 +218,44 @@ pub async fn issue(st: &AppState, purpose: Purpose<'_>, to: Option<Recipient>) -
         });
     }
     Ok(id)
+}
+
+/// Take codes out of the command queue once nobody can use them: past their
+/// five minutes, a code row is wiped and an undelivered one withdrawn (a
+/// delivered one unacked for an hour is closed too — that ack isn't coming).
+/// Best-effort; run on every new code and by the hourly sweep.
+pub async fn scrub_commands(db: &sqlx::PgPool) {
+    if let Err(e) = sqlx::query(
+        "UPDATE commands
+            SET payload = '{}'::jsonb,
+                status = CASE WHEN status = 'queued'
+                                OR (status = 'sent' AND created_at < now() - interval '1 hour')
+                              THEN 'cancelled' ELSE status END
+          WHERE type = 'login_code'
+            AND created_at < now() - make_interval(mins => $1)
+            AND (payload <> '{}'::jsonb OR status = 'queued'
+                 OR (status = 'sent' AND created_at < now() - interval '1 hour'))",
+    )
+    .bind(CODE_MINUTES)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(error = %e, "could not scrub old sign-in codes from the command queue");
+    }
+}
+
+/// A code is spent (used, or out of tries): wipe it from whatever queue row
+/// still holds it, and withdraw it where it was never delivered.
+async fn scrub_request(db: &sqlx::PgPool, id: Uuid) {
+    let _ = sqlx::query(
+        "UPDATE commands
+            SET payload = '{}'::jsonb,
+                status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END
+          WHERE type = 'login_code' AND payload->>'request_id' = $1",
+    )
+    .bind(id.to_string())
+    .execute(db)
+    .await;
 }
 
 async fn send_code(
@@ -233,7 +278,7 @@ async fn send_code(
         by_device.entry(device_id).or_default().push(os_user);
     }
     for (device_id, os_users) in by_device {
-        enqueue_command_delivered(
+        enqueue_secret_command(
             st,
             device_id,
             CMD_LOGIN_CODE,
@@ -301,6 +346,7 @@ pub async fn check(
             .await?
             .rows_affected();
             if consumed == 1 {
+                scrub_request(db, id).await;
                 Ok((tenant, account))
             } else {
                 Err(Refusal::StartAgain.into())
@@ -314,6 +360,7 @@ pub async fn check(
             .fetch_optional(db)
             .await?;
             if tries.is_none_or(|t| t >= MAX_ATTEMPTS) {
+                scrub_request(db, id).await;
                 Err(Refusal::StartAgain.into())
             } else {
                 Err(Refusal::WrongCode.into())
