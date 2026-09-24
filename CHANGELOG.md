@@ -118,6 +118,8 @@ for just themselves; and the server looks after itself.
   ledger's too — one variable, `OST_TEST_DATABASE_URL` or `DATABASE_URL`,
   for all) and fails if they would skip; the client is tested as the
   headless and the `gui,tray` build; the web runs `bun test`.
+- **Pause everything says "Press and hold to pause."** It said "for a
+  second"; the hold is 600 ms.
 
 ### Upgrading
 

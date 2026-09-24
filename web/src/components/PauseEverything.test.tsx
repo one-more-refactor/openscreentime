@@ -67,6 +67,14 @@ describe("pause everything", () => {
     expect(apiCalls.locked).toHaveLength(0);
   });
 
+  test("the hint says press and hold, and claims no duration it doesn't keep", () => {
+    setup([device("a"), device("b")]);
+    const hint = screen.getByText(/Press and hold/);
+    expect(hint.textContent).toBe("Stops all 2 computers at once. Press and hold to pause.");
+    // The hold is 600 ms: "for a second" was a promise the button didn't keep.
+    expect(hint.textContent).not.toMatch(/second/);
+  });
+
   test("holding past the threshold pauses every device", async () => {
     const { button, onSweep, onDone } = setup([device("a"), device("b")]);
 

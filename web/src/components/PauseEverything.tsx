@@ -159,7 +159,7 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
     ? "Every screen in the house is paused. Tap to resume."
     : phase === "holding"
       ? "Keep holding…"
-      : `Stops all ${computers(devices.length)} at once. Press and hold for a second.`;
+      : `Stops all ${computers(devices.length)} at once. Press and hold to pause.`;
 
   return (
     <div className="pause card" data-paused={allPaused} data-phase={phase}>
