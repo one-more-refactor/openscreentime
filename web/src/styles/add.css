@@ -30,7 +30,6 @@
 .add-bracket-label { font-size: 0.875rem; font-weight: 600; line-height: 1.2; text-align: center; }
 .add-bracket-range { font-size: 0.78125rem; opacity: 0.8; }
 .add-blurb { min-height: 2.6em; font-size: 0.875rem; color: var(--ink-2); }
-.add-look-hint { margin: 4px 0 10px; }
 
 .add-two { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
 @media (max-width: 760px) { .add-two { grid-template-columns: 1fr; } }
