@@ -309,6 +309,13 @@ pub struct Face {
     #[serde(default)]
     pub snooze: Snooze,
     pub help: String,
+    /// Under the code field.
+    #[serde(default = "code_hint")]
+    pub code_hint: String,
+}
+
+fn code_hint() -> String {
+    CODE_HINT.into()
 }
 
 impl Face {
@@ -324,7 +331,19 @@ impl Face {
             ask: AskState::Hidden,
             snooze: Snooze::Hidden,
             help: HELP.into(),
+            code_hint: CODE_HINT.into(),
         }
+    }
+}
+
+/// How the way out reads: (help line, code hint). Someone who sets their
+/// own limits has no parent in it (board 05f) — the code is theirs.
+pub fn way_out(self_set: bool, has_code: bool) -> (&'static str, &'static str) {
+    match (self_set, has_code) {
+        (false, true) => (HELP, CODE_HINT),
+        (false, false) => (HELP_NO_CODE, CODE_HINT),
+        (true, true) => (HELP_SELF, CODE_HINT_SELF),
+        (true, false) => (HELP_SELF_NO_CODE, CODE_HINT_SELF),
     }
 }
 
@@ -332,8 +351,11 @@ pub const HELP: &str = "A parent can also unlock this computer from their consol
 pub const HELP_NO_CODE: &str =
     "There's no unlock code on this computer yet — a parent can unlock it from their console.";
 /// Under the code field (board 05a).
-#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub const CODE_HINT: &str = "A parent's code from their console, or one of the recovery codes.";
+pub const HELP_SELF: &str = "You can also unlock this computer from your console.";
+pub const HELP_SELF_NO_CODE: &str =
+    "There's no unlock code on this computer yet — you can unlock it from your console.";
+pub const CODE_HINT_SELF: &str = "The code from your console, or one of your recovery codes.";
 /// A wrong code (board 06): one line, then it settles.
 pub const WRONG_CODE: &str = "That's not the code — try again.";
 
