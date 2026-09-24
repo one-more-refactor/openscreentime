@@ -72,11 +72,33 @@ impl AlertConfig {
     /// through [`sanitize`]; `allowed_mentions` additionally disables Discord
     /// `@everyone`/`@here`/role pings so a crafted name/message can't ping.
     /// `tg_keyboard` rides only on Telegram sends — webhooks stay send-only.
-    async fn send(
+    pub async fn send(
         &self,
         client: &reqwest::Client,
         db: &sqlx::PgPool,
         tenant_id: Option<Uuid>,
+        text: &str,
+        tg_keyboard: Option<serde_json::Value>,
+    ) {
+        let chats = match (tenant_id, &self.tg_token) {
+            (Some(tenant), Some(_)) => crate::telegram::chats_for_tenant(db, tenant).await,
+            _ => Vec::new(),
+        };
+        self.deliver(client, &chats, text, tg_keyboard).await
+    }
+
+    /// An operator-level message — the server itself needs attention: the
+    /// webhook, the legacy env chat, and the paired chats of household owners.
+    /// The chat list is passed in rather than looked up, because the database
+    /// being down is one of the things this reports.
+    pub async fn send_operator(&self, client: &reqwest::Client, owner_chats: &[i64], text: &str) {
+        self.deliver(client, owner_chats, text, None).await
+    }
+
+    async fn deliver(
+        &self,
+        client: &reqwest::Client,
+        chats: &[i64],
         text: &str,
         tg_keyboard: Option<serde_json::Value>,
     ) {
@@ -89,10 +111,16 @@ impl AlertConfig {
                 "text": text,
                 "allowed_mentions": { "parse": [] },
             });
-            if let Err(e) = client.post(url).json(&body).send().await {
+            // A 4xx/5xx is a failure too — a deleted webhook answers 404
+            // forever, and that used to be logged as nothing at all.
+            match client.post(url).json(&body).send().await {
+                Ok(resp) if !resp.status().is_success() => {
+                    tracing::warn!(status = %resp.status(), "alert webhook refused the message");
+                }
+                Ok(_) => {}
                 // Don't interpolate `e`: a webhook URL is itself the secret
                 // (Discord/Slack embed a token in the path).
-                tracing::warn!(timeout = e.is_timeout(), "alert webhook failed");
+                Err(e) => tracing::warn!(timeout = e.is_timeout(), "alert webhook failed"),
             }
         }
         if let Some(token) = &self.tg_token {
@@ -107,24 +135,26 @@ impl AlertConfig {
                     tracing::warn!(timeout = e.is_timeout(), "alert telegram failed");
                 }
             }
-            if let Some(tenant) = tenant_id {
-                for chat_id in crate::telegram::chats_for_tenant(db, tenant).await {
-                    // Skip a paired chat that duplicates the env broadcast.
-                    if self.tg_env_chat.as_deref() == Some(chat_id.to_string().as_str()) {
-                        continue;
-                    }
-                    crate::telegram::send_message(
-                        client,
-                        token,
-                        chat_id,
-                        text,
-                        tg_keyboard.clone(),
-                    )
-                    .await;
+            for &chat_id in chats {
+                // Skip a paired chat that duplicates the env broadcast.
+                if self.tg_env_chat.as_deref() == Some(chat_id.to_string().as_str()) {
+                    continue;
                 }
+                crate::telegram::send_message(client, token, chat_id, text, tg_keyboard.clone())
+                    .await;
             }
         }
     }
+}
+
+/// The HTTP client for outbound alerts. Bounded: a chat API that stops
+/// answering must not wedge the worker (reqwest has no timeout by default).
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap_or_default()
 }
 
 /// Spawn the alert fan-out worker if any channel is configured. It polls for new
@@ -144,16 +174,19 @@ pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
         telegram = cfg.tg_token.is_some(),
         "phone alerts enabled"
     );
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        // Prime to now so startup doesn't blast the backlog.
-        let mut since_events: DateTime<Utc> = Utc::now();
-        let mut since_earn: DateTime<Utc> = Utc::now();
-        let mut tick = tokio::time::interval(Duration::from_secs(20));
-        loop {
-            tick.tick().await;
-            since_events = drain_events(&db, &client, &cfg, since_events).await;
-            since_earn = drain_earn(&db, &client, &cfg, since_earn).await;
+    crate::supervise::spawn("alerts", move || {
+        let (db, cfg) = (db.clone(), cfg.clone());
+        async move {
+            let client = http_client();
+            // Prime to now so startup doesn't blast the backlog.
+            let mut since_events: DateTime<Utc> = Utc::now();
+            let mut since_earn: DateTime<Utc> = Utc::now();
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            loop {
+                tick.tick().await;
+                since_events = drain_events(&db, &client, &cfg, since_events).await;
+                since_earn = drain_earn(&db, &client, &cfg, since_earn).await;
+            }
         }
     });
 }
@@ -165,7 +198,7 @@ pub fn spawn(db: sqlx::PgPool, cfg: AlertConfig) {
 /// push a `critical` event with an arbitrary message), so every such field is
 /// sanitized before interpolation. Mass-mention pings are separately disabled
 /// via `allowed_mentions` on the webhook body.
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
