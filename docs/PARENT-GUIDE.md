@@ -1,264 +1,171 @@
 # Using OpenScreenTime — a guide for parents
 
-This is the day-to-day guide to the web console: enrolling devices, setting policy, granting
-time, and reading what the system is telling you. It assumes the server is already running —
-see [`docs/DEPLOY.md`](DEPLOY.md) for standing it up. This document is about the product, not
-the infrastructure.
+The console, page by page. It assumes the server is running — see
+[`DEPLOY.md`](DEPLOY.md). What your family can and can't see about each other
+is in [`TRANSPARENCY.md`](TRANSPARENCY.md); read it before you set anyone up.
 
-The short version of what this product is (as of the 0.6 "passive turn"):
-**everything works unless you block it — and what you block is really blocked, honestly
-reported.** It's a calm, glanceable family screen-time app, not a lockdown cage: the internet
-is open by default, you *add* the blocks you want (whole categories or single apps/sites), and
-those are enforced for real (DNS sinkhole + firewall). The console never tells you something
-happened when it only queued. Where there's a real limitation — an offline device you can't
-pause instantly, a determined kid who can route around DNS-level blocking, a computer with root
-who can ultimately unplug the machine — this guide says so instead of pretending otherwise.
+The short version: **everything works until you block it, and what you block
+is really blocked.** The console tells you what actually happened, not what
+it hopes happened — a pause that hasn't reached a computer yet says
+"Pausing…".
 
-## First login & passkeys
+## Signing in
 
-The first time, open the setup link the installer printed: **Create your household** asks for
-your name, then makes a passkey. After that there are two ways in: type your **name** and type
-the 6-digit code your own computer shows (in the OpenScreenTime window, or `ost code`), or tap
-**Sign in with a passkey**. To sign in with a code, add your own computer first: **Devices → Add
-my computer**. Lost every passkey and no computer set up? The server operator runs
-`openscreentime-server recover <name>` for a one-time sign-in link (docs/OPERATIONS.md).
+**The first time**, open the setup link the installer printed
+(`https://<your-server>/#setup=…`): **Create your household** asks for your
+name, then makes a passkey. Nobody else can do this after you.
 
-To add a second passkey (e.g. so both parents can unlock the console from their own phone or
-laptop, or so you have a backup if you lose one device): go to **Settings → Passkeys** and
-click **Add a passkey**. Every passkey is listed with when it was added and last used, and can
-be removed individually — except your last one. OpenScreenTime will not let you delete your only
-passkey; you'd lock yourself out, and there's no password reset to fall back on. Add a spare
-before you travel.
+**After that, two doors** ([`AUTH.md`](AUTH.md)):
 
-## Enrolling a device
+1. Type your **name** → your own computer shows a 6-digit code (in its
+   OpenScreenTime window, as a notification, or with `ost code`) → type it
+   in. For this you need your own computer set up: **Computers → Add a
+   computer → Mine**, or **Add my computer** on the Family page.
+2. **Sign in with a passkey** — no name needed.
 
-From **Devices**, click **+ ADD DEVICE** and give it a name (e.g. "Living Room PC"). The
-device is created in a `pending` state and you're shown a one-line install command:
+`ost login` on your own computer opens the console already signed in.
 
-```sh
-curl -fsSL https://your-server/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://your-server
-```
+**Add a second passkey** under **Settings → Security → Passkeys** (both
+parents, or a spare before you travel). You can't remove your last one.
+**Lost every passkey and no computer set up?** Whoever runs the server can
+give you a one-time sign-in link: `openscreentime-server recover <name>`
+([`OPERATIONS.md`](OPERATIONS.md)). It opens Settings so you can add a new
+passkey.
 
-Run that as root on the target Linux machine. It downloads a sha256-verified agent binary,
-enrolls it against the token, and installs it as a systemd service. There's also a manual
-path (build from source, `enroll` + `install-service`) behind the "MANUAL INSTALL" disclosure
-if you're not using the prebuilt binary.
+Inside, everything just works. Only the keys — unlock and recovery codes,
+passkeys, the phone pairing, Who's who, a new install line — ask you to
+**confirm it's you** (your passkey, or a code on your own computer). That
+lasts 15 minutes.
 
-The enroll token is **single-use and expires after 24 hours**. If it expires before you get to
-the device, or you need to re-run the install, open the device's detail page and click **SHOW
-ENROLL COMMAND** (only available while the device is still `pending`) to generate a fresh
-token with a new 24-hour window. Once a device has actually enrolled it holds its own bearer
-token and this option disappears — a re-enroll at that point means deleting and re-adding the
-device.
+## Family — the home page
 
-## Understanding the device list
+- **The verdict** at the top says how the day is going: "Everyone is within
+  their time.", "Mia asked for more.", "Noah is paused."
+- **Pause everything** stops every computer in the house. Press and hold to
+  do it, so it never happens by accident; **Resume everything** is one tap.
+  The note that follows has **Undo**. A computer that's offline pauses when
+  it's back, and the note says so.
+- **One card per person**: their ring (time used today), their bracket and
+  computer, and time left ("27 min left of 1 h 15 min", "12 min today · no
+  limit set"). Cards that need you come first: someone asking, then paused,
+  then out of time. Your own card is last and says "private to you".
+- **Requests** wait on the card: "Asked for 15 more minutes · 4 min ago",
+  with **Give 15 min** and **Not now**.
+- **Notices** only when something is wrong: a computer that has been offline
+  (outside its allowed away time), or a login nobody has sorted yet — with a
+  link to **Who's who**.
 
-Each device card shows a status LED with one of four real states:
+## A person — Today
 
-- **online** — the agent has an active connection to the server right now.
-- **offline** — no active connection. This can mean anything from "the laptop is asleep" to
-  "someone pulled the network cable." By itself it is not alarming.
-- **locked** — an admin lock is currently applied and confirmed delivered to the agent.
-- **pending** — created but not yet enrolled; waiting on the install command to run.
+Open anyone from the Family page or the **Today** list in the rail.
 
-Below the LED, the card shows either "SEEN `<relative time>`" for a normal offline device, or
-a **GONE DARK `Nd`** badge once a device has been offline for **7 or more days**. That
-threshold exists because a brief network hiccup is normal, but a week of silence usually means
-something else happened — the agent was killed, the device was wiped, or someone is
-deliberately keeping it off the network. Gone dark isn't a special status the server sets; it's
-just what the console calls a long, unexplained silence. See "What to do when a device goes
-dark" below for what to actually check.
+- **The ring and time left**, what they've used, what you gave, and when
+  screens next stop ("Screens stop at 20:00 for bedtime.").
+- **Pause / Resume** their computers, and **Give 15 min / Give 30 min** (up
+  to 4 hours at once). Given time is extra today and also lifts a stop for
+  that long.
+- **Where the time went**, as their age allows: which apps were open (in
+  minutes, and when in the day) and which sites their computer looked up (as
+  a count). Older teens: apps only. Adults: their minutes, nothing more. Sites
+  are counted per computer, so a shared computer mixes everyone's lookups.
+- **Moments** from the last two days: paused, resumed, time's up, time given,
+  someone trying to get around the rules. Quiet on a normal day.
+- **Their computers**: Online, Offline ("It keeps today's rules"), or Not set
+  up yet.
+- **Keys**: the computer's **unlock code** (it changes every 30 seconds and
+  works even when the computer is offline) and **recovery codes** — eight
+  one-time spares for when your phone isn't to hand. Make them early.
 
-Devices also carry a **TAMPER L3** chip when Level 3 lockdown is enabled (see below), and a
-**LOCK PENDING** chip when a lock/unlock command was sent while the device was offline — it
-will apply automatically the moment the device reconnects.
+**Edit** next to their name changes their name, face and age. Changing the
+age doesn't rewrite their rules.
 
-## Locking a whole device, honestly
+## A person — Rules
 
-Every device card and the device detail page has a **LOCK** / **UNLOCK** button. Clicking it
-sends an immediate command over the agent's live connection. If the device is online, the
-lock lands right away and the card flips to `locked`.
+Every change is saved when you make it and reaches their computer within a
+minute.
 
-If the device is **offline**, clicking LOCK does not lie to you: the card does not flip, and
-you get a toast — "LOCK QUEUED — APPLIES WHEN DEVICE RECONNECTS." The command sits queued on
-the server and is delivered the instant the agent reconnects. There is no way to force an
-instant lock on a device that isn't talking to the server; nothing can be. The same honesty
-applies to unlock.
+- **Daily limit**: 0 to 8 hours in 15-minute steps. 0 means no limit. One
+  limit covers all their computers.
+- **When screens can be on**: hours for school days and for the weekend (or
+  any time), and a **bedtime**. A window can run past midnight.
+- **Blocked**: whole **categories**, single **apps** (open apps are closed on
+  their computer), and **sites** by name, plus **safe search**. Nothing is
+  blocked until you block it — except what their age starts with
+  ([`PROFILES.md`](PROFILES.md)).
+- **Earning time**: tasks that earn minutes ("Read for 20 min", 15 min).
+  Asking for more time from their computer names the first task; you still
+  answer **Give** or **Not now**.
+- **Remove**: type their name to confirm.
 
-**Tamper resistance** (per device, under **TAMPER RESISTANCE** on the device page) has two
-levels. Level 1 is the default on every device: a root-owned, auto-restarting systemd service,
-boot persistence, and real-time tamper alerts. Level 3 — "MAXIMUM LOCKDOWN" — additionally
-disables TTY switching and locks the systemd unit against a `systemctl stop` from the managed
-user. It requires an explicit confirm because **it can lock the admin out too**; the recovery
-paths are the parent PIN (`ost unlock` run locally on the machine, or typed into
-the lockout screen), the local `ost-admin` account (exempt from every lockdown rule), or
-dropping back to Level 1 from the console. Read the confirmation dialog before you enable it.
+An adult sets their own rules; their Rules page says so, and you can't change
+them.
 
-And the honest limit that applies to all of this: if the person at the keyboard has physical
-access and root, no software lock is unbypassable — only expensive and detectable. OpenScreenTime's
-promise is deterrence plus real-time alerting, not magic. See `docs/TAMPER.md` for the full
-threat model.
+## Computers
 
-## Age brackets & rules
+- **Status**: Online, Offline, Away (allowed), Paused, or Not set up yet.
+- **Pause / Resume** one computer.
+- **Allow offline…** for 1 hour, 4 hours or until tomorrow morning — a laptop
+  going on a trip isn't a problem to report.
+- **Details**: **Who's who** (which login is which person), "Is it
+  answering?", the agent version, **Rename** and **Remove**.
+- **Add a computer**: say whose it is (yours, a person's, or shared), name it,
+  and paste the line it gives you on that computer, as root:
 
-Everyone you add has an **age bracket** — Little (0–6), Kid (6–12), Younger teen (12–16),
-Older teen (16–18), Adult (18+) — chosen from their birthdate (with an override for the
-mature 11-year-old). The bracket sets their starting rules and how much they run themselves;
-you adjust any of it afterward. Rules are tracked per Linux user account on a device, so a
-shared family computer just works — each login gets its own limits.
+  ```sh
+  curl -fsSL https://your-server/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://your-server
+  ```
 
-The network is **open for every bracket**; the difference is which categories come
-pre-blocked and how the limits are set:
+  It works once, within 24 hours. Linux only for now. A computer with a
+  desktop gets the build with the app window and the graphical lock.
 
-**Little / Kid** — the internet works, but adult content, gambling, dating, and VPN/proxy
-sites are blocked from the start (add or remove any of that yourself). A daily limit and a
-bedtime are on; the youngest bracket can't send requests and just gets a plain hard stop,
-the Kid bracket can ask for time and earn it. Anti-bypass on (forced DNS, DoH/DoT/Tor
-blocked) so the blocks you set actually hold.
+**Who's who.** Every login on a computer is its own person. Setting up a
+computer for Mia links one login to her; any other login becomes a new
+person marked "not sorted yet". On a child's computer they get a child's
+rules; on your own computer they get rules that enforce nothing, so a guess
+can never lock you out of your own machine. Sort them under Who's who.
 
-**Younger / Older teen** — same open network with a lighter pre-block set (adult, gambling,
-proxies), their own goals and stats, requests to you, and a short wind-down before a stop.
-Older teens are mostly self-set with your visibility.
+## Settings
 
-**Adult** — fully private self-tracking. No parent, no external enforcement, nothing
-pre-blocked; they can also be the hub for others.
+**You** (your name and how you sign in), **Appearance** (light, dark, or
+match your system), and **Security** behind "Confirm it's you": passkeys,
+every computer's unlock code, the **phone** (pair Telegram to get alerts and
+answer requests with one tap), and paired companions if you still have one.
 
-Nothing is blocked by an allowlist any more, and the pre-0.6 "Approved sites only" posture
-is gone — if you have an old profile still using it, its page offers to open it back up.
+## Keeping time for yourself
 
-You edit the rules on each person's page: **Apps & categories** (tap to block a whole
-category or a single app — nothing is blocked until you do), **Websites** (block a site by
-name), a daily-limit slider, allowed hours and bedtime, safe search, earning time back, and
-what the hard stop feels like. There's also a one-slider **Protection** level (Off → Safe
-search → Protected → Strict) if you'd rather not tune each field. Presets
-can be edited in place; custom profiles can be duplicated from any existing one and deleted
-once nothing is assigned to them.
+On **Me** (or **My computer**, if it's just you): your ring, **My daily
+limit** (a hard stop with warnings at 15, 5 and 1 minute), **My focus hours**
+and **Sites I block for myself** — blocked during your focus hours, or all day
+if you set none — and your week. Nobody else in the household sees your
+apps or your sites. (Another parent in the same household can currently
+open your rules; a child's view never can.)
 
-## Screen time day-to-day
+## What the person experiences
 
-Limits are tracked **per Linux user account**, not per device — the device detail page's
-**USERS · SCREEN TIME TODAY** panel lists every OS user OpenScreenTime has seen on that machine, each
-with a usage bar (used minutes vs. earned minutes, reset daily) and a profile picker.
+1. **Warnings** at 15, 5 and 1 minute before any stop — their limit, bedtime,
+   the end of their hours, or a pause you planned.
+2. **The stop**: the screen switches to the OpenScreenTime lock — "Time's up
+   for today", "Bedtime until 07:00", "Paused by a parent" — and their apps
+   are paused, not closed. If a stop comes without warning (you just changed
+   a rule), they get a short save-your-work countdown first. Your pause is
+   immediate.
+3. **Ways back**: **Ask for more time** (Kid and teens), you type the
+   **unlock code** at the lock (30 minutes, even offline), or you give time
+   or resume from the console.
 
-What the child actually experiences, in order, as their time runs out:
+The unlock code also answers `sudo` on a child's computer, so you can
+administer it and they can't.
 
-1. **10 minutes left** — a one-time nudge: "N MIN LEFT TODAY — GOOD TIME TO FINISH UP."
-2. **2 minutes left** — a more urgent one-time nudge: "N MIN LEFT — WRAP UP AND SAVE NOW."
-   (If bedtime is configured, a separate "BEDTIME IN N MIN — WIND DOWN" nudge fires in the
-   15 minutes before bedtime starts.) Each of these fires at most once per user per day.
-3. **Time's up** — a full-screen lockout appears (Duolingo-style: black background, dot grid,
-   mono type) along with a **60-second countdown** — "SCREEN PAUSES IN 60 SECONDS. SAVE YOUR
-   WORK." Nothing freezes yet. This grace period exists specifically so a freeze never looks
-   like a crash and never eats unsaved work.
-4. When the 60 seconds elapse, the user's session is frozen (a soft freeze via cgroups — not a
-   logout, not a kill, just paused) until more time is available.
+## Honest limits
 
-If earn-time is enabled on the profile, the lockout screen's primary action offers the first
-configured task instead of a bare dismiss (e.g. "EARN 15 MIN — Read for 20 min"). On the
-headless agent (no GUI), that offer is auto-filed as a pending earn request the moment the
-lockout fires, so the request is already waiting for you by the time anyone asks.
-
-**Granting extra time today**, no request needed: on the device detail page, each user has
-**+15 min** / **+30 min** give-time buttons. This credits the ledger immediately and
-pushes a live update to the agent — the toast says "applies within ~10s," which is the
-enforcement tick interval, so it's not instant but it's fast. Grants larger than 240 minutes
-are rejected by the server as a sanity check.
-
-**The earn/approve flow**: the **Approvals** page lists every pending earn request — which
-child, which device, which task, how many minutes, how long ago. **APPROVE +N** credits the
-same ledger and pushes the same live `credit_time` update as a manual grant; **DENY** tells the
-agent to clear the pending state so the child can ask again (rather than leaving it stuck on
-"waiting for approval" forever). A **RECENTLY DECIDED** panel below lets you filter past
-approvals/denials for a paper trail.
-
-## The parent PIN
-
-The parent PIN is not a console login — it's a **local override**, typed at the device itself,
-for when the device can't or shouldn't wait for the server. It's set per profile, under the
-profile editor's **PARENT PIN** section (the field never shows the current PIN back to you,
-only whether one "IS SET"; typing a new value replaces it, and there's an explicit CLEAR PIN
-action). It's hashed with Argon2 on the server and shipped to the agent as a hash — never in
-plaintext.
-
-What it unlocks, and for how long:
-- Typed into a lockout screen as the answer to a **"PARENT PIN" challenge**, or offered
-  alongside any other challenge type as a standing master escape (a parent physically present
-  can always get in) — grants **30 minutes** of unlocked time.
-- Solving a plain math challenge on its own (no PIN) grants a shorter **5-minute** breather —
-  enough to matter, not enough to hand back the evening.
-- It's also the only way through a **whole-device admin lock**, an **offline hard-lockdown**
-  (see Profiles above — a device that hasn't reached the server in `offline_lockdown_days` days
-  locks itself exactly like an admin lock), and a Level 3 tamper lockdown, all without needing
-  the server to be reachable.
-
-**If no PIN is configured on a profile, that override path simply does not exist for it** —
-this fails closed, not open. A wrong PIN never falls through to grant anything, and an unset
-PIN is never treated as "PIN not required." If you want a manual override available at the
-device, you have to set one.
-
-## DNS & network filtering, honestly
-
-The network is open by default; only the categories, apps, and sites you block are filtered
-(the family DNS resolver plus a local sinkhole). What the child sees when they hit something
-blocked is whatever their browser shows for a domain that doesn't resolve — "can't reach this
-site," "server not found," depending on the browser. **There is no OpenScreenTime-branded explainer
-page yet.** It looks like the site is broken, not like a filter. If you're troubleshooting "the
-internet doesn't work" complaints, first check whether the site is one you blocked — and note
-that on a captive-portal or public-DNS-blocking network (some cafés/schools) filtering
-temporarily relaxes itself so the device can still get online, which the console shows as a
-"filtering relaxed" note rather than pretending everything's fine.
-
-Whenever you block anything, the anti-bypass rules (force DNS, block DoH/DoT/Tor) turn on
-automatically so the block actually holds — closing the common ways a technically capable kid
-routes around DNS filtering. Be honest with yourself about the ceiling, though: because the
-network is open, blocking lives at the DNS layer, and a determined kid with another way to
-resolve a name (a hand-configured DoH endpoint, a hotspot) can still get around it — you'll
-usually see the blocked category briefly reappear in "Where the time went" when that happens.
-These rules are on for the managed brackets and
-mostly off in Teen, reflecting the different trust levels those two presets are built around.
-
-## The events feed
-
-**Events** is the audit log: every lock/unlock, policy application, screen-time exceed,
-earn-time request/grant/decision, tamper signal, and enrollment (plus
-historical `ssh` entries from the removed remote-shell feature — see below),
-filterable by device, type, and severity (info / warn / critical), with a free-text search over
-event payloads. It's also linked from each device's detail page, scoped to that device. If
-something surprising happened — a device suddenly locked itself, a lockdown engaged, a PIN was
-used — this is where to see exactly when and why.
-
-## Remote SSH — removed
-
-Earlier versions had a **SHELL** button that opened a real root terminal to the device,
-always disclosed to the child while it was live. That feature has been **removed
-entirely** — there is no remote shell at all anymore, and nothing in OpenScreenTime can reach a
-terminal or the files on a managed device. Everything you can do as a parent goes through
-this console. The promise to the child got simpler and stronger in the process: instead of
-"a shell is never open without you knowing," it's now "there is no shell."
-
-If shell sessions were ever opened on a device in the past, they're still visible as `ssh`
-entries in the events feed — the audit record survives the feature's removal. A possible
-future replacement (a secure reverse tunnel for native SSH and remote desktop) was
-considered and deferred; if it ever ships, it will be just as loudly disclosed.
-
-## What to do when a device goes dark
-
-"Gone dark" (the badge that appears after 7+ days offline) is a symptom, not a diagnosis. A few
-things can cause it, roughly in order of likelihood:
-- The machine is genuinely off or in long-term storage.
-- Someone disabled networking or pulled a cable — the agent's NetworkManager guard fires a
-  `tamper` event for exactly this if it can (check Events, filtered to that device).
-- The agent process was killed or the service stopped — Level 1 tamper protection auto-restarts
-  it and reports the stop attempt, but a sufficiently determined and privileged user can still
-  win a given round.
-- The server itself was unreachable from the device's side for a long stretch — if the
-  profile's `offline_lockdown_days` is set (off by default in every preset; opt in per profile),
-  the device will have locked *itself* down once that threshold passed, which is visible as an
-  `offline_hard_lockdown` event once it reconnects.
-
-Check that device's **Events** feed first — filter by device and look for `tamper` entries
-around the time it went quiet; the agent buffers undeliverable events in memory and re-sends
-them on reconnect (a reboot while offline loses that buffer, but the gap itself stays visible
-as gone-dark time), so you'll usually get a real answer instead of just silence. If you truly need to act while it's still dark, remember a LOCK you issue now only
-applies once the device reconnects (see "Locking a whole device, honestly" above) — there is no
-remote kill switch that works against a device that isn't talking to you.
+- **Blocking is at DNS.** Anti-bypass rules (forced DNS, DNS-over-HTTPS and
+  -TLS, Tor) are on for everyone under 18, but a determined teenager with a
+  hotspot or a VPN you haven't blocked can still get around a block. A blocked
+  site looks like a site that won't load; there's no explainer page.
+- **An offline computer** keeps today's rules and counts time, but a pause
+  you send lands when it's back.
+- **Someone with root and physical access** can eventually remove the agent.
+  They can't do it quietly: the computer goes dark on your Computers page. See
+  [`TAMPER.md`](TAMPER.md).
+- **There is no remote shell.** Nothing in OpenScreenTime reaches a terminal
+  or the files on a computer.

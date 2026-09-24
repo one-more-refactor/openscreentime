@@ -246,9 +246,9 @@ jobs:
         run: |
           mkdir -p screenshots
 
-          # Serve dist in background
+          # Serve dist in background (-s: the SPA answers every route)
           cd web
-          bunx --bun serve -p 4173 dist &
+          bunx --bun serve -s -p 4173 dist &
           SERVER_PID=$!
           echo "Waiting for server…"
           for i in $(seq 1 20); do
@@ -258,22 +258,18 @@ jobs:
 
           cd ..
 
-          # Playwright inline script — screenshots all major routes
-          bunx playwright screenshot \
-            --browser chromium \
-            --full-page \
-            --viewport-size "1440,900" \
-            http://localhost:4173 \
-            screenshots/00-login.png
-
-          # We use the mock build, so navigate to authenticated pages directly
-          for route in devices profiles events settings; do
+          # The mock build is signed in as the sample parent, so every page
+          # of the console can be opened directly. acc-mia is a sample kid.
+          n=0
+          for route in login "" "child/acc-mia" "child/acc-mia/rules" computers settings me; do
+            name="${route:-family}"
             bunx playwright screenshot \
               --browser chromium \
               --full-page \
               --viewport-size "1440,900" \
               "http://localhost:4173/${route}" \
-              "screenshots/$(printf '%02d' $RANDOM)-${route}.png" || true
+              "screenshots/$(printf '%02d' $n)-${name//\//-}.png" || true
+            n=$((n + 1))
           done
 
           kill $SERVER_PID 2>/dev/null || true

@@ -125,7 +125,7 @@ impl AppBlocks {
     }
 }
 
-/// Age bracket — autonomy scales with age (docs/OPENSCREENTIME.md).
+/// Age bracket — autonomy scales with age (docs/PRODUCT.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgeBracket {
