@@ -98,7 +98,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
 
     // 5. Profiles (the rules editor needs the full list), as JSON and as a
     //    policy map for limits/blocks.
-    let profiles = crate::profiles::list_for_tenant(&st.db, admin.tenant_id).await?;
+    //    A self-managed person's own rules are not in it (list_for_tenant):
+    //    their limit, focus hours and blocked sites are theirs alone.
+    let profiles =
+        crate::profiles::list_for_tenant(&st.db, admin.tenant_id, admin.admin_id).await?;
     let mut policies: HashMap<Uuid, Policy> = HashMap::new();
     if let Some(list) = profiles.as_array() {
         for p in list {
@@ -231,6 +234,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .into_iter()
         .map(|c| {
             let bracket = members::bracket_of(&c.account);
+            // An adult (or anyone who manages themselves) sets their own
+            // rules, and the hub doesn't see them: their policy isn't in
+            // `policies` (it was dropped with the profile list), so the limit,
+            // the stop, and the blocks all come out empty. Minutes stay.
             let policy = c.account.9.and_then(|p| policies.get(&p));
             let limit = policy.and_then(members::limit_minutes);
             let profile_name = c

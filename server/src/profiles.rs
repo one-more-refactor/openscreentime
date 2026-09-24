@@ -111,7 +111,7 @@ fn profile_to_json(r: ProfileRow) -> Value {
 /// Validate a raw policy value by deserializing into the shared `Policy` type
 /// (forward-compat: unknown fields are tolerated), then re-serialize so what we
 /// store is canonical.
-fn normalize_policy(v: Value) -> AppResult<Value> {
+pub(crate) fn normalize_policy(v: Value) -> AppResult<Value> {
     normalize(v, true)
 }
 
@@ -125,6 +125,7 @@ fn normalize(v: Value, check_rules: bool) -> AppResult<Value> {
     if check_rules {
         openscreentime_policy::rules::validate_screen_time(&p.screen_time)
             .map_err(AppError::BadRequest)?;
+        openscreentime_policy::rules::validate_focus(&p.focus).map_err(AppError::BadRequest)?;
     }
     // The DNS upstream is interpolated verbatim into the agent's nftables
     // ruleset (`ip daddr <upstream> ...`). Require a literal IP so a hostname,
@@ -138,14 +139,13 @@ fn normalize(v: Value, check_rules: bool) -> AppResult<Value> {
     }
     let mut p = p;
     sanitize_blocks(&mut p.blocks)?;
+    sanitize_domains(&mut p.focus.sites, "sites")?;
     Ok(serde_json::to_value(p).unwrap())
 }
 
 /// `blocks` hygiene: ids de-duplicated (unknown ones tolerated — a newer
 /// console may know apps this server's catalog does not yet), custom domains
-/// lower-cased, trimmed, de-duplicated, and **rejected** if they carry anything
-/// but hostname characters — like `dns.upstream`, they end up verbatim in the
-/// device's resolver config.
+/// cleaned by [`sanitize_domains`].
 fn sanitize_blocks(b: &mut openscreentime_policy::AppBlocks) -> AppResult<()> {
     fn dedupe(v: &mut Vec<String>) {
         let mut seen = std::collections::BTreeSet::new();
@@ -156,9 +156,17 @@ fn sanitize_blocks(b: &mut openscreentime_policy::AppBlocks) -> AppResult<()> {
     }
     dedupe(&mut b.apps);
     dedupe(&mut b.categories);
+    sanitize_domains(&mut b.custom_domains, "blocks.custom_domains")
+}
+
+/// Domains typed by a person (a parent's custom blocks, someone's own focus
+/// sites): lower-cased, trimmed of spaces and dots, de-duplicated — and
+/// **rejected** if they carry anything but hostname characters: like
+/// `dns.upstream`, they end up verbatim in the device's resolver config.
+pub(crate) fn sanitize_domains(list: &mut Vec<String>, field: &str) -> AppResult<()> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for raw in &b.custom_domains {
+    for raw in list.iter() {
         let d = raw
             .trim()
             .trim_start_matches('.')
@@ -173,20 +181,119 @@ fn sanitize_blocks(b: &mut openscreentime_policy::AppBlocks) -> AppResult<()> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_');
         if !ok {
             return Err(AppError::BadRequest(format!(
-                "blocks.custom_domains: {raw:?} is not a domain name"
+                "{field}: {raw:?} is not a domain name"
             )));
         }
         if seen.insert(d.clone()) {
             out.push(d);
         }
     }
-    b.custom_domains = out;
+    *list = out;
     Ok(())
 }
 
-/// Every profile in a tenant, as JSON. Shared with the family view so both
-/// return the identical shape from the identical query.
-pub async fn list_for_tenant(db: &sqlx::PgPool, tenant_id: Uuid) -> AppResult<Value> {
+/// Write an already-normalized policy to a profile inside `tx`, bumping
+/// `updated_at` (the agents' policy version), and return the devices that must
+/// re-pull it. Tell them with [`notify_devices`] once `tx` has committed.
+pub(crate) async fn write_policy(
+    tx: &mut sqlx::PgConnection,
+    id: Uuid,
+    policy: &Value,
+) -> AppResult<Vec<Uuid>> {
+    sqlx::query("UPDATE profiles SET policy = $1, updated_at = now() WHERE id = $2")
+        .bind(policy)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let devices: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT DISTINCT device_id FROM device_users WHERE profile_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+    Ok(devices.into_iter().map(|(d,)| d).collect())
+}
+
+/// Tell devices to re-pull their policy (WS agents get it pushed; poll agents
+/// catch up via the heartbeat's policy version). Only after the write is
+/// durably committed, and outside the transaction so a hub push can't hold
+/// the row lock.
+pub(crate) async fn notify_devices(st: &AppState, devices: Vec<Uuid>) -> AppResult<()> {
+    for device_id in devices {
+        enqueue_command(st, device_id, "apply_policy", json!({})).await?;
+    }
+    Ok(())
+}
+
+/// The profile is someone else's own — a self-managed person's (an adult, or
+/// someone who manages themselves) rules, which only they see and change.
+/// Presets are never private.
+pub(crate) async fn private_to_other(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    profile_id: Uuid,
+    viewer: Uuid,
+) -> AppResult<bool> {
+    Ok(private_profile_ids(db, tenant_id, viewer)
+        .await?
+        .contains(&profile_id))
+}
+
+/// Every profile in the tenant that is a self-managed member's own and not the
+/// viewer's: the hub neither sees nor edits those rules.
+pub(crate) async fn private_profile_ids(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    viewer: Uuid,
+) -> AppResult<std::collections::HashSet<Uuid>> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT a.profile_id FROM admins a JOIN profiles p ON p.id = a.profile_id
+          WHERE a.tenant_id = $1 AND a.id <> $2 AND a.role = 'member'
+            AND (a.age_bracket = 'adult' OR a.self_managed)
+            AND NOT p.is_preset",
+    )
+    .bind(tenant_id)
+    .bind(viewer)
+    .fetch_all(db)
+    .await?;
+    Ok(ids.into_iter().collect())
+}
+
+fn their_rules_are_their_own() -> AppError {
+    AppError::ForbiddenForMember("their rules are their own".into())
+}
+
+/// Startup backfill: open every pre-0.6 closed-network profile. A profile
+/// still on `default_deny` DNS or firewall ("only approved sites work") becomes
+/// a normal allow-by-default one — `allow_all` with the `*` wildcard — and
+/// keeps every block it had (catalog blocks, the blocklist, safe search, the
+/// filtered upstream, lockdown, screen time). Nobody is asked: the old posture
+/// broke apt, game launchers and school software, and the console no longer
+/// has a control for it. Idempotent; `updated_at` moves so agents re-pull.
+pub async fn open_legacy_networks(db: &sqlx::PgPool) -> AppResult<u64> {
+    let res = sqlx::query(
+        "UPDATE profiles
+            SET policy = jsonb_set(
+                           jsonb_set(
+                             jsonb_set(
+                               jsonb_set(policy, '{dns,mode}', '\"allow_all\"', true),
+                               '{dns,allowlist}', '[\"*\"]', true),
+                             '{firewall,mode}', '\"allow_all\"', true),
+                           '{firewall,allow_outbound_ports}', '[]', true),
+                updated_at = now()
+          WHERE policy->'dns'->>'mode' = 'default_deny'
+             OR policy->'firewall'->>'mode' = 'default_deny'",
+    )
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Every profile in a tenant the viewer may see, as JSON — not the rules a
+/// self-managed person set for themselves ([`private_profile_ids`]). Shared
+/// with the family view so both return the identical shape from the
+/// identical query.
+pub async fn list_for_tenant(db: &sqlx::PgPool, tenant_id: Uuid, viewer: Uuid) -> AppResult<Value> {
+    let hidden = private_profile_ids(db, tenant_id, viewer).await?;
     let rows: Vec<ProfileRow> = sqlx::query_as(&format!(
         "SELECT {PROFILE_COLS} FROM profiles WHERE tenant_id = $1 \
          ORDER BY is_preset DESC, name"
@@ -196,13 +303,14 @@ pub async fn list_for_tenant(db: &sqlx::PgPool, tenant_id: Uuid) -> AppResult<Va
     .await?;
     Ok(json!(rows
         .into_iter()
+        .filter(|r| !hidden.contains(&r.0))
         .map(profile_to_json)
         .collect::<Vec<_>>()))
 }
 
 pub async fn list_profiles(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     Ok(Json(json!({
-        "profiles": list_for_tenant(&st.db, admin.tenant_id).await?
+        "profiles": list_for_tenant(&st.db, admin.tenant_id, admin.admin_id).await?
     })))
 }
 
@@ -211,6 +319,9 @@ pub async fn get_profile(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
+    if private_to_other(&st.db, admin.tenant_id, id, admin.admin_id).await? {
+        return Err(their_rules_are_their_own());
+    }
     let row: Option<ProfileRow> = sqlx::query_as(&format!(
         "SELECT {PROFILE_COLS} FROM profiles WHERE id = $1 AND tenant_id = $2"
     ))
@@ -290,6 +401,10 @@ pub async fn update_profile(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateProfileReq>,
 ) -> AppResult<Json<Value>> {
+    // A self-managed person's own rules are theirs to change (/api/me/rules).
+    if private_to_other(&st.db, admin.tenant_id, id, admin.admin_id).await? {
+        return Err(their_rules_are_their_own());
+    }
     // All reads + writes happen in one transaction with the row locked
     // (`FOR UPDATE`), so a concurrent update can't interleave between reading the
     // stored policy and writing the merged one (which would resurrect a
@@ -332,19 +447,10 @@ pub async fn update_profile(
             .await?;
     }
 
-    let mut affected_devices: Vec<(Uuid,)> = Vec::new();
-    if let Some(policy) = &new_policy {
-        sqlx::query("UPDATE profiles SET policy = $1, updated_at = now() WHERE id = $2")
-            .bind(policy)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        affected_devices =
-            sqlx::query_as("SELECT DISTINCT device_id FROM device_users WHERE profile_id = $1")
-                .bind(id)
-                .fetch_all(&mut *tx)
-                .await?;
-    }
+    let affected_devices = match &new_policy {
+        Some(policy) => write_policy(&mut tx, id, policy).await?,
+        None => Vec::new(),
+    };
 
     let row: ProfileRow = sqlx::query_as(&format!(
         "SELECT {PROFILE_COLS} FROM profiles WHERE id = $1"
@@ -354,12 +460,7 @@ pub async fn update_profile(
     .await?;
     tx.commit().await?;
 
-    // Only after the row is durably committed do we tell affected devices to
-    // re-pull (WS agents get it pushed; poll agents catch up via the heartbeat
-    // policy_version). Done outside the tx so a hub push can't hold the lock.
-    for (device_id,) in affected_devices {
-        enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
-    }
+    notify_devices(&st, affected_devices).await?;
     Ok(Json(json!({ "profile": profile_to_json(row) })))
 }
 
@@ -368,6 +469,9 @@ pub async fn delete_profile(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
+    if private_to_other(&st.db, admin.tenant_id, id, admin.admin_id).await? {
+        return Err(their_rules_are_their_own());
+    }
     let row: Option<(bool,)> =
         sqlx::query_as("SELECT is_preset FROM profiles WHERE id = $1 AND tenant_id = $2")
             .bind(id)
