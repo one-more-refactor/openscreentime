@@ -739,7 +739,7 @@ async fn policy_for_account(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<P
         .unwrap_or_default())
 }
 
-type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32);
+type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32, Option<i32>);
 
 /// `GET /api/me/today` — the person's own day, across every device they use.
 pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -747,24 +747,32 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     let bracket = bracket_of(&acct);
     let policy = policy_for_account(&st.db, &acct).await?;
 
-    let rows: Vec<TodayRow> = sqlx::query_as(
+    // "Today" is each device's own local day — the day its agent enforces.
+    let rows: Vec<TodayRow> = sqlx::query_as(&format!(
         "SELECT du.id, d.id, d.name, d.status, d.locked,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
-           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = CURRENT_DATE
+           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = {}
           WHERE du.account_id = $1 AND d.tenant_id = $2
           ORDER BY d.name",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let used: i64 = rows.iter().map(|r| i64::from(r.5)).sum::<i64>() / 60;
-    let earned: i64 = rows.iter().map(|r| i64::from(r.6)).sum::<i64>() / 60;
+    let used_secs: i64 = rows.iter().map(|r| i64::from(r.5)).sum();
+    let earned_secs: i64 = rows.iter().map(|r| i64::from(r.6)).sum();
+    let used = used_secs / 60;
+    let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    let left = limit.map(|l| (l + earned - used).max(0));
+    // The same budget the device enforces: limit + earned − used, per person,
+    // in seconds, rounded up to the minute like the device's ring.
+    let left = limit.map(|l| ((l * 60 + earned_secs - used_secs).max(0) + 59) / 60);
+    let offset = rows.iter().find_map(|r| r.7);
+    let rules = crate::ledger::rules_json(&policy, used_secs, earned_secs, offset, Utc::now());
     let locked = rows.iter().any(|r| r.4);
     let du_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let pending: Option<i32> = sqlx::query_scalar(
@@ -788,6 +796,9 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "earned_minutes": earned,
         "limit_minutes": limit,
         "left_minutes": left,
+        // When screens stop by the rules (limit, bedtime or window end,
+        // whichever first) — the agent's own rules function.
+        "rules": rules,
         "locked": locked,
         "devices": devices,
         "blocks": policy.blocks,
@@ -835,29 +846,31 @@ pub async fn set_goal(
 pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
 
-    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(&format!(
         "SELECT l.day, SUM(l.used_seconds)::bigint, SUM(l.earned_seconds)::bigint
            FROM screen_time_ledger l
            JOIN device_users du ON du.id = l.device_user_id
            JOIN devices d ON d.id = du.device_id
           WHERE du.account_id = $1 AND d.tenant_id = $2
-            AND l.day > CURRENT_DATE - 14
+            AND l.day > {} - 14
           GROUP BY l.day ORDER BY l.day",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let today_by_device: Vec<(String, i64)> = sqlx::query_as(
+    let today_by_device: Vec<(String, i64)> = sqlx::query_as(&format!(
         "SELECT d.name, SUM(l.used_seconds)::bigint
            FROM screen_time_ledger l
            JOIN device_users du ON du.id = l.device_user_id
            JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = CURRENT_DATE
+          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = {}
           GROUP BY d.name HAVING SUM(l.used_seconds) > 0
           ORDER BY SUM(l.used_seconds) DESC",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
