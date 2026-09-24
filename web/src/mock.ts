@@ -10,7 +10,7 @@ import type {
   MemberPatch,
   MeToday,
   NewMember,
-  ChangeModeStatus,
+  ConfirmStatus,
   RecoveryCodes,
   RecoveryCodesStatus,
   UnlockCode,
@@ -31,7 +31,6 @@ import type {
   Policy,
   Profile,
   Tenant,
-  TwoFactorStatus,
 } from "./types";
 import { defaultThemeFor } from "./types";
 
@@ -502,15 +501,8 @@ export const mockMe: Me = {
   tenant: mockTenant,
 };
 
-/** Design-review 2FA state: an authenticator is enrolled, email is available. */
-export const mockTwoFactor: TwoFactorStatus = {
-  totp_enrolled: true,
-  email_available: true,
-  telegram_available: true,
-};
-
-/** The code the mock step-up flow accepts, so the modal is demoable offline. */
-export const MOCK_STEPUP_CODE = "123456";
+/** The code design-review mode accepts wherever a code is typed. */
+export const MOCK_CODE = "123456";
 
 export const mockEarnRequests: EarnRequest[] = [
   {
@@ -861,52 +853,25 @@ export function mockRecoveryCodesStatus(deviceId: string): RecoveryCodesStatus {
   };
 }
 
-// ---- Change mode ---------------------------------------------------------------
-// Mirrors the server's step-up grant: 15 minutes, one extension, lock anytime.
+// ---- Confirm it's you ------------------------------------------------------------
+// Mirrors the server's confirm window: 15 minutes, opened by a passkey or a code.
 
-const GRANT_MS = 15 * 60_000;
+const CONFIRM_MS = 15 * 60_000;
 let mockArmedUntil: number | null = null;
-let mockExtended = false;
-export const mockChangeMode = {
-  status(): ChangeModeStatus {
+export const mockConfirm = {
+  status(): ConfirmStatus {
     if (mockArmedUntil !== null && mockArmedUntil <= Date.now()) mockArmedUntil = null;
     return {
       armed_until: mockArmedUntil === null ? null : new Date(mockArmedUntil).toISOString(),
-      extended: mockExtended,
+      passkey: true,
+      computer: true,
     };
   },
-  enter(): { expires_at: string; extended: boolean } {
-    mockArmedUntil = Date.now() + GRANT_MS;
-    mockExtended = false;
-    return { expires_at: new Date(mockArmedUntil).toISOString(), extended: false };
-  },
-  lock(): ChangeModeStatus {
-    mockArmedUntil = null;
-    mockExtended = false;
-    return { armed_until: null, extended: false };
-  },
-  extend(): ChangeModeStatus {
-    if (mockArmedUntil === null || mockArmedUntil <= Date.now()) {
-      throw new MockError("step_up_required", "Change mode is off.", 428);
-    }
-    if (mockExtended) throw new MockError("already_extended", "Already extended once.", 409);
-    mockArmedUntil = Date.now() + GRANT_MS;
-    mockExtended = true;
-    return this.status();
+  open(): { armed_until: string } {
+    mockArmedUntil = Date.now() + CONFIRM_MS;
+    return { armed_until: new Date(mockArmedUntil).toISOString() };
   },
 };
-
-/** The shape api.ts's ApiError has, without importing api.ts (a cycle). */
-class MockError extends Error {
-  code: string;
-  status: number;
-  constructor(code: string, message: string, status: number) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.name = "ApiError";
-  }
-}
 
 // ---- The person's own page --------------------------------------------------------
 
