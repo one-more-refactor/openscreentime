@@ -112,6 +112,12 @@ for just themselves; and the server looks after itself.
   `OST_TOKEN` and then passed it to `ost enroll --token`, in every user's
   process list. It now hands it over in the environment; `ost enroll` reads
   `OST_TOKEN` (or `--token -` for stdin) when `--token` is absent.
+- **CI tests what ships, and fails when a test does.** Steps ran `cargo test
+  | tee` without `pipefail`, so a failing test passed. Now every step runs
+  `bash -eo pipefail`; the server job runs every DB-backed test (the
+  ledger's too — one variable, `OST_TEST_DATABASE_URL` or `DATABASE_URL`,
+  for all) and fails if they would skip; the client is tested as the
+  headless and the `gui,tray` build; the web runs `bun test`.
 
 ### Upgrading
 

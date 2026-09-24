@@ -402,19 +402,13 @@ mod tests {
     }
 }
 
-/// Database-backed tests: run with `OST_TEST_DATABASE_URL` pointing at a
-/// throwaway Postgres (e.g. `podman run --rm -p 55432:5432 -e
-/// POSTGRES_PASSWORD=t postgres:16-alpine`). Skipped when unset.
+/// Database-backed tests, on the same harness as every other one
+/// (`tests_auth::Env`): a throwaway database from `OST_TEST_DATABASE_URL`,
+/// else `DATABASE_URL`, dropped at the end. Skipped when neither is set.
 #[cfg(test)]
 mod db_tests {
     use super::*;
-
-    async fn pool() -> Option<sqlx::PgPool> {
-        let url = std::env::var("OST_TEST_DATABASE_URL").ok()?;
-        let db = crate::db::connect(&url).await.ok()?;
-        crate::db::migrate(&db).await.expect("migrations");
-        Some(db)
-    }
+    use crate::tests_auth::Env;
 
     /// A tenant, a person, two devices (one in UTC+2), one login on each.
     async fn family(db: &sqlx::PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
@@ -485,10 +479,8 @@ mod db_tests {
 
     #[tokio::test]
     async fn usage_is_filed_per_device_day_and_answered_per_person() {
-        let Some(db) = pool().await else {
-            eprintln!("OST_TEST_DATABASE_URL unset — skipping");
-            return;
-        };
+        let Some(env) = Env::new().await else { return };
+        let db = env.st.db.clone();
         let (tenant, _person, laptop, du_laptop, desktop, du_desktop) = family(&db).await;
         let today = local_today(Some(7200), Utc::now());
 
@@ -549,14 +541,13 @@ mod db_tests {
             46 * 60,
             "the console sums the same person-day"
         );
+        env.drop_db().await;
     }
 
     #[tokio::test]
     async fn midnight_never_accuses_and_a_real_drop_alerts_once() {
-        let Some(db) = pool().await else {
-            eprintln!("OST_TEST_DATABASE_URL unset — skipping");
-            return;
-        };
+        let Some(env) = Env::new().await else { return };
+        let db = env.st.db.clone();
         let (tenant, _p, laptop, du, _d2, _du2) = family(&db).await;
         let today = local_today(Some(7200), Utc::now());
         let yesterday = today.pred_opt().unwrap();
@@ -609,5 +600,6 @@ mod db_tests {
         .await
         .unwrap();
         assert_eq!(regressions(&db, du).await, 1);
+        env.drop_db().await;
     }
 }

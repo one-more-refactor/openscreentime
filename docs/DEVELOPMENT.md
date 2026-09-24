@@ -71,16 +71,16 @@ Features (`client/Cargo.toml`, all off by default):
 ```bash
 cd policy && cargo test                      # the rules function + policy/tests/schedule-vectors.json
 cd server && cargo test                      # unit tests; the DB-backed ones need a Postgres (below)
-cd client && cargo test && cargo test --features tray
+cd client && cargo test && cargo test --features gui,tray   # the headless and the desktop build
 cd web && bun run check                      # tsc + bun test (Ring, Icon, Login, Person, Me, …)
 cd web && bun run build
 ```
 
-**Database-backed server tests** (`server/src/tests_auth.rs`, `server/src/tests_rules.rs`) create
-a throwaway database per test on the Postgres at `OST_TEST_DATABASE_URL`, else `DATABASE_URL`, and
-skip themselves (with a note) when neither is set — point either at a server where the user may
-`CREATE DATABASE`. The ledger's DB tests (`server/src/ledger.rs`) read only
-`OST_TEST_DATABASE_URL`.
+**Database-backed server tests** (`server/src/tests_auth.rs`, `server/src/tests_rules.rs`,
+`server/src/ledger.rs`) create a throwaway database per test on the Postgres at
+`OST_TEST_DATABASE_URL`, else `DATABASE_URL`, and skip themselves (with a note) when neither is
+set — point either at a server where the user may `CREATE DATABASE`. With `OST_REQUIRE_TEST_DB`
+set (CI does), a skip is a failure.
 
 `presets::tests` is the preset canary: every preset must round-trip through `Policy` byte for
 byte, so a field added to `Policy` but not to the presets (or the other way round) fails there.

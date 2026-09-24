@@ -48,15 +48,15 @@ sudo ./target/release/openscreentime --dry-run --time-accel 60 run   # logs inst
 ```bash
 cd policy && cargo test                 # rules function + shared schedule vectors
 cd server && cargo test                 # DB-backed tests need a Postgres (below)
-cd client && cargo test && cargo test --features tray
+cd client && cargo test && cargo test --features gui,tray
 cd web && bun run check                 # tsc + bun test; then bun run build
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings   # per crate
 ```
 
-- **DB-backed server tests** (`server/src/tests_auth.rs`, `tests_rules.rs`)
-  make a throwaway database per test from `OST_TEST_DATABASE_URL`, else
-  `DATABASE_URL`, and skip when neither is set. `ledger.rs`'s DB tests read
-  only `OST_TEST_DATABASE_URL`.
+- **DB-backed server tests** (`server/src/tests_auth.rs`, `tests_rules.rs`,
+  `ledger.rs`) make a throwaway database per test from
+  `OST_TEST_DATABASE_URL`, else `DATABASE_URL`, and skip when neither is set
+  (a failure instead with `OST_REQUIRE_TEST_DB`, as in CI).
 - **Container harness** (`deploy/test/run.sh build|up|sh|status|dns|offline|online|logs|down`):
   a rootless Debian box with systemd and the musl agent — enroll, WS, DNS
   sinkhole, PAM. No display, no real freeze.
@@ -66,7 +66,9 @@ cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings   # 
   freeze and the lock on a real seat. `deploy/test/gnome-vm.sh` is a
   persistent Debian 12 GNOME "child's laptop" to enroll by hand.
 - CI: `.github/workflows/ci.yml` (fmt, clippy, tests per crate — the server
-  job has Postgres — web typecheck + build) and `build.yml` (agent builds
+  job runs the DB tests on its Postgres, the client tests default and
+  `gui,tray` — web typecheck, `bun test`, build; every step `bash -eo
+  pipefail`) and `build.yml` (agent builds
   incl. the glibc 2.35 floor, the image, screenshots of the mock console).
 
 ### Deploy (`docs/DEPLOY.md`, `docs/OPERATIONS.md`)
