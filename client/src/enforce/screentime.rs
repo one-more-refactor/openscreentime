@@ -111,6 +111,9 @@ pub struct UsageTracker {
     /// makes the server redeliver; the second copy must not credit twice.
     #[serde(default)]
     grants: HashMap<String, NaiveDate>,
+    /// "Give me 15 more minutes" taken today, per user (self-set limits only).
+    #[serde(default)]
+    snoozes: HashMap<String, u32>,
     /// Trusted-clock anchor, persisted so a restart keeps it.
     #[serde(default)]
     pub clock: TrustedClock,
@@ -173,6 +176,7 @@ impl UsageTracker {
         self.used_secs.clear();
         self.earned_secs.clear();
         self.elsewhere.retain(|_, e| e.day == Some(today));
+        self.snoozes.clear();
         // Keep grant ids a couple of days: a grant delivered late must still
         // be recognised as already applied.
         self.grants
@@ -239,6 +243,20 @@ impl UsageTracker {
             }
             None => None,
         }
+    }
+
+    /// Snoozes `user` has taken today.
+    pub fn snoozes(&self, user: &str) -> u32 {
+        self.snoozes.get(user).copied().unwrap_or(0)
+    }
+
+    /// A self-set snooze: count it and hold the rules off for `minutes`.
+    pub fn snooze(&mut self, user: &str, minutes: u32, now: DateTime<Utc>) -> u32 {
+        let n = self.snoozes.entry(user.to_string()).or_insert(0);
+        *n += 1;
+        let n = *n;
+        self.set_override(user, now + chrono::Duration::minutes(i64::from(minutes)));
+        n
     }
 
     /// Read-only view of an override (for status output).

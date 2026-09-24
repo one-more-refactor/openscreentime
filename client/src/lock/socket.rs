@@ -34,6 +34,9 @@ pub enum Request {
     Code { code: String },
     /// "Ask for more time".
     Ask,
+    /// "Give me 15 more minutes" — only for someone who set their own limits;
+    /// the agent checks that, the wait and today's count, not the lock.
+    Snooze,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
