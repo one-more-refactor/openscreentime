@@ -20,7 +20,6 @@ import type {
   Account,
   Admin,
   Device,
-  DeviceDetail,
   DeviceUser,
   EarnRequest,
   EnrollTokenResponse,
@@ -624,15 +623,6 @@ export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
   };
 }
 
-export function mockDeviceDetail(id: string): DeviceDetail {
-  const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
-  return {
-    ...dev,
-    users: dev.users ?? [],
-    recent_events: mockEvents.filter((e) => e.device_id === dev.id).slice(0, 8),
-  };
-}
-
 /**
  * Mock for GET /api/family — assembled from the mock devices exactly the way
  * the server assembles it from real rows, so design-review mode exercises the
@@ -743,7 +733,6 @@ export function mockFamily(): FamilyResponse {
     server_time: new Date().toISOString(),
   };
 }
-
 
 // ---- Members ------------------------------------------------------------------
 

@@ -25,30 +25,3 @@ export function relTime(iso: string | null): string {
   return new Date(iso).toLocaleDateString();
 }
 
-/** Days an offline device has been silent, if it crossed the "gone dark"
- * tamper threshold (offline for 7+ days) — null otherwise. A device that
- * briefly loses its network is merely "offline"; one silent for a week has
- * likely been wiped, blocked, or hidden. */
-export function goneDarkDays(
-  status: string,
-  lastSeen: string | null,
-): number | null {
-  if (status !== "offline" || !lastSeen) return null;
-  const then = new Date(lastSeen).getTime();
-  if (Number.isNaN(then)) return null;
-  const days = Math.floor((Date.now() - then) / 86_400_000);
-  return days >= 7 ? days : null;
-}
-
-export function minutesToHm(mins: number): string {
-  if (mins <= 0) return "0m";
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return [h ? `${h}h` : "", m ? `${m}m` : ""].filter(Boolean).join(" ") || "0m";
-}
-
-export function pad2(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-export const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
