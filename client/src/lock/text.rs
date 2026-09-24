@@ -361,6 +361,7 @@ mod tests {
             ask: AskState::Ready,
             snooze: Snooze::Hidden,
             help: super::super::HELP.into(),
+            code_hint: super::super::CODE_HINT.into(),
         };
         let s = render(&face, "1234", None, 80, 25);
         assert!(s.contains("Bedtime until 07:00"));

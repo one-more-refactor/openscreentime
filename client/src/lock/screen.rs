@@ -456,7 +456,7 @@ impl LockWindow {
                 (format!("{}{tries}", m.message), ui::STOP)
             }
             (false, Some(m)) => (m.message.clone(), ui::BRAND_INK),
-            (false, None) => (super::CODE_HINT.to_string(), ui::INK_3),
+            (false, None) => (face.code_hint.clone(), ui::INK_3),
         };
         uic.add(
             egui::Label::new(

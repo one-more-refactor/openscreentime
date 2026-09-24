@@ -2089,11 +2089,7 @@ impl Agent {
             self.tracker.snoozes(user),
             back,
         );
-        let help = if code == CodeState::Unavailable {
-            lock::HELP_NO_CODE
-        } else {
-            lock::HELP
-        };
+        let (help, code_hint) = lock::way_out(self_set, code != CodeState::Unavailable);
         Face {
             look,
             title,
@@ -2103,6 +2099,7 @@ impl Agent {
             ask,
             snooze,
             help: help.to_string(),
+            code_hint: code_hint.to_string(),
         }
     }
 
@@ -3740,6 +3737,7 @@ mod tests {
             face.detail,
             "You've used the 1 hour you set for today. Screens come back tomorrow."
         );
+        assert!(!face.help.contains("parent") && !face.code_hint.contains("parent"));
         for n in 1..=lock::SNOOZES_PER_DAY {
             if n > 1 {
                 // The last 15 minutes ran out: stopped again.
