@@ -39,7 +39,7 @@ cp .env.example .env && cargo run                    # :8080, migrates on start
 cd web && bun install && bun run dev                 # :5173, proxies /api and /agent
 VITE_USE_MOCK=1 bun run dev                          # no backend; ?mock=solo|empty for other households
 cd client && cargo build --release [--features gui,tray]
-sudo ./target/release/openscreentime enroll --server http://localhost:8080 --token <TOKEN>
+sudo OST_TOKEN=<TOKEN> ./target/release/openscreentime enroll --server http://localhost:8080
 sudo ./target/release/openscreentime --dry-run --time-accel 60 run   # logs instead of enforcing
 ```
 
