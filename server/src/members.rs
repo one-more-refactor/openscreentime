@@ -996,7 +996,13 @@ pub async fn set_goal(
 /// who is an adult or manages themselves. Everyone else's rules are a
 /// parent's.
 pub fn manages_self(acct: &AccountRow) -> bool {
-    acct.4 != "member" || !bracket_of(acct).is_managed() || acct.8
+    sets_own_rules(&acct.4, bracket_of(acct), acct.8)
+}
+
+/// [`manages_self`] from the account's parts — the one rule, shared with
+/// `profiles::private_profile_ids` (whose rules nobody else may read or edit).
+pub fn sets_own_rules(role: &str, bracket: AgeBracket, self_managed: bool) -> bool {
+    role != "member" || !bracket.is_managed() || self_managed
 }
 
 fn rules_are_a_parents() -> AppError {

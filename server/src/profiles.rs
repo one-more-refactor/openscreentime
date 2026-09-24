@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::agent::enqueue_command;
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, AuthAdmin};
-use openscreentime_policy::Policy;
+use openscreentime_policy::{AgeBracket, Policy};
 
 /// Minimum parent-PIN length. Short PINs are still hashed, but we reject them
 /// up front so a fat-fingered "1" doesn't become the household's lockout key.
@@ -224,9 +224,9 @@ pub(crate) async fn notify_devices(st: &AppState, devices: Vec<Uuid>) -> AppResu
     Ok(())
 }
 
-/// The profile is someone else's own — a self-managed person's (an adult, or
-/// someone who manages themselves) rules, which only they see and change.
-/// Presets are never private.
+/// The profile is someone else's own — the rules a parent keeps for
+/// themselves, or an adult's or self-managed person's — which only they see
+/// and change (`/api/me/rules`). Presets are never private.
 pub(crate) async fn private_to_other(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -238,24 +238,32 @@ pub(crate) async fn private_to_other(
         .contains(&profile_id))
 }
 
-/// Every profile in the tenant that is a self-managed member's own and not the
-/// viewer's: the hub neither sees nor edits those rules.
+/// Every profile in the tenant that is someone's own rules and not the
+/// viewer's — whoever `members::sets_own_rules` says keeps their own: every
+/// parent (the hub included) for themselves, adults, self-managed people. No
+/// one else sees or edits those, not even another parent.
 pub(crate) async fn private_profile_ids(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
     viewer: Uuid,
 ) -> AppResult<std::collections::HashSet<Uuid>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT a.profile_id FROM admins a JOIN profiles p ON p.id = a.profile_id
-          WHERE a.tenant_id = $1 AND a.id <> $2 AND a.role = 'member'
-            AND (a.age_bracket = 'adult' OR a.self_managed)
-            AND NOT p.is_preset",
+    let rows: Vec<(Uuid, String, String, bool)> = sqlx::query_as(
+        "SELECT a.profile_id, a.role, a.age_bracket, a.self_managed
+           FROM admins a JOIN profiles p ON p.id = a.profile_id
+          WHERE a.tenant_id = $1 AND a.id <> $2 AND NOT p.is_preset",
     )
     .bind(tenant_id)
     .bind(viewer)
     .fetch_all(db)
     .await?;
-    Ok(ids.into_iter().collect())
+    Ok(rows
+        .into_iter()
+        .filter(|(_, role, bracket, self_managed)| {
+            let bracket = AgeBracket::parse(bracket).unwrap_or(AgeBracket::Adult);
+            crate::members::sets_own_rules(role, bracket, *self_managed)
+        })
+        .map(|(id, ..)| id)
+        .collect())
 }
 
 fn their_rules_are_their_own() -> AppError {

@@ -221,10 +221,12 @@ task_label, minutes, status, created_at, decided_at }` with `status` one of
 | PUT    | `/api/profiles/:id`     | update the policy; `parent_pin` omitted keeps the hash, `""` clears it. Invalid windows, a whole-day bedtime or a non-IP `dns.upstream` → 400 |
 | DELETE | `/api/profiles/:id`     | custom only                                   |
 
-A self-managed person's own profile (an adult or `self_managed` member's
-rules, see "My rules" below) is not the hub's: `GET /api/profiles` and
+Someone's own profile — a parent's (the hub included) for themselves, or an
+adult or `self_managed` member's (see "My rules" below) — is only theirs:
+for anyone else, another parent included, `GET /api/profiles` and
 `/api/family` leave it out, and `GET|PUT|DELETE /api/profiles/:id` on it →
-`403 forbidden_for_member` "their rules are their own".
+`403 forbidden_for_member` "their rules are their own". They change it through
+`/api/me/rules`.
 
 At startup the server opens any pre-0.6 closed-network profile
 (`dns.mode` or `firewall.mode` = `default_deny`) to `allow_all` (+ the `*`
