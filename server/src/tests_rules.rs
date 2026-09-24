@@ -302,6 +302,104 @@ async fn an_adults_rules_are_theirs_and_the_hub_cannot_see_them() {
     env.drop_db().await;
 }
 
+async fn profile_as(env: &Env, who: &AuthAdmin, id: Uuid) -> Result<Value, AppError> {
+    crate::profiles::get_profile(State(env.st.clone()), clone(who), Path(id))
+        .await
+        .map(|j| j.0)
+}
+
+async fn edit_profile_as(env: &Env, who: &AuthAdmin, id: Uuid) -> Result<Value, AppError> {
+    crate::profiles::update_profile(
+        State(env.st.clone()),
+        clone(who),
+        Path(id),
+        Json(serde_json::from_value(json!({ "name": "renamed" })).unwrap()),
+    )
+    .await
+    .map(|j| j.0)
+}
+
+async fn rules_id(env: &Env, account: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT profile_id FROM admins WHERE id = $1")
+        .bind(account)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_parents_own_rules_are_theirs_even_from_another_parent() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    // A second parent in the household, with rules of her own.
+    let anna_pid = crate::members::create_profile_for(
+        &env.st.db,
+        tenant,
+        openscreentime_policy::AgeBracket::Adult,
+        "Anna",
+    )
+    .await
+    .unwrap();
+    let anna: Uuid = sqlx::query_scalar(
+        "INSERT INTO admins (tenant_id, display_name, role, age_bracket, profile_id)
+         VALUES ($1, 'Anna', 'parent', 'adult', $2) RETURNING id",
+    )
+    .bind(tenant)
+    .bind(anna_pid)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap();
+    let (_, as_philip) = session_for(&env, philip, tenant).await;
+    let (_, as_anna) = session_for(&env, anna, tenant).await;
+
+    let his = put_rules(
+        &env,
+        &as_philip,
+        json!({ "daily_limit_minutes": 90, "focus_hours": null, "sites": ["reddit.com"] }),
+    )
+    .await
+    .unwrap();
+    put_rules(
+        &env,
+        &as_anna,
+        json!({ "daily_limit_minutes": 45, "focus_hours": null, "sites": [] }),
+    )
+    .await
+    .unwrap();
+    let philip_rules = rules_id(&env, philip).await;
+    let anna_rules = rules_id(&env, anna).await;
+
+    // Neither parent can read, change or delete the other's own rules (403)…
+    for (who, theirs) in [(&as_anna, philip_rules), (&as_philip, anna_rules)] {
+        assert!(is_forbidden(&profile_as(&env, who, theirs).await));
+        assert!(is_forbidden(&edit_profile_as(&env, who, theirs).await));
+        let del = crate::profiles::delete_profile(State(env.st.clone()), clone(who), Path(theirs))
+            .await
+            .map(|j| j.0);
+        assert!(is_forbidden(&del));
+        let listed = crate::profiles::list_profiles(State(env.st.clone()), clone(who))
+            .await
+            .unwrap()
+            .0;
+        assert!(!listed.to_string().contains(&theirs.to_string()));
+    }
+    // …nothing changed, and each still has their own through /api/me/rules.
+    assert_eq!(get_rules(&env, &as_philip).await.unwrap(), his);
+    assert!(profile_as(&env, &as_philip, philip_rules).await.is_ok());
+    assert_eq!(
+        get_rules(&env, &as_anna).await.unwrap()["daily_limit_minutes"],
+        45
+    );
+
+    // A child's rules are still every parent's.
+    let mia = env.member(tenant, "Mia").await;
+    let mia_rules = rules_id(&env, mia).await;
+    assert!(profile_as(&env, &as_anna, mia_rules).await.is_ok());
+    assert!(edit_profile_as(&env, &as_anna, mia_rules).await.is_ok());
+    assert!(edit_profile_as(&env, &as_philip, mia_rules).await.is_ok());
+    env.drop_db().await;
+}
+
 /// The login `name` on `device`, tied to `account` (the linking heuristics
 /// aren't what these tests are about).
 async fn login_of(env: &Env, device: Uuid, name: &str, account: Uuid) -> Uuid {

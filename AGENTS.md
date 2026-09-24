@@ -252,8 +252,12 @@ questions, checked against `policy/tests/schedule-vectors.json`.
    backup code.
 4. **A member session sees `/me` only** — the server 403s the rest
    (`members.rs` guard); the web redirects.
-5. **Adults' own rules are theirs**: the hub can't read or edit them
-   (`profiles.rs`), and `/api/usage/where` refuses adults.
+5. **Own rules are theirs**: a parent's rules for themselves, and an adult's
+   or self-managed person's, are editable only by that person (`/api/me/rules`);
+   anyone else — another parent included — gets 403 (`profiles.rs`
+   `private_profile_ids`, `members::sets_own_rules`). A parent sees such a
+   person's minutes only: `/api/usage/where` refuses them and `/api/events`
+   leaves out their logins' events (`usage::hub_exposure`).
 6. **WS push is best-effort**; a command stays queued and is pulled on the
    next heartbeat. Pause shows "Pausing…" until the agent confirms.
 7. **`--dry-run` is required off-root.** Every enforcement action goes through

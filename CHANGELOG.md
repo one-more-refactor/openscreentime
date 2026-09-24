@@ -104,6 +104,10 @@ for just themselves; and the server looks after itself.
   The server now leaves events under an adult's or self-managed person's
   login out of `/api/events` and a computer's `recent_events` for everyone
   but them, and the page no longer asks.
+- **A parent's own rules are theirs, even from another parent.** Only
+  members' own rules were protected; one parent could read and change
+  another's through `/api/profiles/:id`. Now that's a 403 for anyone but the
+  person, who changes them through `/api/me/rules`.
 
 ### Upgrading
 
