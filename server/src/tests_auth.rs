@@ -22,14 +22,14 @@ use crate::error::AppError;
 use crate::login_code::{self, challenge_of};
 use crate::state::{AppState, AuthAdmin, Hub, SESSION_COOKIE};
 
-struct Env {
-    st: AppState,
+pub(crate) struct Env {
+    pub(crate) st: AppState,
     admin_url: String,
     name: String,
 }
 
 impl Env {
-    async fn new() -> Option<Env> {
+    pub(crate) async fn new() -> Option<Env> {
         Self::with_setup_code(None).await
     }
 
@@ -106,7 +106,7 @@ impl Env {
         })
     }
 
-    async fn drop_db(self) {
+    pub(crate) async fn drop_db(self) {
         self.st.db.close().await;
         let admin = PgPool::connect(&self.admin_url).await.unwrap();
         let _ = sqlx::query(&format!(
@@ -118,14 +118,14 @@ impl Env {
     }
 
     /// A household: its owner, and a device.
-    async fn household(&self, owner: &str) -> (Uuid, Uuid) {
+    pub(crate) async fn household(&self, owner: &str) -> (Uuid, Uuid) {
         let username = crate::auth::username_from_name(owner);
         crate::auth::create_tenant_with_admin(&self.st.db, None, &username, owner, true)
             .await
             .unwrap()
     }
 
-    async fn member(&self, tenant: Uuid, name: &str) -> Uuid {
+    pub(crate) async fn member(&self, tenant: Uuid, name: &str) -> Uuid {
         let pid = crate::members::create_profile_for(
             &self.st.db,
             tenant,
@@ -149,7 +149,7 @@ impl Env {
     /// An enrolled, online computer owned by `owner`, with these OS logins,
     /// installed from `installer`, the owner's login picked at install time as
     /// `chosen` — through the real linking code.
-    async fn computer(
+    pub(crate) async fn computer(
         &self,
         tenant: Uuid,
         owner: Option<Uuid>,
@@ -533,7 +533,7 @@ async fn each_os_login_is_its_own_person() {
     env.drop_db().await;
 }
 
-async fn session_for(env: &Env, admin: Uuid, tenant: Uuid) -> (CookieJar, AuthAdmin) {
+pub(crate) async fn session_for(env: &Env, admin: Uuid, tenant: Uuid) -> (CookieJar, AuthAdmin) {
     let token = crate::auth::create_session(&env.st.db, admin, tenant)
         .await
         .unwrap();

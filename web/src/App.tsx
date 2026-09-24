@@ -6,7 +6,7 @@ import { Shell } from "./layout/Shell";
 import { Login } from "./pages/Login";
 import { Welcome } from "./pages/Welcome";
 import { Family } from "./pages/Family";
-import { ChildDetail } from "./pages/ChildDetail";
+import { Person } from "./pages/Person";
 import { Computers } from "./pages/Computers";
 import { AddChild } from "./pages/AddChild";
 import { Settings } from "./pages/Settings";
@@ -64,7 +64,9 @@ export function App() {
           >
             {/* Home is the family, not the fleet. */}
             <Route index element={<Family />} />
-            <Route path="/child/:key" element={<ChildDetail />} />
+            {/* A person: today (the glance and the verbs), and their rules. */}
+            <Route path="/child/:key" element={<Person tab="today" />} />
+            <Route path="/child/:key/rules" element={<Person tab="rules" />} />
             <Route path="/computers" element={<Computers />} />
             <Route path="/add" element={<AddChild />} />
             <Route path="/settings" element={<Settings />} />
