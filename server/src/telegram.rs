@@ -113,44 +113,61 @@ pub fn spawn(st: AppState) {
     let Some(token) = bot_token() else {
         return;
     };
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        if let Some(me) = call(&client, &token, "getMe", json!({})).await {
-            if let Some(name) = me.get("username").and_then(Value::as_str) {
-                let _ = BOT_USERNAME.set(name.to_string());
-                tracing::info!(bot = name, "telegram bot connected");
-            }
-        }
-        let mut offset: i64 = 0;
-        loop {
-            let updates = call(
-                &client,
-                &token,
-                "getUpdates",
-                json!({
-                    "offset": offset,
-                    "timeout": 50,
-                    "allowed_updates": ["message", "callback_query"],
-                }),
-            )
-            .await;
-            let Some(Value::Array(updates)) = updates else {
-                // API hiccup — breathe, then poll again.
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            };
-            for u in updates {
-                if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
-                    offset = offset.max(id + 1);
-                }
-                if let Some(msg) = u.get("message") {
-                    handle_message(&st, &client, &token, msg).await;
-                } else if let Some(cq) = u.get("callback_query") {
-                    handle_callback(&st, &client, &token, cq).await;
-                }
-            }
-        }
+    // The update offset outlives a restart of the worker, so an update that
+    // made it panic is not fetched (and panicked on) again.
+    let offset = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    crate::supervise::spawn("telegram", move || {
+        let (st, token, offset) = (st.clone(), token.clone(), offset.clone());
+        async move { poll(st, token, offset).await }
     });
+}
+
+async fn poll(st: AppState, token: String, offset: std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    use std::sync::atomic::Ordering;
+    // Bounded, but longer than the 50 s long-poll below.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(70))
+        .build()
+        .unwrap_or_default();
+    loop {
+        // Learn the bot's @username (the pairing deep link needs it) — and
+        // keep trying if the network was down when we started.
+        if BOT_USERNAME.get().is_none() {
+            if let Some(me) = call(&client, &token, "getMe", json!({})).await {
+                if let Some(name) = me.get("username").and_then(Value::as_str) {
+                    let _ = BOT_USERNAME.set(name.to_string());
+                    tracing::info!(bot = name, "telegram bot connected");
+                }
+            }
+        }
+        let updates = call(
+            &client,
+            &token,
+            "getUpdates",
+            json!({
+                "offset": offset.load(Ordering::Relaxed),
+                "timeout": 50,
+                "allowed_updates": ["message", "callback_query"],
+            }),
+        )
+        .await;
+        let Some(Value::Array(updates)) = updates else {
+            // API hiccup — breathe, then poll again.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        };
+        for u in updates {
+            if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
+                offset.fetch_max(id + 1, Ordering::Relaxed);
+            }
+            if let Some(msg) = u.get("message") {
+                handle_message(&st, &client, &token, msg).await;
+            } else if let Some(cq) = u.get("callback_query") {
+                handle_callback(&st, &client, &token, cq).await;
+            }
+        }
+    }
 }
 
 /// `/start <code>` pairs the chat; anything else gets a gentle pointer.

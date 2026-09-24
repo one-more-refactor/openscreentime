@@ -15,19 +15,18 @@
 ```bash
 cd server
 docker compose up -d db          # postgres on :5432
-cp .env.example .env             # DATABASE_URL, RP_ID, RP_ORIGIN, etc.
+cp .env.example .env             # DATABASE_URL, OST_PUBLIC_URL, etc.
 sqlx migrate run
 cargo run                        # serves :8080
 ```
 
 Key env:
 - `DATABASE_URL=postgres://openscreentime:openscreentime@localhost:5432/openscreentime`
-- `RP_ID=localhost` / `RP_ORIGIN=http://localhost:5173` (WebAuthn relying party)
+- `OST_PUBLIC_URL` — the address the browser uses. RP ID, origin, CORS and cookie security derive from it; unset = `http://localhost:5173` (the Vite dev server), which gives `RP_ID=localhost` and non-Secure cookies.
 - `BIND_ADDR=0.0.0.0:8080`
-- `OST_PUBLIC_URL` — public base URL of the control center (OIDC redirect URI + post-login redirects); falls back to `RP_ORIGIN`.
-- `OST_INSECURE_COOKIES` — session cookies are Secure by default; set to `1` only for plain-http dev.
+- `RP_ID` / `RP_ORIGIN` / `OST_INSECURE_COOKIES` — optional overrides of the derived values (`OST_INSECURE_COOKIES=1` forces non-Secure cookies, `0` forces Secure).
 - `OST_TRUST_PROXY` — set to `1` behind a reverse proxy so the rate limiter keys on the first `X-Forwarded-For` value instead of the peer address.
-- `OST_OIDC_ISSUER` / `OST_OIDC_CLIENT_ID` / `OST_OIDC_CLIENT_SECRET` / `OST_OIDC_NAME` — OIDC SSO (e.g. Authentik); off unless issuer/client id/secret are all set, endpoints are discovered at startup.
+- `OST_OIDC_ISSUER` / `OST_OIDC_CLIENT_ID` / `OST_OIDC_CLIENT_SECRET` / `OST_OIDC_NAME` — OIDC SSO (e.g. Authentik); off unless issuer/client id/secret are all set; endpoints are discovered in the background (retried; the SSO button stays hidden until then).
 - `RUST_LOG` — log filter, e.g. `openscreentime_server=debug,tower_http=info,info`.
 
 ## Web

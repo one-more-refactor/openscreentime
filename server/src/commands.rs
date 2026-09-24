@@ -102,17 +102,23 @@ pub async fn cancel(
 /// Daily janitor: settled commands older than 30 days serve no purpose — the
 /// event log is the durable audit trail, the queue is operational state.
 pub fn spawn_janitor(st: AppState) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-        loop {
-            tick.tick().await;
-            let _ = sqlx::query(
-                "DELETE FROM commands
-                 WHERE status IN ('acked','failed','cancelled')
-                   AND created_at < now() - interval '30 days'",
-            )
-            .execute(&st.db)
-            .await;
+    crate::supervise::spawn("command-janitor", move || {
+        let db = st.db.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                tick.tick().await;
+                if let Err(e) = sqlx::query(
+                    "DELETE FROM commands
+                     WHERE status IN ('acked','failed','cancelled')
+                       AND created_at < now() - interval '30 days'",
+                )
+                .execute(&db)
+                .await
+                {
+                    tracing::warn!(error = %e, "command janitor failed");
+                }
+            }
         }
     });
 }

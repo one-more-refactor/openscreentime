@@ -284,6 +284,70 @@ fn link_aliases(exec: &Exec) {
     }
 }
 
+/// The unit files whose installed copies must follow the binary.
+const MANAGED_UNITS: [(&str, &str); 4] = [
+    (UNIT_PATH, UNIT),
+    (WATCHDOG_SVC_PATH, WATCHDOG_SERVICE),
+    (WATCHDOG_TIMER_PATH, WATCHDOG_TIMER),
+    (TRAY_UNIT_PATH, TRAY_UNIT),
+];
+
+/// Installed units that differ from the ones this build carries. A unit that
+/// was never installed here (a manual `run`, no `install-service`) is left
+/// alone — this only ever refreshes, it never installs.
+fn stale_units() -> Vec<(&'static str, &'static str)> {
+    MANAGED_UNITS
+        .into_iter()
+        .filter(|(path, body)| matches!(std::fs::read_to_string(path), Ok(cur) if cur != *body))
+        .collect()
+}
+
+/// `ost __refresh-units` (hidden): rewrite the stale units, reload systemd.
+/// Runs in a transient unit (see [`refresh_units_if_stale`]), outside the
+/// agent's sandbox.
+pub fn refresh_units() -> Result<()> {
+    let stale = stale_units();
+    for (path, body) in &stale {
+        std::fs::write(path, body).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+    }
+    if !stale.is_empty() {
+        let ok = std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        anyhow::ensure!(ok, "systemctl daemon-reload failed");
+        println!("refreshed {} systemd unit(s)", stale.len());
+    }
+    Ok(())
+}
+
+/// A self-update replaces the binary, but the units were written once by
+/// `install-service` — so unit fixes (like the watchdog that rolls a bad
+/// update back) would never reach an installed fleet. A freshly started agent
+/// calls this: if the installed units differ from the ones it carries, it
+/// rewrites them through `systemd-run`, because its own sandbox
+/// (ProtectSystem=strict) cannot write /etc/systemd. Takes effect at the next
+/// restart; nothing is restarted here.
+pub fn refresh_units_if_stale(exec: &Exec) {
+    if exec.dry_run() || !crate::config::is_root() || stale_units().is_empty() {
+        return;
+    }
+    match exec.run(
+        "systemd-run",
+        &[
+            "--quiet",
+            "--collect",
+            "--unit=openscreentime-refresh-units",
+            BIN_TARGET,
+            "__refresh-units",
+        ],
+    ) {
+        Ok(_) => tracing::info!("systemd units differ from this build's; refreshing them"),
+        Err(e) => tracing::warn!("could not refresh the systemd units: {e}"),
+    }
+}
+
 pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     ctx.require_root_for_enforcement()?;
     let exec = Exec::new(ctx.clone());

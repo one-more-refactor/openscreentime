@@ -88,4 +88,7 @@ ALTER TABLE events ADD CONSTRAINT events_type_check CHECK (type IN
      'enrolled','ssh','earn_request','evasion',
      'enforcement_degraded','vpn_profile',
      'parent_code_ok','parent_code_failed','parent_code_backup_used',
-     'app_blocked','member','account_login'));
+     'app_blocked','member','account_login',
+     -- kept from 0026: the retired number-match flow's type, and `other`
+     -- (an event type from a newer agent, original type in the payload).
+     'login_approval','other'));
