@@ -29,9 +29,11 @@ Then:
 
 1. Point your reverse proxy at `127.0.0.1:8080` (snippets below — setup.sh
    prints them for your domain).
-2. Open `https://ost.example.com` and create the first parent account with
-   the one-time setup code setup.sh prints (`OST_BOOTSTRAP_TOKEN` in `.env`).
-3. Click **ADD DEVICE** in the console and paste the one-liner on each device.
+2. Open the one-time setup link setup.sh prints
+   (`https://ost.example.com/#setup=<code>`, the code is `OST_BOOTSTRAP_TOKEN`
+   in `.env`): your name, then a passkey.
+3. **Computers → Add a computer** in the console, and paste the one-liner on
+   each computer.
 
 Re-running `deploy/setup.sh` is safe: it never touches an existing `.env`, and
 on an existing stack it runs `deploy/update.sh` (the safe update path).
