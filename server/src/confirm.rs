@@ -20,6 +20,9 @@
 //! It is a **layer**, not a per-handler extractor: a new sensitive route is
 //! guarded the moment it matches `sensitive()`, and nobody can forget a
 //! parameter. The same layer refuses every change from a paused account.
+//! The one call whose sensitivity depends on its body — `POST /api/devices`
+//! for a *parent's* own computer, whose enroll token becomes device vouchers
+//! for that parent — asks [`require_window`] itself.
 
 use axum::{
     extract::{Request, State},
@@ -120,6 +123,31 @@ pub async fn require_confirm(
             }
             Ok(next.run(req).await)
         }
+    }
+}
+
+/// For a handler whose request is sensitive only for some bodies: the same
+/// `428 step_up_required` the layer gives, unless the session's confirm
+/// window is open.
+pub async fn require_window(st: &AppState, jar: &CookieJar) -> AppResult<()> {
+    let cookie = jar
+        .get(SESSION_COOKIE)
+        .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
+    let until: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "SELECT stepup_until FROM admin_sessions
+         WHERE (token_hash = $1
+                OR (prev_token_hash = $1 AND prev_valid_until > now()))
+           AND expires_at > now()",
+    )
+    .bind(hash_token(cookie.value()))
+    .fetch_optional(&st.db)
+    .await?;
+    match until {
+        None => Err(AppError::Unauthorized("no session".into())),
+        Some(t) if t.is_some_and(|t| t > Utc::now()) => Ok(()),
+        Some(_) => Err(AppError::StepUpRequired(
+            "confirm it's you to touch the keys".into(),
+        )),
     }
 }
 
@@ -343,6 +371,8 @@ mod tests {
         assert!(sensitive("/api/devices/abc/enroll-token"));
         assert!(sensitive("/api/vpn-profiles/abc"));
         // Everything else — reads and ordinary changes — stays out of it.
+        // (`POST /api/devices` for a parent's own computer is checked by the
+        // handler: `require_window`.)
         assert!(!sensitive("/api/devices"));
         assert!(!sensitive("/api/devices/abc/lock"));
         assert!(!sensitive("/api/device-users/abc/credit-time"));
