@@ -10,6 +10,7 @@ Name=OpenScreenTime companion
 Comment=Warns before the screen stops, and tells you when you're back
 Exec=/usr/local/bin/openscreentime tray
 Icon=openscreentime
+StartupWMClass=openscreentime
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true

@@ -189,7 +189,8 @@ pub fn notify(c: &LoginCode) {
     n.appname("OpenScreenTime")
         .summary(&format!("{}: {}", c.headline(), c.spaced()))
         .body(&c.instructions())
-        .icon("dialog-password")
+        .icon("openscreentime")
+        .hint(notify_rust::Hint::DesktopEntry("openscreentime".into()))
         .urgency(notify_rust::Urgency::Critical)
         .timeout(notify_rust::Timeout::Milliseconds(
             (c.minutes_left(chrono::Utc::now()) * 60_000).clamp(10_000, 300_000) as u32,

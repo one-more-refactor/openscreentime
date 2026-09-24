@@ -299,6 +299,12 @@ pub struct Agent {
     /// os_username → profile kind (the age bracket id, or a legacy preset
     /// name). Drives overlay wording and the managed-sudo list.
     kinds: HashMap<String, String>,
+    /// OS logins whose person sets their own limits (the bundle's
+    /// `self_managed`; the adult bracket always counts).
+    self_managed: HashSet<String>,
+    /// Who the lock went up for, and when — what the self-set snooze's
+    /// one-minute wait is measured from.
+    lock_since: Option<(String, Instant)>,
     /// The device's unlock-code secret from the last bundle.
     parent_totp_secret: Option<String>,
     /// Unused one-time recovery codes from the last bundle.
@@ -588,6 +594,8 @@ impl Agent {
             measured: true,
             input: crate::enforce::activity::InputTracker::new(),
             requested_earn: HashMap::new(),
+            self_managed: HashSet::new(),
+            lock_since: None,
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
             offline_grace: offline_grace_from_env(),
@@ -998,7 +1006,11 @@ impl Agent {
         }
         self.policies.clear();
         self.kinds.clear();
+        self.self_managed.clear();
         for up in bundle.users {
+            if up.self_managed {
+                self.self_managed.insert(up.os_username.clone());
+            }
             self.kinds.insert(up.os_username.clone(), up.profile_kind);
             self.policies.insert(up.os_username, up.policy);
         }
@@ -1887,6 +1899,7 @@ impl Agent {
                 self.lock_unavailable(user);
                 return;
             }
+            self.note_lock_subject();
         } else if !lock::has_graphical_session(&sessions, user) {
             let face = self.face_for(user);
             self.lock.host().tell_ttys(
@@ -2042,83 +2055,66 @@ impl Agent {
         self.forecasts = next;
     }
 
+    /// The person sets their own limits: the bundle says so, or they're an adult.
+    fn is_self_set(&self, user: &str) -> bool {
+        self.self_managed.contains(user) || self.bracket_of(user) == AgeBracket::Adult
+    }
+
+    /// Why `user` is stopped, for the lock's words.
+    fn stop_of(&self, user: &str, policy: &Policy) -> Option<lock::Stop> {
+        use lock::Stop;
+        use openscreentime_policy::rules::StopReason;
+        if self.tamper_lockdown {
+            return Some(Stop::Tamper);
+        }
+        if self.offline_hard_lockdown {
+            return Some(Stop::Offline);
+        }
+        if self.device_locked {
+            return Some(Stop::Paused);
+        }
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        let v = screentime::verdict(policy, &self.tracker, user, &now, false);
+        let until = v.resume_at.map(|t| warn::until_words(t, now));
+        Some(match v.reason.filter(|_| !v.allowed)? {
+            StopReason::Limit => Stop::Limit {
+                minutes: policy.screen_time.daily_limit_minutes + self.tracker.earned_minutes(user),
+                back: v.resume_at.map(|t| warn::back_words(t, now)),
+            },
+            StopReason::Bedtime => Stop::Bedtime { until },
+            StopReason::OutsideHours => Stop::OutsideHours { until },
+            StopReason::Paused => Stop::Paused,
+        })
+    }
+
     /// Everything the lock says to `user` right now.
     fn face_for(&self, user: &str) -> Face {
-        use lock::{AskState, CodeState, Look};
-        use openscreentime_policy::rules::StopReason;
+        use lock::{AskState, CodeState, Look, Stop};
         let policy = self.policies.get(user).cloned().unwrap_or_default();
         let verifier = self
             .parent_keys(&policy)
             .verifier()
             .with_state_path(self.parent_state.clone());
         let code = lock::code_state(&verifier);
-        let now = self.trusted_now.with_timezone(&chrono::Local);
-        let (look, title, detail, can_ask) = if self.tamper_lockdown {
-            (
+        let self_set = self.is_self_set(user);
+        let stop = self.stop_of(user, &policy);
+        let (look, title, detail) = match &stop {
+            Some(s) => lock::stop_words(s, self_set),
+            // Frozen, and the rules allow again: the thaw is a moment away.
+            None => (
                 Look::Wall,
-                "Stopped until a parent checks this computer".to_string(),
-                "OpenScreenTime was changed without a parent's code.".to_string(),
-                false,
-            )
-        } else if self.offline_hard_lockdown {
-            (
-                Look::Wall,
-                "Stopped until this computer reaches the family server".to_string(),
-                "It hasn't been in touch for days.".to_string(),
-                false,
-            )
-        } else if self.device_locked {
-            (
-                Look::Paused,
-                "Paused by a parent".to_string(),
+                "This computer is stopped for now".into(),
                 String::new(),
-                false,
-            )
-        } else {
-            let v = screentime::verdict(&policy, &self.tracker, user, &now, false);
-            let until = v.resume_at.map(|t| warn::until_words(t, now));
-            match v.reason.filter(|_| !v.allowed) {
-                Some(StopReason::Limit) => {
-                    let used = self.tracker.used_minutes(user);
-                    let limit =
-                        policy.screen_time.daily_limit_minutes + self.tracker.earned_minutes(user);
-                    (
-                        Look::Wall,
-                        "Time's up for today".to_string(),
-                        if used > limit {
-                            format!("All {limit} minutes are used.")
-                        } else {
-                            format!("{used} of {limit} minutes used.")
-                        },
-                        true,
-                    )
-                }
-                Some(StopReason::Bedtime) => (
-                    Look::Night,
-                    match until {
-                        Some(t) => format!("Bedtime until {t}"),
-                        None => "Bedtime".to_string(),
-                    },
-                    "Screens are off until morning.".to_string(),
-                    true,
-                ),
-                Some(StopReason::OutsideHours) => (
-                    Look::Night,
-                    match until {
-                        Some(t) => format!("Outside allowed hours until {t}"),
-                        None => "Outside allowed hours".to_string(),
-                    },
-                    "Screens are off at this time of day.".to_string(),
-                    true,
-                ),
-                Some(StopReason::Paused) | None => (
-                    Look::Wall,
-                    "This computer is stopped for now".to_string(),
-                    String::new(),
-                    true,
-                ),
-            }
+            ),
         };
+        let own_rules = matches!(
+            stop,
+            Some(Stop::Limit { .. } | Stop::Bedtime { .. } | Stop::OutsideHours { .. })
+        );
+        // A child asks a parent; someone who set their own limits has nobody
+        // to ask (they get the snooze instead), and a pause or a device-wide
+        // stop isn't about time.
+        let can_ask = !self_set && self.bracket_of(user).can_request_time() && own_rules;
         let today = chrono::Local::now().date_naive();
         let asked = self
             .requested_earn
@@ -2129,11 +2125,23 @@ impl Agent {
             (true, true) => AskState::Sent,
             (true, false) => AskState::Ready,
         };
-        let help = if code == CodeState::Unavailable {
-            lock::HELP_NO_CODE
-        } else {
-            lock::HELP
+        let back = match &stop {
+            Some(Stop::Limit { back, .. }) => back.clone(),
+            _ => {
+                let now = self.trusted_now.with_timezone(&chrono::Local);
+                screentime::verdict(&policy, &self.tracker, user, &now, false)
+                    .resume_at
+                    .map(|t| warn::back_words(t, now))
+            }
         };
+        let snooze = lock::snooze_state(
+            self_set,
+            own_rules,
+            self.lock_waited(user),
+            self.tracker.snoozes(user),
+            back,
+        );
+        let (help, code_hint) = lock::way_out(self_set, code != CodeState::Unavailable);
         Face {
             look,
             title,
@@ -2141,7 +2149,29 @@ impl Agent {
             who: user.to_string(),
             code,
             ask,
+            snooze,
             help: help.to_string(),
+            code_hint: code_hint.to_string(),
+        }
+    }
+
+    /// Seconds the lock has been up in front of `user` (0 if it isn't).
+    fn lock_waited(&self, user: &str) -> u64 {
+        self.lock_since
+            .as_ref()
+            .filter(|(u, _)| u == user)
+            .map(|(_, t)| t.elapsed().as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Remember when the lock went up in front of whom (the snooze's wait).
+    fn note_lock_subject(&mut self) {
+        match self.lock.subject() {
+            Some(s) if self.lock_since.as_ref().map(|(u, _)| u.as_str()) != Some(s) => {
+                self.lock_since = Some((s.to_string(), Instant::now()));
+            }
+            None => self.lock_since = None,
+            _ => {}
         }
     }
 
@@ -2184,6 +2214,7 @@ impl Agent {
                 }
             }
         }
+        self.note_lock_subject();
         if !self.exec.dry_run() {
             self.persist_freeze_state();
         }
@@ -2212,6 +2243,7 @@ impl Agent {
             Request::Face => None,
             Request::Code { code } => Some(self.try_code(&subject, &code)),
             Request::Ask => Some(self.ask_from_lock(&subject).await),
+            Request::Snooze => Some(self.snooze_from_lock(&subject)),
         };
         // A code that worked takes the lock down right here.
         self.reconcile_lock().await;
@@ -2239,7 +2271,7 @@ impl Agent {
                 parentcode::Verdict::NotConfigured => {
                     "There's no unlock code on this computer yet.".to_string()
                 }
-                _ => "That code didn't work.".to_string(),
+                _ => lock::WRONG_CODE.to_string(),
             });
         }
         let minutes = lock::UNLOCK_MINUTES;
@@ -2268,6 +2300,64 @@ impl Agent {
             false,
         );
         Outcome::yes("Unlocked")
+    }
+
+    /// "Give me 15 more minutes" at the lock — for someone who set their own
+    /// limits, after the lock has been up a minute, three times a day.
+    /// Decided here, never by the lock UI: a child's lock can send the same
+    /// request and is refused.
+    fn snooze_from_lock(&mut self, user: &str) -> lock::socket::Outcome {
+        use lock::socket::Outcome;
+        use lock::{SnoozeRefusal, Stop};
+        let policy = self.policies.get(user).cloned().unwrap_or_default();
+        let own_rules = matches!(
+            self.stop_of(user, &policy),
+            Some(Stop::Limit { .. } | Stop::Bedtime { .. } | Stop::OutsideHours { .. })
+        );
+        let used = self.tracker.snoozes(user);
+        let check = lock::snooze_check(
+            self.is_self_set(user),
+            own_rules,
+            self.lock_waited(user),
+            used,
+        );
+        if let Err(why) = check {
+            tracing::warn!("snooze for {user} refused: {why:?}");
+            return Outcome::no(match why {
+                SnoozeRefusal::NotSelfSet => "Only a parent can add time here.",
+                SnoozeRefusal::NotTheirStop => "This stop isn't yours to skip.",
+                SnoozeRefusal::TooSoon => "In a moment — it opens after a minute.",
+                SnoozeRefusal::UsedUp => "That's today's extra time.",
+            });
+        }
+        let minutes = lock::SNOOZE_MINUTES;
+        let n = self.tracker.snooze(user, minutes, self.trusted_now);
+        if !self.exec.dry_run() {
+            self.tracker.save();
+        }
+        // Thaw now (the override makes the rules allow it); the lock comes
+        // down in the reconcile that follows every request.
+        self.lock.host().freeze(user, false, false);
+        self.frozen.remove(user);
+        self.pending_freeze.remove(user);
+        self.pending_events.push(Event::new(
+            EV_SCREEN_TIME_EARNED,
+            SEV_INFO,
+            json!({
+                "user": user,
+                "minutes": minutes,
+                "via": "self",
+                "today": n,
+                "of": lock::SNOOZES_PER_DAY,
+            }),
+        ));
+        self.notify_user(
+            Some(user),
+            &format!("{minutes} more minutes"),
+            "You gave yourself a little more time.",
+            false,
+        );
+        Outcome::yes("15 more minutes")
     }
 
     /// "Ask for more time" at the lock: the same request `ost ask` files.
@@ -2351,8 +2441,23 @@ impl Agent {
             .filter(|_| v.allowed)
             .and_then(|stop| next_warning(stop, now));
         let ts = |t: chrono::DateTime<chrono::Local>| t.to_rfc3339();
+        // Who sees what (the app window's honest footer), and today's rules.
+        let kind_of = |x: &str| self.kinds.get(x).map(String::as_str).unwrap_or("");
+        let sees = crate::glance::sees(kind_of(u), self.is_self_set(u));
+        let shared_sites = sees != crate::glance::Sees::TimeAppsSites
+            && self.policies.keys().any(|o| {
+                o != u
+                    && crate::glance::sees(kind_of(o), self.is_self_set(o))
+                        == crate::glance::Sees::TimeAppsSites
+            });
+        let weekday = chrono::Datelike::weekday(&now).num_days_from_sunday() as u8;
         json!({
             "name": u,
+            "self_managed": self.is_self_set(u),
+            "can_ask": !self.is_self_set(u) && self.bracket_of(u).can_request_time(),
+            "sees": sees,
+            "shared_sites": shared_sites,
+            "today": crate::glance::today(&p.screen_time, weekday),
             "used_minutes": self.tracker.used_minutes(u),
             "used_here_minutes": self.tracker.used_here_secs(u) / 60,
             "remaining_minutes": self.tracker.remaining_minutes(u, p),
@@ -3644,6 +3749,90 @@ mod tests {
         assert!(a.lock.shown().is_none());
         assert!(fake.w().log.is_empty(), "nothing done: {:?}", fake.w().log);
         assert!(ev.is_empty(), "no 'time ran out' for someone who wasn't on");
+    }
+
+    /// Stop mia at her limit, the lock up in front of her, the lock's
+    /// one-minute wait already over.
+    async fn stop_mia(a: &mut Agent) {
+        a.prev_active = Some(HashSet::new());
+        let r = reason(a);
+        let mut ev = Vec::new();
+        a.screen_time_lockout("mia", &r, &mut ev).await;
+        assert!(a.frozen.contains("mia"));
+        a.lock_since = Some((
+            "mia".into(),
+            Instant::now() - Duration::from_secs(lock::SNOOZE_WAIT_SECS + 1),
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_someone_who_set_their_own_limit_can_give_themselves_more() {
+        let (mut a, _fake) = agent_with_mia();
+        // A child: the lock offers "Ask for more time", never the snooze —
+        // and a lock that sends the snooze anyway is refused here.
+        a.kinds.insert("mia".into(), "kid".into());
+        stop_mia(&mut a).await;
+        let face = a.face_for("mia");
+        assert_eq!(face.snooze, lock::Snooze::Hidden);
+        assert_eq!(face.ask, lock::AskState::Ready);
+        let reply = a.on_lock_request(Request::Snooze).await;
+        assert!(!reply.result.unwrap().ok, "a child can't snooze");
+        assert!(a.frozen.contains("mia"), "still stopped");
+        assert!(a.tracker.peek_override("mia", a.trusted_now).is_none());
+
+        // An adult at the limit they set: the snooze, not the ask.
+        a.kinds.insert("mia".into(), "adult".into());
+        let face = a.face_for("mia");
+        assert_eq!(face.ask, lock::AskState::Hidden);
+        assert_eq!(face.snooze, lock::Snooze::Ready { left: 2 });
+        assert_eq!(
+            face.detail,
+            "You've used the 1 hour you set for today. Screens come back tomorrow."
+        );
+        assert!(!face.help.contains("parent") && !face.code_hint.contains("parent"));
+        for n in 1..=lock::SNOOZES_PER_DAY {
+            if n > 1 {
+                // The last 15 minutes ran out: stopped again.
+                a.trusted_now += chrono::Duration::minutes(16);
+                stop_mia(&mut a).await;
+            }
+            let reply = a.on_lock_request(Request::Snooze).await;
+            assert!(reply.result.unwrap().ok, "snooze {n} is allowed");
+            assert!(reply.face.is_none(), "the lock is down");
+            assert!(!a.frozen.contains("mia"));
+            assert!(a.tracker.peek_override("mia", a.trusted_now).is_some());
+            assert_eq!(a.tracker.snoozes("mia"), n);
+        }
+        let logged = a
+            .pending_events
+            .iter()
+            .filter(|e| e.ev_type == EV_SCREEN_TIME_EARNED)
+            .count();
+        assert_eq!(logged, 3, "each one is on the record");
+
+        // A fourth: that's today's extra time.
+        a.trusted_now += chrono::Duration::minutes(16);
+        stop_mia(&mut a).await;
+        assert!(matches!(
+            a.face_for("mia").snooze,
+            lock::Snooze::UsedUp { .. }
+        ));
+        let reply = a.on_lock_request(Request::Snooze).await;
+        assert!(!reply.result.unwrap().ok, "the fourth is refused");
+        assert!(a.frozen.contains("mia"));
+
+        // Too soon is refused too, even for an adult.
+        let (mut b, _fake) = agent_with_mia();
+        b.kinds.insert("mia".into(), "adult".into());
+        stop_mia(&mut b).await;
+        b.lock_since = Some(("mia".into(), Instant::now()));
+        assert!(matches!(
+            b.face_for("mia").snooze,
+            lock::Snooze::Wait { .. }
+        ));
+        let reply = b.on_lock_request(Request::Snooze).await;
+        assert!(!reply.result.unwrap().ok);
+        assert!(b.frozen.contains("mia"));
     }
 
     #[tokio::test]

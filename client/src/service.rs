@@ -11,13 +11,12 @@ const UNIT: &str = include_str!("../systemd/openscreentime-agent.service");
 const WATCHDOG_SERVICE: &str = include_str!("../systemd/openscreentime-watchdog.service");
 const WATCHDOG_TIMER: &str = include_str!("../systemd/openscreentime-watchdog.timer");
 const TRAY_UNIT: &str = include_str!("../systemd/openscreentime-tray.service");
-/// App-grid launcher for `ost app` (the on-device window) and its icon. Only
-/// installed on a GUI build — a headless agent has no window to launch.
+/// App-grid launcher for `ost app` (the on-device window) and its icons —
+/// the brand's app icon and its single-colour symbolic version, straight from
+/// brand/. Only installed on a GUI build: a headless agent has no window.
 const DESKTOP_ENTRY: &str = include_str!("../desktop/openscreentime.desktop");
-const DESKTOP_ICON: &str = include_str!("../desktop/openscreentime.svg");
-/// Autostart entry (opens `ost app` on login, so the device is never silent —
-/// GNOME has no usable tray). Distinct from the app-grid launcher above.
-const DESKTOP_AUTOSTART: &str = include_str!("../desktop/openscreentime-autostart.desktop");
+const DESKTOP_ICON: &str = include_str!("../../brand/app-icon.svg");
+const DESKTOP_ICON_SYMBOLIC: &str = include_str!("../../brand/app-icon-symbolic.svg");
 /// The companion's autostart: every desktop login, with or without a systemd
 /// user session (the tray user unit covers the ones with). Tray build only.
 const COMPANION_AUTOSTART: &str = include_str!("../desktop/openscreentime-companion.desktop");
@@ -40,8 +39,12 @@ const TRAY_UNIT_PATH: &str = "/etc/systemd/user/openscreentime-tray.service";
 /// anything to open their own window.
 const DESKTOP_ENTRY_PATH: &str = "/usr/share/applications/openscreentime.desktop";
 const DESKTOP_ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/apps/openscreentime.svg";
-/// System-wide autostart (every user's session), so the window opens on login.
-const DESKTOP_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-app.desktop";
+const DESKTOP_ICON_SYMBOLIC_PATH: &str =
+    "/usr/share/icons/hicolor/symbolic/apps/openscreentime-symbolic.svg";
+/// Where older versions opened the window at every login. The companion is
+/// the always-on piece now; the window opens from the launcher, from a
+/// notification, and once on first run — so this entry is removed.
+const RETIRED_APP_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-app.desktop";
 
 pub const BIN_TARGET: &str = "/usr/local/bin/openscreentime";
 /// Short alias, symlinked next to the binary. `ost time` is what a person (or
@@ -161,13 +164,17 @@ fn install_desktop_entry(exec: &Exec) {
         tracing::warn!("could not install app launcher {DESKTOP_ENTRY_PATH}: {e}");
         return;
     }
-    if let Err(e) = exec.write_file(DESKTOP_ICON_PATH, DESKTOP_ICON) {
-        tracing::warn!("could not install app icon {DESKTOP_ICON_PATH}: {e}");
+    for (path, body) in [
+        (DESKTOP_ICON_PATH, DESKTOP_ICON),
+        (DESKTOP_ICON_SYMBOLIC_PATH, DESKTOP_ICON_SYMBOLIC),
+    ] {
+        if let Err(e) = exec.write_file(path, body) {
+            tracing::warn!("could not install app icon {path}: {e}");
+        }
     }
-    // Autostart: open the window on login so the device shows something without
-    // the child having to hunt for it in the app grid.
-    if let Err(e) = exec.write_file(DESKTOP_AUTOSTART_PATH, DESKTOP_AUTOSTART) {
-        tracing::warn!("could not install app autostart {DESKTOP_AUTOSTART_PATH}: {e}");
+    // The window is no longer opened at every login (the companion is).
+    if !exec.dry_run() {
+        let _ = std::fs::remove_file(RETIRED_APP_AUTOSTART_PATH);
     }
     // Refresh the desktop database + icon cache so the entry shows up without a
     // relogin. Both are optional tools; a miss just means it appears next login.
@@ -183,7 +190,8 @@ fn install_desktop_entry(exec: &Exec) {
 fn remove_desktop_entry() {
     let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
     let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
-    let _ = std::fs::remove_file(DESKTOP_AUTOSTART_PATH);
+    let _ = std::fs::remove_file(DESKTOP_ICON_SYMBOLIC_PATH);
+    let _ = std::fs::remove_file(RETIRED_APP_AUTOSTART_PATH);
     let _ = std::fs::remove_file(COMPANION_AUTOSTART_PATH);
 }
 
@@ -410,7 +418,15 @@ fn desktop_setup_missing() -> bool {
             || differs(crate::lock::PAM_PATH, crate::lock::PAM_BODY));
     let companion =
         cfg!(feature = "tray") && differs(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART);
-    lock || companion
+    // The launcher and its icons as this build carries them (and no window
+    // opening at every login) — on a device that has the launcher at all.
+    let app = cfg!(feature = "gui")
+        && std::path::Path::new(DESKTOP_ENTRY_PATH).exists()
+        && (differs(DESKTOP_ENTRY_PATH, DESKTOP_ENTRY)
+            || differs(DESKTOP_ICON_PATH, DESKTOP_ICON)
+            || differs(DESKTOP_ICON_SYMBOLIC_PATH, DESKTOP_ICON_SYMBOLIC)
+            || std::path::Path::new(RETIRED_APP_AUTOSTART_PATH).exists());
+    lock || companion || app
 }
 
 /// `ost __refresh-units` (hidden): rewrite the stale units, set up what the
@@ -425,13 +441,16 @@ pub fn refresh_units() -> Result<()> {
         let exec = Exec::new(AgentCtx::new(false, false, 1));
         if cfg!(feature = "gui") {
             install_lock(&exec);
+            if std::path::Path::new(DESKTOP_ENTRY_PATH).exists() {
+                install_desktop_entry(&exec);
+            }
         }
         if cfg!(feature = "tray") {
             if let Err(e) = exec.write_file(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART) {
                 tracing::warn!("could not install {COMPANION_AUTOSTART_PATH}: {e}");
             }
         }
-        println!("set up the lock screen and the companion for this desktop build");
+        println!("set up the lock screen, the launcher and the companion for this desktop build");
     }
     if !stale.is_empty() {
         let ok = std::process::Command::new("systemctl")

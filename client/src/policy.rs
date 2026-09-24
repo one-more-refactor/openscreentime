@@ -154,6 +154,11 @@ pub struct UserPolicy {
     pub profile_kind: String,
     #[serde(default)]
     pub policy: Policy,
+    /// The person sets their own limits (an adult member, a self-managed
+    /// teen, a parent's own login). Absent from older servers: then only the
+    /// adult bracket counts as self-managed.
+    #[serde(default)]
+    pub self_managed: bool,
 }
 
 #[cfg(test)]
@@ -176,6 +181,7 @@ mod tests {
                 os_username: "vali".into(),
                 profile_kind: "kids".into(),
                 policy: Policy::default(),
+                self_managed: false,
             }],
             vpn: Some(VpnProfile {
                 id: Some("p1".into()),
