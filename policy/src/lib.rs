@@ -56,6 +56,11 @@ pub struct Policy {
     /// so older presets stay byte-identical.
     #[serde(default, skip_serializing_if = "AppBlocks::is_default")]
     pub blocks: AppBlocks,
+    /// A self-managed person's own site blocks and the hours they hold
+    /// (`/api/me/rules`). Absent = none; skipped on serialize when empty so
+    /// presets stay byte-identical.
+    #[serde(default, skip_serializing_if = "Focus::is_default")]
+    pub focus: Focus,
 }
 
 impl Default for Policy {
@@ -69,7 +74,29 @@ impl Default for Policy {
             lockdown: NetworkLockdown::default(),
             parent_pin_hash: None,
             blocks: AppBlocks::default(),
+            focus: Focus::default(),
         }
+    }
+}
+
+/// A self-managed person's own site blocks and the hours they hold — "sites I
+/// block for myself" and "my focus hours". The sites are blocked inside the
+/// focus hours and open again outside them; with no hours they are blocked
+/// all day, every day. What that means at a given moment is
+/// [`rules::focus_blocking`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Focus {
+    /// Domains the person blocks for themselves (subdomains included).
+    #[serde(default)]
+    pub sites: Vec<String>,
+    /// Focus hours: the window the sites are blocked in. `None` = all day.
+    #[serde(default)]
+    pub hours: Option<Window>,
+}
+
+impl Focus {
+    pub fn is_default(&self) -> bool {
+        self.sites.is_empty() && self.hours.is_none()
     }
 }
 
@@ -372,7 +399,7 @@ pub struct ScreenTime {
 /// An allowed window. `days` uses 0=Sunday .. 6=Saturday (matches the docs).
 /// A day with no window is unrestricted; `end` `"00:00"` is midnight; an end
 /// before the start crosses midnight. See [`rules`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     #[serde(default)]
     pub days: Vec<u8>,
@@ -504,6 +531,23 @@ mod tests {
         assert_eq!(p.blocks.apps, vec!["youtube"]);
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"blocks\""));
+    }
+
+    #[test]
+    fn focus_absent_by_default_and_round_trips() {
+        let p: Policy = serde_json::from_str("{}").unwrap();
+        assert!(p.focus.is_default());
+        assert!(!serde_json::to_string(&p).unwrap().contains("focus"));
+        let raw = r#"{ "focus": { "sites": ["reddit.com"],
+                       "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" } } }"#;
+        let p: Policy = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.focus.sites, vec!["reddit.com"]);
+        assert_eq!(p.focus.hours.as_ref().unwrap().start, "09:00");
+        let p2: Policy = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p2.focus, p.focus);
+        // Sites with no hours: blocked all day.
+        let p: Policy = serde_json::from_str(r#"{ "focus": { "sites": ["x.org"] } }"#).unwrap();
+        assert!(p.focus.hours.is_none());
     }
 
     #[test]

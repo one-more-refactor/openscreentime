@@ -304,7 +304,7 @@ fn open_registration() -> bool {
 
 /// First run is open while no account exists — with the setup code, when the
 /// server has one. After that it is closed (unless open registration is on).
-async fn ensure_first_run(st: &AppState, setup_token: Option<&str>) -> AppResult<()> {
+pub(crate) async fn ensure_first_run(st: &AppState, setup_token: Option<&str>) -> AppResult<()> {
     let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
         .fetch_one(&st.db)
         .await?;

@@ -144,7 +144,7 @@ pub async fn create_profile_for(
 
 /// The account's rules, creating them from the bracket preset if the account
 /// predates 0.4 and has none yet.
-async fn ensure_profile(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<Uuid> {
+pub(crate) async fn ensure_profile(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<Uuid> {
     if let Some(p) = acct.9 {
         return Ok(p);
     }
@@ -260,9 +260,15 @@ pub async fn settle_owner_login(
 /// 3. a **member** whose name is the login's name or display name — never a
 ///    parent: the agent declares these names, and a login linked to a parent
 ///    can ask for that parent's sign-in codes;
-/// 4. a new person of their own, named after the login, with a child's
-///    rules until a parent says otherwise (fail closed: an unknown login is
-///    never quietly unmanaged).
+/// 4. a new person of their own, named after the login, marked **unsorted**
+///    (`device_users.unsorted`: the Family page asks a parent to sort it
+///    under Devices → Who's who). On a child's computer they get a child's
+///    rules until a parent says otherwise (fail closed: an unknown login on
+///    a managed computer is never quietly unmanaged). On a parent's own
+///    computer — or re-linked by the startup backfill — they get the adult
+///    rules, which enforce nothing: that login may well be the parent's own,
+///    and a parent is never locked out of their computer by a guess. A parent
+///    assigns child rules deliberately.
 ///
 /// Always leaves `device_users.profile_id` equal to the person's rules.
 pub async fn link_os_user(
@@ -271,6 +277,27 @@ pub async fn link_os_user(
     device_id: Uuid,
     os_username: &str,
     os_display_name: Option<&str>,
+) -> AppResult<Uuid> {
+    link_os_user_as(
+        db,
+        tenant_id,
+        device_id,
+        os_username,
+        os_display_name,
+        false,
+    )
+    .await
+}
+
+/// [`link_os_user`]; `backfill`: re-linking a login that lost its person
+/// (startup), whose new person never gets enforcing rules by default.
+async fn link_os_user_as(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_id: Uuid,
+    os_username: &str,
+    os_display_name: Option<&str>,
+    backfill: bool,
 ) -> AppResult<Uuid> {
     let os_username = os_username.trim();
     if os_username.is_empty() {
@@ -290,6 +317,8 @@ pub async fn link_os_user(
     .fetch_optional(db)
     .await?;
 
+    // `None`: keep whatever the row says; `Some`: this call decided it.
+    let mut unsorted: Option<bool> = None;
     let account: AccountRow = match existing.flatten() {
         Some(id) => get_account(db, id, tenant_id).await?,
         None => {
@@ -321,12 +350,25 @@ pub async fn link_os_user(
                     .await?
                 }
             };
+            unsorted = Some(owner.is_none() && by_name.is_none());
             match (owner, by_name) {
                 (Some(id), _) => get_account(db, id, tenant_id).await?,
                 (None, Some(a)) => a,
                 // 4. A person of their own.
                 (None, None) => {
-                    let bracket = AgeBracket::Kid;
+                    let parents_computer: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM devices d
+                                          JOIN admins a ON a.id = d.owner_account_id
+                                         WHERE d.id = $1 AND a.role <> 'member')",
+                    )
+                    .bind(device_id)
+                    .fetch_one(db)
+                    .await?;
+                    let bracket = if backfill || parents_computer {
+                        AgeBracket::Adult
+                    } else {
+                        AgeBracket::Kid
+                    };
                     let pid = create_profile_for(db, tenant_id, bracket, display).await?;
                     let id: Uuid = sqlx::query_scalar(
                         "INSERT INTO admins (tenant_id, display_name, role, age_bracket,
@@ -360,11 +402,13 @@ pub async fn link_os_user(
 
     let profile_id = ensure_profile(db, &account).await?;
     sqlx::query(
-        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id,
+                                   unsorted)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6, false))
          ON CONFLICT (device_id, os_username)
          DO UPDATE SET account_id = $5,
                        profile_id = $4,
+                       unsorted = COALESCE($6, device_users.unsorted),
                        display_name = COALESCE(device_users.display_name, EXCLUDED.display_name)",
     )
     .bind(device_id)
@@ -372,6 +416,7 @@ pub async fn link_os_user(
     .bind(os_display_name)
     .bind(profile_id)
     .bind(account.0)
+    .bind(unsorted)
     .execute(db)
     .await?;
     Ok(account.0)
@@ -387,7 +432,9 @@ pub async fn backfill_links(db: &sqlx::PgPool) -> AppResult<()> {
     .fetch_all(db)
     .await?;
     for (tenant_id, device_id, user, display) in rows {
-        if let Err(e) = link_os_user(db, tenant_id, device_id, &user, display.as_deref()).await {
+        if let Err(e) =
+            link_os_user_as(db, tenant_id, device_id, &user, display.as_deref(), true).await
+        {
             tracing::warn!(error = %e, %device_id, %user, "could not link OS user to an account");
         }
     }
@@ -617,6 +664,13 @@ pub async fn patch_member(
             .await?;
         sync_device_users(&st, id, pid).await?;
     }
+
+    // A parent has looked at this person and decided something: their logins
+    // are sorted.
+    sqlx::query("UPDATE device_users SET unsorted = false WHERE account_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
 
     let row = get_account(&st.db, id, admin.tenant_id).await?;
     Ok(Json(json!({ "member": account_json(&row) })))
@@ -895,6 +949,11 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "display_name": acct.2,
         // The person's own goal (minutes/day), distinct from the parent cap.
         "goal_minutes": acct.12,
+        // They set their own rules (/api/me/rules): the hub for themselves,
+        // an adult, or someone who manages themselves.
+        "self_managed": manages_self(&acct),
+        // Sites they block for themselves and the hours those hold.
+        "focus": { "hours": policy.focus.hours, "sites": policy.focus.sites },
     })))
 }
 
@@ -920,6 +979,161 @@ pub async fn set_goal(
         .execute(&st.db)
         .await?;
     Ok(Json(json!({ "goal_minutes": goal })))
+}
+
+// ── my rules (self-control) ─────────────────────────────────────────────────
+//
+// An adult keeps time for themselves: their own daily limit, their focus
+// hours, the sites they block for themselves. The hub has the same page for
+// their own computer. These are the person's rules, stored as their own
+// policy and enforced by the agent like any other — and nobody else sees or
+// changes them (profiles::private_profile_ids).
+
+/// Whether a person sets their own rules: the hub for themselves, or a member
+/// who is an adult or manages themselves. Everyone else's rules are a
+/// parent's.
+pub fn manages_self(acct: &AccountRow) -> bool {
+    acct.4 != "member" || !bracket_of(acct).is_managed() || acct.8
+}
+
+fn rules_are_a_parents() -> AppError {
+    AppError::ForbiddenForMember("your rules are set by a parent".into())
+}
+
+/// The person's own profile, never a shared one: a preset, or a profile
+/// another account also uses, is copied first. Their logins end up on it.
+async fn own_profile(st: &AppState, acct: &AccountRow) -> AppResult<Uuid> {
+    let mut pid = ensure_profile(&st.db, acct).await?;
+    let (is_preset, shared): (bool, bool) = sqlx::query_as(
+        "SELECT p.is_preset,
+                EXISTS (SELECT 1 FROM admins o WHERE o.profile_id = p.id AND o.id <> $2)
+           FROM profiles p WHERE p.id = $1",
+    )
+    .bind(pid)
+    .bind(acct.0)
+    .fetch_one(&st.db)
+    .await?;
+    if is_preset || shared {
+        pid = sqlx::query_scalar(
+            "INSERT INTO profiles (tenant_id, name, kind, is_preset, policy)
+             SELECT tenant_id, $2, kind, false, policy FROM profiles WHERE id = $1
+             RETURNING id",
+        )
+        .bind(pid)
+        .bind(format!("{}'s rules", acct.2))
+        .fetch_one(&st.db)
+        .await?;
+        sqlx::query("UPDATE admins SET profile_id = $2 WHERE id = $1")
+            .bind(acct.0)
+            .bind(pid)
+            .execute(&st.db)
+            .await?;
+    }
+    // Every login of theirs on their own rules (a copy above, or a login a
+    // parent once pointed elsewhere).
+    let stray: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM device_users WHERE account_id = $1 AND profile_id <> $2)",
+    )
+    .bind(acct.0)
+    .bind(pid)
+    .fetch_one(&st.db)
+    .await?;
+    if stray {
+        sync_device_users(st, acct.0, pid).await?;
+    }
+    Ok(pid)
+}
+
+/// The three rules a person sets for themselves, read from their policy.
+fn my_rules_json(p: &Policy) -> Value {
+    json!({
+        "daily_limit_minutes": limit_minutes(p).unwrap_or(0),
+        "focus_hours": p.focus.hours,
+        "sites": p.focus.sites,
+    })
+}
+
+/// `GET /api/me/rules` — my daily limit, my focus hours, the sites I block
+/// for myself. 403 for a person whose rules are a parent's.
+pub async fn my_rules(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
+    let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
+    if !manages_self(&acct) {
+        return Err(rules_are_a_parents());
+    }
+    let policy = policy_for_account(&st.db, &acct).await?;
+    Ok(Json(my_rules_json(&policy)))
+}
+
+#[derive(Deserialize)]
+struct MyRulesReq {
+    /// 0 = no limit.
+    #[serde(default)]
+    daily_limit_minutes: i64,
+    /// None = the sites are blocked all day.
+    #[serde(default)]
+    focus_hours: Option<openscreentime_policy::Window>,
+    #[serde(default)]
+    sites: Vec<String>,
+}
+
+/// `PUT /api/me/rules` — replace my rules (the same shape `GET` returns).
+/// Validated with the shared rules semantics; the person's devices re-pull.
+pub async fn set_my_rules(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let req: MyRulesReq = serde_json::from_value(body)
+        .map_err(|e| AppError::BadRequest(format!("those rules don't read: {e}")))?;
+    let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
+    if !manages_self(&acct) {
+        return Err(rules_are_a_parents());
+    }
+    if req.daily_limit_minutes < 0 {
+        return Err(AppError::BadRequest(
+            "the daily limit can't be negative — 0 means no limit".into(),
+        ));
+    }
+    let limit = u32::try_from(req.daily_limit_minutes).unwrap_or(u32::MAX);
+    let pid = own_profile(&st, &acct).await?;
+
+    let mut tx = st.db.begin().await?;
+    let stored: Value = sqlx::query_scalar("SELECT policy FROM profiles WHERE id = $1 FOR UPDATE")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut p: Policy = serde_json::from_value(stored).unwrap_or_default();
+    p.screen_time.daily_limit_minutes = limit;
+    p.screen_time.enabled =
+        limit > 0 || !p.screen_time.schedule.is_empty() || p.screen_time.bedtime.is_some();
+    p.focus = openscreentime_policy::Focus {
+        sites: req.sites,
+        hours: req.focus_hours,
+    };
+    let normalized = crate::profiles::normalize_policy(
+        serde_json::to_value(&p).map_err(|e| AppError::Internal(e.into()))?,
+    )?;
+    let devices = crate::profiles::write_policy(&mut tx, pid, &normalized).await?;
+    tx.commit().await?;
+    crate::profiles::notify_devices(&st, devices).await?;
+
+    let saved: Policy = serde_json::from_value(normalized).unwrap_or_default();
+    // The trail says that it changed, never what: the hub reads events, and
+    // these rules are the person's own.
+    events::insert(
+        &st.db,
+        acct.1,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "own_rules_changed", "account_id": acct.0,
+                "daily_limit": limit_minutes(&saved).is_some(),
+                "focus_hours": saved.focus.hours.is_some(),
+                "sites": saved.focus.sites.len() }),
+    )
+    .await?;
+    Ok(Json(my_rules_json(&saved)))
 }
 
 /// `GET /api/me/history` — the last 14 days summed across the person's
@@ -1110,6 +1324,7 @@ pub fn member_allowed(path: &str) -> bool {
         || path == "/api/me/history"
         || path == "/api/me/where"
         || path == "/api/me/goal"
+        || path == "/api/me/rules"
         || path == "/api/me/ask"
         || path == "/api/catalog"
         || path.starts_with("/api/auth/")
@@ -1164,6 +1379,9 @@ mod tests {
         assert!(member_allowed("/api/me"));
         assert!(member_allowed("/api/me/today"));
         assert!(member_allowed("/api/me/ask"));
+        // An adult member keeps their own rules (the handler says no to a
+        // child).
+        assert!(member_allowed("/api/me/rules"));
         assert!(member_allowed("/api/catalog"));
         assert!(member_allowed("/api/auth/logout"));
         assert!(member_allowed("/api/auth/confirm"));

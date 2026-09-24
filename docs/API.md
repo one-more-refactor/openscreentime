@@ -69,7 +69,10 @@ for 2 minutes so in-flight requests and second tabs survive.
 and `owner_login` (the one the installer picked), and answers with `users:
 [{ os_username, person, parent }]`. Commands include **`login_code`**
 `{ request_id, name, os_users, code, purpose, site, expires_in_secs }` — show
-the code to exactly those OS logins (docs/AUTH.md).
+the code to exactly those OS logins (docs/AUTH.md). It is sent only to an
+agent that lists `"login_code"` in `features` (its `state` frame, or the
+heartbeat body's `features`); it is never redelivered, and never shown in
+`GET /api/devices/:id/commands`.
 
 Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
 `ost_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
@@ -136,7 +139,7 @@ self-updates from `/api/agent/latest` daily (agent.toml `auto_update = true` by 
 |--------|-------------------------------|-------------------------------------------------------------|
 | GET    | `/api/devices`                | list devices for tenant (+status, last_seen, users, per-device `online: bool`) |
 | GET    | `/api/devices/:id`            | detail incl. device_users, recent events, `online: bool`     |
-| POST   | `/api/devices`                | `{ name }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }` |
+| POST   | `/api/devices`                | `{ name, account_id? }` → creates `pending` device + 24 h TTL enroll token → `{ device, enroll_token }`; for a parent's own computer (`account_id` = a parent) `428` unless the confirm window is open |
 | PATCH  | `/api/devices/:id`            | rename, set `tamper_level`                                   |
 | POST   | `/api/devices/:id/enroll-token` | regenerate the one-time enroll token (fresh 24 h TTL) → `{ device, enroll_token }`; 409 unless status is `pending` |
 | POST   | `/api/devices/:id/lock`       | enqueue `lock` command → `{ command_id, queued: true, delivered: bool }` |
@@ -196,6 +199,48 @@ task_label, minutes, status, created_at, decided_at }` with `status` one of
 | GET    | `/api/profiles/:id`     |                                               |
 | PUT    | `/api/profiles/:id`     | update policy (presets are cloneable, editable); accepts optional `parent_pin` — omitted preserves the existing hash, empty string `""` clears it, non-empty (min 4 chars) sets a new hash |
 | DELETE | `/api/profiles/:id`     | custom only                                   |
+
+A self-managed person's own profile (an adult or `self_managed` member's
+rules, see "My rules" below) is not the hub's: `GET /api/profiles` and
+`/api/family` leave it out, and `GET|PUT|DELETE /api/profiles/:id` on it →
+`403 forbidden_for_member` "their rules are their own".
+
+At startup the server opens any pre-0.6 closed-network profile
+(`dns.mode` or `firewall.mode` = `default_deny`) to `allow_all` (+ the `*`
+allowlist, no outbound port list), keeping every block, and bumps its
+`updated_at` so agents re-pull. Idempotent.
+
+## My rules (self-control)
+
+The hub for themselves, and any adult or `self_managed` member, sets their own
+rules. A managed child or teen → `403 forbidden_for_member` "your rules are set
+by a parent". Member sessions may reach both routes.
+
+| Method | Path            | Notes |
+|--------|-----------------|-------|
+| GET    | `/api/me/rules` | `{ daily_limit_minutes, focus_hours, sites }` |
+| PUT    | `/api/me/rules` | same shape in (a full replace), the normalized rules out |
+
+```jsonc
+{
+  "daily_limit_minutes": 180,          // 0 = no limit; ≤ 1440
+  "focus_hours": {                     // null = the sites are blocked all day
+    "days": [1,2,3,4,5], "start": "09:00", "end": "12:00"
+  },
+  "sites": ["reddit.com", "youtube.com"]  // lower-cased, deduped; ≤ 200
+}
+```
+
+Stored in the person's own profile (a preset or shared profile is copied first):
+`screen_time.daily_limit_minutes` (+ `enabled`), and `policy.focus =
+{ sites, hours }`. Focus hours read exactly like allowed hours (`00:00` end =
+midnight, `00:00 – 00:00` = all day, an end before the start crosses midnight);
+a window that can't mean anything → `400` with a plain message, as does a site
+that isn't a domain. Their devices get `apply_policy`; the agent enforces it
+like any policy. The audit event (`member`, `own_rules_changed`) records that
+it changed — `daily_limit`/`focus_hours` as booleans and a count of `sites` —
+never the sites themselves. `GET /api/me/today` adds `self_managed` and
+`focus: { hours, sites }`.
 
 ## Discovery
 
@@ -338,9 +383,17 @@ This is the single most important shared type. Server stores it, web edits it, a
       "enabled": true,
       "unlock_challenge": "math"      // "math" | "wait" | "parent_pin"
     }
+  },
+  "focus": {                          // optional; a self-managed person's own (/api/me/rules)
+    "sites": ["reddit.com"],          // blocked for themselves…
+    "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }  // …inside these; null = all day
   }
 }
 ```
+
+`focus` is absent when empty. The agent adds `focus.sites` to the host's
+blocks while `rules::focus_blocking` holds and removes them when the window
+ends; a focus window never stops a screen.
 
 Every component MUST treat unknown fields leniently (forward-compat). The Rust side models this
 with `#[serde(default)]` on optional sub-objects.
@@ -379,7 +432,7 @@ with `#[serde(default)]` on optional sub-objects.
 - `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],
   apps:[{id,name,category,has_native_client}] }`.
 - **Member sessions** may reach only `/api/me`, `/api/me/today`, `/api/me/ask`,
-  `/api/catalog`, `/api/auth/*` (and a few more `/api/me/*` reads). Anything else under `/api/` →
+  `/api/me/rules`, `/api/catalog`, `/api/auth/*` (and a few more `/api/me/*` reads). Anything else under `/api/` →
   `403 forbidden_for_member` (a layer; fails closed for new routes).
 
 **Unlock code (per-device TOTP) and recovery codes.** The secret behind the
@@ -424,10 +477,15 @@ linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
 the account fields plus `name, used_minutes, earned_minutes, limit_minutes,
 profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
 os_username}], pending_requests, locked, blocks, blocked_apps, can_ask, managed`.
+For an adult or `self_managed` member the hub gets their minutes but not their
+rules: `limit_minutes`, `left_minutes` and `rules` are null, `blocks` and
+`blocked_apps` empty, and their profile is not in `profiles`.
 
 ### `POST /api/device-users/{id}/assign-account` (0.4)
 
 Body `{ "account_id": "<uuid>" }`. Moves an OS login to another person in the
 household; the login takes that person's rules (`profile_id` follows) and the
-agent is told to re-pull. Step-up gated like every mutation. Use it when
-enrollment linked a second adult's login on a child's laptop to the child.
+agent is told to re-pull. Needs the confirm window (`428` without). Pointing
+a login at the computer's owner makes it the owner's login
+(`devices.owner_os_username`) — how a parent settles theirs on their own
+computer.

@@ -28,6 +28,12 @@ pub const CMD_LOGIN_CODE: &str = "login_code";
 /// enforcement summary), so a parent can see the client is alive and working.
 pub const CMD_PING: &str = "ping";
 
+/// What this agent understands beyond the basics, declared in every `state`
+/// frame and heartbeat. The server sends a sign-in code only to an agent that
+/// lists `login_code`; agents from before it said nothing, and would only
+/// have failed the command.
+pub const FEATURES: &[&str] = &[CMD_LOGIN_CODE];
+
 /// Event types the agent emits (DATA_MODEL.md → `events.type`; `heartbeat` and
 /// `enrolled` also exist but are written server-side, never by the agent).
 pub const EV_TAMPER: &str = "tamper";
@@ -210,4 +216,7 @@ pub struct DeviceState {
     pub agent_version: String,
     /// Local, active seat users right now.
     pub active_users: Vec<String>,
+    /// [`FEATURES`].
+    #[serde(default)]
+    pub features: Vec<String>,
 }

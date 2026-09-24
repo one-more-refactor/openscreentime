@@ -85,7 +85,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     let cmd_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT c.device_id, c.type FROM commands c
            JOIN devices d ON d.id = c.device_id
-          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent')
+          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent') AND c.type <> 'login_code'
           ORDER BY c.created_at",
     )
     .bind(admin.tenant_id)
@@ -98,7 +98,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
 
     // 5. Profiles (the rules editor needs the full list), as JSON and as a
     //    policy map for limits/blocks.
-    let profiles = crate::profiles::list_for_tenant(&st.db, admin.tenant_id).await?;
+    //    A self-managed person's own rules are not in it (list_for_tenant):
+    //    their limit, focus hours and blocked sites are theirs alone.
+    let profiles =
+        crate::profiles::list_for_tenant(&st.db, admin.tenant_id, admin.admin_id).await?;
     let mut policies: HashMap<Uuid, Policy> = HashMap::new();
     if let Some(list) = profiles.as_array() {
         for p in list {
@@ -134,8 +137,20 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }
     }
 
-    // Devices, with liveness, pending chips and spare keys folded in.
+    // Devices, with liveness, pending chips and spare keys folded in — and
+    // how many of their logins nobody has said who they are (Who's who).
     let recovery = crate::devices::recovery_unused_by_device(&st.db, admin.tenant_id).await?;
+    let unsorted: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT du.device_id, count(*) FROM device_users du
+           JOIN devices d ON d.id = du.device_id
+          WHERE d.tenant_id = $1 AND du.unsorted
+          GROUP BY du.device_id",
+    )
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
     let mut devices_json = Vec::with_capacity(device_rows.len());
     let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
     for r in &device_rows {
@@ -146,6 +161,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         let lp = lock_pending(&p, r.14.as_ref());
         d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
+        d["unsorted_logins"] = json!(unsorted.get(&r.0).copied().unwrap_or(0));
         device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lp));
         devices_json.push(d);
     }
@@ -218,6 +234,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .into_iter()
         .map(|c| {
             let bracket = members::bracket_of(&c.account);
+            // An adult (or anyone who manages themselves) sets their own
+            // rules, and the hub doesn't see them: their policy isn't in
+            // `policies` (it was dropped with the profile list), so the limit,
+            // the stop, and the blocks all come out empty. Minutes stay.
             let policy = c.account.9.and_then(|p| policies.get(&p));
             let limit = policy.and_then(members::limit_minutes);
             let profile_name = c

@@ -36,8 +36,10 @@ pub struct MintVoucherReq {
 ///
 /// The voucher is bound to the **account** behind `os_username`
 /// (`device_users.account_id`). A parent is only vouched for from a computer
-/// declared as theirs — root on a shared kid laptop must not mint a parent
-/// session.
+/// declared as theirs, and there only for **the owner's login**
+/// (`devices.owner_os_username`) — root on a shared kid laptop must not mint a
+/// parent session, and neither may a child's login that an older server
+/// linked to the parent on the parent's own computer.
 pub async fn mint(
     State(st): State<AppState>,
     agent: crate::state::AgentAuth,
@@ -63,11 +65,14 @@ pub async fn mint(
     };
     let (role, own_device): (String, bool) = sqlx::query_as(
         "SELECT a.role,
-                EXISTS (SELECT 1 FROM devices d WHERE d.id = $2 AND d.owner_account_id = a.id)
+                EXISTS (SELECT 1 FROM devices d
+                         WHERE d.id = $2 AND d.owner_account_id = a.id
+                           AND lower(d.owner_os_username) = lower($3))
            FROM admins a WHERE a.id = $1",
     )
     .bind(account_id)
     .bind(agent.device_id)
+    .bind(&os_username)
     .fetch_one(&st.db)
     .await?;
     if role != "member" && !own_device {
@@ -143,6 +148,28 @@ pub async fn redeem(
     let role = role.ok_or_else(|| AppError::Unauthorized("no account on this household".into()))?;
 
     let token = insert_session(&st.db, account_id, tenant_id, VOUCHER_SESSION_DAYS, true).await?;
+    // A new session is security-relevant, like every other sign-in: a
+    // parent's is phoned out (critical) — it opens with the confirm window
+    // open, so a computer that shouldn't vouch for them is never silent. A
+    // child's `ost login` on their own laptop is logged, not phoned.
+    let display: String = sqlx::query_scalar("SELECT display_name FROM admins WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(&st.db)
+        .await?;
+    let _ = crate::events::insert(
+        &st.db,
+        tenant_id,
+        Some(device_id),
+        None,
+        "account_login",
+        if role == "member" { "info" } else { "critical" },
+        json!({
+            "message": format!("New web sign-in as {display} from this computer (ost login)."),
+            "account_id": account_id,
+            "via": "device_voucher",
+        }),
+    )
+    .await;
     Ok((
         jar.add(session_cookie(token, st.cookie_secure)),
         Json(json!({

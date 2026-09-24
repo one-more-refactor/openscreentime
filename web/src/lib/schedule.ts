@@ -27,7 +27,7 @@ export function parseHm(s: string): number | null {
 }
 
 /** start/end as a span, end in 1..1440 (00:00 = midnight); null if empty. */
-function span(start: string, end: string): [number, number] | null {
+export function span(start: string, end: string): [number, number] | null {
   const s = parseHm(start);
   const e0 = parseHm(end);
   if (s === null || e0 === null) return null;
