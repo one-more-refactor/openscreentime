@@ -3,10 +3,11 @@
 The design of the surfaces that run on the managed computer: the app window
 with its first-run cards (`ost app`, `app.rs`), the lock (`lock/`), and the
 tray + notifications (`tray.rs`). It extends [`DESIGN.md`](DESIGN.md) — the
-ring language — onto the Rust/egui client.
+ring language — onto the Rust/egui client; behaviour and words are
+`PRODUCT.md`'s (see `docs/README.md`).
 
-> **Status (the house clock).** The brand board (`brand/board.html`, section
-> 05) supersedes this doc where they differ, and the client is built to it:
+> **Status (the house clock).** The client is built to the brand board
+> (`brand/board.html`, section 05):
 > the ring has its tick at 12 and the board's geometry (`ui::ring`,
 > `mark.rs`); the lock is the ring completed with "0 · min left" inside for
 > every stop — no padlock, moon or other glyph — except a parent's pause (the
@@ -14,7 +15,8 @@ ring language — onto the Rust/egui client.
 > ships as static Regular/Medium/SemiBold/Bold/ExtraBold; the first run is a
 > state of the app window, not a separate one; there is no wind-down overlay
 > or challenge (warnings are notifications, `warn.rs`). Sections 3–6 below
-> describe the retired `lockout.rs`/`intro.rs` and are kept as history.
+> are the pre-board design of the old full-screen overlay and intro window
+> (both gone; today: `lock/screen.rs`, `app.rs`), kept as history.
 
 > **One idea, carried to the last screen.** *Time is a ring you fill.* The same
 > ring that shows a child how much of the day is left is the ring that fills to
@@ -26,11 +28,9 @@ ring language — onto the Rust/egui client.
 
 ## 0. Tokens as egui constants
 
-Replace the approximate constants currently in `app.rs`, `lockout.rs` and
-`intro.rs` (they drifted — `0xf5f5f4` paper, `0x1a1a1a` ink, gray lines) with
-the real palette. One shared block, ideally lifted into a small `client/src/ui.rs`
-(or `theme.rs`) module and `use`d by all four surfaces so they can never diverge
-again.
+The client's constants live in one block, `client/src/ui.rs`, shared by the app
+window and the lock so they can't diverge (the ring's track is `LINE_2` on
+paper, `LINE` on a card — the board's tokens; the table below predates that).
 
 ```rust
 // OpenScreenTime — the ring language, as egui tuples. Verbatim from DESIGN.md §2.
@@ -246,7 +246,7 @@ detail "It'll pick up in a moment.", the button disabled. No red, no stack trace
 
 ---
 
-## 3. Wind-down — the save-your-work countdown (`lockout.rs`, `deadline`)
+## 3. Wind-down — the save-your-work countdown (retired overlay)
 
 The amber bridge before a stop. It is a full-screen surface (the grace runs while
 the session is still usable, but the overlay is up so the warning can't be
@@ -287,7 +287,7 @@ keep it. For little/kid, the shorter detail. The wind-down **notification**
 
 ---
 
-## 4. Hard-stop lock (`lockout.rs` `LockApp`)
+## 4. Hard-stop lock (pre-board; today `lock/screen.rs`)
 
 **Art direction, one sentence:** the day's ring, drawn full and closed, centered
 on warm paper, with the reason said plainly in a real sans and one calm way back
@@ -345,7 +345,7 @@ only its color hardens amber→red; don't re-draw it.
 
 ---
 
-## 5. The challenge / parent-code entry (`lockout.rs` `challenge`)
+## 5. The challenge / parent-code entry (retired; the code field is `lock/screen.rs`)
 
 Below the reason, only when there is a way back. Four challenge shapes plus the
 always-available parent code. All sentence case, calm, firm.
@@ -398,7 +398,7 @@ the ink button fill with BRAND, and add the 240ms ring-flash on the
 
 ---
 
-## 6. First-run intro (`intro.rs`)
+## 6. First-run intro (retired window; the cards are `app.rs`)
 
 560×380. The child's documentation as a few honest cards. The ring becomes the
 **progress indicator**: a small ring, top, that fills one segment per card — you

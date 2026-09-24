@@ -4,18 +4,17 @@
 > computer itself**: the app window and its first-run cards
 > (`client/src/app.rs`), the lock (`client/src/lock/`), and the notifications +
 > tray (`client/src/tray.rs`). The look is the brand board
-> (`brand/board.html`, section 05); where this doc and the board disagree, the
-> board wins.
+> (`brand/board.html`, section 05).
 >
 > This is the most emotionally loaded surface in the product — it is the thing
 > that tells a child *your time is up*. It builds **on** the product design
 > language (`docs/DESIGN.md`: "time is a ring you fill"; green healthy / amber
 > transition / red the one stop; Figtree; sentence case), obeys the product
 > vocabulary (`docs/PRODUCT.md` §4: one word per concept), and keeps the honesty
-> contract (`docs/OPENSCREENTIME.md`: "when it stops, it says it stopped";
-> `docs/TRANSPARENCY.md`: what it can and can't see). Where this doc gives
-> strings and `DESIGN.md`/`PRODUCT.md` give the rule, the rule wins; this doc is
-> the words that fill it.
+> contract (`docs/PRODUCT.md`: "when it stops, it says it stopped";
+> `docs/TRANSPARENCY.md`: what it can and can't see). Behaviour and words are
+> owned by `docs/PRODUCT.md` (see `docs/README.md`); this doc is the voice
+> around them.
 >
 > **Scope note for engineers:** the ALL-CAPS strings this doc once listed are
 > gone from the client. The words that ship are in the code: the lock's in
@@ -41,11 +40,11 @@ of them:
   is the web app. On the device, the child is the user.
 - **It is a clock, not an alarm.** A full ring is *normal* (`DESIGN.md` §1). The
   app is quiet almost all the time and only speaks when a human needs to act
-  (`OPENSCREENTIME.md`: "silent unless a human is needed"). It never re-engages,
+  (`PRODUCT.md`: "silent unless a human is needed"). It never re-engages,
   never nags, never gamifies attention back onto the screen.
 - **It is honest to a fault.** It never softens the stop into a euphemism, and it
   never overstates what it sees. The stop is firm; the tone is kind; the facts
-  are exact. When it stops, it says it stopped (`OPENSCREENTIME.md` §Enforcement).
+  are exact. When it stops, it says it stopped (`PRODUCT.md` §Enforcement).
 
 ---
 
@@ -63,7 +62,7 @@ of them:
 2. **Plain words, no euphemism, no cop.** When it stops, it says *stop* — not
    "session suspended", not "access restricted", not "you've been locked out for
    violating." A child understands "your time is up for today." We never dress the
-   stop as a system event or a punishment. (`OPENSCREENTIME.md`: "Plain words:
+   stop as a system event or a punishment. (`PRODUCT.md`: "Plain words:
    when it stops, it says it stopped." `PRODUCT.md` §4: retire "lockout",
    "restricted", "frozen" from anything a person reads.)
 
@@ -93,9 +92,9 @@ rule: **younger = fewer words, warmer, no jargon, no autonomy it doesn't have;
 older = plainer, more data, more agency, less hand-holding.** The *fact* never
 changes across brackets — only the framing.
 
-| Bracket (from `OPENSCREENTIME.md`) | Voice | What changes |
+| Bracket (from `PRODUCT.md`) | Voice | What changes |
 |---|---|---|
-| **0–6 Little** | Warmest, shortest, concrete. No numbers a 6-year-old can't read, no "request", no jargon. A grown-up handles everything. | "All done for today. Time to do something else!" No "ask for more" UI (`OPENSCREENTIME.md`: no request UI for Little). No wind-down math. |
+| **0–6 Little** | Warmest, shortest, concrete. No numbers a 6-year-old can't read, no "request", no jargon. A grown-up handles everything. | "All done for today. Time to do something else!" No "ask for more" UI (`PRODUCT.md`: no request UI for Little). No wind-down math. |
 | **6–12 Kid** | Warm and encouraging, simple sentences, second person. Can ask for more and earn time. | "That's it for today. Want more? Ask a parent, or earn a few minutes." Full "Ask for more time." Wind-down is gentle: "2 minutes left — good time to save." |
 | **12–16 Younger teen** | Calm, matter-of-fact, respectful. Own stats, goals, a real wind-down countdown. Less cheer. | "Time's up for today — 90 of 90 minutes used. Screen pauses in 60s — save your work." Shows the numbers. |
 | **16–18 Older teen** | Plain and peer-level. Mostly self-set goals; a stop only where a parent capped. Zero cheerleading, zero condescension. | "Time's up — you've hit today's limit. 60s to save." Treats them as an adult who chose most of this. |
@@ -211,10 +210,10 @@ shifting toward amber. No countdown for Little (a grown-up manages it).
 - Kid: **"Saving your work — screen pauses in 45s."**
 - Teen+: **"Screen pauses in 45s — save your work."**
 
-(Keeps the existing `lockout.rs` amber line "Saving your work — pausing in {n}s";
-this is the canonical wording.)
+(The save-your-work countdown is now a notification from the companion —
+`warn.rs` — not an on-screen overlay.)
 
-### 4.3 The hard stop (the full-screen `lockout.rs`)
+### 4.3 The hard stop (the lock, `client/src/lock/`)
 
 The heart of the product. The stop reason is generated from `LockReason` in
 `enforce/screentime.rs` (`headline()` + `detail()`) and by `runner.rs lock_copy`,
@@ -242,7 +241,7 @@ Design notes on the stop screen:
   when a code can open it, **"OK"** for a plain acknowledgement (bedtime,
   outside-hours where nothing to do), or the earn/ask path where that exists.
   Never "CONTINUE" in caps.
-- **The unlock-code prompt** (the parent-present escape). Keep the good `lockout.rs`
+- **The unlock-code prompt** (the parent-present escape). Keep the good old
   faint-label pattern; the words:
   - Label: **"A parent's unlock code"** — sub: "From the console, or a recovery code."
   - Field hint: **"123 456"** (Space Mono — the one place mono survives,
@@ -340,7 +339,7 @@ OpenScreenTime" leads to the same promise, never to a marketing line.
 ## 5. Notifications voice (freedesktop / `notify-rust`)
 
 Fire on **state transitions only**, never on a timer, never to re-engage
-(`tray.rs notify_transitions`; `OPENSCREENTIME.md`: "silent unless a human is
+(`tray.rs notify_transitions`; `PRODUCT.md`: "silent unless a human is
 needed"). Title = the fact in a few words, sentence case; body = what it means or
 what to do next. `appname` is always **"OpenScreenTime"** (never
 "OPENSCREENTIME"). Critical urgency only for a genuine interrupt (imminent freeze,
@@ -402,7 +401,7 @@ product, and each would break the identity in §1.
   badges, XP, or mascots celebrating that you stopped. Earning time is a *plain
   transaction* (a task for minutes), not a game loop. Encouragement lives in the
   calm ring and the honest number, not in dopamine theatre
-  (`OPENSCREENTIME.md`: "No mascot, no confetti storms").
+  (`PRODUCT.md`: "No mascot, no confetti storms").
 - **Guilt & shame.** Never "you've been on too long", "again?", "you always do
   this." The app reports facts and offers a next step. It has no opinion about the
   person's worth. A stop is "that's it for today", not a reprimand.
@@ -415,7 +414,7 @@ product, and each would break the identity in §1.
 - **Euphemism that hides the stop.** The opposite failure, and just as
   forbidden. No "session paused for wellness", no "you've reached a great
   stopping point!" pretending the limit was the child's idea, no burying "your
-  time is up" under cheer. When it stops, it says *stop* (`OPENSCREENTIME.md`).
+  time is up" under cheer. When it stops, it says *stop* (`PRODUCT.md`).
   Kindness is in the tone and the next step — never in obscuring the fact.
 - **Overstated power.** Never imply it sees more than it does ("we're always
   watching", "we know what you did"). That would be a lie and a betrayal of the
