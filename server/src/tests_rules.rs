@@ -302,6 +302,98 @@ async fn an_adults_rules_are_theirs_and_the_hub_cannot_see_them() {
     env.drop_db().await;
 }
 
+/// The login `name` on `device`, tied to `account` (the linking heuristics
+/// aren't what these tests are about).
+async fn login_of(env: &Env, device: Uuid, name: &str, account: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "UPDATE device_users SET account_id = $3
+          WHERE device_id = $1 AND os_username = $2 RETURNING id",
+    )
+    .bind(device)
+    .bind(name)
+    .bind(account)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap()
+}
+
+async fn events_as(env: &Env, who: &AuthAdmin, device: Option<Uuid>) -> Vec<Value> {
+    let got = crate::events::list_events(
+        State(env.st.clone()),
+        clone(who),
+        axum::extract::Query(crate::events::EventsQuery {
+            device_id: device,
+            r#type: None,
+            severity: None,
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    got["events"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn an_adults_moments_are_theirs_the_hub_sees_minutes_only() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    let (jonas, _) = adult_member(&env, tenant, "Jonas").await;
+    let desk = env
+        .computer(tenant, Some(jonas), &["jonas"], None, None)
+        .await;
+    let jonas_login = login_of(&env, desk, "jonas", jonas).await;
+    let mia = env.member(tenant, "Mia").await;
+    let laptop = env.computer(tenant, Some(mia), &["mia"], None, None).await;
+    let mia_login = login_of(&env, laptop, "mia", mia).await;
+    let (_, as_hub) = session_for(&env, philip, tenant).await;
+    let (_, as_jonas) = session_for(&env, jonas, tenant).await;
+
+    let db = &env.st.db;
+    let ev = |device, login, etype: &'static str, severity: &'static str| {
+        crate::events::insert(db, tenant, Some(device), login, etype, severity, json!({}))
+    };
+    ev(desk, Some(jonas_login), "screen_time_exceeded", "info")
+        .await
+        .unwrap();
+    ev(desk, Some(jonas_login), "app_blocked", "info")
+        .await
+        .unwrap();
+    // The computer's own event: no login, about the machine.
+    ev(desk, None, "tamper", "warn").await.unwrap();
+    ev(laptop, Some(mia_login), "screen_time_exceeded", "info")
+        .await
+        .unwrap();
+
+    let from = |evs: &[Value], login: Uuid| {
+        evs.iter()
+            .filter(|e| e["device_user_id"] == login.to_string())
+            .count()
+    };
+
+    // The hub: Mia's moments, the computer's own — none of Jonas's.
+    let all = events_as(&env, &as_hub, None).await;
+    assert_eq!(from(&all, jonas_login), 0, "{all:?}");
+    assert_eq!(from(&all, mia_login), 1);
+    assert!(all.iter().any(|e| e["type"] == "tamper"));
+    let on_desk = events_as(&env, &as_hub, Some(desk)).await;
+    assert_eq!(on_desk.len(), 1);
+    assert_eq!(on_desk[0]["type"], "tamper");
+    // …and not through the computer's own page either.
+    let page = crate::devices::get_device(State(env.st.clone()), clone(&as_hub), Path(desk))
+        .await
+        .unwrap()
+        .0;
+    let recent = page["recent_events"].as_array().unwrap();
+    assert_eq!(from(recent, jonas_login), 0, "{recent:?}");
+    assert_eq!(recent.len(), 1);
+
+    // Jonas is never hidden from himself.
+    let his = events_as(&env, &as_jonas, Some(desk)).await;
+    assert_eq!(from(&his, jonas_login), 2);
+    env.drop_db().await;
+}
+
 #[tokio::test]
 async fn own_rules_never_land_on_a_shared_profile() {
     let Some(env) = Env::new().await else { return };

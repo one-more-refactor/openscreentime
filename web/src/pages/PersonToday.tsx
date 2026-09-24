@@ -253,13 +253,15 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
 
   // The moments that mattered on their computers. Events are per computer, so
   // on a shared one they include a sibling's — keep this person's own and the
-  // computer-wide ones (a tamper has no login).
+  // computer-wide ones (a tamper has no login). Someone keeping their own time
+  // has no moments here: a parent sees their minutes, and that's all (the
+  // server leaves their events out too).
   const idsKey = devices
     .map((d) => d.id)
     .sort()
     .join(",");
   useEffect(() => {
-    if (!idsKey) {
+    if (!idsKey || own) {
       setEvents([]);
       return;
     }
@@ -271,7 +273,7 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
     return () => {
       alive = false;
     };
-  }, [idsKey]);
+  }, [idsKey, own]);
 
   return (
     <>
@@ -311,7 +313,7 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
       <Computers
         devices={devices}
         name={child.name}
-        events={events.filter((e) => e.device_user_id === null || duIds.has(e.device_user_id))}
+        events={own ? [] : events.filter((e) => e.device_user_id === null || duIds.has(e.device_user_id))}
       />
       <Keys devices={devices} name={child.name} />
     </>

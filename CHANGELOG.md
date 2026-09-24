@@ -99,6 +99,11 @@ for just themselves; and the server looks after itself.
   "apps and sites" to everyone; a parent sees an older teen's apps only. The
   page now says what the server returns in `parent_sees` — the same rule
   that decides what the parent's view shows.
+- **An adult's page shows a parent their minutes, and that's all.** Their
+  moments (time's up, a blocked app, a code typed) showed on the person page.
+  The server now leaves events under an adult's or self-managed person's
+  login out of `/api/events` and a computer's `recent_events` for everyone
+  but them, and the page no longer asks.
 
 ### Upgrading
 
