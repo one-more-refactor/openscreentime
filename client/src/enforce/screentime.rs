@@ -78,6 +78,9 @@ pub struct Elsewhere {
     pub used_secs: u64,
     #[serde(default)]
     pub earned_secs: u64,
+    /// The server's record of grants to THIS login today (see `day_for`).
+    #[serde(default)]
+    pub earned_here_secs: u64,
 }
 
 /// Outcome of a parent grant.
@@ -251,12 +254,13 @@ impl UsageTracker {
         }
     }
 
-    fn elsewhere_of(&self, user: &str) -> (u64, u64) {
+    /// Today's report from the server for `user`, if it is for today.
+    fn elsewhere_of(&self, user: &str) -> Elsewhere {
         self.elsewhere
             .get(user)
             .filter(|e| e.day.is_some() && e.day == self.day)
-            .map(|e| (e.used_secs, e.earned_secs))
-            .unwrap_or((0, 0))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Seconds used on this device today.
@@ -265,11 +269,16 @@ impl UsageTracker {
     }
 
     /// The person's whole day: this device plus their other computers.
+    /// Grants on this login are the larger of what this device applied and
+    /// what the server has on record (it credits its ledger when the parent
+    /// grants, before the command arrives) — the larger, never the sum.
     pub fn day_for(&self, user: &str) -> rules::Day {
-        let (used_else, earned_else) = self.elsewhere_of(user);
+        let e = self.elsewhere_of(user);
+        let earned_here =
+            u64::from(self.earned_secs.get(user).copied().unwrap_or(0)).max(e.earned_here_secs);
         rules::Day {
-            used_secs: self.used_here_secs(user) + used_else,
-            earned_secs: u64::from(self.earned_secs.get(user).copied().unwrap_or(0)) + earned_else,
+            used_secs: self.used_here_secs(user) + e.used_secs,
+            earned_secs: earned_here + e.earned_secs,
         }
     }
 
@@ -600,7 +609,7 @@ mod tests {
             Elsewhere {
                 day: Some(now.date_naive()),
                 used_secs: 40 * 60,
-                earned_secs: 0,
+                ..Default::default()
             },
         );
         // 20 here + 40 on the other laptop = the whole hour.
@@ -617,13 +626,36 @@ mod tests {
             Elsewhere {
                 day: Some(now.date_naive() - chrono::Days::new(1)),
                 used_secs: 60 * 60,
-                earned_secs: 0,
+                ..Default::default()
             },
         );
         assert_eq!(t2.used_minutes("kid"), 0);
         // And a new day drops it.
         t.roll_to(now.date_naive() + chrono::Days::new(1));
         assert_eq!(t.used_minutes("kid"), 0);
+    }
+
+    #[test]
+    fn own_grants_are_the_larger_of_device_and_server_never_the_sum() {
+        let mut t = UsageTracker::new();
+        let now = local(0, 17, 0);
+        t.roll_to(now.date_naive());
+        let here = |earned_here_secs| Elsewhere {
+            day: Some(now.date_naive()),
+            earned_here_secs,
+            ..Default::default()
+        };
+        // The server credited +15 before the command arrived.
+        t.set_elsewhere("kid", here(15 * 60));
+        assert_eq!(t.earned_minutes("kid"), 15);
+        // The command lands: still 15, not 30.
+        t.grant("c1", "kid", 15, now.with_timezone(&Utc));
+        assert_eq!(t.earned_minutes("kid"), 15);
+        // A device that lost its ledger still knows its grants.
+        let mut fresh = UsageTracker::new();
+        fresh.roll_to(now.date_naive());
+        fresh.set_elsewhere("kid", here(30 * 60));
+        assert_eq!(fresh.earned_minutes("kid"), 30);
     }
 
     #[test]
