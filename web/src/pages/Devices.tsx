@@ -11,9 +11,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
-import type { Device } from "../types";
+import type { Account, Device, DeviceUser, EnrollTokenResponse } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
+import { useSession } from "../lib/session";
 import { familyChanged } from "../lib/family";
+import { EnrollCommand } from "../components/EnrollCommand";
 import { StateRing, type RingTone } from "../components/StateRing";
 import { PageHead } from "../layout/PageHead";
 
@@ -100,9 +102,83 @@ function steadiness(d: Device): { label: string; tone?: "ok" | "warn" | "crit" }
   return { label: "silent", tone: offlineAllowed(d) ? undefined : "warn" };
 }
 
-function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => void }) {
+/**
+ * Which OS login on this computer is which person. Every login is its own
+ * person unless someone says otherwise here — the installer asked about the
+ * owner's; this is where "that one's me" goes. Inside the confirm window: it
+ * decides who that login signs in as.
+ */
+function WhoIsWho({
+  users,
+  people,
+  onChanged,
+}: {
+  users: DeviceUser[];
+  people: Account[];
+  onChanged: () => void;
+}) {
+  const { guard } = useConfirm();
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function assign(u: DeviceUser, accountId: string) {
+    const who = people.find((p) => p.id === accountId)?.display_name ?? "them";
+    setStatus(null);
+    try {
+      await guard(() => api.assignAccount(u.id, accountId));
+      setStatus(`${u.os_username} is ${who} now.`);
+      onChanged();
+      familyChanged();
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setStatus(e instanceof Error ? e.message : "That didn't work.");
+    }
+  }
+
+  return (
+    <details className="add-more">
+      <summary>Who's who on it</summary>
+      {users.map((u) => (
+        <div className="rl-app" key={u.id}>
+          <label className="rl-app-name" htmlFor={`who-${u.id}`}>
+            {u.os_username}
+          </label>
+          <select
+            id={`who-${u.id}`}
+            className="ost-field ost-select"
+            value={u.account_id ?? ""}
+            onChange={(e) => void assign(u, e.target.value)}
+          >
+            {!u.account_id && <option value="">Nobody yet</option>}
+            {people.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.display_name}
+                {p.role !== "member" ? " (parent)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
+      {status && (
+        <p className="dev-inline-status" role="status">
+          {status}
+        </p>
+      )}
+    </details>
+  );
+}
+
+function DeviceCard({
+  device,
+  people,
+  onChanged,
+}: {
+  device: Device;
+  people: Account[];
+  onChanged: () => void;
+}) {
   const { guard } = useConfirm();
   const [busy, setBusy] = useState(false);
+  const [installToken, setInstallToken] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"crit" | undefined>();
   const [pickingDuration, setPickingDuration] = useState(false);
@@ -132,6 +208,22 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
     } catch (e) {
       if (e instanceof StepUpCancelled) return;
       setStatus(e instanceof Error ? e.message : "That didn't work — the computer may be off; it catches up when it's back");
+      setStatusTone("crit");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // A computer that never joined: a fresh one-line install for it (the old
+  // one lasts a day). Minting one is standing device access, so it asks.
+  async function showInstall() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      setInstallToken((await guard(() => api.regenEnrollToken(d.id))).enroll_token);
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setStatus(e instanceof Error ? e.message : "Couldn't make a new install command.");
       setStatusTone("crit");
     } finally {
       setBusy(false);
@@ -209,9 +301,21 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
       )}
 
       {d.status === "pending" ? (
-        <p className="dev-offline-note">
-          Set up, but it hasn't joined yet. <Link to="/add" style={{ color: "var(--fg)" }}>Finish setting it up</Link>.
-        </p>
+        installToken ? (
+          <div>
+            <p className="dev-offline-note">
+              Open a Terminal on that computer, paste this in, and press Enter.
+            </p>
+            <EnrollCommand token={installToken} />
+          </div>
+        ) : (
+          <div className="dev-offline">
+            <p className="dev-offline-note">Set up, but it hasn't joined yet.</p>
+            <button className="ch-btn" disabled={busy} onClick={() => void showInstall()}>
+              Show the install command
+            </button>
+          </div>
+        )
       ) : (
         <>
           {away && d.offline_allowed_until && (
@@ -282,6 +386,10 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
         </>
       )}
 
+      {d.status !== "pending" && (d.users?.length ?? 0) > 0 && people.length > 0 && (
+        <WhoIsWho users={d.users ?? []} people={people} onChanged={onChanged} />
+      )}
+
       {status && (
         <p className="dev-inline-status" data-tone={statusTone} role="status">
           {status}
@@ -305,9 +413,74 @@ function DeviceCard({ device, onChanged }: { device: Device; onChanged: () => vo
 // instantly and refreshes underneath — no "Checking…" flash on every click.
 let lastDevices: Device[] | null = null;
 
+/**
+ * "This is my computer": the parent's own computer joins as theirs, which is
+ * what lets them sign in with a code on it (and `ost login` there).
+ */
+function AddMyComputer({ haveOne, onAdded }: { haveOne: boolean; onAdded: () => void }) {
+  const { me } = useSession();
+  const { guard } = useConfirm();
+  const [mine, setMine] = useState<EnrollTokenResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function add() {
+    if (!me?.account) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const name = `${me.account.display_name}'s computer`;
+      setMine(await guard(() => api.createDevice(name, me.account.id)));
+      onAdded();
+    } catch (e) {
+      if (e instanceof StepUpCancelled) return;
+      setError(e instanceof Error ? e.message : "Couldn't set that up.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (mine) {
+    return (
+      <section className="add-col card" style={{ marginBottom: "1.5rem" }}>
+        <h2 className="ch-h2">Set up your computer</h2>
+        <p className="add-step-text">
+          Open a Terminal on your computer, paste this in, and press Enter. After that, signing in
+          is your name and a code that shows up there.
+        </p>
+        <EnrollCommand token={mine.enroll_token} />
+      </section>
+    );
+  }
+  if (haveOne) return null;
+  return (
+    <div style={{ marginBottom: "1.5rem" }}>
+      <button className="ch-btn" disabled={busy} onClick={() => void add()}>
+        {busy ? "Setting up…" : "Add my computer"}
+      </button>
+      {error && <p className="fam-error">{error}</p>}
+    </div>
+  );
+}
+
 export function Devices() {
+  const { me } = useSession();
   const [devices, setDevices] = useState<Device[] | null>(lastDevices);
   const [error, setError] = useState<string | null>(null);
+  const [people, setPeople] = useState<Account[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .listMembers()
+      .then((m) => alive && setPeople(m))
+      .catch(() => {
+        /* no picker without the list — the cards still work */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -355,17 +528,22 @@ export function Devices() {
     <div className="dev-wrap">
       <PageHead eyebrow="Devices" title={verdict} />
 
+      <AddMyComputer
+        haveOne={devices.some((d) => !!d.owner_account_id && d.owner_account_id === me?.account?.id)}
+        onAdded={() => void load()}
+      />
+
       {devices.length === 0 ? (
         <div className="dev-empty">
-          <p>No devices yet. A device joins when you set up a child on it.</p>
+          <p>No computers yet. Add your own above, or set one up for a child.</p>
           <Link to="/add" className="fam-cta">
-            Set one up
+            Set one up for a child
           </Link>
         </div>
       ) : (
         <ul className="dev-grid">
           {devices.map((d) => (
-            <DeviceCard key={d.id} device={d} onChanged={() => void load()} />
+            <DeviceCard key={d.id} device={d} people={people} onChanged={() => void load()} />
           ))}
         </ul>
       )}

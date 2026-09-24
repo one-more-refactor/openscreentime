@@ -1,11 +1,11 @@
 // The unlock code is the parent's key to a child's computer, read live from
-// the console. What matters: it is never shown without change mode, it rolls
+// the console. What matters: it is never shown outside the confirm window, it rolls
 // over when the server says it does, and recovery codes are shown once.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { render, screen, waitFor, cleanup, fireEvent, act, within } from "@testing-library/react";
 
 // Registers the shared API mock; must be imported before the components.
-import { ApiError, apiCalls, apiImpl, armChangeMode, resetApiMock } from "../test/mockApi";
+import { ApiError, apiCalls, apiImpl, armConfirm, resetApiMock } from "../test/mockApi";
 
 const { ConfirmProvider } = await import("../lib/confirm");
 const { UnlockCodePanel } = await import("./UnlockCodePanel");
@@ -25,7 +25,7 @@ afterEach(cleanup);
 
 describe("unlock code panel", () => {
   test("shows the live code, spaced for reading aloud, with the seconds left", async () => {
-    armChangeMode();
+    armConfirm();
     setup({ autoShow: true, variant: "step" });
     await waitFor(() => expect(screen.getByText("123 456")).toBeTruthy());
     expect(apiCalls.unlockCode).toEqual(["d1"]);
@@ -33,7 +33,7 @@ describe("unlock code panel", () => {
   });
 
   test("refetches when the code rolls over", async () => {
-    armChangeMode();
+    armConfirm();
     apiImpl.getUnlockCode = (id) =>
       Promise.resolve({ code: apiCalls.unlockCode.length > 1 ? "777888" : "123456", seconds_left: 1, period: 30, device_name: id });
     setup({ autoShow: true, variant: "step" });
@@ -62,9 +62,9 @@ describe("unlock code panel", () => {
   });
 
   test("the row hides the code until asked, then shows it", async () => {
-    armChangeMode();
+    armConfirm();
     setup();
-    await waitFor(() => expect(apiCalls.changeMode).toBe(1));
+    await waitFor(() => expect(apiCalls.confirmStatus).toBe(1));
     expect(screen.queryByTestId("unlock-code-live")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /show code/i }));
@@ -73,9 +73,9 @@ describe("unlock code panel", () => {
   });
 
   test("recovery codes: eight of them, shown once, in a sheet", async () => {
-    armChangeMode();
+    armConfirm();
     setup();
-    await waitFor(() => expect(apiCalls.changeMode).toBe(1));
+    await waitFor(() => expect(apiCalls.confirmStatus).toBe(1));
 
     fireEvent.click(screen.getByRole("button", { name: /recovery codes/i }));
     const sheet = await screen.findByRole("dialog", { name: /recovery codes/i });
@@ -85,12 +85,12 @@ describe("unlock code panel", () => {
   });
 
   test("replacing warns, then re-keys and says the recovery codes are gone", async () => {
-    armChangeMode();
+    armConfirm();
     // After the re-key the server hands out codes from the new secret.
     apiImpl.getUnlockCode = (id) =>
       Promise.resolve({ code: apiCalls.rotate.length ? "654321" : "123456", seconds_left: 20, period: 30, device_name: id });
     setup();
-    await waitFor(() => expect(apiCalls.changeMode).toBe(1));
+    await waitFor(() => expect(apiCalls.confirmStatus).toBe(1));
 
     fireEvent.click(screen.getByRole("button", { name: /^replace$/i }));
     const confirm = await screen.findByRole("dialog", { name: /replace unlock code/i });
