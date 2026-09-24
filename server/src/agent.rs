@@ -185,6 +185,10 @@ pub struct EnrollReq {
     pub os_users: Vec<OsUser>,
 }
 
+/// How long after enrolling a device may repeat its enrollment with the same
+/// token, as long as it never used the credentials it was given.
+const ENROLL_RETRY_MINUTES: i64 = 15;
+
 pub async fn enroll(
     State(st): State<AppState>,
     Json(req): Json<EnrollReq>,
@@ -192,18 +196,34 @@ pub async fn enroll(
     if req.os_users.len() > MAX_OS_USERS {
         return Err(AppError::BadRequest("too many os_users".into()));
     }
-    // Consume the one-time enroll token. An expired token is rejected exactly
-    // like a consumed one (24 h TTL; the admin can regenerate while pending).
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, tenant_id FROM devices WHERE enroll_token = $1
-           AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now())",
-    )
     // Stored hashed (like device/parent/voucher tokens); compare the hash.
-    .bind(hash_token(&req.enroll_token))
+    let enroll_hash = hash_token(&req.enroll_token);
+
+    // Which device is this for? Either a live token (24 h TTL; expired counts
+    // as used), or — the retry case — a token spent moments ago on a device
+    // that has not been heard from since: the agent never got its
+    // credentials (the reply was lost, the one-liner died), so hand out fresh
+    // ones instead of making the parent generate a new command. Same host
+    // only, and only within ENROLL_RETRY_MINUTES.
+    let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(&format!(
+        "SELECT id, tenant_id, enroll_token IS NULL FROM devices
+          WHERE (enroll_token = $1
+                 AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now()))
+             OR (enroll_token_used = $1
+                 AND enrolled_at > now() - interval '{ENROLL_RETRY_MINUTES} minutes'
+                 AND last_seen IS NOT DISTINCT FROM enrolled_at
+                 AND hostname = $2)",
+    ))
+    .bind(&enroll_hash)
+    .bind(&req.hostname)
     .fetch_optional(&st.db)
     .await?;
-    let (device_id, tenant_id) =
+    let (device_id, tenant_id, is_retry) =
         row.ok_or_else(|| AppError::Unauthorized("invalid, used or expired enroll token".into()))?;
+
+    // Everything that can fail goes BEFORE the token is spent, so a failure
+    // leaves it usable. (The os-user upsert is idempotent.)
+    upsert_os_users(&st.db, tenant_id, device_id, &req.os_users).await?;
 
     let device_token = gen_token();
     let token_hash = hash_token(&device_token);
@@ -212,32 +232,52 @@ pub async fn enroll(
     // into a device are the unlock code and the recovery codes, both read off
     // the console after a step-up and verified by the agent. Nothing is shown
     // once on a terminal that a parent then has to write on a sticker.
-    sqlx::query(
+    //
+    // Spend the token atomically: the WHERE re-checks it, so of two racing
+    // enrolls only one gets credentials. `last_seen = enrolled_at` is what the
+    // retry path above looks for — the first frame the agent sends moves it.
+    let spent = sqlx::query(
         "UPDATE devices SET device_token = $1, enroll_token = NULL,
-             enroll_token_expires_at = NULL, status = 'online',
+             enroll_token_expires_at = NULL, enroll_token_used = $6,
+             enrolled_at = now(), status = 'online',
              hostname = $2, os = $3, agent_version = $4, last_seen = now()
-         WHERE id = $5",
+         WHERE id = $5 AND (enroll_token = $6 OR enroll_token_used = $6)",
     )
     .bind(&token_hash)
     .bind(&req.hostname)
     .bind(&req.os)
     .bind(&req.agent_version)
     .bind(device_id)
+    .bind(&enroll_hash)
     .execute(&st.db)
-    .await?;
+    .await?
+    .rows_affected();
+    if spent != 1 {
+        return Err(AppError::Unauthorized(
+            "invalid, used or expired enroll token".into(),
+        ));
+    }
 
-    upsert_os_users(&st.db, tenant_id, device_id, &req.os_users).await?;
-
-    events::insert(
+    // The audit line is best-effort: failing it must not turn a completed
+    // enrollment into an error whose credentials the agent never sees.
+    if let Err(e) = events::insert(
         &st.db,
         tenant_id,
         Some(device_id),
         None,
         "enrolled",
         "info",
-        json!({ "hostname": req.hostname, "os": req.os, "users": req.os_users.len() }),
+        json!({
+            "hostname": req.hostname,
+            "os": req.os,
+            "users": req.os_users.len(),
+            "retry": is_retry,
+        }),
     )
-    .await?;
+    .await
+    {
+        tracing::warn!(%device_id, error = %e, "could not record the enrolled event");
+    }
 
     Ok(Json(json!({
         "device_id": device_id,
@@ -535,6 +575,9 @@ pub async fn policy(State(st): State<AppState>, agent: AgentAuth) -> AppResult<J
 
 #[derive(Deserialize)]
 pub struct PushEvent {
+    /// Minted on the device, stable across its retries (agents ≥ 0.6.2).
+    #[serde(default)]
+    pub id: Option<Uuid>,
     pub r#type: String,
     #[serde(default = "default_severity")]
     pub severity: String,
@@ -564,49 +607,92 @@ pub async fn push_events(
     // reject an out-of-range severity with a clean 400 and bound the batch +
     // payload size so a device can't blast oversized/unbounded events.
     const MAX_EVENTS: usize = 100;
-    const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
     if req.events.len() > MAX_EVENTS {
         return Err(AppError::BadRequest("too many events in one push".into()));
     }
+    // The agent keeps a batch it couldn't deliver and re-sends it until it
+    // lands, so this must never half-apply: the whole batch goes in one
+    // transaction, and events carrying a device-minted id are inserted at most
+    // once. A single bad event is dropped (logged) rather than rejecting the
+    // batch — a 400 would be retried forever and stall the device's whole
+    // audit trail behind it.
+    let mut tx = st.db.begin().await?;
+    let mut fresh = Vec::new();
     for ev in req.events {
-        if !matches!(ev.severity.as_str(), "info" | "warn" | "critical") {
-            return Err(AppError::BadRequest("invalid event severity".into()));
-        }
-        if ev.r#type.trim().is_empty() {
-            return Err(AppError::BadRequest("event type required".into()));
-        }
-        if serde_json::to_string(&ev.payload)
-            .map(|s| s.len())
-            .unwrap_or(usize::MAX)
-            > MAX_PAYLOAD_BYTES
-        {
-            return Err(AppError::BadRequest("event payload too large".into()));
-        }
-        let device_user_id = resolve_device_user(&st.db, agent.device_id, ev.device_user).await?;
-        if ev.r#type == "vpn_profile" {
-            // The agent's verdict on a tested profile lands in the profile row.
-            crate::vpn::apply_agent_report(&st.db, agent.device_id, &ev.payload).await;
-        }
-        if ev.r#type == "parent_code_backup_used" {
-            // A recovery code was spent offline; retire it here too.
-            crate::devices::mark_recovery_code_used(&st.db, agent.device_id, &ev.payload).await;
-        }
-        events::insert(
-            &st.db,
+        let Some((etype, payload)) =
+            checked_event(agent.device_id, &ev.r#type, &ev.severity, ev.payload)
+        else {
+            continue;
+        };
+        let device_user_id = resolve_device_user(&mut *tx, agent.device_id, ev.device_user).await?;
+        let new = events::insert_from_agent(
+            &mut *tx,
             agent.tenant_id,
-            Some(agent.device_id),
+            agent.device_id,
             device_user_id,
-            &ev.r#type,
+            ev.id,
+            &etype,
             &ev.severity,
-            ev.payload,
+            &payload,
         )
         .await?;
+        if new {
+            fresh.push((etype, payload));
+        }
+    }
+    tx.commit().await?;
+
+    // Side effects only for events that are new — a replayed batch changes
+    // nothing twice.
+    for (etype, payload) in fresh {
+        event_side_effects(&st.db, agent.device_id, &etype, &payload).await;
     }
     Ok(axum::http::StatusCode::ACCEPTED)
 }
 
-async fn resolve_device_user(
-    db: &sqlx::PgPool,
+/// Validate one agent event: `None` (logged) when it must be dropped,
+/// otherwise its storable type (unknown → `other`) and payload.
+fn checked_event(
+    device_id: Uuid,
+    etype: &str,
+    severity: &str,
+    payload: Value,
+) -> Option<(String, Value)> {
+    const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
+    if !matches!(severity, "info" | "warn" | "critical") {
+        tracing::warn!(%device_id, severity, "dropping agent event with invalid severity");
+        return None;
+    }
+    if etype.trim().is_empty() {
+        tracing::warn!(%device_id, "dropping agent event without a type");
+        return None;
+    }
+    if serde_json::to_string(&payload)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+        > MAX_PAYLOAD_BYTES
+    {
+        tracing::warn!(%device_id, etype, "dropping agent event with oversize payload");
+        return None;
+    }
+    Some(events::normalize_type(etype, payload))
+}
+
+/// What an agent event changes besides the log.
+async fn event_side_effects(db: &sqlx::PgPool, device_id: Uuid, etype: &str, payload: &Value) {
+    match etype {
+        // The agent's verdict on a tested profile lands in the profile row.
+        "vpn_profile" => crate::vpn::apply_agent_report(db, device_id, payload).await,
+        // A recovery code was spent offline; retire it here too.
+        "parent_code_backup_used" => {
+            crate::devices::mark_recovery_code_used(db, device_id, payload).await
+        }
+        _ => {}
+    }
+}
+
+async fn resolve_device_user<'e, E: sqlx::PgExecutor<'e>>(
+    db: E,
     device_id: Uuid,
     os_username: Option<String>,
 ) -> AppResult<Option<Uuid>> {
@@ -713,6 +799,14 @@ pub async fn ack_command(
 // WebSocket bus
 // ---------------------------------------------------------------------------
 
+/// A WS agent that has sent nothing — not even a pong to our 6-second ping —
+/// for this long is gone (suspended, off the network); its socket is dropped.
+/// Generous on purpose: the agent answers pings from its own main loop, which
+/// can be busy for a while (a slow event upload) without being dead.
+const WS_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// `last_seen` is written at most this often per connected device.
+const LAST_SEEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub async fn ws(
     State(st): State<AppState>,
     agent: AgentAuth,
@@ -762,32 +856,48 @@ async fn handle_ws(st: AppState, agent: AgentAuth, socket: WebSocket) {
     // the server — and that local contact state is what the on-device app shows.
     // Without a server-initiated frame an idle-but-connected agent would report
     // itself offline (its window is ~10s), so ping it well inside that window.
-    // A push that can't be delivered also surfaces a half-open socket to drop.
     let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(6));
     keepalive.reset(); // first tick one period out — the connect push just ran.
+
+    // Liveness is what the AGENT sends, never what we send: every agent answers
+    // the ping above with a `pong`, so a connected device is heard from every
+    // few seconds. Stamping `last_seen` on our own ping kept a suspended laptop
+    // (a half-open socket nobody closed) "online" for as long as the kernel took
+    // to give up on it — about 15 minutes. Now a socket that has gone silent is
+    // dropped, and the device shows offline within a minute.
+    let mut last_heard = std::time::Instant::now();
+    let mut last_stamped = std::time::Instant::now();
 
     // Reader loop.
     loop {
         tokio::select! {
             msg = stream.next() => {
-                match msg {
-                    Some(Ok(Message::Text(t))) => {
-                        if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
-                            handle_ws_frame(&st, agent, v).await;
-                        }
-                    }
-                    Some(Ok(Message::Binary(_))) => { /* ignore in skeleton */ }
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                let msg = match msg {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                }
-            }
-            _ = keepalive.tick() => {
-                // Also refreshes the row's last_seen so the console's "last heard"
-                // stays honest for a device that is connected but quiet.
-                let _ = sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
+                    Some(Ok(m)) => m,
+                };
+                last_heard = std::time::Instant::now();
+                // Throttled: a pong every 6 s needn't be a write every 6 s.
+                if last_stamped.elapsed() >= LAST_SEEN_EVERY {
+                    last_stamped = std::time::Instant::now();
+                    let _ = sqlx::query(
+                        "UPDATE devices SET last_seen = now(), status = 'online' WHERE id = $1",
+                    )
                     .bind(device_id)
                     .execute(&st.db)
                     .await;
+                }
+                if let Message::Text(t) = msg {
+                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                        handle_ws_frame(&st, agent, v).await;
+                    }
+                }
+            }
+            _ = keepalive.tick() => {
+                if last_heard.elapsed() >= WS_SILENCE_LIMIT {
+                    tracing::info!(%device_id, "agent went silent on its socket; dropping it");
+                    break;
+                }
                 if !st.hub.push(device_id, json!({ "type": "ping" })).await {
                     break;
                 }
@@ -843,48 +953,35 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
                 .and_then(|d| d.as_str())
                 .map(|s| s.to_string());
             let payload = ev.get("payload").cloned().unwrap_or_else(|| json!({}));
+            let client_id = ev
+                .get("id")
+                .and_then(|i| i.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
 
-            // SECURITY: bound the WS path the same way the HTTP path is bound
-            // (see push_events). Without this, a rooted managed device — which
-            // already has a valid device_token (the threat model acknowledged
-            // at agent.rs:547-549) — can flood oversized/unbounded events or
-            // arbitrary severity strings through the WS, bypassing the
-            // MAX_EVENTS/MAX_PAYLOAD_BYTES/severity-whitelist checks the HTTP
-            // handler enforces. The DB CHECK on `severity` would silently
-            // reject invalid severities, but each invalid event still costs a
-            // Postgres roundtrip. Drop the frame early instead.
-            const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
-            if !matches!(severity, "info" | "warn" | "critical") {
-                tracing::warn!(agent_device_id = %agent.device_id, severity,
-                    "dropping WS event with invalid severity");
+            // SECURITY: bound the WS path exactly like the HTTP path (see
+            // push_events): a rooted managed device holds a valid token and
+            // must not get around the severity whitelist or payload cap here.
+            let Some((etype, payload)) = checked_event(agent.device_id, etype, severity, payload)
+            else {
                 return;
-            }
-            if serde_json::to_string(&payload)
-                .map(|s| s.len())
-                .unwrap_or(usize::MAX)
-                > MAX_PAYLOAD_BYTES
-            {
-                tracing::warn!(agent_device_id = %agent.device_id,
-                    "dropping WS event with oversize payload");
-                return;
-            }
-
+            };
             if let Ok(device_user_id) =
                 resolve_device_user(&st.db, agent.device_id, device_user).await
             {
-                if etype == "vpn_profile" {
-                    crate::vpn::apply_agent_report(&st.db, agent.device_id, &payload).await;
-                }
-                let _ = events::insert(
+                if let Ok(true) = events::insert_from_agent(
                     &st.db,
                     agent.tenant_id,
-                    Some(agent.device_id),
+                    agent.device_id,
                     device_user_id,
-                    etype,
+                    client_id,
+                    &etype,
                     severity,
-                    payload,
+                    &payload,
                 )
-                .await;
+                .await
+                {
+                    event_side_effects(&st.db, agent.device_id, &etype, &payload).await;
+                }
             }
         }
         Some("ack") => {
@@ -908,12 +1005,7 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             apply_state(&st.db, agent.device_id, frame).await;
         }
         Some("heartbeat") => {
-            let _ = sqlx::query(
-                "UPDATE devices SET last_seen = now(), status = 'online' WHERE id = $1",
-            )
-            .bind(agent.device_id)
-            .execute(&st.db)
-            .await;
+            // `last_seen` is stamped by the reader loop for every inbound frame.
             if let Some(state) = v.get("state") {
                 apply_state(&st.db, agent.device_id, state).await;
             }
