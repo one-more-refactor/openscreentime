@@ -12,6 +12,10 @@
 //! publishes ("You're back — 15 more minutes"). Started on every desktop login
 //! by an XDG autostart entry and by the systemd user unit; it keeps a single
 //! instance. Everything else fires on state *transitions* only.
+//!
+//! Where a tray exists, its icon is the ring (brand/tray-*.svg), drawn with
+//! the real share of the day used (`mark::tray_argb`). The first time it runs
+//! for someone it opens the app window, which shows the first-run cards.
 
 use crate::parent;
 use crate::warn::{self, StopReason, WarnState};
@@ -89,6 +93,12 @@ struct UserStatus {
     /// Countdown to an imminent session freeze, if one is pending.
     #[serde(default)]
     freeze_in_secs: Option<u64>,
+    /// Sets their own limits: nobody to ask.
+    #[serde(default)]
+    self_managed: bool,
+    /// May ask a parent for more (absent from older agents: yes).
+    #[serde(default = "yes")]
+    can_ask: bool,
     /// The next stop (RFC 3339) and why — what the warnings count down to.
     #[serde(default)]
     stop_at: Option<String>,
@@ -96,9 +106,26 @@ struct UserStatus {
     reason: Option<String>,
 }
 
+fn yes() -> bool {
+    true
+}
+
 impl Status {
     fn user<'a>(&'a self, name: &str) -> Option<&'a UserStatus> {
         self.users.iter().find(|u| u.name == name)
+    }
+}
+
+impl UserStatus {
+    /// The share of today's time used (the ring), if there is a limit.
+    fn frac(&self) -> Option<f32> {
+        let left = self.remaining_minutes?;
+        let total = self.used_minutes as f32 + left.max(0) as f32;
+        Some(if total > 0.0 {
+            (self.used_minutes as f32 / total).clamp(0.0, 1.0)
+        } else {
+            1.0
+        })
     }
 }
 
@@ -135,36 +162,57 @@ impl OpenScreenTimeTray {
         self.status.as_ref().and_then(|s| s.user(&self.username))
     }
 
-    /// "TIME LEFT: NN MIN" / "NO LIMIT" / "PAUSED" — the headline for the
-    /// current user, or a device-level line when we are not a managed user.
+    /// The headline for the current user (sentence case, docs/BRAND-CLIENT.md
+    /// §4.1), or a device-level line when we are not a managed user.
     fn time_line(&self) -> String {
+        let Some(s) = &self.status else {
+            return "OpenScreenTime isn't running".to_string();
+        };
+        if s.device_locked {
+            return "Paused by a parent".to_string();
+        }
         match self.me() {
-            Some(u) if u.frozen => "PAUSED".to_string(),
+            Some(u) if u.frozen => "Time's up for today".to_string(),
             Some(u) => match u.remaining_minutes {
-                Some(m) => format!("TIME LEFT: {} MIN", m.max(0)),
-                None => "NO LIMIT".to_string(),
+                Some(m) if m <= 0 => "Time's up for today".to_string(),
+                Some(1) => "1 minute left today".to_string(),
+                Some(m) => format!("{m} minutes left today"),
+                None => "No limit today".to_string(),
             },
-            None => "DEVICE MANAGED".to_string(),
+            None => "This computer is managed".to_string(),
         }
     }
 
     fn connection_line(&self) -> &'static str {
         match self.status.as_ref().map(|s| s.connection.as_str()) {
-            Some("online") => "ONLINE",
-            Some("offline_fail_closed") => "OFFLINE — LOCKED",
-            Some(_) => "OFFLINE",
-            None => "AGENT NOT RUNNING",
+            Some("online") => "Connected",
+            Some(_) => "Offline — it catches up when it's back",
+            None => "Not running",
         }
     }
 
-    /// Anything that means "restricted right now" for this user/device.
-    fn restricted(&self) -> bool {
-        let Some(s) = &self.status else { return false };
-        s.connection == "offline_fail_closed"
-            || s.device_locked
-            || s.offline_hard_lockdown
-            || s.tamper_lockdown
-            || self.me().is_some_and(|u| u.frozen)
+    /// What the ring in the panel shows.
+    fn tray_state(&self) -> crate::mark::TrayState {
+        use crate::mark::TrayState;
+        let Some(s) = &self.status else {
+            return TrayState::Idle;
+        };
+        if s.device_locked {
+            return TrayState::Paused;
+        }
+        if s.tamper_lockdown || s.offline_hard_lockdown {
+            return TrayState::Stopped;
+        }
+        match self.me() {
+            Some(u) if u.frozen => TrayState::Stopped,
+            Some(u) => match (u.remaining_minutes, u.frac()) {
+                (Some(m), _) if m <= 0 => TrayState::Stopped,
+                (Some(m), Some(frac)) if m <= 15 => TrayState::Low { frac },
+                (Some(_), Some(frac)) => TrayState::Ok { frac },
+                _ => TrayState::Idle,
+            },
+            None => TrayState::Idle,
+        }
     }
 }
 
@@ -174,23 +222,29 @@ impl ksni::Tray for OpenScreenTimeTray {
     }
 
     fn title(&self) -> String {
-        "OPENSCREENTIME".into()
+        "OpenScreenTime".into()
     }
 
     fn icon_name(&self) -> String {
-        // Themed freedesktop icon names — no bundled assets.
-        let name = match &self.status {
-            None => "security-medium",
-            Some(_) if self.restricted() => "security-low",
-            Some(s) if s.connection == "online" => "security-high",
-            Some(_) => "security-medium",
-        };
-        name.into()
+        // Empty: the host draws our pixmap (the ring, with today's share).
+        String::new()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        let state = self.tray_state();
+        [16, 22, 24, 32, 48]
+            .into_iter()
+            .map(|px| ksni::Icon {
+                width: px as i32,
+                height: px as i32,
+                data: crate::mark::tray_argb(px, state),
+            })
+            .collect()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "OPENSCREENTIME".into(),
+            title: "OpenScreenTime".into(),
             description: format!("{} · {}", self.time_line(), self.connection_line()),
             ..Default::default()
         }
@@ -206,18 +260,23 @@ impl ksni::Tray for OpenScreenTimeTray {
             }
             .into(),
             StandardItem {
-                label: format!("CONNECTION: {}", self.connection_line()),
+                label: self.connection_line().into(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
         ];
-        // Parent mode: pending time requests, each with approve/deny.
+        // Parent mode: pending time requests, each with its two answers.
         if self.action_tx.is_some() && !self.pending.is_empty() {
             items.push(MenuItem::Separator);
+            let n = self.pending.len();
             items.push(
                 StandardItem {
-                    label: format!("{} TIME REQUEST(S)", self.pending.len()),
+                    label: if n == 1 {
+                        "1 time request".to_string()
+                    } else {
+                        format!("{n} time requests")
+                    },
                     enabled: false,
                     ..Default::default()
                 }
@@ -228,10 +287,15 @@ impl ksni::Tray for OpenScreenTimeTray {
                 let deny_id = r.id.clone();
                 items.push(
                     SubMenu {
-                        label: format!("{} · +{} MIN · {}", r.who(), r.minutes, r.task_label),
+                        label: format!(
+                            "{} · {} more minutes · {}",
+                            r.who(),
+                            r.minutes,
+                            r.task_label
+                        ),
                         submenu: vec![
                             StandardItem {
-                                label: format!("APPROVE +{} MIN", r.minutes),
+                                label: format!("Give {} more minutes", r.minutes),
                                 activate: Box::new(move |t: &mut Self| {
                                     if let Some(tx) = &t.action_tx {
                                         let _ = tx.send(ParentAction::Approve(approve_id.clone()));
@@ -241,7 +305,7 @@ impl ksni::Tray for OpenScreenTimeTray {
                             }
                             .into(),
                             StandardItem {
-                                label: "DENY".into(),
+                                label: "Not now".into(),
                                 activate: Box::new(move |t: &mut Self| {
                                     if let Some(tx) = &t.action_tx {
                                         let _ = tx.send(ParentAction::Deny(deny_id.clone()));
@@ -258,13 +322,12 @@ impl ksni::Tray for OpenScreenTimeTray {
             }
         }
 
-        // The managed user can ask for more time straight from the tray. Shown
-        // whenever this user is managed (has a status entry).
-        if self.me().is_some() {
+        // The one verb, for someone who has a parent to ask.
+        if self.me().is_some_and(|u| u.can_ask && !u.self_managed) {
             items.push(MenuItem::Separator);
             items.push(
                 StandardItem {
-                    label: "REQUEST MORE TIME".into(),
+                    label: "Ask for more time".into(),
                     activate: Box::new(|_: &mut Self| request_more_time()),
                     ..Default::default()
                 }
@@ -272,22 +335,27 @@ impl ksni::Tray for OpenScreenTimeTray {
             );
         }
 
+        // The window says the rest (and the honest footer).
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "ABOUT OPENSCREENTIME".into(),
-                activate: Box::new(|_: &mut Self| {
-                    notify(
-                        "OPENSCREENTIME",
-                        "This device is managed. Screen time and network filtering are active.",
-                        false,
-                    );
-                }),
+                label: "Open OpenScreenTime".into(),
+                activate: Box::new(|_: &mut Self| open_app()),
                 ..Default::default()
             }
             .into(),
         );
         items
+    }
+}
+
+/// Open the app window (it brings an open one forward instead).
+fn open_app() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe)
+            .arg("app")
+            .stdin(std::process::Stdio::null())
+            .spawn();
     }
 }
 
@@ -304,17 +372,17 @@ fn request_more_time() {
     let dir = std::path::PathBuf::from(format!("/run/user/{uid}/openscreentime"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::debug!("could not create runtime dir for earn request: {e}");
-        notify("Couldn't send", "Try again in a moment", false);
+        notify("Couldn't send", "Try again in a moment.", false);
         return;
     }
     if let Err(e) = std::fs::write(dir.join("earn_request"), b"1") {
         tracing::debug!("could not write earn-request marker: {e}");
-        notify("Couldn't send", "Try again in a moment", false);
+        notify("Couldn't send", "Try again in a moment.", false);
         return;
     }
     notify(
-        "REQUEST SENT",
-        "Asked for more time — waiting for a parent",
+        "Asked for more time",
+        "Waiting for a parent to answer.",
         false,
     );
 }
@@ -324,7 +392,8 @@ fn notify(summary: &str, body: &str, critical: bool) {
     n.appname("OpenScreenTime")
         .summary(summary)
         .body(body)
-        .icon("security-medium");
+        .icon("openscreentime")
+        .hint(notify_rust::Hint::DesktopEntry("openscreentime".into()));
     if critical {
         n.urgency(notify_rust::Urgency::Critical);
     }
@@ -342,17 +411,21 @@ fn notify_transitions(prev: &Status, next: &Status) {
     if prev.connection != next.connection {
         if next.connection == "offline_fail_closed" {
             notify(
-                "Offline too long",
-                "This computer stays on its last rules until it reconnects.",
-                true,
+                "Offline for a while",
+                "It keeps today's rules and catches up when it's back.",
+                false,
             );
-        } else if next.connection == "online" {
-            notify("Back online", "Connection to the server restored", false);
+        } else if next.connection == "online" && prev.connection == "offline_fail_closed" {
+            notify("Back online", "Connected to home again.", false);
         }
     }
     match (prev.offline_hard_lockdown, next.offline_hard_lockdown) {
-        (false, true) => notify("Lockdown active", "The device is in offline lockdown", true),
-        (true, false) => notify("Lockdown lifted", "Normal use has resumed", false),
+        (false, true) => notify(
+            "Offline for too long",
+            "This computer stops until it reaches home again. A parent's unlock code opens it.",
+            true,
+        ),
+        (true, false) => notify("Back to normal", "This computer reached home again.", false),
         _ => {}
     }
     match (prev.tamper_lockdown, next.tamper_lockdown) {
@@ -361,7 +434,7 @@ fn notify_transitions(prev: &Status, next: &Status) {
             "Ask a parent — their unlock code opens it.",
             true,
         ),
-        (true, false) => notify("Tamper lock lifted", "Normal use has resumed", false),
+        (true, false) => notify("Back to normal", "A parent checked this computer.", false),
         _ => {}
     }
 }
@@ -418,7 +491,14 @@ struct Warner {
 }
 
 impl Warner {
-    fn observe(&mut self, stop: Option<(StopReason, i64, chrono::DateTime<chrono::Local>)>) {
+    /// `frac`: the share of today's time used (the ring on the notice), if
+    /// there is a limit; `can_ask`: whether "Ask for more time" is offered.
+    fn observe(
+        &mut self,
+        stop: Option<(StopReason, i64, chrono::DateTime<chrono::Local>)>,
+        frac: Option<f32>,
+        can_ask: bool,
+    ) {
         let Some((reason, secs, at)) = stop.filter(|(_, s, _)| *s > 0) else {
             self.state.clear();
             if let Some(h) = self.last_minute.take() {
@@ -439,8 +519,8 @@ impl Warner {
         if due.is_none() {
             return;
         }
-        let ask = reason != StopReason::Paused;
-        match show_warning(&w, ask) {
+        let ask = can_ask && reason != StopReason::Paused;
+        match show_warning(&w, ask, frac) {
             Some(h) if w.critical => {
                 self.shown_title = w.title;
                 self.last_minute = Some(h);
@@ -456,25 +536,48 @@ impl Warner {
 fn on_action(action: &str) {
     match action {
         "ask" => request_more_time(),
-        "open" => {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe)
-                    .arg("app")
-                    .stdin(std::process::Stdio::null())
-                    .spawn();
-            }
-        }
+        "open" => open_app(),
         _ => {}
     }
 }
 
-fn show_warning(w: &warn::Words, ask: bool) -> Option<notify_rust::NotificationHandle> {
+/// Board 05b's amber ring, at the share of today used, as an image file the
+/// notification server can load (SVG, in the person's own runtime dir).
+fn warning_image(frac: Option<f32>) -> Option<String> {
+    use crate::mark::{ring_svg, Ring, TRACK_CARD, WARN};
+    let ring = match frac {
+        Some(f) => Ring::Fill {
+            frac: f.max(0.02),
+            color: WARN,
+        },
+        None => Ring::Full { color: WARN },
+    };
+    let dir = std::path::PathBuf::from(format!(
+        "/run/user/{}/openscreentime",
+        users::get_current_uid()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    // One file per percent: a server that caches by path still shows the new one.
+    let pct = frac.map_or(100, |f| (f * 100.0).round() as u32);
+    let path = dir.join(format!("warn-ring-{pct}.svg"));
+    std::fs::write(&path, ring_svg(96.0, ring, TRACK_CARD)).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn show_warning(
+    w: &warn::Words,
+    ask: bool,
+    frac: Option<f32>,
+) -> Option<notify_rust::NotificationHandle> {
     let mut n = notify_rust::Notification::new();
     n.appname("OpenScreenTime")
         .summary(&w.title)
         .body(&w.body)
         .icon("openscreentime")
         .hint(notify_rust::Hint::DesktopEntry("openscreentime".into()));
+    if let Some(img) = warning_image(frac) {
+        n.hint(notify_rust::Hint::ImagePath(img));
+    }
     if ask {
         n.action("ask", "Ask for more time");
     }
@@ -596,15 +699,19 @@ fn spawn_parent_worker(
                     };
                     match rt.block_on(parent::api::decide(&client, &cfg, &id, approve)) {
                         Ok(()) => notify(
-                            if approve { "APPROVED" } else { "DENIED" },
-                            "Time request updated",
+                            if approve { "Given" } else { "Not now" },
+                            if approve {
+                                "The extra time is on its way."
+                            } else {
+                                "They'll hear it was a no for now."
+                            },
                             false,
                         ),
                         Err(e) => {
                             tracing::warn!("parent decide failed: {e}");
                             notify(
-                                "COULDN'T UPDATE",
-                                "Check the connection and try again",
+                                "Couldn't update",
+                                "Check the connection and try again.",
                                 false,
                             );
                         }
@@ -620,7 +727,7 @@ fn spawn_parent_worker(
                         for r in &pending {
                             if !seen_pending.contains(&r.id) {
                                 notify(
-                                    &format!("{} WANTS +{} MIN", r.who().to_uppercase(), r.minutes),
+                                    &format!("{} asked for {} more minutes", r.who(), r.minutes),
                                     &format!("{} · {}", r.task_label, r.device_name),
                                     false,
                                 );
@@ -643,7 +750,11 @@ fn spawn_parent_worker(
                                     .get("message")
                                     .and_then(|m| m.as_str())
                                     .unwrap_or(&a.etype);
-                                notify(&format!("ALERT · {}", a.etype.to_uppercase()), msg, true);
+                                notify(
+                                    &format!("Alert · {}", a.etype.replace('_', " ")),
+                                    msg,
+                                    true,
+                                );
                             }
                         }
                     }
@@ -713,15 +824,25 @@ pub fn run() -> Result<()> {
         spawn_parent_worker(cfg, handle.clone(), rx);
     }
 
-    // First-run intro (skippable child-facing cards), shown once. Only on a
-    // gui+tray build — the intro window needs the gui presenter.
+    // First run: open the app window once — it shows the first-run cards.
+    // Only on a gui+tray build (the window needs the gui presenter).
     #[cfg(feature = "gui")]
-    maybe_show_intro();
+    if !crate::app::intro_seen() {
+        open_app();
+    }
 
     let mut warner = Warner::default();
+    let ring_of = |s: &Status| {
+        let me = s.user(&username);
+        (
+            me.and_then(UserStatus::frac),
+            me.is_some_and(|u| u.can_ask && !u.self_managed),
+        )
+    };
     loop {
         if let Some(n) = &prev {
-            warner.observe(next_stop(n, &username, chrono::Local::now()));
+            let (frac, ask) = ring_of(n);
+            warner.observe(next_stop(n, &username, chrono::Local::now()), frac, ask);
         }
         std::thread::sleep(POLL_INTERVAL);
         let next = read_status(&username);
@@ -733,7 +854,8 @@ pub fn run() -> Result<()> {
         if let Some(n) = &next {
             // A stop that's gone (a thaw) closes its last-minute notice
             // before "You're back" arrives.
-            warner.observe(next_stop(n, &username, chrono::Local::now()));
+            let (frac, ask) = ring_of(n);
+            warner.observe(next_stop(n, &username, chrono::Local::now()), frac, ask);
             last_notif_id = deliver_notifications(&username, n, last_notif_id);
             let now = chrono::Utc::now();
             for c in n.login_codes.iter().filter(|c| c.is_live(now)) {
@@ -752,28 +874,6 @@ pub fn run() -> Result<()> {
 
 fn current_username() -> Option<String> {
     users::get_current_username().map(|s| s.to_string_lossy().into_owned())
-}
-
-/// Show the first-run intro once, as a detached subprocess so it never blocks
-/// the tray. No-op if it's already been seen.
-#[cfg(feature = "gui")]
-fn maybe_show_intro() {
-    if crate::intro::already_seen() {
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    match std::process::Command::new(exe)
-        .arg("__intro")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {} // the subprocess marks itself seen when it closes
-        Err(e) => tracing::debug!("could not spawn first-run intro: {e}"),
-    }
 }
 
 #[cfg(test)]
@@ -837,6 +937,46 @@ mod tests {
         let s = status(r#"{"users":[{"name":"mia","remaining_minutes":0,"frozen":true}]}"#);
         assert!(next_stop(&s, "mia", now).is_none());
         assert!(next_stop(&s, "dad", now).is_none());
+    }
+
+    fn tray_for(json: &str) -> OpenScreenTimeTray {
+        OpenScreenTimeTray {
+            username: "mia".into(),
+            status: Some(status(json)),
+            pending: Vec::new(),
+            action_tx: None,
+        }
+    }
+
+    #[test]
+    fn the_tray_ring_shows_the_share_of_the_day() {
+        use crate::mark::TrayState;
+        let t = tray_for(
+            r#"{"connection":"online","users":[{"name":"mia","used_minutes":48,"remaining_minutes":27}]}"#,
+        );
+        match t.tray_state() {
+            TrayState::Ok { frac } => assert!((frac - 0.64).abs() < 0.001),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(t.time_line(), "27 minutes left today");
+        assert_eq!(t.connection_line(), "Connected");
+        let t = tray_for(r#"{"users":[{"name":"mia","used_minutes":80,"remaining_minutes":10}]}"#);
+        assert!(matches!(t.tray_state(), TrayState::Low { .. }));
+        let t = tray_for(
+            r#"{"users":[{"name":"mia","used_minutes":90,"remaining_minutes":0,"frozen":true}]}"#,
+        );
+        assert_eq!(t.tray_state(), TrayState::Stopped);
+        assert_eq!(t.time_line(), "Time's up for today");
+        let t =
+            tray_for(r#"{"device_locked":true,"users":[{"name":"mia","remaining_minutes":20}]}"#);
+        assert_eq!(t.tray_state(), TrayState::Paused);
+        assert_eq!(t.time_line(), "Paused by a parent");
+        let t = tray_for(r#"{"users":[{"name":"mia","used_minutes":5}]}"#);
+        assert_eq!(t.tray_state(), TrayState::Idle);
+        assert_eq!(t.time_line(), "No limit today");
+        for t in [t.time_line(), t.connection_line().to_string()] {
+            assert_ne!(t, t.to_uppercase(), "no shouting");
+        }
     }
 
     #[test]
