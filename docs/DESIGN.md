@@ -1,35 +1,32 @@
-# OpenScreenTime — Design language
+# OpenScreenTime — Design language (web console)
 
-**One idea: time is a ring you fill.** A single green activity ring is the
-product's whole identity — it is the favicon, the wordmark's marque, every
-family avatar, the child's own page, and the shape the lock screen draws. Around
-that one idea we build a warm, plain-spoken family dashboard: friendly like
-Google Family Link, but with a point of view Family Link doesn't have.
+**The house clock.** The mark is the activity ring read as a clock face: one
+added detail, a tick at twelve o'clock — the start line of every day —
+separates it from a progress spinner. Around it, a warm, plain-spoken family
+console.
 
-The visual source of truth is [`web/design/reference.html`](../web/design/reference.html) —
-open it in a browser (it renders every token and component in light **and** dark).
-This document is the written spec. When the two disagree, the reference is right.
-
-> This replaces the old "Nothing" austere-dark system. That system was rigorous
-> but read as *surveillance* — OLED black, monospace ALL-CAPS labels, corner
-> registration ticks, dot-grid, ink-on-ink buttons. Warmth was bolted on top
-> (a green ring, emoji faces) without changing the bones, which is exactly why
-> the client called it inconsistent. We change the bones.
+The visual source of truth is [`brand/board.html`](../brand/board.html) —
+open it in a browser: the mark and its geometry, colour and type, the icon
+set, the product's key screens, and the voice. This doc writes the rules down
+for the web console; [`web/src/theme.css`](../web/src/theme.css) is the same
+token set in code. The computer's own screens are
+[`DESIGN-CLIENT.md`](DESIGN-CLIENT.md).
 
 ---
 
 ## 1. Principles
 
-1. **The ring is the product.** One mark, one meaning, everywhere. Green fills as
-   the day is used; it is calm, not alarming, because a full ring is *normal*.
-   Never invent a second chart language for "time used" — if it's about time,
-   it's the ring or a bar that reads like the ring.
+1. **The ring means one thing: time used today**, filling clockwise from the
+   tick at twelve. The number beside it may say time left, because that is
+   what a person asks. It never depletes, never spins, and never counts
+   anything but a day — no loading rings, hold rings, countdown rings or
+   code-entry rings.
 
-2. **Colour is reassurance, not decoration.** The palette is tiny and every hue
-   has one job: **green = healthy / within budget / the action to take**,
-   **amber = attention or a transition** (offline, wind-down, a waiting request),
-   **red = the one interrupt** (locked, over the limit, destructive). Everything
-   else is ink on warm neutral. A calm day shows no red at all.
+2. **Colour is hierarchy.** Most of any screen is paper, white and ink.
+   **Green** is time and the one main action. **Amber** is a transition: 15
+   minutes or less, offline, a waiting request. **Red** is stop — time's up, or
+   a destructive confirm — and a healthy day has none. A parent's pause is
+   neutral (a dashed ring, a plain tag), never red.
 
 3. **Read it like a person, not a console.** Sentence case. A humanist sans.
    No monospace ALL-CAPS labels, no timestamps dressed as data. Numbers mean
@@ -40,16 +37,16 @@ This document is the written spec. When the two disagree, the reference is right
    radius, real whitespace, one gentle motion grammar. Every empty and loading
    state is authored so the product never looks broken or blank.
 
-5. **The same language reaches the locked screen.** What a child is locked out
-   *of* is unmistakably the same product that let them in — same ring, same
-   colours, same warm off-white. Enforcement is calm, never punitive.
+5. **The same language reaches the lock.** The screen that stops someone is
+   unmistakably the product that let them in — same ring, same colours, same
+   warm paper. Calm, kind, firm, in that order.
 
 ---
 
 ## 2. Colour
 
-Roles, not shades. Every value is a CSS custom property; light is the default
-and the on-device client is always light. Contrast ratios are against the
+Roles, not shades. Every value is a CSS custom property in `theme.css`; light
+is the default and the computer's own screens are always light. Contrast ratios are against the
 surface the colour normally sits on; all body/label text passes WCAG AA.
 
 ### Light (default)
@@ -73,7 +70,6 @@ surface the colour normally sits on; all body/label text passes WCAG AA.
 | `--warn-tint` | `#f7edd6` | attention banner bg | — |
 | `--stop` | `#b3151c` | the interrupt: locked, over, destructive | 5.9:1 |
 | `--stop-tint` | `#f8e3e2` | interrupt banner bg | — |
-| `--focus` | `#2e7d46` | focus ring (ink `#1e1c19` when on a green fill) | — |
 
 ### Dark (web console only)
 
@@ -89,14 +85,18 @@ Warm near-black, never OLED. Green and status colours brighten for contrast.
 | `--line-2` | `#423d37` | | `--warn-tint` | `#38300f` |
 | `--ink` | `#f3f0ea` | | `--stop` | `#e5595c` |
 | `--ink-2` | `#b4aea4` | | `--stop-tint` | `#3a1d1e` |
-| `--ink-3` | `#8b857b` | | `--focus` | `#46b06a` |
+| `--ink-3` | `#8b857b` | | | |
+
+Derived, not on the board: `--scrim` (the dialog backdrop, warm
+`rgba(30,26,18,.45)`; black `.55` in dark), `--glow` (the 3 px brand halo on a
+focused field), `--on-brand` (text on a green fill: white in light, near-black
+in dark), and the motion tokens in §4. Focus is a 2 px `--brand` outline with
+a 2 px offset; ink on a green fill.
 
 ### The avatar set — curated, never random
 
-The current build derives an avatar disc colour from `hsl(hueFor(seed) …)`, which
-produces uncontrolled hues. Replace it with a fixed set of eight warm pairs,
-chosen deterministically by `hash(id) % 8`, so a family of faces looks like one
-family:
+Eight warm pairs, chosen by `hash(id) % 8` (`web/src/lib/avatar.ts`), so a
+family of faces looks like one family:
 
 ```
 0 blush   bg #fbe3dd  ink #9a3b28      4 mint   bg #d6efe0  ink #1f6b45
@@ -152,7 +152,7 @@ on H1, `0` elsewhere. Measure for body copy ≤ 60ch.
 **Spacing** — 4px base scale: `4 · 8 · 12 · 16 · 20 · 24 · 32 · 40 · 48 · 64`.
 Card padding 20px; page gutters 20–24px; section gap 32–48px.
 
-**Radius** — a real 3-step scale plus the pill, replacing today's 6/12/22/28 mix:
+**Radius** — three steps plus the pill:
 
 | Token | Value | Use |
 |---|---|---|
@@ -170,7 +170,7 @@ Card padding 20px; page gutters 20–24px; section gap 32–48px.
 
 Cards rest at `--shadow-1` + `--line`; on hover (if interactive) they lift to
 `--shadow-2` and `translateY(-2px)`. Modals use `--shadow-2`. Dark mode swaps in
-black-based shadows (see reference).
+black-based shadows (`theme.css`).
 
 **Motion** — one gentle ease, three durations. Calm, never bouncy.
 
@@ -193,8 +193,8 @@ the number counts up to meet the ring. Press = `scale(.98)`. Page arrival = one
 
 ### Button — one grammar, four roles, three sizes
 
-Pill, Figtree 600. Focus ring `--focus` 2px + 2px offset (ink ring on green
-fills). Press `scale(.98)`. Disabled `opacity .45`.
+Pill, Figtree 600. Focus: 2 px `--brand` outline, 2 px offset (ink on a green
+fill). Press `scale(.98)`. Disabled `opacity .45`.
 
 | Variant | Rest | Hover | Use |
 |---|---|---|---|
@@ -205,9 +205,7 @@ fills). Press `scale(.98)`. Disabled `opacity .45`.
 
 Sizes: `sm` 36px / 14px · `md` 44px / 15px · `lg` 52px / 17px (kid). One
 `<Button>` component; the segmented control, filter pills and bracket picker are
-their own primitives but share these tokens. **This is the biggest single change
-from today, where "primary" is a hairline outline and the real filled button is
-ink-black — the primary action becomes green.**
+their own primitives but share these tokens.
 
 ### Text input & select
 
@@ -221,30 +219,34 @@ Select adds a CSS chevron. Hint 12.5px `--ink-3`.
 `--surface`, `--line`, `--r`, `--shadow-1`, padding 20px. No corner ticks, no
 dot-grid. Interactive cards get the hover lift. Three card recipes:
 
-- **Family card** — avatar-ring on the left; name (H3), a meta line
-  (`ages · device`), a segmented budget bar, and one plain sentence of time
-  ("**48m** left of 1h 30m"). Over the limit: bar and time go `--stop`, a
-  `Time's up` status tag sits by the name.
-- **Device card** — name (H3) + user (meta), a status pill (Online/Offline/
-  Locked) top-right, a small facts list (last seen, today, protection), and a
-  row of secondary/quiet buttons.
+- **Family card** — the avatar ring; name (H3); a meta line (`Kid · Mia's
+  laptop`); one plain sentence of time ("**27 min** left of 1 h 15 min", "12
+  min today · no limit set", "Paused by you"). A waiting request sits on the
+  card with its two answers. Time's up: the ring completes in `--stop` and a
+  `Time's up` tag sits by the name.
+- **Computer card** — name (H3), who uses it (meta), a status tag (Online /
+  Offline / Away, allowed / Paused / Not set up yet / Pausing… / Resuming…),
+  one status line ("Last online 20 min ago"), and a row of secondary/quiet
+  buttons; the rest under Details.
 - **Plain card** — the generic container for settings rows and sheets.
 
 ### Avatar + activity ring — the mark
 
 Identity disc (emoji or monogram, on an avatar-set pair) centred inside a ring.
-Ring geometry is fixed everywhere:
+One ring component draws every ring (`web/src/components/Ring.tsx`):
 
-- stroke = `round(diameter × 0.07)`, round line-caps, fill starts at 12 o'clock
-  and grows clockwise.
-- track `--line`; fill `--brand`; **over-limit fill `--stop`**; **paused = a
-  dashed `--ink-3` ring** (`stroke-dasharray` ~2%/5%) and the disc dims to 0.6.
-- no target (no goal, no limit) → a plain disc, no ring.
-- disc inset = stroke + 3px; disc font-size = 50% of its own box (emoji) / 34%
-  (monogram).
+- stroke 9% of the diameter on hero rings (120 px and up), 8% from 48 px, 7%
+  below; the arc starts flush under the tick and sweeps clockwise to a round
+  cap.
+- **the tick** at twelve o'clock, in ink, on every ring 40 px and larger,
+  painted last.
+- fill `--brand`; `--warn` at 15 minutes or less; `--stop` only at zero (time's
+  up); **paused = a dashed `--ink-3` ring**, no fill.
+- no limit set → just the track and the tick.
 
-Sizes: 28px (rail), 56px (family grid), 72px (states), 140–180px (child/lock
-hero). The favicon and wordmark marque use the same arc at a fixed ~40% fill.
+Sizes: 28 px (rail), 64 px (family cards), 140–220 px (hero, the lock). The
+static mark (favicon, lockup, app icon) is fixed at 40% — a morning, most of
+the day still ahead; its heavier stroke (16% of the ring) holds at 16 px.
 
 ### Chips, pills, toggles, status
 
@@ -261,23 +263,23 @@ hero). The favicon and wordmark marque use the same arc at a fixed ~40% fill.
 
 ### Modal & confirm
 
-`--surface`, `--r-lg`, `--shadow-2`. Scrim `rgba(30,26,18,.5)` (warm, lighter
-than today's harsh `rgba(0,0,0,.72)`), no dot-grid. Title is an **H2 in sentence
+`--surface`, `--r-lg`, `--shadow-2`. Scrim `--scrim`, no dot-grid. Title is an **H2 in sentence
 case** (not a mono-caps 11px "terminal" title). Close `✕` is a 44px target. Traps
 focus, restores on close, Escape to dismiss. Destructive confirm: danger-**solid**
 final button, with type-the-name confirmation.
 
 ### App shell & navigation
 
-- **Desktop rail** (`--rail` plane): wordmark, then nav as **pill rows** —
-  active = `--brand-tint` bg + `--brand-ink` text + leading monoline icon (not a
-  left ink border). Below, "Today at home": each person as a small avatar-ring
-  row with minutes left. Footer: identity, sign-out, and the change-mode lock.
-- **Mobile: a bottom tab bar** (Family · Devices · Settings · You) — conventional
-  and thumb-reachable, replacing today's floating hamburger. Active tab uses the
-  same brand-tint treatment.
-- Icons are monoline (1.75–2px stroke, `currentColor`, round joins). No emoji as
-  iconography — emoji are identity (faces) only.
+- **The rail** (`--rail` plane, `layout/Shell.tsx`): the lockup, then **Family ·
+  Computers · Settings · Me** as pill rows — active = `--brand-tint` bg +
+  `--brand-ink` text + the leading icon. Below, **Today**: each person as a
+  28 px ring, their name and time left. Footer: who is signed in, and
+  sign-out.
+- **Below 1024 px** the rail becomes a drawer behind a slim top bar with the
+  lockup and a menu button.
+- **Icons come from `brand/icons/` only** (24 grid, 2 px stroke, round caps and
+  joins, `currentColor`), through `components/Icon.tsx`. No cog (settings is a
+  pair of sliders), no shield. Emoji are faces, never icons.
 
 ### Empty / loading / error / success
 
@@ -290,51 +292,17 @@ final button, with type-the-name confirmation.
   top-bar, not a blanked page.
 - **Error**: an inline banner, `--stop-tint` bg / `--stop` text, a monoline icon,
   human copy and a **Retry** action. Never a bare stack trace.
-- **Success**: an inline `--brand-tint` banner with a check ("Saved. Vali's new
-  limit is live."). Brief, inline, no toast.
+- **Success**: a short toast that states the result ("Gave Mia 15 more
+  minutes."), with **Undo** where the inverse is one call.
 
 ---
 
-## 6. The on-device client (Rust / egui)
+## 6. The computer's own screens
 
-The agent's app, wind-down, lock and intro screens share this language via
-hand-set constants. They are **light** (the black lock is retired). Update the
-tuples in `client/src/app.rs`, `client/src/lockout.rs`, `client/src/intro.rs`:
-
-```rust
-// tokens → egui Color32::from_rgb tuples
-const BG:     (u8,u8,u8) = (0xf4,0xf2,0xee); // warm paper
-const SURFACE:(u8,u8,u8) = (0xff,0xff,0xff);
-const SUNKEN: (u8,u8,u8) = (0xec,0xeb,0xe6); // ring / bar track
-const LINE:   (u8,u8,u8) = (0xd5,0xd1,0xc9);
-const INK:    (u8,u8,u8) = (0x1e,0x1c,0x19);
-const INK2:   (u8,u8,u8) = (0x57,0x54,0x4e);
-const INK3:   (u8,u8,u8) = (0x72,0x6e,0x66);
-const BRAND:  (u8,u8,u8) = (0x2e,0x7d,0x46); // the ring / ok
-const WARN:   (u8,u8,u8) = (0x8a,0x63,0x00); // wind-down
-const STOP:   (u8,u8,u8) = (0xb3,0x15,0x1c); // time-up / wrong code
-```
-
-Rules that translate:
-
-- **Corner radius** ~16px on cards/buttons, pill (`h/2`) on action buttons;
-  round line-caps on the ring stroke. Set egui `Rounding` and `Stroke` to match.
-- **Type**: bundle Figtree (`egui::FontData::from_static` on a `.ttf` in the
-  binary) so the lock matches the console; fall back to the platform sans if the
-  font can't load. Sizes follow the scale: the big number ~64px/800, one message
-  line ~22px/700, sub ~16px/400.
-- **The ring is drawn, not decorative.** Use egui's painter: a `SUNKEN` track
-  circle + a `BRAND` arc from top, clockwise, proportional to time used. Over →
-  `STOP` arc. This is the same mark as the web favicon.
-- **Lock screen** (`lockout.rs`): warm `BG`, the ring large with the fact inside
-  (minutes left, or a padlock glyph when stopped), then one sentence and one next
-  step, drawn from the lock reason so copy matches the console verbatim —
-  "Stop — time's up for today", "Goodnight — screens are off until morning",
-  "Paused — a parent paused this computer. Save your work." A wind-down countdown
-  precedes every stop, ring and text in `WARN`, sliding to `STOP` at zero.
-- **Intro** (`intro.rs`): same `BG`/`INK`, the wordmark ring, plain sentences.
-- Wrong-code feedback: the ring/segment flashes `STOP` once; no shake, no siren.
-  Calm, not punitive — the enforcement is firm, the tone is kind.
+The app window, the warnings and the lock on the managed computer use the same
+light tokens, the same ring and Figtree. Their layout, sizes and words are
+[`DESIGN-CLIENT.md`](DESIGN-CLIENT.md) and [`BRAND-CLIENT.md`](BRAND-CLIENT.md);
+the key moments are drawn on the brand board (§05 a–c).
 
 ---
 
