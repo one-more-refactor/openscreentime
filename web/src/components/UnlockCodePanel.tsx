@@ -5,12 +5,14 @@
 // reopens time and allows `sudo`. It is verified on the device, offline — but
 // the secret behind it never leaves the server and the agent. There is no QR
 // to scan, no authenticator entry to keep: when a parent needs the code they
-// open this (on their phone, usually), prove it's them once (change mode), and
+// open this (on their phone, usually), confirm it's them (a passkey, or a code
+// on their own computer — a fresh sign-in counts), and
 // read the code that is valid right now. Recovery codes are the phone-is-dead
 // fallback: eight one-time 8-digit codes, shown once, generated here.
 //
 // Used in two places with one body: Add a child (step 2) and Settings →
-// Unlock codes. Every read here is a sensitive read (428 without change mode),
+// Unlock codes. Every read here is a sensitive read (428 outside the confirm
+// window),
 // so everything goes through guard().
 // ============================================================================
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";

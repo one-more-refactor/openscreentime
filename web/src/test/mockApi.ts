@@ -3,19 +3,19 @@
 // first file's endpoints vanish. The API is therefore mocked exactly once,
 // here, and tests steer it through these handles.
 //
-// Change mode is NOT mocked: components render inside the real
+// The confirm dialog is NOT mocked: components render inside the real
 // ConfirmProvider, which talks to this mocked API. That keeps one truth for
 // "what does guard() do" and lets the provider's own tests live here too.
 import { mock } from "bun:test";
 import type {
-  ChangeModeStatus,
+  AuthConfig,
+  CodeRequest,
+  ConfirmGrant,
+  ConfirmStatus,
   FamilyResponse,
   LockResponse,
   RecoveryCodes,
   RecoveryCodesStatus,
-  SecondFactorMethod,
-  StepUpGrant,
-  TwoFactorStatus,
   UnlockCode,
   UnlockCodeRotated,
 } from "../types";
@@ -40,10 +40,12 @@ export const apiCalls = {
   family: 0,
   locked: [] as string[],
   unlocked: [] as string[],
-  changeMode: 0,
-  lockChangeMode: 0,
-  extendChangeMode: 0,
+  confirmStatus: 0,
   verify: [] as string[],
+  codeStart: [] as string[],
+  codeVerify: [] as string[],
+  register: [] as [string, string | undefined][],
+  passkey: 0,
   unlockCode: [] as string[],
   recoveryCodes: [] as string[],
   generateRecovery: [] as string[],
@@ -58,21 +60,28 @@ function inMinutes(m: number): string {
 
 export const apiImpl = {
   getFamily: (() => Promise.reject(new Error("no getFamily impl set"))) as () => Promise<FamilyResponse>,
+  getAuthConfig: (() =>
+    Promise.resolve({
+      oidc: false,
+      oidc_name: "SSO",
+      needs_setup: false,
+      setup_code_required: false,
+    })) as () => Promise<AuthConfig>,
   lockDevice: ((_: string) => Promise.resolve(ok)) as Lock,
   unlockDevice: ((_: string) => Promise.resolve(ok)) as Lock,
-  getChangeMode: (() => Promise.resolve({ armed_until: null, extended: false })) as () => Promise<ChangeModeStatus>,
-  lockChangeMode: (() => Promise.resolve({ armed_until: null, extended: false })) as () => Promise<ChangeModeStatus>,
-  extendChangeMode: (() =>
-    Promise.resolve({ armed_until: inMinutes(15), extended: true })) as () => Promise<ChangeModeStatus>,
-  verifyStepUp: ((method: SecondFactorMethod, code: string) =>
+  getConfirmStatus: (() =>
+    Promise.resolve({ armed_until: null, passkey: false, computer: true })) as () => Promise<ConfirmStatus>,
+  startConfirmCode: (() =>
+    Promise.resolve({ request_id: "r1", expires_in_secs: 300 })) as () => Promise<CodeRequest>,
+  verifyConfirmCode: ((_: string, code: string) =>
     code === MOCK_CODE
-      ? Promise.resolve({ method, expires_at: inMinutes(15), extended: false })
-      : Promise.reject(new ApiError("invalid_code", "That code didn't match.", 400))) as (
-    m: SecondFactorMethod,
+      ? Promise.resolve({ armed_until: inMinutes(15) })
+      : Promise.reject(new ApiError("wrong_code", "that code didn't match", 401))) as (
+    id: string,
     c: string,
-  ) => Promise<StepUpGrant>,
-  getTwoFactorStatus: (() =>
-    Promise.resolve({ totp_enrolled: true, email_available: true })) as () => Promise<TwoFactorStatus>,
+  ) => Promise<ConfirmGrant>,
+  confirmWithPasskey: (() =>
+    Promise.resolve({ armed_until: inMinutes(15) })) as () => Promise<ConfirmGrant>,
   getUnlockCode: ((id: string) =>
     Promise.resolve({ code: "123456", seconds_left: 20, period: 30, device_name: id })) as (
     id: string,
@@ -96,19 +105,22 @@ export const apiImpl = {
 
 const defaults = { ...apiImpl };
 
-/** Change mode on from the first render (the server says so on mount). */
-export function armChangeMode(minutes = 15) {
-  apiImpl.getChangeMode = () => Promise.resolve({ armed_until: inMinutes(minutes), extended: false });
+/** The confirm window open from the first render (the server says so on mount). */
+export function armConfirm(minutes = 15) {
+  apiImpl.getConfirmStatus = () =>
+    Promise.resolve({ armed_until: inMinutes(minutes), passkey: false, computer: true });
 }
 
 export function resetApiMock() {
   apiCalls.family = 0;
   apiCalls.locked.length = 0;
   apiCalls.unlocked.length = 0;
-  apiCalls.changeMode = 0;
-  apiCalls.lockChangeMode = 0;
-  apiCalls.extendChangeMode = 0;
+  apiCalls.confirmStatus = 0;
   apiCalls.verify.length = 0;
+  apiCalls.codeStart.length = 0;
+  apiCalls.codeVerify.length = 0;
+  apiCalls.register.length = 0;
+  apiCalls.passkey = 0;
   apiCalls.unlockCode.length = 0;
   apiCalls.recoveryCodes.length = 0;
   apiCalls.generateRecovery.length = 0;
@@ -131,25 +143,43 @@ mock.module("../api", () => ({
     apiCalls.unlocked.push(id);
     return apiImpl.unlockDevice(id);
   },
-  getChangeMode: () => {
-    apiCalls.changeMode += 1;
-    return apiImpl.getChangeMode();
+  getConfirmStatus: () => {
+    apiCalls.confirmStatus += 1;
+    return apiImpl.getConfirmStatus();
   },
-  lockChangeMode: () => {
-    apiCalls.lockChangeMode += 1;
-    return apiImpl.lockChangeMode();
-  },
-  extendChangeMode: () => {
-    apiCalls.extendChangeMode += 1;
-    return apiImpl.extendChangeMode();
-  },
-  verifyStepUp: (m: SecondFactorMethod, c: string) => {
+  startConfirmCode: () => apiImpl.startConfirmCode(),
+  verifyConfirmCode: (id: string, c: string) => {
     apiCalls.verify.push(c);
-    return apiImpl.verifyStepUp(m, c);
+    return apiImpl.verifyConfirmCode(id, c);
   },
-  getTwoFactorStatus: () => apiImpl.getTwoFactorStatus(),
-  startEmailStepUp: () => Promise.resolve(),
-  startTelegramStepUp: () => Promise.resolve(),
+  confirmWithPasskey: () => apiImpl.confirmWithPasskey(),
+  // The sign-in page and the session provider.
+  getAuthConfig: () => apiImpl.getAuthConfig(),
+  getMe: () => Promise.reject(new ApiError("unauthorized", "no session", 401)),
+  pkcePair: () => Promise.resolve({ verifier: "v".repeat(43), challenge: "c".repeat(43) }),
+  auth: {
+    logout: () => Promise.resolve(),
+    voucher: () => Promise.resolve(),
+    link: () => Promise.resolve(),
+    register: (name: string, setupToken?: string) => {
+      apiCalls.register.push([name, setupToken]);
+      return Promise.resolve();
+    },
+    passkey: () => {
+      apiCalls.passkey += 1;
+      return Promise.resolve();
+    },
+    codeStart: (name: string) => {
+      apiCalls.codeStart.push(name);
+      return Promise.resolve({ request_id: "r1", expires_in_secs: 300 });
+    },
+    codeVerify: (_id: string, _verifier: string, code: string) => {
+      apiCalls.codeVerify.push(code);
+      return code === MOCK_CODE
+        ? Promise.resolve()
+        : Promise.reject(new ApiError("wrong_code", "that code didn't match — check your computer and try again", 401));
+    },
+  },
   getUnlockCode: (id: string) => {
     apiCalls.unlockCode.push(id);
     return apiImpl.getUnlockCode(id);

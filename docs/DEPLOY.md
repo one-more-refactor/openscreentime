@@ -127,17 +127,15 @@ for the full list of variables (OIDC SSO, logging, etc.).
 Database migrations run automatically on every server startup
 (`db::migrate` in `server/src/main.rs`) — no manual migration step needed.
 
-### First admin & registration lockdown
+### First run & registration lockdown
 
-While the database has **zero admins**, the login page's FIRST ADMIN tab is open: register
-with any email + passkey and the tenant is bootstrapped around you. From the moment the
-first admin exists, the register endpoints refuse with `403 registration_closed` — a
-public OpenScreenTime URL can't be hijacked by whoever finds it first thereafter.
-
-To deliberately allow another *new* admin account to register, set
-`OST_OPEN_REGISTRATION=1` in the server environment, restart, let them register, then
-remove it again. (Logged-in admins can always add more passkeys to their own account via
-Settings; OIDC SSO admin matching is unaffected.)
+`deploy/setup.sh` prints a one-time setup link, `https://<domain>/#setup=<code>`
+(the code is `OST_BOOTSTRAP_TOKEN` in `.env`). Open it: **Create your household**
+asks only for your name, then a passkey. From the moment that first account
+exists, first run refuses with `403 registration_closed` — a public
+OpenScreenTime URL can't be hijacked by whoever finds it first. (Without the
+link, the page asks for the setup code.) After that, people sign in with their
+name and a code on their own computer, or a passkey — see docs/AUTH.md.
 
 ### Enrolling devices
 

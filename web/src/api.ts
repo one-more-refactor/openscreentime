@@ -10,8 +10,6 @@ import {
   startRegistration,
   type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON,
-  type RegistrationResponseJSON,
-  type AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
 
 import type {
@@ -22,7 +20,9 @@ import type {
   WhereData,
   MeToday,
   NewMember,
-  ChangeModeStatus,
+  CodeRequest,
+  ConfirmGrant,
+  ConfirmStatus,
   RecoveryCodes,
   RecoveryCodesStatus,
   UnlockCode,
@@ -51,11 +51,7 @@ import type {
   Policy,
   Profile,
   Severity,
-  StepUpGrant,
-  SecondFactorMethod,
   TamperLevel,
-  TotpEnrollment,
-  TwoFactorStatus,
   VpnKind,
 } from "./types";
 
@@ -72,18 +68,18 @@ import {
   mockEarnRequests,
   mockEvents,
   mockFamily,
+  mockHouseholdAccounts,
   mockMe,
   mockMeToday,
   mockPasskeys,
   mockProfiles,
-  mockTwoFactor,
-  mockChangeMode,
+  mockConfirm,
   mockUnlockCode,
   mockRotateUnlockCode,
   mockGenerateRecoveryCodes,
   mockRecoveryCodesStatus,
   mockUpdateMember,
-  MOCK_STEPUP_CODE,
+  MOCK_CODE,
 } from "./mock";
 
 /** Design-review mode: bundled sample data instead of network reads. */
@@ -135,42 +131,79 @@ async function read<T>(path: string, fallback: () => T, init?: RequestInit): Pro
   return request<T>(path, init);
 }
 
-// ---- Auth ------------------------------------------------------------------
+// ---- Sign-in (docs/AUTH.md) ------------------------------------------------
+// Two doors: your name, then a code shown on your own computer — or a passkey.
+// webauthn-rs wraps its options as `{ publicKey: {...} }`;
+// @simplewebauthn/browser wants the inner object.
+
+function b64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/** A fresh PKCE pair: keep the verifier in this tab, send only the challenge.
+ * A code typed into another browser is useless without it. */
+export async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  const verifier = b64url(raw);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return { verifier, challenge: b64url(new Uint8Array(digest)) };
+}
+
+/** Mock mode accepts this code wherever one is typed. */
+function mockCode(code: string) {
+  if (code.replace(/\D/g, "") !== MOCK_CODE) {
+    throw new ApiError("wrong_code", "That code didn't match — check your computer and try again.", 401);
+  }
+}
 
 export const auth = {
-  // webauthn-rs serializes challenges wrapped in `{ publicKey: {...} }`;
-  // @simplewebauthn/browser wants the inner options object.
-  async registerStart(username: string, display_name?: string) {
-    const res = await request<{
-      publicKey: PublicKeyCredentialCreationOptionsJSON;
-    }>("/api/auth/register/start", {
+  /** First run: your name, then a passkey — that creates the household. */
+  async register(name: string, setupToken?: string) {
+    if (usingMock) return;
+    const res = await request<{ publicKey: PublicKeyCredentialCreationOptionsJSON }>(
+      "/api/auth/register/start",
+      { method: "POST", body: JSON.stringify({ name, setup_token: setupToken }) },
+    );
+    const credential = await startRegistration({ optionsJSON: res.publicKey });
+    await request("/api/auth/register/finish", {
       method: "POST",
-      body: JSON.stringify({ username, display_name }),
-    });
-    return res.publicKey;
-  },
-
-  async registerFinish(username: string, credential: RegistrationResponseJSON) {
-    return request<{ admin: Me["admin"] }>("/api/auth/register/finish", {
-      method: "POST",
-      body: JSON.stringify({ username, credential }),
+      body: JSON.stringify({ credential, setup_token: setupToken }),
     });
   },
 
-  async loginStart(username: string) {
-    const res = await request<{
-      publicKey: PublicKeyCredentialRequestOptionsJSON;
-    }>("/api/auth/login/start", {
-      method: "POST",
-      body: JSON.stringify({ username }),
-    });
-    return res.publicKey;
-  },
-
-  async loginFinish(credential: AuthenticationResponseJSON) {
-    return request<void>("/api/auth/login/finish", {
+  /** Sign in with a passkey — no name first; the passkey says whose it is. */
+  async passkey() {
+    if (usingMock) return;
+    const res = await request<{ publicKey: PublicKeyCredentialRequestOptionsJSON }>(
+      "/api/auth/login/start",
+      { method: "POST" },
+    );
+    const credential = await startAuthentication({ optionsJSON: res.publicKey });
+    await request("/api/auth/login/finish", {
       method: "POST",
       body: JSON.stringify({ credential }),
+    });
+  },
+
+  /** Door one: a name in, a 6-digit code on that person's own computer. */
+  async codeStart(name: string, code_challenge: string): Promise<CodeRequest> {
+    if (usingMock) return { request_id: "mock", expires_in_secs: 300 };
+    return request<CodeRequest>("/api/auth/code/start", {
+      method: "POST",
+      body: JSON.stringify({ name, code_challenge }),
+    });
+  },
+
+  /** …and the code typed back, from the browser that asked. */
+  async codeVerify(request_id: string, code_verifier: string, code: string): Promise<void> {
+    if (usingMock) return mockCode(code);
+    await request("/api/auth/code/verify", {
+      method: "POST",
+      body: JSON.stringify({ request_id, code_verifier, code }),
     });
   },
 
@@ -178,12 +211,7 @@ export const auth = {
     return request<void>("/api/auth/logout", { method: "POST" });
   },
 
-  /**
-   * Device-voucher autologin: the installed client mints a one-time voucher the
-   * local browser reads; the server verifies the device token + that this
-   * account is permitted on the device, then issues a session. Contract:
-   * voucher in → session out, server-verified (docs/AUTH.md).
-   */
+  /** `ost login`'s one-time voucher (from the URL fragment) → a session. */
   async voucher(voucher: string) {
     return request<void>("/api/auth/voucher", {
       method: "POST",
@@ -191,18 +219,12 @@ export const auth = {
     });
   },
 
-  /** Full register ceremony: start → browser prompt → finish. Passkey only. */
-  async register(username: string, display_name?: string) {
-    const options = await this.registerStart(username, display_name);
-    const credential = await startRegistration({ optionsJSON: options });
-    return this.registerFinish(username, credential);
-  },
-
-  /** Full login ceremony: start → browser prompt → finish. */
-  async login(username: string) {
-    const options = await this.loginStart(username);
-    const credential = await startAuthentication({ optionsJSON: options });
-    return this.loginFinish(credential);
+  /** A recovery link from `openscreentime-server recover` → a session. */
+  async link(token: string) {
+    return request<void>("/api/auth/link", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
   },
 };
 
@@ -236,11 +258,16 @@ export async function finishOidcSetup(
 }
 
 export async function getAuthConfig(): Promise<AuthConfig> {
-  const res = await read<{ needs_setup?: boolean; auth: Omit<AuthConfig, "needs_setup"> }>(
-    "/api/auth/config",
-    () => ({ needs_setup: false, auth: { oidc: true, oidc_name: "Authentik" } }),
-  );
-  return { ...res.auth, needs_setup: res.needs_setup ?? false };
+  const res = await read<{
+    needs_setup?: boolean;
+    setup_code_required?: boolean;
+    auth: Pick<AuthConfig, "oidc" | "oidc_name">;
+  }>("/api/auth/config", () => ({ needs_setup: false, auth: { oidc: false, oidc_name: "SSO" } }));
+  return {
+    ...res.auth,
+    needs_setup: res.needs_setup ?? false,
+    setup_code_required: res.setup_code_required ?? false,
+  };
 }
 
 // ---- Session ---------------------------------------------------------------
@@ -249,121 +276,48 @@ export async function getMe(): Promise<Me> {
   return read<Me>("/api/me", () => mockMe);
 }
 
-// ---- Change mode (step-up 2FA) ----------------------------------------------
-// "Reading is free; changing needs a second factor — once." A verified factor
-// turns change mode on for 15 minutes (the server's step-up grant); the
-// console locks it again on request, on expiry, or on reload if it lapsed.
-// A mutation attempted without it returns STEP_UP_REQUIRED. See docs/AUTH.md.
+// ---- Confirm it's you (the sensitive corner) --------------------------------
+// Signing in is the proof; inside, only the keys (unlock codes, recovery
+// codes, passkeys, pairing tokens) ask again: a passkey, or a code from your
+// own computer, opens a 15-minute window. A fresh sign-in opens it too.
 
-export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
-  return read<TwoFactorStatus>("/api/me/2fa", () => mockTwoFactor);
+export async function getConfirmStatus(): Promise<ConfirmStatus> {
+  return read<ConfirmStatus>("/api/auth/confirm", () => mockConfirm.status());
 }
 
-/** Begin authenticator-app enrollment — secret + otpauth URI, shown once. */
-export async function startTotpEnrollment(): Promise<TotpEnrollment> {
+/** Confirm with your passkey. */
+export async function confirmWithPasskey(): Promise<ConfirmGrant> {
+  if (usingMock) return mockConfirm.open();
+  const res = await request<{ publicKey: PublicKeyCredentialRequestOptionsJSON }>(
+    "/api/auth/confirm/passkey/start",
+    { method: "POST" },
+  );
+  const credential = await startAuthentication({ optionsJSON: res.publicKey });
+  return request<ConfirmGrant>("/api/auth/confirm/passkey/finish", {
+    method: "POST",
+    body: JSON.stringify({ credential }),
+  });
+}
+
+/** Send a code to your own computer. */
+export async function startConfirmCode(): Promise<CodeRequest> {
+  if (usingMock) return { request_id: "mock", expires_in_secs: 300 };
+  return request<CodeRequest>("/api/auth/confirm/code/start", { method: "POST" });
+}
+
+/** …and type it back. */
+export async function verifyConfirmCode(request_id: string, code: string): Promise<ConfirmGrant> {
   if (usingMock) {
-    const secret = "JBSWY3DPEHPK3PXP";
-    return {
-      secret,
-      otpauth_uri: `otpauth://totp/OpenScreenTime:${mockMe.account.email}?secret=${secret}&issuer=OpenScreenTime`,
-    };
+    mockCode(code);
+    return mockConfirm.open();
   }
-  return request<TotpEnrollment>("/api/me/2fa/totp/start", { method: "POST" });
-}
-
-/** Confirm the authenticator by proving one live code before it counts. */
-export async function confirmTotpEnrollment(code: string): Promise<void> {
-  if (usingMock) {
-    if (code.replace(/\s/g, "") !== MOCK_STEPUP_CODE) {
-      throw new ApiError("invalid_code", "That code didn't match. Try again.", 400);
-    }
-    return;
-  }
-  return request<void>("/api/me/2fa/totp/confirm", {
+  return request<ConfirmGrant>("/api/auth/confirm/code/verify", {
     method: "POST",
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ request_id, code }),
   });
 }
 
-/** Ask the server to email a step-up code. Dev builds log it server-side. */
-export async function startEmailStepUp(): Promise<void> {
-  if (usingMock) return;
-  return request<void>("/api/auth/stepup/email/start", { method: "POST" });
-}
-
-/** Verify a second factor; on success change mode is on for 15 minutes. */
-export async function verifyStepUp(
-  method: SecondFactorMethod,
-  code: string,
-): Promise<StepUpGrant> {
-  if (usingMock) {
-    if (code.replace(/\s/g, "") !== MOCK_STEPUP_CODE) {
-      throw new ApiError("invalid_code", "That code didn't match. Try again.", 400);
-    }
-    return { method, ...mockChangeMode.enter() };
-  }
-  return request<StepUpGrant>("/api/auth/stepup/verify", {
-    method: "POST",
-    body: JSON.stringify({ method, code }),
-  });
-}
-
-// ---- Client-first login (CONTRACT-0.6) --------------------------------------
-// The browser asks by name; the person's own computer approves. PKCE-style:
-// the verifier below never leaves this browser.
-
-export interface DeviceLoginStart {
-  request_id: string;
-  /** The code the approver's device must show — the human matches it. */
-  match_code: string;
-  expires_in_secs: number;
-}
-
-function b64url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-/** A fresh PKCE pair: keep the verifier, send only the challenge. */
-export async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
-  const raw = new Uint8Array(32);
-  crypto.getRandomValues(raw);
-  const verifier = b64url(raw);
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-  return { verifier, challenge: b64url(new Uint8Array(digest)) };
-}
-
-export async function startDeviceLogin(
-  username: string,
-  code_challenge: string,
-): Promise<DeviceLoginStart> {
-  if (usingMock)
-    return { request_id: "mock-req", match_code: "1234", expires_in_secs: 120 };
-  return request<DeviceLoginStart>("/api/auth/device/start", {
-    method: "POST",
-    body: JSON.stringify({ username, code_challenge }),
-  });
-}
-
-/** One poll. `status` is "pending" until the human at the machine answers. */
-export async function finishDeviceLogin(
-  request_id: string,
-  code_verifier: string,
-): Promise<{ status: string; role?: string }> {
-  if (usingMock) return { status: "approved", role: "admin" };
-  return request<{ status: string; role?: string }>("/api/auth/device/finish", {
-    method: "POST",
-    body: JSON.stringify({ request_id, code_verifier }),
-  });
-}
-
-/** Ask the server to send one confirm-tap to the paired Telegram chat. */
-export async function startTelegramStepUp(): Promise<void> {
-  if (usingMock) return;
-  return request<void>("/api/auth/stepup/telegram/start", { method: "POST" });
-}
+// ---- Telegram alerts (one-way) ----------------------------------------------
 
 /** Pairing state of the account's Telegram companion (Security room). */
 export async function getTelegram(): Promise<TelegramStatus> {
@@ -392,23 +346,6 @@ export async function pairTelegram(): Promise<TelegramPairing> {
 export async function unpairTelegram(): Promise<void> {
   if (usingMock) return;
   return request<void>("/api/me/telegram", { method: "DELETE" });
-}
-
-/** Is change mode on for this session (survives a reload), and until when. */
-export async function getChangeMode(): Promise<ChangeModeStatus> {
-  return read<ChangeModeStatus>("/api/auth/stepup", () => mockChangeMode.status());
-}
-
-/** Lock it down again, now. */
-export async function lockChangeMode(): Promise<ChangeModeStatus> {
-  if (usingMock) return mockChangeMode.lock();
-  return request<ChangeModeStatus>("/api/auth/stepup/lock", { method: "POST" });
-}
-
-/** Another 15 minutes from now — once per grant (409 `already_extended`). */
-export async function extendChangeMode(): Promise<ChangeModeStatus> {
-  if (usingMock) return mockChangeMode.extend();
-  return request<ChangeModeStatus>("/api/auth/stepup/extend", { method: "POST" });
 }
 
 // ---- Family ----------------------------------------------------------------
@@ -616,6 +553,16 @@ export async function assignProfile(
   );
 }
 
+/** Point an OS login on a computer at a person ("dad" is me, "m2011" is Mia).
+ * Inside the confirm window: it decides who that login signs in as. */
+export async function assignAccount(deviceUserId: string, account_id: string): Promise<void> {
+  if (usingMock) return;
+  await request<{ ok: boolean }>(`/api/device-users/${deviceUserId}/assign-account`, {
+    method: "POST",
+    body: JSON.stringify({ account_id }),
+  });
+}
+
 // ---- Profiles --------------------------------------------------------------
 
 export async function listProfiles(): Promise<Profile[]> {
@@ -744,6 +691,20 @@ export async function listPasskeys(): Promise<Passkey[]> {
   return res.passkeys;
 }
 
+/** Add another passkey to your account (inside the confirm window). */
+export async function addPasskey(): Promise<void> {
+  if (usingMock) return;
+  const res = await request<{ publicKey: PublicKeyCredentialCreationOptionsJSON }>(
+    "/api/me/passkeys/new/start",
+    { method: "POST" },
+  );
+  const credential = await startRegistration({ optionsJSON: res.publicKey });
+  await request("/api/me/passkeys/new/finish", {
+    method: "POST",
+    body: JSON.stringify({ credential }),
+  });
+}
+
 export async function deletePasskey(id: string): Promise<void> {
   await request<{ ok: boolean }>(`/api/me/passkeys/${id}`, {
     method: "DELETE",
@@ -841,6 +802,14 @@ export async function createMember(m: NewMember): Promise<Account> {
     body: JSON.stringify(m),
   });
   return res.member;
+}
+
+/** Everyone in the household — parents first (hub only). */
+export async function listMembers(): Promise<Account[]> {
+  const res = await read<{ members: Account[] }>("/api/members", () => ({
+    members: mockHouseholdAccounts,
+  }));
+  return res.members;
 }
 
 export async function updateMember(id: string, patch: MemberPatch): Promise<Account> {
