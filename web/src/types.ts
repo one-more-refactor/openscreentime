@@ -14,7 +14,6 @@
 // everything. Same silent drift as the schedule/windows mismatch.
 export type DnsMode = "default_deny" | "allow_all";
 export type FirewallMode = "default_deny" | "allow_all";
-export type UnlockChallenge = "math" | "wait" | "parent_pin";
 
 export interface DnsPolicy {
   mode: DnsMode;
@@ -62,9 +61,11 @@ export interface EarnTimePolicy {
   tasks: EarnTask[];
 }
 
+/** Still in the document, read by nothing: the lock has one way back (the
+ * unlock code) and the console no longer offers a choice. */
 export interface LockoutPolicy {
   enabled: boolean;
-  unlock_challenge: UnlockChallenge;
+  unlock_challenge: string;
 }
 
 export interface GamificationPolicy {
@@ -99,6 +100,26 @@ export interface Policy {
   /** One-click app / category blocks from the built-in catalog. Absent =
    * nothing blocked. */
   blocks?: AppBlocks;
+  /** A self-managed person's own site blocks and the hours they hold
+   * (policy crate `Focus`). Absent = none. */
+  focus?: Focus;
+}
+
+/** Sites a person blocks for themselves, and the focus hours they hold in.
+ * No hours = blocked all day, every day. */
+export interface Focus {
+  sites: string[];
+  hours: TimeWindow | null;
+}
+
+/** GET/PUT /api/me/rules — a self-managed person's own rules (the hub for
+ * themselves, or an adult). A child gets 403: a parent sets theirs. */
+export interface MyRules {
+  /** 0 = no limit */
+  daily_limit_minutes: number;
+  /** when the sites below are blocked; null = all day */
+  focus_hours: TimeWindow | null;
+  sites: string[];
 }
 
 /** Catalog-driven blocks (policy crate `AppBlocks`). Ids refer to
@@ -187,6 +208,8 @@ export interface DeviceUser {
   created_at?: string;
   /** The person this login belongs to. */
   account_id?: string | null;
+  /** nobody has said who this login is yet (Devices → Who's who) */
+  unsorted?: boolean;
 }
 
 /** One row of a device's command queue (GET /api/devices/:id/commands). */
@@ -224,6 +247,8 @@ export interface Device {
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
   pending_commands?: string[];
+  /** /api/family: logins on it nobody has sorted yet (Devices → Who's who) */
+  unsorted_logins?: number;
   /** one-time recovery codes not yet used (0 when none were generated) */
   recovery_codes_unused?: number;
   /** "This is <person>'s computer" — whose it was set up for. */
@@ -278,8 +303,13 @@ export interface FamilyChild {
   devices: ChildDevice[];
   /** earn requests waiting on a parent */
   pending_requests: number;
-  /** paused via the Danger Zone: can read their own page, can't change anything; devices locked */
+  /** an account block from before Pause was the one verb: they can read their
+   *  own page but not ask for anything. The console only offers to lift it. */
   blocked?: boolean;
+  /** false for adults: the hub enforces nothing on them */
+  managed?: boolean;
+  /** keeps their own time — their rules are theirs; the hub sees only minutes */
+  self_managed?: boolean;
 }
 
 export interface FamilyResponse {
@@ -409,15 +439,9 @@ export interface Account {
   created_at: string;
 }
 
-/** How a person's own page looks — playful for small children, calm for
- * teens, plain for adults. Null on an account means "auto by bracket". */
+/** The server still stores a per-person "look"; the console has one look
+ * for everyone now and ignores it. */
 export type Theme = "playful" | "calm" | "plain";
-
-export const THEMES: { key: Theme; label: string; blurb: string }[] = [
-  { key: "playful", label: "Playful", blurb: "Big friendly ring, bright colours — for little ones" },
-  { key: "calm", label: "Calm", blurb: "Quieter stats and goals — for teens" },
-  { key: "plain", label: "Plain", blurb: "A compact private dashboard — for adults" },
-];
 
 export function defaultThemeFor(b: AgeBracket): Theme {
   return b === "little" || b === "kid" ? "playful" : b === "adult" ? "plain" : "calm";
@@ -494,6 +518,11 @@ export interface MeToday {
   windows: TimeWindow[];
   /** the person's own daily goal (minutes), or null if none set */
   goal_minutes?: number | null;
+  /** they keep their own time (the hub for themselves, or an adult): their
+   *  page is "My computer" and /api/me/rules is theirs */
+  self_managed?: boolean;
+  /** their own site blocks and focus hours */
+  focus?: Focus;
 }
 
 /** One day of a person's own history (GET /api/me/history). */

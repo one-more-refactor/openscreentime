@@ -104,7 +104,7 @@ lib/toast.tsx     → Toast notifications
 lib/useAsync.ts   → useAsync hook for data fetching
 components/       → Icon (brand/icons/*.svg), Ring (time used today), AvatarRing, Button, Modal, …
 layout/Shell.tsx  → Left rail (nav with icons, "Today" rings, sign-out); drawer below 1024 px
-pages/            → Login, Welcome, Family, ChildDetail (+ChildRules), Computers, AddChild, Settings, Me
+pages/            → Login, Welcome, Family, Person (/child/:key = PersonToday, /child/:key/rules = PersonRules), Computers, AddChild, Settings, Me (a child's day, or "My computer" for anyone keeping their own time)
 theme.css         → The brand board's tokens (light + dark) + shared pieces; page styles in styles/*.css
 ```
 

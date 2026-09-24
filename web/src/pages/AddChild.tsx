@@ -16,13 +16,10 @@ import { Link, useNavigate } from "react-router-dom";
 import * as api from "../api";
 import {
   AGE_BRACKETS,
-  THEMES,
   bracketForBirthdate,
-  defaultThemeFor,
   type Account,
   type AgeBracket,
   type EnrollTokenResponse,
-  type Theme,
 } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
@@ -33,14 +30,7 @@ import { Icon } from "../components/Icon";
 import { PageHead } from "../layout/PageHead";
 import { familyChanged } from "../lib/family";
 import { FACES } from "../lib/avatar";
-
-const BRACKET_BLURB: Record<AgeBracket, string> = {
-  little: "You decide everything. A firm daily limit and the simplest stop.",
-  kid: "A firm limit and stop, but they can ask you for more time.",
-  younger_teen: "Limits plus their own goals, and two minutes' warning before the stop.",
-  older_teen: "Mostly up to them. You see how it goes and can still set a limit.",
-  adult: "Keeping time for themselves. Nothing is enforced; they can block things for themselves.",
-};
+import { BRACKET_BLURB } from "../lib/brackets";
 
 export function AddChild() {
   const { guard } = useConfirm();
@@ -48,7 +38,6 @@ export function AddChild() {
   const [face, setFace] = useState<string | null>(null);
   const [birthdate, setBirthdate] = useState("");
   const [override, setOverride] = useState<AgeBracket | null>(null);
-  const [theme, setTheme] = useState<Theme | null>(null);
   const [newComputer, setNewComputer] = useState(true);
   const [member, setMember] = useState<Account | null>(null);
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
@@ -58,7 +47,6 @@ export function AddChild() {
 
   const derived = useMemo(() => (birthdate ? bracketForBirthdate(birthdate) : null), [birthdate]);
   const bracket: AgeBracket = override ?? derived ?? "kid";
-  const autoTheme = defaultThemeFor(bracket);
   const first = name.trim();
 
   async function create(e: React.FormEvent) {
@@ -75,7 +63,6 @@ export function AddChild() {
           display_name: first,
           birthdate: birthdate || null,
           age_bracket: bracket,
-          theme,
         });
         // The face is a person-detail, not part of creating them — set right
         // after, so they arrive already looking like themselves.
@@ -264,34 +251,6 @@ export function AddChild() {
             <p className="hint">Afterwards, link their login under Computers → Details → Who's who.</p>
           )}
         </fieldset>
-
-        <details className="disclosure">
-          <summary>
-            <Icon name="chevron-right" size={16} />
-            How their own page looks
-          </summary>
-          <p className="hint add-look-hint">
-            They see their own page on their computer. For this age it's{" "}
-            {THEMES.find((t) => t.key === autoTheme)?.label.toLowerCase()} unless you choose.
-          </p>
-          <div className="pills">
-            <button type="button" className="pill" data-on={theme === null} onClick={() => setTheme(null)}>
-              For their age
-            </button>
-            {THEMES.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                className="pill"
-                data-on={theme === t.key}
-                title={t.blurb}
-                onClick={() => setTheme(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </details>
 
         {error && (
           <p className="hint" data-error="true" role="alert">

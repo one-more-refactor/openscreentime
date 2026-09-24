@@ -138,3 +138,8 @@
 .fr-title { margin: 4px 0 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.01em; }
 .fr-steps { margin: 0 0 6px; padding-left: 1.25rem; display: grid; gap: 8px; color: var(--ink-2); }
 .fr-steps b { color: var(--ink); font-weight: 600; }
+.fr-lede { margin: 0; color: var(--ink-2); }
+.fr-doors { list-style: none; padding-left: 0; }
+.fr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* On the wall, beside your own card. */
+.people > .fr { max-width: none; padding: 22px 22px 20px; gap: 12px; }

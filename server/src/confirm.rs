@@ -20,6 +20,9 @@
 //! It is a **layer**, not a per-handler extractor: a new sensitive route is
 //! guarded the moment it matches `sensitive()`, and nobody can forget a
 //! parameter. The same layer refuses every change from a paused account.
+//! The one call whose sensitivity depends on its body — `POST /api/devices`
+//! for a *parent's* own computer, whose enroll token becomes device vouchers
+//! for that parent — asks [`require_window`] itself.
 
 use axum::{
     extract::{Request, State},
@@ -39,7 +42,7 @@ use crate::auth::{
     take_auth_challenge, CONFIRM_MINUTES,
 };
 use crate::error::{AppError, AppResult};
-use crate::login_code::{self, Purpose, Recipient, CODE_MINUTES};
+use crate::login_code::{self, Held, Purpose, Recipient, CODE_MINUTES};
 use crate::state::{AppState, AuthAdmin, PasskeyCeremony, AUTH_COOKIE, SESSION_COOKIE};
 
 // ── the layer ───────────────────────────────────────────────────────────────
@@ -120,6 +123,31 @@ pub async fn require_confirm(
             }
             Ok(next.run(req).await)
         }
+    }
+}
+
+/// For a handler whose request is sensitive only for some bodies: the same
+/// `428 step_up_required` the layer gives, unless the session's confirm
+/// window is open.
+pub async fn require_window(st: &AppState, jar: &CookieJar) -> AppResult<()> {
+    let cookie = jar
+        .get(SESSION_COOKIE)
+        .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
+    let until: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "SELECT stepup_until FROM admin_sessions
+         WHERE (token_hash = $1
+                OR (prev_token_hash = $1 AND prev_valid_until > now()))
+           AND expires_at > now()",
+    )
+    .bind(hash_token(cookie.value()))
+    .fetch_optional(&st.db)
+    .await?;
+    match until {
+        None => Err(AppError::Unauthorized("no session".into())),
+        Some(t) if t.is_some_and(|t| t > Utc::now()) => Ok(()),
+        Some(_) => Err(AppError::StepUpRequired(
+            "confirm it's you to touch the keys".into(),
+        )),
     }
 }
 
@@ -261,14 +289,23 @@ pub async fn code_start(
     admin: AuthAdmin,
     jar: CookieJar,
 ) -> AppResult<Json<Value>> {
-    let targets = login_code::code_targets(&st.db, admin.admin_id, admin.tenant_id).await?;
+    let all = login_code::all_code_targets(&st.db, admin.admin_id, admin.tenant_id).await?;
+    let targets: Vec<(Uuid, String)> = all
+        .iter()
+        .filter(|t| t.2)
+        .map(|(d, u, _)| (*d, u.clone()))
+        .collect();
     if targets.is_empty() {
-        return Err(AppError::Conflict(
-            "none of your computers is online right now".into(),
-        ));
+        return Err(AppError::Conflict(if all.is_empty() {
+            "none of your computers is online right now".into()
+        } else {
+            "your computer's OpenScreenTime is too old to show a code — update it there".into()
+        }));
     }
     let session_id = session_id_for(&st, &jar).await?;
-    let id = login_code::issue(
+    // The same caps as the sign-in door: five codes per ten minutes, and none
+    // at all after the hour's wrong codes are spent.
+    let (id, held) = login_code::issue(
         &st,
         Purpose::Confirm { session_id },
         Some(Recipient {
@@ -278,6 +315,21 @@ pub async fn code_start(
         }),
     )
     .await?;
+    match held {
+        None => {}
+        Some(Held::TooOften) => {
+            return Err(AppError::RateLimited(
+                "your computer was asked for a code a lot just now — wait a few minutes, \
+                 or use your passkey"
+                    .into(),
+            ))
+        }
+        Some(Held::TooManyWrong) => {
+            return Err(AppError::RateLimited(
+                "too many wrong codes this hour — use your passkey, or wait a while".into(),
+            ))
+        }
+    }
     Ok(Json(json!({
         "request_id": id,
         "expires_in_secs": CODE_MINUTES * 60,
@@ -343,6 +395,8 @@ mod tests {
         assert!(sensitive("/api/devices/abc/enroll-token"));
         assert!(sensitive("/api/vpn-profiles/abc"));
         // Everything else — reads and ordinary changes — stays out of it.
+        // (`POST /api/devices` for a parent's own computer is checked by the
+        // handler: `require_window`.)
         assert!(!sensitive("/api/devices"));
         assert!(!sensitive("/api/devices/abc/lock"));
         assert!(!sensitive("/api/device-users/abc/credit-time"));

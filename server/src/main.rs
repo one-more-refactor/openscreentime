@@ -33,6 +33,8 @@ mod supervise;
 mod telegram;
 #[cfg(test)]
 mod tests_auth;
+#[cfg(test)]
+mod tests_rules;
 mod unlock_code;
 mod usage;
 mod voucher;
@@ -136,6 +138,13 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = members::backfill_links(&pool).await {
         tracing::warn!(error = %e, "account backfill incomplete");
+    }
+    // Pre-0.6 "only approved sites work" profiles become allow-by-default,
+    // keeping every block they had. Idempotent.
+    match profiles::open_legacy_networks(&pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(profiles = n, "opened legacy closed-network profiles"),
+        Err(e) => tracing::warn!(error = %e, "legacy network backfill incomplete"),
     }
 
     // WebAuthn relying party.
@@ -301,6 +310,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me/today", get(members::today))
         .route("/api/me/history", get(members::history))
         .route("/api/me/goal", post(members::set_goal))
+        .route(
+            "/api/me/rules",
+            get(members::my_rules).put(members::set_my_rules),
+        )
         .route("/api/me/where", get(usage::me_where))
         .route("/api/usage/where", get(usage::where_api))
         .route("/api/me/ask", post(members::ask))
@@ -552,6 +565,8 @@ async fn prune(db: &sqlx::PgPool) {
             tracing::warn!(what, error = %e, "retention prune failed");
         }
     }
+    // Sign-in codes nobody picked up: out of the command queue.
+    login_code::scrub_commands(db).await;
 }
 
 /// `GET /health` — liveness AND the one dependency that matters: 200
