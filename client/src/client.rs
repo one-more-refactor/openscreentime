@@ -65,6 +65,12 @@ pub struct HeartbeatResponse {
     pub commands: Vec<Command>,
     #[serde(default)]
     pub policy_version: String,
+    /// The person's day on their other computers (see `PersonDay`).
+    #[serde(default)]
+    pub usage: Vec<crate::protocol::PersonDay>,
+    /// The server's clock — a time source the agent trusts.
+    #[serde(default)]
+    pub server_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub use crate::protocol::UsageReport;
@@ -296,9 +302,15 @@ impl ServerClient {
         request
             .headers_mut()
             .insert("Authorization", self.bearer().parse()?);
-        let (stream, _resp) = tokio_tungstenite::connect_async(request)
-            .await
-            .context("ws connect")?;
+        // Bounded like every HTTP call: a blackholed server must not park the
+        // reconnect loop forever.
+        let (stream, _resp) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .context("ws connect timed out")?
+        .context("ws connect")?;
         Ok(stream)
     }
 }
