@@ -88,7 +88,10 @@ pub fn today(st: &ScreenTime, day: u8) -> Today {
     if !st.enabled {
         return Today::default();
     }
-    let hm = |s: &str| openscreentime_policy::rules::parse_hm(s).map(|_| s.trim().to_string());
+    // "7:00", not "07:00" (board 05c).
+    let hm = |s: &str| {
+        openscreentime_policy::rules::parse_hm(s).map(|m| format!("{}:{:02}", m / 60, m % 60))
+    };
     let windows: Vec<String> = st
         .schedule
         .iter()
@@ -170,9 +173,9 @@ mod tests {
         .unwrap();
         let wed = today(&st, 3);
         assert_eq!(wed.limit_minutes, Some(75));
-        assert_eq!(wed.screens_on.as_deref(), Some("07:00 – 20:00"));
+        assert_eq!(wed.screens_on.as_deref(), Some("7:00 – 20:00"));
         assert_eq!(wed.bedtime.as_deref(), Some("20:00"));
-        assert_eq!(today(&st, 0).screens_on.as_deref(), Some("09:00 – 21:00"));
+        assert_eq!(today(&st, 0).screens_on.as_deref(), Some("9:00 – 21:00"));
         let off = ScreenTime {
             enabled: false,
             ..st
