@@ -16,20 +16,16 @@ who can ultimately unplug the machine — this guide says so instead of pretendi
 
 ## First login & passkeys
 
-The everyday way in is your **name**: type it, and your own already-set-up computer shows a
-prompt to approve the sign-in (no password, no code to type — you tap the number that matches
-the one in your browser). The **first** parent, on a brand-new server, has no computer to
-approve yet, so they set up with a passkey: open the console, choose *First parent*, enter an
-email and register a passkey, and the household is bootstrapped around that account. The instant
-that first admin exists, the
-registration endpoints start refusing new accounts (`403 registration_closed`) — a public
-OpenScreenTime URL can't be hijacked by whoever finds it first. If you need a second parent to have
-their own admin login later, the existing admin sets `OST_OPEN_REGISTRATION=1` on the
-server briefly (see DEPLOY.md), or — more simply — adds another passkey to the *same* account.
+The first time, open the setup link the installer printed: **Create your household** asks for
+your name, then makes a passkey. After that there are two ways in: type your **name** and type
+the 6-digit code your own computer shows (in the OpenScreenTime window, or `ost code`), or tap
+**Sign in with a passkey**. To sign in with a code, add your own computer first: **Devices → Add
+my computer**. Lost every passkey and no computer set up? The server operator runs
+`openscreentime-server recover <name>` for a one-time sign-in link (docs/OPERATIONS.md).
 
 To add a second passkey (e.g. so both parents can unlock the console from their own phone or
 laptop, or so you have a backup if you lose one device): go to **Settings → Passkeys** and
-click **+ ADD PASSKEY**. Every passkey is listed with when it was added and last used, and can
+click **Add a passkey**. Every passkey is listed with when it was added and last used, and can
 be removed individually — except your last one. OpenScreenTime will not let you delete your only
 passkey; you'd lock yourself out, and there's no password reset to fall back on. Add a spare
 before you travel.

@@ -269,21 +269,18 @@ have no one to ask.
   option — only shown where a task can actually be picked (`PRODUCT.md` failure #8:
   don't promise earning with no button).
 
-### 4.5 The sign-in approval prompt (`tray.rs prompt_login`)
+### 4.5 The sign-in code (`logincode.rs`, the app window's code card)
 
-Client-first login, number-match (CONTRACT-0.6): the person is signing in on the
-web, and their own computer approves it. This is a trust moment — keep it plain
-and slightly guarded, never alarming.
+The person typed their name on the sign-in page; their own computer shows a
+6-digit code for them to type there (docs/AUTH.md). A trust moment — plain,
+slightly guarded, never alarming. Nothing to tap: the device only shows.
 
-- Title: **"Sign-in request"**
-- Body: **"{name} is signing in on the web. If that's you, tap the number shown
-  in your browser."**
-- Actions: the three number buttons, plus **"Not me"** (the deny).
-- Wrong number / Not me → server denies; no scary copy needed, the prompt just
-  closes.
-
-(Keep the existing `prompt_login` structure; these are the exact strings, in
-sentence case, `appname` "OpenScreenTime".)
+- Title: **"Your sign-in code"** (or **"Your confirm code"**), the code spaced
+  "123 456".
+- Line: **"Type it into {host} to sign in as {name}. Didn't ask? Ignore it."**
+- Then: **"Works for {n} more minutes."**
+- Surfaces: a card at the top of the app window (which comes forward), one
+  desktop notification, and `ost code` in a terminal.
 
 ### 4.6 First-run intro cards (`intro.rs`)
 
