@@ -11,7 +11,7 @@ A guide for AI agents working in this repository. Documents the architecture, co
 | Path | Role | Stack |
 |------|------|-------|
 | `server/` | Backend API, auth, policy engine, agent WS hub | Rust, Axum, SQLx, Postgres, `webauthn-rs` |
-| `web/` | Admin control center (Nothing-style monochrome UI) | Bun, React 18, Vite, Tailwind, `@simplewebauthn/browser` |
+| `web/` | Family console (the "house clock" brand: `brand/board.html`) | Bun, React 18, Vite, Tailwind, `@simplewebauthn/browser` |
 | `client/` | Linux device agent (root, systemd, nftables, DNS) | Rust, Tokio, `tokio-tungstenite`, `nix` |
 | `policy/` | Shared `Policy` document (jsonb, serde) | Rust only |
 
@@ -99,14 +99,13 @@ main.tsx          → Entry, Vite HMR
 api.ts            → Typed admin API client (credentials: "include"), mock mode (VITE_USE_MOCK=1)
 types.ts          → TypeScript mirrors of Policy + entities (MUST stay in sync with policy crate)
 lib/session.tsx   → Session context (passkey login/register, getMe, logout)
-lib/theme.tsx     → Dark/light toggle (localStorage + :root data-theme)
+lib/theme.ts      → Light / dark / match my system (localStorage + <html data-theme>)
 lib/toast.tsx     → Toast notifications
 lib/useAsync.ts   → useAsync hook for data fetching
-lib/validate.ts   → Zod-ish validators for forms
-components/       → Design system: Panel, Stat, StatusLed, DeviceCard, PolicyEditor, etc.
-layout/Shell.tsx  → Left rail + top bar + fleet strip, ambient polling
-pages/            → Login, Devices, DeviceDetail, Profiles, Approvals, Events, Settings
-theme.css         → CSS variables from docs/DESIGN.md (monochrome, accent red, dot grid)
+components/       → Icon (brand/icons/*.svg), Ring (time used today), AvatarRing, Button, Modal, …
+layout/Shell.tsx  → Left rail (nav with icons, "Today" rings, sign-out); drawer below 1024 px
+pages/            → Login, Welcome, Family, ChildDetail (+ChildRules), Computers, AddChild, Settings, Me
+theme.css         → The brand board's tokens (light + dark) + shared pieces; page styles in styles/*.css
 ```
 
 **Vite proxy** (`vite.config.ts`): Proxies `/api` and `/agent` → `http://localhost:8080` with WS upgrade.
@@ -197,8 +196,8 @@ Single source of truth for `Policy` document. All components serialize/deseriali
 | API client | `api.ts` class with typed methods, `credentials: "include"` for cookies |
 | Errors | `ApiError` class with `code`, `status`, `message` |
 | State | React Context (`SessionProvider`) + `useSession()` hook |
-| Styling | Tailwind + CSS variables from `theme.css` (monochrome, dot grid, accent red) |
-| Components | `web/src/components/index.ts` exports all; design system per `docs/DESIGN.md` |
+| Styling | CSS variables from `theme.css` (the brand board's tokens); Tailwind reads the same names |
+| Components | `web/src/components/index.ts` exports all; one `Icon` set, one `Ring` — never draw either inline |
 | Mock | `VITE_USE_MOCK=1` at build time only — never silent in prod |
 
 ### Database
@@ -269,9 +268,9 @@ bun run build          # tsc -b && vite build
 
 2. **Mock mode is build-time only**: `VITE_USE_MOCK=1` at `bun run build` or `bun run dev`. Production builds never include mock data.
 
-3. **Ambient fleet polling**: `Shell.tsx` polls `/api/devices` + `/api/earn-requests?status=pending` every 20s. Failures keep last snapshot. Pages handle their own errors.
+3. **Ambient refresh**: `lib/family.ts` refetches `/api/family` every 20 s while anyone is watching (4 s while a pause is pending, never in a hidden tab). Failures keep the last snapshot.
 
-4. **Design tokens in `theme.css`**: All colors, spacing, typography from `docs/DESIGN.md` as CSS variables. Tailwind config extends these.
+4. **Design tokens in `theme.css`**: exactly the brand board's set (`brand/board.html`), light and dark — no aliases. The ring means time used today only; never use it as a spinner, countdown, hold or code entry. Don't name a class `ring` (Tailwind owns it).
 
 5. **Passkey flow**: `@simplewebauthn/browser` for credential creation/assertion. Server endpoints: `/api/auth/register/start|finish`, `/api/auth/login/start|finish`.
 
