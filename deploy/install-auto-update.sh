@@ -1,74 +1,33 @@
 #!/usr/bin/env bash
-# OpenScreenTime — install a systemd timer that runs deploy/update.sh once a day,
-# as the (rootless-podman) user that owns this checkout. update.sh already
-# polls /health and rolls back to the previous revision on failure, so an
-# unattended bad update self-heals.
+# OpenScreenTime — install the systemd units that keep the server running by
+# itself: start at boot, nightly backup, and a daily deploy/update.sh (which
+# backs up, swaps the image, checks health and rolls back on failure).
+# deploy/setup.sh already does this; run it on installs made before that.
 #
-# Run with sudo from the repo checkout of the deploy user:
-#   sudo deploy/install-auto-update.sh
+#   Rootful Podman (containers belong to root):   sudo deploy/install-auto-update.sh
+#   Rootless Podman (containers belong to you):   deploy/install-auto-update.sh
 #
-# Undo:
+# Undo (add --user and drop sudo for rootless):
 #   sudo systemctl disable --now openscreentime-update.timer
 set -euo pipefail
 
-if [[ "$(id -u)" -ne 0 ]]; then
-    echo "error: run with sudo (writes /etc/systemd/system)." >&2
-    exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=deploy/lib.sh
+source deploy/lib.sh
+
+[[ -f .env ]] || ost_die "no .env in $(pwd) — run deploy/setup.sh first."
+ost_detect_engine
+
+# The units must run as whoever owns the containers. Root with no containers
+# of its own is the old "sudo for a rootless install" habit — that would
+# install units that update nothing.
+if [[ "$(id -u)" == 0 && "$ENGINE" == podman ]] &&
+    ! "$ENGINE" container inspect "$OST_SERVER" >/dev/null 2>&1; then
+    owner="$(stat -c '%U' .)"
+    if [[ "$owner" != root ]]; then
+        ost_die "root has no ${OST_SERVER} container — this looks like a rootless install. Run this as ${owner}, without sudo."
+    fi
+    ost_warn "no ${OST_SERVER} container yet; installing the units anyway."
 fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# The deploy user = whoever owns the checkout (rootless podman runs as them),
-# not root. `sudo deploy/...` makes SUDO_USER a good fallback check.
-run_user="$(stat -c '%U' "$repo_root")"
-if [[ "$run_user" == "root" && -n "${SUDO_USER:-}" ]]; then
-    run_user="$SUDO_USER"
-fi
-if [[ "$run_user" == "root" ]]; then
-    echo "error: could not determine the non-root deploy user owning ${repo_root}." >&2
-    exit 1
-fi
-
-if [[ ! -f "${repo_root}/.env" ]]; then
-    echo "error: no .env in ${repo_root} — run deploy/setup.sh first." >&2
-    exit 1
-fi
-
-cat > /etc/systemd/system/openscreentime-update.service <<EOF
-# Managed by openscreentime deploy/install-auto-update.sh — do not edit.
-[Unit]
-Description=OpenScreenTime server update (git pull, rebuild, health check, rollback on failure)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=${run_user}
-WorkingDirectory=${repo_root}
-ExecStart=${repo_root}/deploy/update.sh
-# A full image rebuild can take a while on a small VPS.
-TimeoutStartSec=45min
-EOF
-
-cat > /etc/systemd/system/openscreentime-update.timer <<EOF
-# Managed by openscreentime deploy/install-auto-update.sh — do not edit.
-[Unit]
-Description=Daily OpenScreenTime server update
-
-[Timer]
-OnCalendar=daily
-# Spread the load / avoid a thundering herd against the git remote.
-RandomizedDelaySec=1h
-# Run at next boot if the machine slept through the scheduled time.
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now openscreentime-update.timer
-
-echo "==> installed. Next runs:"
-systemctl list-timers openscreentime-update.timer --no-pager | head -3
-echo "==> logs after a run: journalctl -u openscreentime-update.service"
+ost_install_units 1

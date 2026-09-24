@@ -1,8 +1,10 @@
-# Deploying OpenScreenTime (production, rootless Podman)
+# Deploying OpenScreenTime
 
-This is the operator guide for running OpenScreenTime on an internet-exposed VPS
-behind your own reverse proxy. It is not a dev setup guide — see
-`docs/DEVELOPMENT.md` for that.
+This is the operator guide for running OpenScreenTime on your own server
+behind your own reverse proxy. For a dev setup see `docs/DEVELOPMENT.md`; for
+day-2 work (backups, restores, alerts, recovery) see `docs/OPERATIONS.md`.
+
+The goal: you set it up once, and it keeps itself running.
 
 ## Quickstart
 
@@ -11,64 +13,67 @@ git clone <this-repo-url> openscreentime && cd openscreentime
 deploy/setup.sh --domain ost.example.com
 ```
 
-That generates `.env` with fresh secrets, builds the images, brings the
-stack up, and waits for it to report healthy. Then:
+`setup.sh`:
 
-1. Point your reverse proxy at `127.0.0.1:8080` (see below for
-   Caddy/nginx snippets — `deploy/setup.sh` also prints them for your domain).
-2. Open `https://ost.example.com` and register the first admin passkey.
-3. Click **ADD DEVICE** in the console and paste the one-liner it gives you
-   on the machine you want to enroll.
+1. writes `.env` with fresh secrets and **one** setting, `OST_PUBLIC_URL`
+   (the passkey domain, origin and secure cookies are derived from it),
+2. pulls the server image (or builds it here if it can't pull),
+3. starts the stack, waits for `/health`, and takes a first database backup,
+4. installs systemd units so it keeps running by itself:
+   - `openscreentime.service` — starts the containers at boot (Podman),
+   - `openscreentime-backup.timer` — nightly database backup, 7 kept,
+   - `openscreentime-update.timer` — daily update with automatic rollback
+     (skip with `--no-auto-update`).
 
-Re-run `deploy/setup.sh` any time — it won't touch an existing `.env`, so
-it's safe to use as a rebuild/restart shortcut too. For pulling and
-deploying new versions later, use `deploy/update.sh` (see
-[Updating](#updating)).
+Then:
 
-The rest of this document covers the same ground in more detail, plus
-troubleshooting.
+1. Point your reverse proxy at `127.0.0.1:8080` (snippets below — setup.sh
+   prints them for your domain).
+2. Open `https://ost.example.com` and create the first parent account with
+   the one-time setup code setup.sh prints (`OST_BOOTSTRAP_TOKEN` in `.env`).
+3. Click **ADD DEVICE** in the console and paste the one-liner on each device.
 
-## Architecture
-
-- `compose.yaml` (repo root) runs two containers: `db` (Postgres 15) and
-  `server` (the OpenScreenTime API + the built web UI, single image, built from
-  `Containerfile`).
-- The server binds `0.0.0.0:8080` **inside** its container, but the compose
-  file only publishes it to `127.0.0.1:${OST_PORT:-8080}` on the host.
-  It is never reachable directly from the internet.
-- **You provide the reverse proxy** (Caddy, nginx, Traefik, whatever you
-  already run on the VPS) that terminates TLS and forwards to
-  `127.0.0.1:8080`. OpenScreenTime does not bundle one.
-- The server serves the web UI itself (same origin as the API) — no CORS
-  hop, no separate web server needed.
+Re-running `deploy/setup.sh` is safe: it never touches an existing `.env`, and
+on an existing stack it runs `deploy/update.sh` (the safe update path).
 
 ## Prerequisites
 
-- A Linux VPS with rootless Podman set up for your deploy user, plus
-  `podman-compose` (or Podman >= 4 with the `compose` plugin, or Docker as a
-  fallback).
-- A reverse proxy already running on the host and terminating TLS for your
-  domain (e.g. Caddy with automatic HTTPS, or nginx + certbot).
-- A DNS name pointing at the VPS (e.g. `ost.example.com`).
-- git access to this repository from the VPS.
+- A Linux server (VPS, LXC, spare PC), x86_64, 1 GB RAM is plenty when the
+  image is pulled (building it here needs ~2 GB and 10–60 minutes).
+- Podman with `podman-compose` — rootful or rootless — or Docker with the
+  compose plugin. Plus `git` and `curl`.
+  - **Rootful** (simplest for a dedicated box): run setup.sh as root.
+  - **Rootless**: run setup.sh as the user that owns the stack, not with sudo.
+    It enables lingering for that user (`loginctl enable-linger`) so the stack
+    runs at boot without anyone logged in; if that needs root it tells you the
+    one command to run.
+- A DNS name and a reverse proxy that terminates TLS. Passkeys only work over
+  https on a real domain — a plain-http LAN address will not do.
+
+## Architecture
+
+- `compose.yaml` runs two containers: `openscreentime-db` (Postgres 15) and
+  `openscreentime-server` (API + web console + the agent binaries devices
+  install and update from). The server runs the image tagged
+  `localhost/openscreentime-server:current`.
+- The server is published on `127.0.0.1:${OST_PORT:-8080}` only. Your proxy
+  forwards to it. Set `OST_BIND_ADDR` in `.env` (or `--bind`) to a LAN address
+  only when the proxy runs on another machine — never `0.0.0.0`.
+- Both containers have `restart: always`; the server has a healthcheck
+  (`/health`, which also checks the database).
 
 ## Reverse proxy requirements
 
 Your proxy MUST:
 
 1. Forward all traffic for the domain to `127.0.0.1:${OST_PORT:-8080}`
-   (plain HTTP — TLS is terminated at the proxy).
-2. **Upgrade WebSocket connections** for `/agent/ws`. This is a long-lived
-   bidirectional connection (the agent command channel) — if your proxy
-   doesn't forward the `Upgrade` and `Connection` headers, it silently
-   breaks.
-3. Set `X-Forwarded-For` with the **real client IP as the last hop**. The
-   server's rate limiter (`server/src/rate_limit.rs`) reads the last XFF hop
-   to key rate limits per-client; if your proxy doesn't set this (or another
-   hop further upstream overwrites it incorrectly), rate limiting will be
-   keyed on the proxy's own address instead of real clients.
+   (plain HTTP — TLS ends at the proxy).
+2. **Upgrade WebSocket connections** (`/agent/ws`, the device channel). Without
+   it devices fall back to slower polling.
+3. Append the real client IP to `X-Forwarded-For` (the rate limiter keys on the
+   last hop).
 
-### Example (Caddy)
+### Caddy
 
 ```caddyfile
 ost.example.com {
@@ -76,9 +81,10 @@ ost.example.com {
 }
 ```
 
-Caddy forwards WebSocket upgrades and sets `X-Forwarded-For` automatically.
+Caddy gets the certificate, forwards WebSocket upgrades and sets
+`X-Forwarded-For` by itself.
 
-### Example (nginx)
+### nginx
 
 ```nginx
 server {
@@ -97,37 +103,26 @@ server {
 }
 ```
 
-## First boot
+## Configuration
 
-The [Quickstart](#quickstart) above covers the normal path:
-`deploy/setup.sh --domain <your-domain>`. It writes `.env` (generating
-`POSTGRES_PASSWORD` and deriving `RP_ID`/`RP_ORIGIN`/`OST_PUBLIC_URL`
-from the domain you pass), builds the images, runs `up -d`, and waits for
-`/health`.
+Everything lives in `.env` next to `compose.yaml` (see `.env.example`). The
+only value you choose is `OST_PUBLIC_URL`; the rest is generated or optional:
 
-If you'd rather set things up by hand (e.g. to point at an external
-Postgres, or to review the generated values before they're used), skip
-`deploy/setup.sh` and instead:
+| Variable | What |
+|---|---|
+| `OST_PUBLIC_URL` | The public https address. Derives `RP_ID`, `RP_ORIGIN`, secure cookies. |
+| `POSTGRES_PASSWORD` | Generated. Exists only here (and in `backups/env.backup`). |
+| `OST_BOOTSTRAP_TOKEN` | Generated one-time code for the first account. |
+| `OST_PORT`, `OST_BIND_ADDR` | Where the server is published on the host. |
+| `OST_IMAGE` | The image updates pull (default: the one CI publishes from `main`); `build` = always build here. |
+| `OST_ALERT_WEBHOOK`, `OST_TELEGRAM_BOT_TOKEN` | Phone alerts — see OPERATIONS.md. |
+| `OST_OIDC_*` | Optional SSO. If the provider is down, the SSO button just hides. |
+| `RP_ID`, `RP_ORIGIN`, `OST_INSECURE_COOKIES` | Overrides; normally unset. |
 
-```sh
-git clone <this-repo-url> openscreentime && cd openscreentime
-cp .env.example .env
-$EDITOR .env         # set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
-deploy/build.sh       # builds the server+web image locally on the VPS
-podman-compose up -d  # or: podman compose up -d / docker compose up -d
-podman-compose logs -f server
-```
+After editing `.env`, apply it with `podman-compose up -d` (or
+`deploy/update.sh`). Migrations run automatically when the server starts.
 
-`RP_ID` is the bare domain (e.g. `ost.example.com`); `RP_ORIGIN` and
-`OST_PUBLIC_URL` are the full `https://` URL of the reverse proxy —
-**not** an internal container address. WebAuthn/passkeys will fail to
-register if these don't match what the browser sees. See `.env.example`
-for the full list of variables (OIDC SSO, logging, etc.).
-
-Database migrations run automatically on every server startup
-(`db::migrate` in `server/src/main.rs`) — no manual migration step needed.
-
-### First run & registration lockdown
+## First run
 
 `deploy/setup.sh` prints a one-time setup link, `https://<domain>/#setup=<code>`
 (the code is `OST_BOOTSTRAP_TOKEN` in `.env`). Open it: **Create your household**
@@ -137,81 +132,64 @@ OpenScreenTime URL can't be hijacked by whoever finds it first. (Without the
 link, the page asks for the setup code.) After that, people sign in with their
 name and a code on their own computer, or a passkey — see docs/AUTH.md.
 
-### Enrolling devices
+## Enrolling devices
 
-The image bundles the headless agent binary and serves an installer, so enrolling a device
-is one command (shown, pre-filled, in the web console's ADD DEVICE modal):
+The ADD DEVICE modal shows a one-liner like:
 
 ```sh
 curl -fsSL https://ost.example.com/install.sh | \
   sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://ost.example.com
 ```
 
-It downloads the sha256-verified binary to `/usr/local/bin/openscreentime`, enrolls, and
-installs the systemd service. Installed agents self-update from the server daily
-(`auto_update = true` in `/etc/openscreentime/agent.toml`; `OST_NO_SELF_UPDATE=1` disables;
-the previous binary is kept as `/usr/local/bin/openscreentime.bak` for manual rollback).
-Desktop builds with the gui/tray features are built from source — see docs/DEVELOPMENT.md.
+It installs the agent build **this server** bundles (desktop build with the
+lock screen and tray on a machine with a graphical session, headless
+otherwise), sha256-verified, enrolls, and installs the systemd service. If the
+one-liner dies halfway, just run it again within 15 minutes — the token is not
+used up until the device has actually connected.
+
+Devices then update themselves from this server (see OPERATIONS.md →
+"Devices update themselves"): the server is their release channel.
 
 ## Updating
 
+It updates itself daily (`openscreentime-update.timer`). By hand:
+
 ```sh
-cd openscreentime
 deploy/update.sh
 ```
 
-This does `git pull --ff-only`, rebuilds the images, recreates the server
-container, and waits for `/health` before reporting success. Equivalent by
-hand:
+What it does:
 
-```sh
-cd openscreentime
-deploy/build.sh --pull   # git pull --ff-only, then rebuild images
-podman-compose up -d     # recreates the server container with the new image
-```
+1. Fast-forwards the checkout (compose.yaml, scripts). Local edits or a
+   diverged branch are reported and skipped — they never block the update.
+2. Pulls `OST_IMAGE`; if that fails, builds the image from the checkout
+   (only when the checkout changed since the last build).
+3. If it's the image already running: done. Otherwise it **backs up the
+   database**, swaps the server to the new image and waits for `/health`.
+4. If the new version isn't healthy within 3 minutes, it **rolls back**: the
+   previous image *and* the pre-update database (a new version may already
+   have migrated the schema, which the old one would refuse). That image is
+   then skipped until a newer one is published, and the rollback is reported
+   to your phone if alerts are set up.
 
-`db` data lives in the named volume `ost_pgdata` and is untouched by
-rebuilds/updates. Already-enrolled agents self-update from the new image
-automatically (within a day) — updating the server is enough, no separate
-device rollout step.
+To deploy an image built elsewhere, `deploy/update.sh --image <ref>` does the
+same backup/health/rollback dance; `deploy/push-image.sh` builds on your dev
+box and does exactly that on the server over SSH.
 
-If the updated server fails its `/health` check within 90 s, `update.sh`
-automatically rolls back: `git reset --hard` to the previously running
-revision, rebuild, `up -d`. The script exits non-zero either way so you (or
-the timer's journal) can see the update didn't stick.
-
-### Automatic updates (optional)
-
-```sh
-sudo deploy/install-auto-update.sh
-```
-
-Installs `openscreentime-update.timer`: runs `deploy/update.sh` daily (randomized
-by up to an hour, catch-up after downtime) as the deploy user. Combined with
-the rollback above, a bad release self-heals instead of leaving the server
-down overnight. Check what it did with `journalctl -u
-openscreentime-update.service`; disable with `sudo systemctl disable --now
-openscreentime-update.timer`.
-
-## Rootless port note
-
-The compose file publishes the app on `127.0.0.1:${OST_PORT:-8080}`
-(default 8080), which is an unprivileged port — rootless Podman can bind it
-with no extra configuration. If you ever want the *container* itself to bind
-a port below 1024, rootless Podman needs
-`sysctl net.ipv4.ip_unprivileged_port_start=<port>` on the host first; this
-does not apply to the default setup here.
+Installs made before these units existed: run `deploy/install-auto-update.sh`
+once (as root for rootful Podman, as the owning user for rootless). Plain
+`deploy/update.sh` also installs the start-at-boot and backup units.
 
 ## Troubleshooting
 
-- **Passkey registration fails / "invalid origin"**: `RP_ID`/`RP_ORIGIN`
-  don't match what the browser actually sees. They must be the public HTTPS
-  origin, not `localhost` or an internal address.
-- **Agent connections drop immediately**: your proxy isn't
-  forwarding WebSocket upgrades — see the reverse-proxy requirements above.
-- **Everything 429s**: `X-Forwarded-For` isn't set correctly by the proxy,
-  so the rate limiter may be collapsing all clients onto one key (the
-  proxy's own IP, or a spoofable client-supplied hop).
-- **Server logs `OST_WEB_DIR (...) not found`**: the web build didn't
-  make it into the image — rerun `deploy/build.sh`, and check the
-  `web-builder` stage in `Containerfile` succeeded.
+- **Passkey registration fails / "invalid origin"**: `OST_PUBLIC_URL` does not
+  match what the browser shows (scheme, host and port must match exactly).
+- **Devices connect but drop to polling**: the proxy isn't forwarding
+  WebSocket upgrades.
+- **Everything 429s**: the proxy doesn't set `X-Forwarded-For` (all clients
+  share the proxy's bucket).
+- **`/health` says `degraded` (503)**: the server runs but can't reach
+  Postgres — `podman logs openscreentime-db`.
+- **Nothing after a reboot** (Podman): `systemctl status openscreentime`
+  (rootless: `systemctl --user status openscreentime` and check
+  `loginctl show-user $USER -p Linger`).

@@ -49,3 +49,7 @@ dotenvy = "0.15"
 hmac = "0.12"
 sha1 = "0.10"
 base32 = "0.5"
+
+[dev-dependencies]
+# Paused-clock tests for the background-task supervisor.
+tokio = { version = "1", features = ["full", "test-util"] }

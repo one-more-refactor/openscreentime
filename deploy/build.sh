@@ -1,58 +1,35 @@
 #!/usr/bin/env bash
-# OpenScreenTime — build the compose stack's images.
+# OpenScreenTime — build the server image from this checkout.
 #
-# Works both on the VPS (typical: rootless Podman) and locally (Podman or
-# Docker). Safe to re-run; each run rebuilds from the current source tree.
+# You rarely need this: deploy/setup.sh and deploy/update.sh pull the
+# published image and only build here when pulling isn't possible. Use it to
+# deploy local changes:
 #
-# Usage:
-#   deploy/build.sh            # build using the checked-out working tree
-#   deploy/build.sh --pull     # also git pull first (fast-forward only)
+#   deploy/build.sh [--pull]                          # --pull: git pull first
+#   deploy/update.sh --image localhost/openscreentime-server:build
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=deploy/lib.sh
+source deploy/lib.sh
 
 if [[ "${1:-}" == "--pull" ]]; then
-    echo "==> git pull --ff-only"
+    ost_log "git pull --ff-only"
     git pull --ff-only
 fi
 
-compose_bin=""
-compose_args=()
+ost_detect_engine
+rev="$(git rev-parse HEAD 2>/dev/null || true)"
+ost_log "building ${OST_IMAGE_BUILD} (server + web + agents, see Containerfile)"
+"$ENGINE" build -t "$OST_IMAGE_BUILD" ${rev:+--label "org.opencontainers.image.revision=${rev}"} \
+    -f Containerfile .
 
-if command -v podman-compose >/dev/null 2>&1; then
-    compose_bin="podman-compose"
-elif command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
-    compose_bin="podman"
-    compose_args=("compose")
-elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    compose_bin="docker"
-    compose_args=("compose")
-else
-    echo "error: none of podman-compose, 'podman compose', or 'docker compose' found." >&2
-    echo "       install podman-compose (rootless Podman recommended for the VPS)." >&2
-    exit 1
-fi
+cat <<EOF
 
-echo "==> using: ${compose_bin} ${compose_args[*]}"
+==> Built ${OST_IMAGE_BUILD}.
 
-if [[ ! -f .env ]]; then
-    echo "note: no .env found yet — build will still work, but 'up' will need one."
-fi
+Deploy it (backup, swap, health check, automatic rollback):
+  deploy/update.sh --image ${OST_IMAGE_BUILD}
 
-echo "==> building images (server + web, see Containerfile)"
-"${compose_bin}" "${compose_args[@]}" -f compose.yaml build
-
-cat <<'EOF'
-
-==> Build complete.
-
-Next steps (first-time setup):
-  1. cp .env.example .env
-  2. edit .env — set POSTGRES_PASSWORD, RP_ID, RP_ORIGIN, OST_PUBLIC_URL
-  3. podman-compose up -d      # (or: podman compose up -d / docker compose up -d)
-  4. check logs:  podman-compose logs -f server
-
-To update later: git pull, then re-run this script, then 'up -d' again.
-See docs/DEPLOY.md for the full operator guide (reverse-proxy config, etc).
+First install instead? Run deploy/setup.sh --domain <your domain>.
 EOF

@@ -26,3 +26,7 @@ build/
 deploy/test/.bin/
 deploy/test/.vm/
 deploy/test/.gnome/
+
+# Server deploy state (deploy/backup.sh, deploy/update.sh)
+/backups/
+/.update.lock
