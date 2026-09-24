@@ -65,7 +65,7 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
     // This process has no view of the running agent's in-memory lock. Persist
     // the recovery so the live agent clears its whole-device lock on the next
     // tick and a reboot doesn't reload it — otherwise it re-freezes in ~10 s.
-    crate::runner::record_local_recovery();
+    crate::runner::record_local_recovery(minutes);
 
     if minutes > 0 {
         spawn_resume(minutes * 60).unwrap_or_else(|e| {
@@ -88,7 +88,7 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
 /// unfreeze re-froze on the next tick; this does the whole thing once.
 pub async fn recover(ctx: &Arc<AgentCtx>) -> Result<()> {
     ctx.require_root_for_enforcement()?;
-    crate::runner::record_local_recovery();
+    crate::runner::record_local_recovery(0);
     let exec = Exec::new(ctx.clone());
     let _ = exec.run("systemctl", &["stop", crate::service::WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["mask", "--now", crate::service::AGENT_UNIT]);

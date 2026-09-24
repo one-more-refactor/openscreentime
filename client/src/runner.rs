@@ -23,6 +23,22 @@ use tokio_tungstenite::tungstenite::Message;
 /// How often the enforcement tick runs (screen-time accounting granularity).
 const TICK: Duration = Duration::from_secs(10);
 
+/// The most one tick may bill. Billing is the measured *awake* time since the
+/// last tick (CLOCK_MONOTONIC: a suspended laptop bills nothing); the cap
+/// bounds what a stalled agent can bill in one go when it wakes up.
+const BILL_CAP: Duration = Duration::from_secs(60);
+
+/// Heads-ups before a stop, in minutes (published as `next_warning_at`) —
+/// the same 15/5/1 the companion announces (`warn::THRESHOLDS`).
+const WARN_BEFORE_MIN: [i64; 3] = [15, 5, 1];
+
+/// Minutes an override lasts when a parent resumes a device whose user a
+/// rule is stopping right now (the same as a parent code at the lock screen).
+const RESUME_OVERRIDE_MIN: u32 = 30;
+
+/// Wall clock this far off the trusted clock is reported (once per episode).
+const CLOCK_SKEW_REPORT: chrono::Duration = chrono::Duration::minutes(60);
+
 /// Save-your-work countdown between "the lock decision fired" and the actual
 /// freeze, for a stop nobody saw coming (a rule changed, a grant ran out). It
 /// is counted down as a notification, never a full-screen takeover. A stop
@@ -138,15 +154,27 @@ fn local_recovery_marker_path() -> std::path::PathBuf {
     crate::paths::state("local_recovery")
 }
 
-fn read_local_recovery_marker() -> Option<u64> {
+/// `(written_at_unix_secs, override_minutes)`. Older markers carry only the
+/// timestamp (no override).
+fn parse_local_recovery_marker(s: &str) -> Option<(u64, u64)> {
+    let mut parts = s.split_whitespace();
+    let ts = parts.next()?.parse().ok()?;
+    let minutes = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    Some((ts, minutes))
+}
+
+fn read_local_recovery_marker() -> Option<(u64, u64)> {
     std::fs::read_to_string(local_recovery_marker_path())
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| parse_local_recovery_marker(&s))
 }
 
 /// Called by `ost unlock` (a separate process): clear the persisted lock so a
-/// reboot doesn't reload it, and leave a marker the live agent picks up.
-pub fn record_local_recovery() {
+/// reboot doesn't reload it, and leave a marker the live agent picks up —
+/// with the minutes the parent asked for, so the live agent holds the
+/// screen-time rules off for exactly that long (it used to clear the lock and
+/// then re-stop the person ~70 s later, while the CLI said "suspended").
+pub fn record_local_recovery(minutes: u64) {
     save_device_locked(false);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -156,7 +184,7 @@ pub fn record_local_recovery() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Err(e) = std::fs::write(path, now.to_string()) {
+    if let Err(e) = std::fs::write(path, format!("{now} {minutes}")) {
         tracing::warn!("could not record local recovery: {e}");
     }
 }
@@ -295,8 +323,20 @@ pub struct Agent {
     /// Effective tamper level (max of device policy and --tamper-max).
     tamper_level: u8,
     policy_version: String,
-    /// Expected wall-clock at the next tick (clock-skew / time-tamper detection).
-    expected_wall: Option<chrono::DateTime<chrono::Utc>>,
+    /// This boot's id (the trusted clock's boottime is only valid within it).
+    boot_id: String,
+    /// Monotonic instant of the last accounting tick — what the next tick
+    /// bills from (awake time only; see `BILL_CAP`).
+    last_tick: Option<Instant>,
+    /// Trusted "now" as of the last tick (see `crate::clock`).
+    trusted_now: chrono::DateTime<chrono::Utc>,
+    /// Users whose time counted on the last tick (present AND active).
+    counting: Vec<String>,
+    /// Input activity could be read for every present seat on the last tick
+    /// (false = counting falls back to presence).
+    measured: bool,
+    /// Root-side input watcher (evdev, non-exclusive) behind `counting`.
+    input: crate::enforce::activity::InputTracker,
     /// (os_username, task_id) → the local date an earn-request was already sent,
     /// so asking twice doesn't spam the server more than once a day
     /// (CONTRACT-PROD.md §4 — the server also dedupes, this just avoids the noise).
@@ -332,15 +372,11 @@ pub struct Agent {
     /// Last `local_network_up` probe (set in the offline check, reused after).
     local_net_up: bool,
     /// Once-per-episode gates for the two new warnings.
-    clock_ahead_reported: bool,
+    clock_skew_reported: bool,
     no_credential_reported: bool,
     /// Confirmation gate that separates a real, sustained evasion attempt from a
     /// transient blip before escalating to `tamper_lockdown`.
     tamper_monitor: tamper::TamperMonitor,
-    /// Verified-unlock grace windows (user → expiry). Fed by a code typed at
-    /// the lock; while active, the user is treated as within policy
-    /// (screen-time AND admin lock — the parent always wins).
-    unlock_until: HashMap<String, Instant>,
     /// Armed save-your-work countdowns (user → freeze deadline).
     pending_freeze: HashMap<String, Instant>,
     /// The lock screen: its own session on its own VT (see `lock`). Every
@@ -353,8 +389,8 @@ pub struct Agent {
     lock_rx: Option<mpsc::Receiver<LockEvent>>,
     /// Where the parent-code replay counter / wrong-code lockout live.
     parent_state: std::path::PathBuf,
-    /// The next stop per user, as published in the status snapshot.
-    forecasts: HashMap<String, warn::Forecast>,
+    /// The next stop per user (what the warnings count down to).
+    forecasts: HashMap<String, (warn::StopReason, chrono::DateTime<chrono::Local>)>,
     /// When each user's last-minute warning was published: that stop was
     /// announced, and gets no extra grace.
     announced: HashMap<String, Instant>,
@@ -375,11 +411,12 @@ pub struct Agent {
     notifications: VecDeque<UserNotification>,
     /// Monotonic id for the next notification (so the tray shows each once).
     notif_seq: u64,
-    /// Web sign-in requests waiting for a human at this machine to answer
-    /// (CONTRACT-0.6 client-first login). Published per target user in the
-    /// status snapshot; answered via a marker file in `/run/user/<uid>`.
-    pending_logins: Vec<PendingLogin>,
+    /// Sign-in / confirm codes for people on this computer, with the OS logins
+    /// each is for (logincode.rs). Published only in those logins' private
+    /// status files; dropped when they expire.
+    login_codes: Vec<(crate::logincode::LoginCode, Vec<String>)>,
     /// Where-the-time-goes sampler (apps by /proc, sites by dnsmasq log).
+    /// Its batches are posted by the network loop, never from the tick.
     attrib: crate::attrib::Attrib,
     /// Ticks since the last usage post (posts every 6 ticks ≈ 1 min).
     attrib_ticks: u32,
@@ -392,29 +429,6 @@ pub struct Agent {
     /// Consecutive ticks the upstream has been unreachable while a block was in
     /// force — relax only after this is sustained, so a blip doesn't flap.
     dns_unreach_ticks: u32,
-}
-
-/// One outstanding "approve this web sign-in?" prompt.
-#[derive(Debug, Clone)]
-struct PendingLogin {
-    /// The server's `login_requests.id` (opaque here).
-    id: String,
-    /// Display name of the person signing in — what the prompt shows.
-    username: String,
-    /// The OS logins on this device that belong to that person; only their
-    /// sessions see the prompt, and only their decision files are honored.
-    os_users: Vec<String>,
-    /// Three 4-digit codes to show the human (number-matching); the browser
-    /// shows the one real code and the human taps the match. The device is not
-    /// told which is real — the server decides on the tapped value.
-    codes: Vec<String>,
-    /// The number the human tapped, once read from the decision file — held in
-    /// MEMORY so a transient POST failure is retried from here, never
-    /// re-written back into the child-owned runtime dir (that write followed a
-    /// child-planted symlink → root file write; the retry-via-file is gone).
-    /// `Some("")` = "not me" (deny); `Some(code)` = tapped that number.
-    decision: Option<String>,
-    expires: chrono::DateTime<chrono::Utc>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -563,7 +577,12 @@ impl Agent {
             // Reboot-surviving: a parent's lock must outlast a power-cycle.
             device_locked: load_device_locked(),
             policy_version: String::new(),
-            expected_wall: None,
+            boot_id: crate::clock::boot_id(),
+            last_tick: None,
+            trusted_now: chrono::Utc::now(),
+            counting: Vec::new(),
+            measured: true,
+            input: crate::enforce::activity::InputTracker::new(),
             requested_earn: HashMap::new(),
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
@@ -572,13 +591,12 @@ impl Agent {
             last_contact_saved: Instant::now(),
             offline_hard_lockdown: false,
             tamper_lockdown: carried.tamper_lockdown,
-            last_local_recovery: read_local_recovery_marker(),
+            last_local_recovery: read_local_recovery_marker().map(|(ts, _)| ts),
             device_lock_grace_until: None,
             local_net_up: true,
-            clock_ahead_reported: false,
+            clock_skew_reported: false,
             no_credential_reported: false,
             tamper_monitor: tamper::TamperMonitor::new(),
-            unlock_until: HashMap::new(),
             pending_freeze,
             lock,
             lock_shared,
@@ -592,7 +610,7 @@ impl Agent {
             pending_events,
             notifications: VecDeque::new(),
             notif_seq: 0,
-            pending_logins: Vec::new(),
+            login_codes: Vec::new(),
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
             probe_reported: HashMap::new(),
@@ -708,45 +726,21 @@ impl Agent {
         Some(AgentFrame::State { state: st })
     }
 
-    /// Deliver `fresh` events plus any earlier failures. On error the batch is
-    /// kept for the next attempt (see `pending_events`) instead of dropped.
-    async fn flush_events(&mut self, fresh: Vec<Event>) {
+    /// Queue events for delivery by the network loop (`flush_queued`). The
+    /// enforcement tick never waits on the network to report what it did.
+    fn queue_events(&mut self, fresh: Vec<Event>) {
         self.pending_events.extend(fresh);
-        if self.pending_events.is_empty() {
-            return;
-        }
+        self.cap_pending_events();
+    }
+
+    /// Keep the undelivered-event buffer bounded (oldest dropped). Delivery
+    /// is in server-sized batches (`EVENT_BATCH_MAX`) — posting the whole
+    /// buffer in one request once meant a buffer past the server's cap could
+    /// never drain, silently discarding the offline audit trail.
+    fn cap_pending_events(&mut self) {
         if self.pending_events.len() > PENDING_EVENTS_CAP {
             let excess = self.pending_events.len() - PENDING_EVENTS_CAP;
             self.pending_events.drain(..excess);
-        }
-        // Post in server-sized batches, dropping each only once it lands.
-        //
-        // Posting the whole buffer in one request was a trap: the server rejects
-        // any batch over MAX_EVENTS (100) with a 400, which `error_for_status`
-        // turns into an error, so the batch was kept — and a buffer that has
-        // once exceeded 100 can never shrink again. Roughly 17 minutes offline
-        // is enough to cross it, because the offline re-assert emits a degraded
-        // event per standing gap every 10s tick. After that every event post
-        // fails forever while heartbeats keep succeeding, so the device looks
-        // healthy and the entire tamper/audit trail is silently discarded —
-        // which is precisely the data this buffer exists to protect.
-        while !self.pending_events.is_empty() {
-            let take = self.pending_events.len().min(EVENT_BATCH_MAX);
-            let batch: Vec<Event> = self.pending_events[..take].to_vec();
-            match self.client.post_events(&batch).await {
-                Ok(()) => {
-                    self.pending_events.drain(..take);
-                }
-                Err(e) => {
-                    // warn, not debug: a stalled audit pipeline is exactly the
-                    // kind of quiet failure this codebase keeps getting bitten by.
-                    tracing::warn!(
-                        "event post failed, {} buffered for retry: {e}",
-                        self.pending_events.len()
-                    );
-                    return;
-                }
-            }
         }
     }
 
@@ -1198,30 +1192,127 @@ impl Agent {
     /// users we hold policy for. Shared by the WS `heartbeat` frame and the poll
     /// HTTP heartbeat so both paths report identically.
     fn usage_snapshot(&self) -> Vec<crate::client::UsageReport> {
+        let offset = self
+            .trusted_now
+            .with_timezone(&chrono::Local)
+            .offset()
+            .local_minus_utc();
         self.policies
             .keys()
-            .map(|u| crate::client::UsageReport {
-                os_username: u.clone(),
-                used_minutes_today: self.tracker.used_minutes(u),
+            .map(|u| {
+                // Only this device's own use: the server sums the person.
+                let here = self.tracker.used_here_secs(u);
+                crate::client::UsageReport {
+                    os_username: u.clone(),
+                    used_minutes_today: u32::try_from(here / 60).unwrap_or(u32::MAX),
+                    used_seconds_today: here,
+                    day: self.tracker.day(),
+                    utc_offset_secs: Some(offset),
+                }
             })
             .collect()
+    }
+
+    /// The server's answer to a usage report: the person's day elsewhere, and
+    /// its clock. Offline, the last answer keeps applying (it is persisted in
+    /// the ledger, tagged with its day).
+    fn apply_person_days(
+        &mut self,
+        server_time: Option<chrono::DateTime<chrono::Utc>>,
+        users: Vec<PersonDay>,
+    ) {
+        // The server's clock is the fallback truth for a device whose own
+        // clock isn't NTP-synchronized (no NTP, or set by hand). A synced
+        // clock is at least as good — and flipping between two sources that
+        // disagree could roll the day early.
+        if let Some(t) = server_time {
+            let reading = crate::clock::read(&self.boot_id);
+            if !reading.ntp_synced {
+                self.tracker.clock.observe_server(&reading, t);
+            }
+        }
+        for p in users {
+            self.tracker.set_elsewhere(
+                &p.os_username,
+                screentime::Elsewhere {
+                    day: Some(p.day),
+                    used_secs: p.used_elsewhere_secs,
+                    earned_secs: p.earned_elsewhere_secs,
+                    earned_here_secs: p.earned_here_secs,
+                },
+            );
+        }
+    }
+
+    /// Hold the rules off for `users` until `until` (one override per user,
+    /// persisted in the ledger right away).
+    fn override_users(&mut self, users: &[String], until: chrono::DateTime<chrono::Utc>) {
+        for u in users {
+            self.tracker.set_override(u, until);
+        }
+        if !self.exec.dry_run() {
+            self.tracker.save();
+        }
+    }
+
+    /// Users a screen-time rule is stopping right now (ignoring pauses).
+    fn stopped_by_rule(&self, users: &[String]) -> Vec<String> {
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        users
+            .iter()
+            .filter(|u| {
+                let p = self.policies.get(*u).cloned().unwrap_or_default();
+                !screentime::verdict(&p, &self.tracker, u, &now, false).allowed
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The next local midnight on the trusted clock ("until end of day").
+    fn end_of_day(&self) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        let tomorrow = now.date_naive() + chrono::Days::new(1);
+        chrono::Local
+            .from_local_datetime(&tomorrow.and_time(chrono::NaiveTime::MIN))
+            .earliest()
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or(self.trusted_now + chrono::Duration::hours(24))
     }
 
     async fn enforcement_tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         tamper::touch_heartbeat(&self.exec);
 
-        // Clock-skew / time-tamper detection: the tick fires on a monotonic timer, so
-        // wall-clock should advance ~TICK each tick. A large deviation means someone
-        // moved the system clock (a classic screen-time evasion). We compare against the
-        // wall-clock we expected this tick to land on, then arm the next expectation.
-        let now = chrono::Utc::now();
-        if let Some(expected) = self.expected_wall.take() {
-            if let Some(ev) = tamper::clock_skew_event(expected, now) {
-                events.push(ev);
+        // The trusted clock (crate::clock): the NTP-synced wall clock, the
+        // server's clock, or boottime extrapolation — never a hand-set wall
+        // clock. It drives the day roll and every rule below. A wall clock that
+        // disagrees with it by a lot was moved by hand; say so once per episode
+        // (suspend doesn't trip this — boottime includes the time asleep).
+        let reading = crate::clock::read(&self.boot_id);
+        self.trusted_now = self.tracker.advance(&reading, &chrono::Local);
+        let skew = self.tracker.clock.wall_skew(&reading);
+        if skew.abs() > CLOCK_SKEW_REPORT {
+            if !self.clock_skew_reported {
+                self.clock_skew_reported = true;
+                events.push(tamper::tamper_event(
+                    "clock_skew",
+                    SEV_WARN,
+                    &format!(
+                        "the system clock is {} min {} the trusted time; screen time keeps \
+                         counting on the trusted clock",
+                        skew.num_minutes().abs(),
+                        if skew > chrono::Duration::zero() {
+                            "ahead of"
+                        } else {
+                            "behind"
+                        }
+                    ),
+                ));
             }
+        } else {
+            self.clock_skew_reported = false;
         }
-        self.expected_wall = Some(now + chrono::Duration::from_std(TICK).unwrap_or_default());
 
         // Keep DNS filtering from bricking a captive-portal / public-DNS-
         // blocking network; re-apply the (relaxed or restored) policy on a flip.
@@ -1276,10 +1367,18 @@ impl Agent {
         events.extend(self.offline_grace_check());
         // …and the days-scale escalation on top of it (policy-configurable).
         // `ost unlock` ran in another process: honor its recovery marker once.
-        if let Some(ts) = read_local_recovery_marker() {
+        if let Some((ts, minutes)) = read_local_recovery_marker() {
             if self.last_local_recovery != Some(ts) {
                 self.last_local_recovery = Some(ts);
                 events.extend(self.local_recovery("ost unlock"));
+                // …and hold the screen-time rules off for the minutes the
+                // parent asked for, for everyone on this machine.
+                if minutes > 0 {
+                    let users: Vec<String> = self.policies.keys().cloned().collect();
+                    let until =
+                        self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64);
+                    self.override_users(&users, until);
+                }
             }
         }
         events.extend(self.offline_hard_lockdown_check());
@@ -1310,86 +1409,62 @@ impl Agent {
             ));
         }
 
-        // Forward clock-jump defense: while on a network, the accounting day
-        // may not run ahead of "last server-confirmed day + 1". Genuinely
-        // offline (no network) → no ceiling, an honest week away still rolls.
-        let ceiling = self.local_net_up.then(|| {
-            self.last_contact_wall
-                .with_timezone(&chrono::Local)
-                .date_naive()
-                + chrono::Days::new(1)
+        // Screen-time accounting: who is at a seat, and whose minute is real
+        // use (recent input or sound — enforce::activity). Bill the measured
+        // awake time since the last tick, not a fixed 10 s.
+        self.input.rescan();
+        let activity = crate::enforce::activity::sample(&crate::enforce::activity::SystemProbe {
+            exec: &self.exec,
+            input: &self.input,
         });
-        self.tracker.set_day_ceiling(ceiling);
-        if self.tracker.clock_ahead_of_ceiling() {
-            if !self.clock_ahead_reported {
-                self.clock_ahead_reported = true;
-                events.push(tamper::tamper_event(
-                    "clock_ahead_of_server",
-                    SEV_WARN,
-                    "the clock is more than a day ahead of the last server-confirmed time — \
-                     the daily budget will not reset until the server is reached",
-                ));
-            }
-        } else {
-            self.clock_ahead_reported = false;
-        }
-
-        // Screen-time: account active seat users, evaluate, freeze/unfreeze.
-        let active = screentime::active_seat_users(&self.exec);
+        let active = activity.present.clone();
         self.active_users = active.clone();
-        for user in &active {
-            // A frozen user is NOT spending screen time: their processes are
-            // suspended at the lock screen, but logind still reports the seat
-            // "active", so counting them here burned budget while locked —
-            // silently eating an earn-time grant so the freeze could never
-            // lift ("granted, but still locked"). Skip them, exactly as the
-            // attribution sampler below already does.
-            if self.frozen.contains(user) {
-                continue;
-            }
+        self.measured = activity.measured;
+        let now_mono = Instant::now();
+        let elapsed = billable_elapsed(self.last_tick, now_mono);
+        self.last_tick = Some(now_mono);
+        // A frozen user is NOT spending screen time: their processes are
+        // suspended at the lock screen, but logind still reports the seat
+        // "active", so counting them burned budget while locked — silently
+        // eating an earn-time grant ("granted, but still locked").
+        let counting: Vec<String> = activity
+            .billable
+            .iter()
+            .filter(|u| !self.frozen.contains(*u))
+            .cloned()
+            .collect();
+        for user in &counting {
             self.tracker
-                .add_active(user, TICK.as_secs() as u32, self.ctx.time_accel);
+                .add_active(user, elapsed.as_secs() as u32, self.ctx.time_accel);
         }
+        self.counting = counting.clone();
 
         // Where the time goes (CONTRACT-0.6): sample running catalog apps for
-        // the active, unfrozen users, and tail the resolver's query log.
+        // the users whose time is counting (an app idling in an idle session
+        // is not time spent), and tail the resolver's query log. The batches
+        // are posted by the network loop, never from this tick.
         {
-            let uids: std::collections::HashMap<String, u32> = active
+            let uids: std::collections::HashMap<String, u32> = counting
                 .iter()
-                .filter(|u| !self.frozen.contains(*u))
                 .filter_map(|u| crate::sysusers::uid_of(u).map(|id| (u.clone(), id)))
                 .collect();
-            self.attrib.sample_apps(&uids, TICK.as_secs() as i64);
+            self.attrib.sample_apps(&uids, elapsed.as_secs() as i64);
             self.attrib.ingest_dns_log();
             self.attrib_ticks += 1;
             if self.attrib_ticks >= 6 {
                 self.attrib_ticks = 0;
-                let batch = self.attrib.drain(400);
-                if !batch.is_empty() {
-                    match self.client.post_usage_slices(&batch).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            tracing::debug!("usage post failed, keeping batch: {e}");
-                            self.attrib.requeue(batch);
-                        }
-                    }
-                }
                 // The lock must never lie (CONTRACT-0.6 §4): probe that the
-                // stops we believe in are real, on the same 1-minute cadence.
+                // stops we believe in are real, on a 1-minute cadence.
                 events.extend(self.probe_enforcement());
             }
         }
+
         // Blocked apps with a native client: deny their processes (CONTRACT-0.4 §7).
         events.extend(enforce::apps::deny(
             &self.exec,
             &self.policies,
             &mut self.app_reported,
         ));
-        // Persist the ledger every tick so a restart resumes today's usage
-        // instead of granting a fresh budget (best-effort; skipped in dry-run).
-        if !self.exec.dry_run() {
-            self.tracker.save();
-        }
         // Consider every user we have a policy for (so we can also UNfreeze).
         let users: Vec<String> = self.policies.keys().cloned().collect();
         for user in users {
@@ -1404,16 +1479,14 @@ impl Agent {
                 self.stop_user(&user, hard).await;
             }
 
-            // An active grace window (a code typed at the lock) suspends
-            // enforcement for this user — including a whole-device admin lock
-            // (the parent always wins).
+            // An active parent override (a grant, a code at the lock screen,
+            // `ost unlock`, a Resume) holds the screen-time rules off for this
+            // user. It does not beat a pause — every source that should lift a
+            // pause clears it directly (`local_recovery`, `unlock`).
             let in_grace = self
-                .unlock_until
-                .get(&user)
-                .is_some_and(|t| *t > Instant::now());
-            if !in_grace {
-                self.unlock_until.remove(&user);
-            }
+                .tracker
+                .override_until(&user, self.trusted_now)
+                .is_some();
 
             // Evaluate when the user is at the machine — and also when they are
             // already frozen, even if their session has gone inactive.
@@ -1442,7 +1515,12 @@ impl Agent {
                 currently_frozen,
                 has_clock_rule,
             ) {
-                screentime::evaluate(&policy, &self.tracker, &user)
+                screentime::evaluate(
+                    &policy,
+                    &self.tracker,
+                    &user,
+                    &self.trusted_now.with_timezone(&chrono::Local),
+                )
             } else {
                 None
             };
@@ -1454,9 +1532,13 @@ impl Agent {
                 self.pending_freeze.remove(&user);
             }
 
-            // A whole-device lock (admin command with its save-your-work window
-            // closed, the offline hard-lockdown, a confirmed evasion attempt).
-            let effective_device_locked = self.device_lock_effective() && !in_grace;
+            // A pause beats an override (policy::rules): a parent who gives
+            // "+30" and then pauses means the pause. A code typed at the
+            // device, `ost unlock` and a console Resume clear the lock itself.
+            // (An admin lock with a save-your-work window isn't effective
+            // until the window closes; the other whole-device locks are
+            // immediate.)
+            let effective_device_locked = self.device_lock_effective();
             match decide_freeze(effective_device_locked, lock.as_ref(), currently_frozen) {
                 FreezeAction::Freeze => {
                     if effective_device_locked {
@@ -1491,8 +1573,9 @@ impl Agent {
         // On-demand "request more time" markers dropped by users' companions.
         self.check_ondemand_earn().await;
 
-        // Web sign-in decisions dropped by users' trays (client-first login).
-        self.check_login_decisions().await;
+        // Sign-in codes run out after a few minutes; stop publishing them.
+        let now = chrono::Utc::now();
+        self.login_codes.retain(|(c, _)| c.is_live(now));
 
         // The lock follows the freeze set: up in front of whoever is stopped
         // and on screen, down (after the thaw above) once they are not.
@@ -1502,112 +1585,11 @@ impl Agent {
         // Persist the freeze/grant state every tick, like the usage ledger
         // above — a power-cycle at any moment must resume, not reset.
         if !self.exec.dry_run() {
+            self.tracker.save();
             self.persist_freeze_state();
         }
         self.write_status_file();
         events
-    }
-
-    /// Collect the sign-in decisions users' trays dropped in their own
-    /// `/run/user/<uid>/openscreentime` (the same spoof-proof channel as the
-    /// earn marker: only that user and root can write there), report them to
-    /// the server, and expire prompts nobody answered.
-    async fn check_login_decisions(&mut self) {
-        if self.pending_logins.is_empty() {
-            return;
-        }
-        let now = chrono::Utc::now();
-        let pending = self.pending_logins.clone();
-        let mut done: Vec<String> = Vec::new();
-        for p in &pending {
-            if p.expires < now {
-                done.push(p.id.clone());
-                continue;
-            }
-            // The request id is interpolated into a filesystem path, so it must
-            // be an opaque token — never a traversal or a weird name.
-            if !p
-                .id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            {
-                done.push(p.id.clone());
-                continue;
-            }
-            for u in &p.os_users {
-                let Some(uid) = crate::sysusers::uid_of(u) else {
-                    continue;
-                };
-                // The verdict lives in memory once read. If we already have it
-                // (a prior tick read the file but the POST failed), retry the
-                // POST — we do NOT touch the child-owned file again.
-                let tapped = match &p.decision {
-                    Some(d) => d.clone(),
-                    None => {
-                        let path = std::path::PathBuf::from(format!(
-                            "/run/user/{uid}/openscreentime/login_decision_{}",
-                            p.id
-                        ));
-                        // O_NOFOLLOW: the runtime dir is owned by the child, so
-                        // a symlink there must never be followed by this root
-                        // read. A symlink or missing file simply means "no
-                        // answer yet". The file is deleted (also O_NOFOLLOW via
-                        // remove_file, which does not follow the final
-                        // component) the moment we have the verdict.
-                        use std::os::unix::fs::OpenOptionsExt;
-                        let Ok(f) = std::fs::OpenOptions::new()
-                            .read(true)
-                            .custom_flags(libc::O_NOFOLLOW)
-                            .open(&path)
-                        else {
-                            continue;
-                        };
-                        use std::io::Read;
-                        let mut raw = String::new();
-                        if f.take(64).read_to_string(&mut raw).is_err() {
-                            continue;
-                        }
-                        let _ = std::fs::remove_file(&path);
-                        // The tapped number, or "deny"/empty for "not me". Only
-                        // digits are kept; the server matches it to the real code.
-                        let d: String = raw.trim().chars().filter(|c| c.is_ascii_digit()).collect();
-                        // Record in memory so a POST failure retries from here.
-                        if let Some(m) = self.pending_logins.iter_mut().find(|x| x.id == p.id) {
-                            m.decision = Some(d.clone());
-                        }
-                        d
-                    }
-                };
-                // The agent never judges: it forwards the tapped code and the
-                // server decides approve vs deny by matching it.
-                let code_opt = if tapped.is_empty() {
-                    None
-                } else {
-                    Some(tapped.as_str())
-                };
-                match self.client.post_login_decision(&p.id, code_opt, u).await {
-                    Ok(()) => {
-                        self.notify_user(
-                            Some(u),
-                            "Answered",
-                            "Your answer was sent. If it was you, the web session opens.",
-                            false,
-                        );
-                        done.push(p.id.clone());
-                    }
-                    Err(e) => {
-                        // Transient: the verdict is safe in memory; next tick
-                        // re-POSTs it. Nothing is written to disk.
-                        tracing::warn!("login decision for {} failed, will retry: {e}", p.id);
-                    }
-                }
-                break;
-            }
-        }
-        if !done.is_empty() {
-            self.pending_logins.retain(|p| !done.contains(&p.id));
-            self.write_status_file();
-        }
     }
 
     /// Probe that enforcement is real, not just logged (CONTRACT-0.6 §4).
@@ -1890,59 +1872,92 @@ impl Agent {
         ));
     }
 
-    /// The next stop per user — published in the status snapshot for the
-    /// companion's 15/5/1-minute warnings, and written to the terminals of
+    /// The rules' stop reason for `user` right now, on the trusted clock (an
+    /// active override already counts: it returns `None`).
+    fn rules_now(&self, user: &str, policy: &Policy) -> Option<screentime::LockReason> {
+        screentime::evaluate(
+            policy,
+            &self.tracker,
+            user,
+            &self.trusted_now.with_timezone(&chrono::Local),
+        )
+    }
+
+    /// The rules' verdict for `u` with the whole-device lock folded in: a
+    /// pause is a stop, and a console pause with a save-your-work window is a
+    /// stop that is coming. What the status snapshot publishes and what the
+    /// warnings count down to.
+    fn stop_verdict(
+        &self,
+        u: &str,
+        p: &Policy,
+    ) -> openscreentime_policy::rules::Verdict<chrono::Local> {
+        use openscreentime_policy::rules::StopReason;
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        let mut v = screentime::verdict(p, &self.tracker, u, &now, false);
+        if self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown {
+            let pending = self
+                .device_lock_grace_until
+                .filter(|_| !self.offline_hard_lockdown && !self.tamper_lockdown)
+                .map(|t| t.saturating_duration_since(Instant::now()))
+                .filter(|d| !d.is_zero());
+            match pending {
+                Some(d) => {
+                    let at = now + chrono::Duration::from_std(d).unwrap_or_default();
+                    if v.allowed && v.stop_at.is_none_or(|s| at < s) {
+                        v.stop_at = Some(at);
+                        v.reason = Some(StopReason::Paused);
+                        v.minutes_left = Some(d.as_secs().div_ceil(60) as u32);
+                    }
+                }
+                None => {
+                    v.allowed = false;
+                    v.reason = Some(StopReason::Paused);
+                    v.stop_at = Some(now);
+                    v.minutes_left = Some(0);
+                    v.resume_at = None;
+                }
+            }
+        }
+        v
+    }
+
+    /// The next stop per user — what the companion's 15/5/1-minute warnings
+    /// count down to (published as `stop_at`/`reason`), remembered here to
+    /// know which stops were announced, and written to the terminals of
     /// anyone here with no desktop (their only way to hear it).
     fn update_forecasts(&mut self, active: &[String]) {
-        let now = chrono::Local::now();
-        let accel = i64::from(self.ctx.time_accel.max(1));
-        let pause = self
-            .device_lock_grace_until
-            .filter(|t| self.device_locked && *t > Instant::now())
-            .map(|t| warn::Forecast {
-                reason: warn::StopReason::Pause,
-                at: now
-                    + chrono::Duration::from_std(t.saturating_duration_since(Instant::now()))
-                        .unwrap_or_default(),
-            });
-        let until = |t: Instant| {
-            now + chrono::Duration::from_std(t.saturating_duration_since(Instant::now()))
-                .unwrap_or_default()
-        };
-        let mut next: HashMap<String, warn::Forecast> = HashMap::new();
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        let mut next: HashMap<String, (warn::StopReason, chrono::DateTime<chrono::Local>)> =
+            HashMap::new();
         for (u, p) in &self.policies {
             if self.frozen.contains(u) {
                 continue;
             }
-            let rule = screentime::evaluate(p, &self.tracker, u).map(|r| stop_reason_of(&r));
             let f = if let Some(deadline) = self.pending_freeze.get(u) {
                 // The save-your-work countdown of a stop that already tripped.
-                Some(warn::Forecast {
-                    reason: rule.unwrap_or(warn::StopReason::Limit),
-                    at: until(*deadline),
-                })
-            } else if let (Some(t), Some(reason)) = (
-                self.unlock_until.get(u).filter(|t| **t > Instant::now()),
-                rule,
-            ) {
-                // A code bought time; the stop comes back when it runs out.
-                Some(warn::Forecast {
+                let reason = self
+                    .rules_now(u, p)
+                    .map(|r| stop_reason_of(&r))
+                    .unwrap_or(warn::StopReason::Limit);
+                let left = deadline.saturating_duration_since(Instant::now());
+                Some((
                     reason,
-                    at: until(*t),
-                })
+                    now + chrono::Duration::from_std(left).unwrap_or_default(),
+                ))
             } else {
-                let limit_left = self
-                    .tracker
-                    .remaining_minutes(u, p)
-                    .map(|m| chrono::Duration::seconds(m * 60 / accel));
-                warn::forecast(p, limit_left, now)
+                let v = self.stop_verdict(u, p);
+                match (v.allowed, v.reason, v.stop_at) {
+                    (true, Some(r), Some(at)) => Some((r, at)),
+                    _ => None,
+                }
             };
-            if let Some(f) = [f, pause].into_iter().flatten().min_by_key(|f| f.at) {
+            if let Some(f) = f {
                 next.insert(u.clone(), f);
             }
         }
-        for (u, f) in &next {
-            if (f.at - now).num_seconds() <= 90 {
+        for (u, (_, at)) in &next {
+            if (*at - now).num_seconds() <= 90 {
                 self.announced.insert(u.clone(), Instant::now());
             }
         }
@@ -1959,10 +1974,10 @@ impl Agent {
                 }
                 let st = self.tty_warn.entry(u.clone()).or_default();
                 match next.get(&u) {
-                    Some(f) => {
-                        let secs = (f.at - now).num_seconds();
-                        if st.observe(f.reason, secs).is_some() {
-                            let w = warn::words(f.reason, secs, Some(f.at));
+                    Some((reason, at)) => {
+                        let secs = (*at - now).num_seconds();
+                        if st.observe(*reason, secs).is_some() {
+                            let w = warn::words(*reason, secs, Some(*at));
                             self.lock
                                 .host()
                                 .tell_ttys(&u, &format!("{} {}", w.title, w.body));
@@ -1978,13 +1993,14 @@ impl Agent {
     /// Everything the lock says to `user` right now.
     fn face_for(&self, user: &str) -> Face {
         use lock::{AskState, CodeState, Look};
+        use openscreentime_policy::rules::StopReason;
         let policy = self.policies.get(user).cloned().unwrap_or_default();
         let verifier = self
             .parent_keys(&policy)
             .verifier()
             .with_state_path(self.parent_state.clone());
         let code = lock::code_state(&verifier);
-        let now = chrono::Local::now();
+        let now = self.trusted_now.with_timezone(&chrono::Local);
         let (look, title, detail, can_ask) = if self.tamper_lockdown {
             (
                 Look::Wall,
@@ -2007,39 +2023,43 @@ impl Agent {
                 false,
             )
         } else {
-            match screentime::evaluate(&policy, &self.tracker, user) {
-                Some(screentime::LockReason::DailyLimit {
-                    used_min,
-                    limit_min,
-                }) => (
-                    Look::Wall,
-                    "Time's up for today".to_string(),
-                    if used_min > limit_min {
-                        format!("All {limit_min} minutes are used.")
-                    } else {
-                        format!("{used_min} of {limit_min} minutes used.")
-                    },
-                    true,
-                ),
-                Some(screentime::LockReason::Bedtime) => (
+            let v = screentime::verdict(&policy, &self.tracker, user, &now, false);
+            let until = v.resume_at.map(|t| warn::until_words(t, now));
+            match v.reason.filter(|_| !v.allowed) {
+                Some(StopReason::Limit) => {
+                    let used = self.tracker.used_minutes(user);
+                    let limit =
+                        policy.screen_time.daily_limit_minutes + self.tracker.earned_minutes(user);
+                    (
+                        Look::Wall,
+                        "Time's up for today".to_string(),
+                        if used > limit {
+                            format!("All {limit} minutes are used.")
+                        } else {
+                            format!("{used} of {limit} minutes used.")
+                        },
+                        true,
+                    )
+                }
+                Some(StopReason::Bedtime) => (
                     Look::Night,
-                    match &policy.screen_time.bedtime {
-                        Some(bt) => format!("Bedtime until {}", bt.end.trim()),
+                    match until {
+                        Some(t) => format!("Bedtime until {t}"),
                         None => "Bedtime".to_string(),
                     },
                     "Screens are off until morning.".to_string(),
                     true,
                 ),
-                Some(screentime::LockReason::OutsideWindow) => (
+                Some(StopReason::OutsideHours) => (
                     Look::Night,
-                    match warn::next_allowed(&policy.screen_time.schedule, now) {
+                    match until {
                         Some(t) => format!("Outside allowed hours until {t}"),
                         None => "Outside allowed hours".to_string(),
                     },
                     "Screens are off at this time of day.".to_string(),
                     true,
                 ),
-                None => (
+                Some(StopReason::Paused) | None => (
                     Look::Wall,
                     "This computer is stopped for now".to_string(),
                     String::new(),
@@ -2047,7 +2067,7 @@ impl Agent {
                 ),
             }
         };
-        let today = now.date_naive();
+        let today = chrono::Local::now().date_naive();
         let asked = self
             .requested_earn
             .iter()
@@ -2171,9 +2191,11 @@ impl Agent {
             });
         }
         let minutes = lock::UNLOCK_MINUTES;
-        self.unlock_until.insert(
-            user.to_string(),
-            Instant::now() + Duration::from_secs(u64::from(minutes) * 60),
+        // The one override (persisted in the ledger): survives a restart,
+        // beats limit/bedtime/window, expires on the trusted clock.
+        self.tracker.set_override(
+            user,
+            self.trusted_now + chrono::Duration::minutes(i64::from(minutes)),
         );
         // A parent at the machine with a valid code is the authority every
         // whole-device lock defers to: clear them all, persistently (this
@@ -2213,10 +2235,7 @@ impl Agent {
     async fn on_seat_changed(&mut self) {
         let sessions = self.lock.host().sessions();
         if let Some(u) = lock::on_screen_user(&sessions) {
-            let in_grace = self
-                .unlock_until
-                .get(&u)
-                .is_some_and(|t| *t > Instant::now());
+            let in_grace = self.tracker.peek_override(&u, self.trusted_now).is_some();
             if self.policies.contains_key(&u)
                 && !self.frozen.contains(&u)
                 && !self.pending_freeze.contains_key(&u)
@@ -2225,7 +2244,7 @@ impl Agent {
                 let policy = self.policies.get(&u).cloned().unwrap_or_default();
                 if self.device_lock_effective() {
                     self.stop_user(&u, true).await;
-                } else if let Some(reason) = screentime::evaluate(&policy, &self.tracker, &u) {
+                } else if let Some(reason) = self.rules_now(&u, &policy) {
                     let mut events = Vec::new();
                     self.screen_time_lockout(&u, &reason, &mut events).await;
                     self.pending_events.extend(events);
@@ -2267,6 +2286,43 @@ impl Agent {
             })
     }
 
+    /// The verdict for one user as the status file publishes it (documented
+    /// field by field in docs/AGENT.md → "status.<user>.json"). Everything is
+    /// computed on the trusted clock with the same rules function the
+    /// enforcement tick uses, so what the app says is what will happen.
+    fn user_status(&self, u: &str, p: &Policy) -> serde_json::Value {
+        let now = self.trusted_now.with_timezone(&chrono::Local);
+        let v = self.stop_verdict(u, p);
+        // Heads-ups land 15, 5 and 1 minute before a stop (docs/AGENT.md).
+        let next_warning_at = v
+            .stop_at
+            .filter(|_| v.allowed)
+            .and_then(|stop| next_warning(stop, now));
+        let ts = |t: chrono::DateTime<chrono::Local>| t.to_rfc3339();
+        json!({
+            "name": u,
+            "used_minutes": self.tracker.used_minutes(u),
+            "used_here_minutes": self.tracker.used_here_secs(u) / 60,
+            "remaining_minutes": self.tracker.remaining_minutes(u, p),
+            "frozen": self.frozen.contains(u),
+            "freeze_in_secs": self.pending_freeze.get(u).map(|d|
+                d.saturating_duration_since(Instant::now()).as_secs()),
+            "allowed": v.allowed,
+            "reason": v.reason.map(|r| r.id()),
+            "minutes_left": v.minutes_left,
+            "stop_at": v.stop_at.map(ts),
+            "resume_at": v.resume_at.map(ts),
+            "next_warning_at": next_warning_at.map(ts),
+            "override_until": self
+                .tracker
+                .peek_override(u, self.trusted_now)
+                .map(|t| ts(t.with_timezone(&chrono::Local))),
+            "counting": self.counting.iter().any(|c| c == u),
+            "measured": self.measured,
+            "day": self.tracker.day(),
+        })
+    }
+
     /// Transparency surface for the per-user tray/companion — time remaining,
     /// freeze state, server connection, and whether a remote shell is open (the
     /// teen deserves to know).
@@ -2278,6 +2334,13 @@ impl Agent {
     /// `/run/openscreentime/status.<user>.json`, chowned to that user and `0600`.
     fn write_status_file(&self) {
         if self.exec.dry_run() {
+            // No /run writes in a dry run — but say what the app would show,
+            // once a minute, so a dry run can be checked end to end.
+            if self.attrib_ticks == 0 {
+                for (u, p) in &self.policies {
+                    tracing::info!(target: "dry_run", "STATUS {u}: {}", self.user_status(u, p));
+                }
+            }
             return;
         }
         let dir = std::path::Path::new(crate::paths::RUN_DIR);
@@ -2294,13 +2357,6 @@ impl Agent {
             "device_locked": self.device_locked,
             "offline_hard_lockdown": self.offline_hard_lockdown,
             "tamper_lockdown": self.tamper_lockdown,
-            // A parent's pause with a save-your-work window: when it lands.
-            "pause_at": self.device_lock_grace_until
-                .filter(|t| self.device_locked && *t > Instant::now())
-                .map(|t| (chrono::Local::now()
-                    + chrono::Duration::from_std(t.saturating_duration_since(Instant::now()))
-                        .unwrap_or_default())
-                    .to_rfc3339()),
         });
         let notif_json = |n: &UserNotification| {
             json!({
@@ -2341,36 +2397,41 @@ impl Agent {
                     .map(&notif_json),
             );
             let mut view = base.clone();
-            view["users"] = json!([{
-                "name": u,
-                "used_minutes": self.tracker.used_minutes(u),
-                "remaining_minutes": self.tracker.remaining_minutes(u, p),
-                "frozen": self.frozen.contains(u),
-                "freeze_in_secs": self.pending_freeze.get(u).map(|d|
-                    d.saturating_duration_since(Instant::now()).as_secs()),
-                // The next stop, for the companion's 15/5/1-minute warnings.
-                "stop_at": self.forecasts.get(u).map(|f| f.at.to_rfc3339()),
-                "reason": self.forecasts.get(u).map(|f| f.reason.as_str()),
-                "minutes_left": self.forecasts.get(u).map(|f|
-                    ((f.at - chrono::Local::now()).num_seconds().max(0) + 59) / 60),
-            }]);
+            view["users"] = json!([self.user_status(u, p)]);
             view["notifications"] = json!(notifs);
-            // Sign-in prompts addressed to this user's sessions — the tray
-            // renders these as actionable notifications and answers via a
-            // decision file (client-first login, CONTRACT-0.6).
-            view["login_requests"] = json!(self
-                .pending_logins
-                .iter()
-                .filter(|l| l.os_users.iter().any(|x| x == u))
-                .map(|l| json!({
-                    "id": l.id,
-                    "username": l.username,
-                    "codes": l.codes,
-                    "expires_at": l.expires.to_rfc3339(),
-                }))
-                .collect::<Vec<_>>());
+            view["login_codes"] = self.login_codes_for(u);
             write_private_status(dir, u, uid, &view.to_string());
         }
+        // A code can be for a login with no rules on this computer (yet): it
+        // still gets its own private file, with the code and nothing else.
+        let mut extra: Vec<&String> = self
+            .login_codes
+            .iter()
+            .flat_map(|(_, users)| users)
+            .filter(|u| !self.policies.contains_key(*u))
+            .collect();
+        extra.sort();
+        extra.dedup();
+        for u in extra {
+            let Some(uid) = crate::sysusers::uid_of(u) else {
+                continue;
+            };
+            let mut view = base.clone();
+            view["users"] = json!([]);
+            view["notifications"] = json!(device_notifs);
+            view["login_codes"] = self.login_codes_for(u);
+            write_private_status(dir, u, uid, &view.to_string());
+        }
+    }
+
+    /// The live codes for one OS login, as its status file carries them.
+    fn login_codes_for(&self, user: &str) -> serde_json::Value {
+        json!(self
+            .login_codes
+            .iter()
+            .filter(|(_, users)| users.iter().any(|x| x == user))
+            .map(|(c, _)| c)
+            .collect::<Vec<_>>())
     }
 
     /// Consume any on-demand "request more time" markers a user's tray dropped
@@ -2439,6 +2500,10 @@ impl Agent {
     /// Dispatch one server command.
     async fn handle_command(&mut self, cmd: Command) -> (CommandAck, Vec<Event>) {
         let mut events = Vec::new();
+        // Commands land between ticks: take "now" fresh, so a "+15 min" is
+        // 15 minutes from when it arrived, not from the last tick.
+        let reading = crate::clock::read(&self.boot_id);
+        self.trusted_now = self.tracker.advance(&reading, &chrono::Local);
         let result = match cmd.cmd_type.as_str() {
             CMD_LOCK => {
                 self.device_locked = true;
@@ -2487,18 +2552,56 @@ impl Agent {
                 self.device_lock_grace_until = None;
                 // An admin unlock also lifts a confirmed-evasion lockdown.
                 self.tamper_lockdown = false;
-                // Resume lifts the pause. Someone whose own rules still stop
-                // them (time's up, bedtime) stays stopped — thawing them only
-                // for the next tick to freeze them again would flash their
-                // desktop and tell them "you're back" when they aren't. The
-                // lock just changes its words.
+                // An unlock also disarms carried-over countdowns — and must
+                // hit disk immediately, or a power-cut right after would boot
+                // back into the lock the parent just lifted.
+                self.pending_freeze.clear();
+                if !self.exec.dry_run() {
+                    self.persist_freeze_state();
+                }
+                // Resume is a parent action, so it writes the override too —
+                // otherwise a rule re-stops the person on the next tick and
+                // "Resume" looks broken. Explicit: `minutes` or
+                // `until: "end_of_day"`, optionally for one `os_username`.
+                // A plain Resume gives RESUME_OVERRIDE_MIN to whoever a rule
+                // is stopping right now; everyone else just carries on under
+                // their normal rules.
+                let targets: Vec<String> =
+                    match cmd.payload.get("os_username").and_then(|v| v.as_str()) {
+                        Some(u) => vec![u.to_string()],
+                        None => self.policies.keys().cloned().collect(),
+                    };
+                let minutes = cmd
+                    .payload
+                    .get("minutes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let end_of_day =
+                    cmd.payload.get("until").and_then(|v| v.as_str()) == Some("end_of_day");
+                let (who, until) = if minutes > 0 {
+                    (
+                        targets,
+                        self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64),
+                    )
+                } else if end_of_day {
+                    (targets, self.end_of_day())
+                } else {
+                    (
+                        self.stopped_by_rule(&targets),
+                        self.trusted_now
+                            + chrono::Duration::minutes(i64::from(RESUME_OVERRIDE_MIN)),
+                    )
+                };
+                self.override_users(&who, until);
+                // Thaw whoever is free to go now — the pause is lifted and
+                // their override (or their own rules) lets them in. Someone a
+                // rule still stops (a Resume aimed at another person) stays
+                // stopped: thawing them only for the next tick to freeze them
+                // again would flash the desktop and say "you're back" when
+                // they aren't. The lock just changes its words.
                 for user in self.frozen.clone() {
                     let policy = self.policies.get(&user).cloned().unwrap_or_default();
-                    let in_grace = self
-                        .unlock_until
-                        .get(&user)
-                        .is_some_and(|t| *t > Instant::now());
-                    if !in_grace && screentime::evaluate(&policy, &self.tracker, &user).is_some() {
+                    if self.rules_now(&user, &policy).is_some() {
                         continue;
                     }
                     self.frozen.remove(&user);
@@ -2510,85 +2613,40 @@ impl Agent {
                         false,
                     );
                 }
-                // An unlock also disarms carried-over countdowns — and must
-                // hit disk immediately, or a power-cut right after would boot
-                // back into the lock the parent just lifted.
-                self.pending_freeze.clear();
                 if !self.exec.dry_run() {
                     self.persist_freeze_state();
                 }
                 events.push(Event::new(
                     EV_UNLOCK,
                     SEV_INFO,
-                    json!({ "source": "command" }),
+                    json!({ "source": "command", "override_users": who, "override_until": until }),
                 ));
-                json!({ "locked": false })
+                json!({ "locked": false, "override_users": who, "override_until": until })
             }
-            CMD_LOGIN_APPROVE => {
-                let request_id = cmd
-                    .payload
-                    .get("request_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let username = cmd
-                    .payload
-                    .get("username")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("someone")
-                    .to_string();
-                let os_users: Vec<String> = cmd
-                    .payload
-                    .get("os_users")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let secs = cmd
-                    .payload
-                    .get("expires_in_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(120);
-                let codes: Vec<String> = cmd
-                    .payload
-                    .get("codes")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if request_id.is_empty() || os_users.is_empty() || codes.is_empty() {
-                    return (ack_failed(&cmd.id, "bad login_approve payload"), events);
-                }
-                for u in &os_users {
-                    self.notify_user(
-                        Some(u),
-                        "Sign-in request",
-                        &format!(
-                            "{username} is signing in on the web. If it's you, tap the \
-                             number shown in your browser — otherwise tap Not me."
-                        ),
-                        false,
-                    );
-                }
-                self.pending_logins.retain(|p| p.id != request_id);
-                self.pending_logins.push(PendingLogin {
-                    id: request_id,
-                    username,
-                    os_users: os_users.clone(),
-                    codes,
-                    decision: None,
-                    expires: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
-                });
-                // Snappy: the tray polls the snapshot every 5 s — publish now
-                // rather than waiting for the next tick.
+            CMD_LOGIN_CODE => {
+                let Some((code, os_users)) =
+                    crate::logincode::LoginCode::from_command(&cmd.payload, chrono::Utc::now())
+                else {
+                    return (ack_failed(&cmd.id, "bad login_code payload"), events);
+                };
+                // Only logins that really exist here; the server named them.
+                let os_users: Vec<String> = os_users
+                    .into_iter()
+                    .filter(|u| crate::sysusers::uid_of(u).is_some())
+                    .collect();
+                self.login_codes.retain(|(c, _)| c.id != code.id);
+                self.login_codes.push((code, os_users.clone()));
+                // Publish now, not at the next tick — someone is waiting.
                 self.write_status_file();
-                json!({ "prompted": os_users })
+                // Bring the window up where there's a desktop (no tray on
+                // GNOME, and the window may be closed); `ost code` otherwise.
+                #[cfg(feature = "gui")]
+                if !self.exec.dry_run() {
+                    for u in &os_users {
+                        crate::logincode::open_app_for(u);
+                    }
+                }
+                json!({ "shown_to": os_users })
             }
             CMD_APPLY_POLICY => match self.client.get_policy().await {
                 Ok(bundle) => {
@@ -2645,9 +2703,45 @@ impl Agent {
                         events,
                     );
                 }
-                self.tracker.add_earned(&os_username, minutes);
+                // A grant filed for an earlier day (the device was offline
+                // when the parent approved) belongs to that day, not this one.
+                let for_day = cmd
+                    .payload
+                    .get("day")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<chrono::NaiveDate>().ok());
+                if let (Some(d), Some(today)) = (for_day, self.tracker.day()) {
+                    if d < today {
+                        return (
+                            CommandAck {
+                                command_id: cmd.id,
+                                status: "acked".into(),
+                                result: json!({ "credited": false, "stale_day": d }),
+                            },
+                            events,
+                        );
+                    }
+                }
+                // "+N minutes" = N more minutes on today's budget AND an
+                // override for N minutes, so it also carries past bedtime or
+                // the end of the allowed hours. Idempotent on the command id:
+                // a redelivery after a lost ack never credits twice.
+                let outcome = self
+                    .tracker
+                    .grant(&cmd.id, &os_username, minutes, self.trusted_now);
                 if !self.exec.dry_run() {
                     self.tracker.save();
+                }
+                if outcome == screentime::Grant::Duplicate {
+                    return (
+                        CommandAck {
+                            command_id: cmd.id,
+                            status: "acked".into(),
+                            result: json!({ "credited": true, "duplicate": true,
+                                            "os_username": os_username, "minutes": minutes }),
+                        },
+                        events,
+                    );
                 }
                 // The user's pending requests are now resolved; clear the dedupe
                 // cache so a later same-day ask sends a fresh request instead
@@ -2730,7 +2824,7 @@ fn stop_reason_of(r: &screentime::LockReason) -> warn::StopReason {
     match r {
         screentime::LockReason::DailyLimit { .. } => warn::StopReason::Limit,
         screentime::LockReason::Bedtime => warn::StopReason::Bedtime,
-        screentime::LockReason::OutsideWindow => warn::StopReason::Window,
+        screentime::LockReason::OutsideWindow => warn::StopReason::OutsideHours,
     }
 }
 
@@ -2787,6 +2881,26 @@ fn decide_freeze(
     }
 }
 
+/// What one tick bills: the awake time since the previous tick
+/// (CLOCK_MONOTONIC — suspend excluded), capped at `BILL_CAP`. The first tick
+/// after start bills nothing (the downtime is unknown).
+fn billable_elapsed(last: Option<Instant>, now: Instant) -> Duration {
+    last.map(|t| now.saturating_duration_since(t).min(BILL_CAP))
+        .unwrap_or(Duration::ZERO)
+}
+
+/// The next heads-up before a stop at `stop` (`WARN_BEFORE_MIN` minutes
+/// before it), if one is still ahead of `now`.
+fn next_warning<Tz: chrono::TimeZone>(
+    stop: chrono::DateTime<Tz>,
+    now: chrono::DateTime<Tz>,
+) -> Option<chrono::DateTime<Tz>> {
+    WARN_BEFORE_MIN
+        .iter()
+        .map(|m| stop.clone() - chrono::Duration::minutes(*m))
+        .find(|w| *w > now)
+}
+
 fn ack_failed(id: &str, msg: &str) -> CommandAck {
     tracing::warn!("command {id} failed: {msg}");
     CommandAck {
@@ -2796,7 +2910,22 @@ fn ack_failed(id: &str, msg: &str) -> CommandAck {
     }
 }
 
+/// The agent, shared between the enforcement tick (its own task) and the
+/// network loops.
+type Shared = Arc<tokio::sync::Mutex<Agent>>;
+
 /// Entry point for `run`.
+///
+/// Two independent loops share the agent:
+/// * the **enforcement tick** — accounting, rules, stops, the status file,
+///   the watchdog heartbeat — on its own timer, whatever the network does;
+/// * the **network loop** — WS bus or HTTP polling, reconnect with backoff,
+///   commands, usage reports, event and usage-slice delivery.
+///
+/// They used to be one: the tick only ran inside the WS/poll loops, so while
+/// the server was unreachable a device ticked about once a minute (counting
+/// 10–25 % of real use) and the watchdog, seeing a stale heartbeat, kept
+/// restarting a perfectly healthy offline agent.
 pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     ctx.require_root_for_enforcement()?;
     let mut agent = Agent::new(ctx.clone(), cfg)?;
@@ -2808,13 +2937,13 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     );
 
     let boot_events = agent.bootstrap().await.unwrap_or_default();
-    agent.flush_events(boot_events).await;
+    agent.queue_events(boot_events);
 
     // The lock: whoever the kernel still has frozen is ours; the graphical
     // lock's socket; and a watch on the VT, so a switch or a login into a
     // stopped session meets the lock at once.
     agent.adopt_frozen();
-    let mut lock_rx = agent
+    let lock_rx = agent
         .lock_rx
         .take()
         .expect("the lock channel is taken once, here");
@@ -2859,47 +2988,120 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
         agent.exec.dry_run(),
     ));
 
-    // Reconnect with jittered exponential backoff (1 s → 60 s). A server that
-    // answers HTTP but not WS keeps the backoff short: the poll round succeeded.
+    let client = agent.client.clone();
+    let agent: Shared = Arc::new(tokio::sync::Mutex::new(agent));
+    let tick = tokio::spawn(tick_loop(agent.clone()));
+    // A code typed at the lock, or a switch to a stopped session, is answered
+    // between ticks and whatever the network is doing.
+    tokio::spawn(lock_loop(agent.clone(), lock_rx));
+
+    // The tick never returns; if it dies (a panic), exit so systemd restarts
+    // the agent now — a process with a live network loop and no enforcement
+    // would otherwise sit there until the watchdog noticed the heartbeat.
+    tokio::select! {
+        r = tick => anyhow::bail!("the enforcement tick stopped: {r:?}"),
+        _ = network_loop(&agent, &client) => unreachable!("the network loop never returns"),
+    }
+}
+
+/// Reconnect with jittered exponential backoff (1 s → 60 s). A server that
+/// answers HTTP but not WS keeps the backoff short: the poll round succeeded.
+async fn network_loop(agent: &Shared, client: &ServerClient) {
+    let agent = agent.clone();
     let mut backoff_secs = BACKOFF_MIN_SECS;
     loop {
-        match agent.client.connect_ws().await {
+        match client.connect_ws().await {
             Ok(stream) => {
                 tracing::info!("WS bus connected");
                 backoff_secs = BACKOFF_MIN_SECS;
-                if let Err(e) = run_ws(&mut agent, stream, &mut lock_rx).await {
+                if let Err(e) = run_ws(&agent, stream).await {
                     tracing::warn!("WS loop ended: {e}");
                 }
             }
             Err(e) => {
                 tracing::warn!("WS unavailable ({e}); falling back to heartbeat polling");
-                match run_poll(&mut agent, &mut lock_rx).await {
+                match run_poll(&agent).await {
                     Ok(()) => backoff_secs = BACKOFF_MIN_SECS,
                     Err(e) => tracing::warn!("poll loop ended: {e}"),
                 }
             }
         }
         let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=backoff_secs / 2 + 1);
-        // Waiting to reconnect must not leave a code typed at the lock unanswered.
-        let wait = tokio::time::sleep(Duration::from_secs(backoff_secs + jitter));
-        tokio::pin!(wait);
-        loop {
-            tokio::select! {
-                _ = &mut wait => break,
-                Some(ev) = lock_rx.recv() => agent.on_lock_event(ev).await,
-            }
-        }
+        tokio::time::sleep(Duration::from_secs(backoff_secs + jitter)).await;
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
     }
 }
 
-/// WS-connected event loop: read server frames, run the enforcement tick, and
-/// drain agent→server frames (events, acks) through a writer task.
-async fn run_ws(
-    agent: &mut Agent,
-    stream: crate::client::WsStream,
-    lock_rx: &mut mpsc::Receiver<LockEvent>,
-) -> Result<()> {
+/// The lock's events: codes and asks from a lock UI, VT changes.
+async fn lock_loop(agent: Shared, mut rx: mpsc::Receiver<LockEvent>) {
+    while let Some(ev) = rx.recv().await {
+        agent.lock().await.on_lock_event(ev).await;
+    }
+}
+
+/// The enforcement tick, on its own timer. `Delay` (not the default `Burst`):
+/// after a stall the next tick simply runs late — and bills the measured
+/// elapsed time (capped), never a burst of replayed fixed credits.
+async fn tick_loop(agent: Shared) {
+    let mut ticker = tokio::time::interval(TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let mut a = agent.lock().await;
+        let events = a.enforcement_tick().await;
+        a.queue_events(events);
+    }
+}
+
+/// Deliver queued events, in server-sized batches, without holding the agent
+/// across the network call. A failed batch goes back to the front.
+async fn flush_queued(agent: &Shared) {
+    loop {
+        let (client, batch) = {
+            let mut a = agent.lock().await;
+            a.cap_pending_events();
+            if a.pending_events.is_empty() {
+                return;
+            }
+            let take = a.pending_events.len().min(EVENT_BATCH_MAX);
+            let batch: Vec<Event> = a.pending_events.drain(..take).collect();
+            (a.client.clone(), batch)
+        };
+        if let Err(e) = client.post_events(&batch).await {
+            let mut a = agent.lock().await;
+            let rest = std::mem::take(&mut a.pending_events);
+            a.pending_events = batch;
+            a.pending_events.extend(rest);
+            a.cap_pending_events();
+            // warn, not debug: a stalled audit pipeline is exactly the kind of
+            // quiet failure this codebase keeps getting bitten by.
+            tracing::warn!(
+                "event post failed, {} buffered for retry: {e}",
+                a.pending_events.len()
+            );
+            return;
+        }
+    }
+}
+
+/// Post where-the-time-goes slices (sampled by the tick).
+async fn post_slices(agent: &Shared) {
+    let (client, batch) = {
+        let mut a = agent.lock().await;
+        (a.client.clone(), a.attrib.drain(400))
+    };
+    if batch.is_empty() {
+        return;
+    }
+    if let Err(e) = client.post_usage_slices(&batch).await {
+        tracing::debug!("usage post failed, keeping batch: {e}");
+        agent.lock().await.attrib.requeue(batch);
+    }
+}
+
+/// WS-connected loop: read server frames, push state/usage frames, deliver
+/// events. The enforcement tick runs elsewhere (`tick_loop`).
+async fn run_ws(agent: &Shared, stream: crate::client::WsStream) -> Result<()> {
     let (mut write, mut read) = stream.split();
     let (out_tx, mut out_rx) = mpsc::channel::<AgentFrame>(256);
 
@@ -2918,47 +3120,55 @@ async fn run_ws(
 
     // First thing on a fresh connection: tell the server what is actually true
     // here (lock state, frozen users, gaps) and push the usage we may have
-    // accumulated while disconnected.
-    if let Some(frame) = agent.state_frame_due(true) {
+    // accumulated while disconnected (the reply carries the person's day
+    // elsewhere and the server's clock).
+    let (state, usage) = {
+        let mut a = agent.lock().await;
+        (a.state_frame_due(true), a.usage_snapshot())
+    };
+    if let Some(frame) = state {
         let _ = out_tx.send(frame).await;
     }
-    let usage = agent.usage_snapshot();
     if !usage.is_empty() {
         let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
     }
     let mut last_hb = Instant::now();
-
-    let mut ticker = tokio::time::interval(TICK);
+    let mut beat = tokio::time::interval(TICK);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut beats: u32 = 0;
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                // Events go over HTTP (`flush_events`), not a WS frame: a frame
-                // pushed into a dying socket's channel is gone, while the flush
-                // buffer keeps undelivered batches and retries next tick — the
-                // same guarantee in both WS and poll mode.
-                let events = agent.enforcement_tick().await;
-                agent.flush_events(events).await;
-                // Honest state: on change, and at least every STATE_AT_LEAST.
-                if let Some(frame) = agent.state_frame_due(false) {
+            _ = beat.tick() => {
+                // Events go over HTTP, not a WS frame: a frame pushed into a
+                // dying socket's channel is gone, while the queue keeps
+                // undelivered batches and retries — same guarantee in both modes.
+                flush_queued(agent).await;
+                beats = beats.wrapping_add(1);
+                if beats.is_multiple_of(6) {
+                    post_slices(agent).await;
+                }
+                let (state, usage) = {
+                    let mut a = agent.lock().await;
+                    // The WS bus has no HTTP heartbeat, so usage rides here
+                    // every WS_HEARTBEAT.
+                    let usage = (last_hb.elapsed() >= WS_HEARTBEAT).then(|| a.usage_snapshot());
+                    (a.state_frame_due(false), usage)
+                };
+                if let Some(frame) = state {
                     let _ = out_tx.send(frame).await;
                 }
-                // The WS bus has no HTTP heartbeat, so push usage here every
-                // WS_HEARTBEAT — otherwise screen_time_ledger only ever updates
-                // in the degraded poll path.
-                if last_hb.elapsed() >= WS_HEARTBEAT {
+                if let Some(usage) = usage {
                     last_hb = Instant::now();
-                    let usage = agent.usage_snapshot();
                     if !usage.is_empty() {
                         let _ = out_tx.send(AgentFrame::Heartbeat { usage }).await;
                     }
                 }
             }
-            Some(ev) = lock_rx.recv() => agent.on_lock_event(ev).await,
             msg = read.next() => {
                 let Some(msg) = msg else { break; };
                 let msg = msg?;
                 // Any frame from the server (including a bare Ping) counts as contact.
-                agent.record_contact();
+                agent.lock().await.record_contact();
                 match msg {
                     Message::Text(txt) => {
                         if let Err(e) = handle_server_text(agent, &txt, &out_tx).await {
@@ -2978,21 +3188,29 @@ async fn run_ws(
 }
 
 async fn handle_server_text(
-    agent: &mut Agent,
+    agent: &Shared,
     txt: &str,
     out_tx: &mpsc::Sender<AgentFrame>,
 ) -> Result<()> {
     let frame: ServerFrame = serde_json::from_str(txt)?;
     match frame {
         ServerFrame::Command { command } => {
-            let (ack, events) = agent.handle_command(command).await;
-            // A resume, unlock or grant takes the lock down right away.
-            agent.reconcile_lock().await;
-            agent.flush_events(events).await;
+            let ack = {
+                let mut a = agent.lock().await;
+                let (ack, events) = a.handle_command(command).await;
+                // A resume, unlock or grant takes the lock down right away.
+                a.reconcile_lock().await;
+                a.queue_events(events);
+                ack
+            };
             let _ = out_tx.send(AgentFrame::Ack { ack }).await;
+            flush_queued(agent).await;
         }
         ServerFrame::Ping => {
             let _ = out_tx.send(AgentFrame::Pong).await;
+        }
+        ServerFrame::Usage { server_time, users } => {
+            agent.lock().await.apply_person_days(server_time, users);
         }
     }
     Ok(())
@@ -3001,53 +3219,63 @@ async fn handle_server_text(
 /// Heartbeat polling fallback (no WS); commands flow via the heartbeat
 /// command queue. Runs one `POLL_ROUND`, then returns `Ok` so the caller
 /// retries the WS bus; returns `Err` as soon as a heartbeat fails.
-async fn run_poll(agent: &mut Agent, lock_rx: &mut mpsc::Receiver<LockEvent>) -> Result<()> {
-    let interval = Duration::from_secs(agent.cfg.poll_interval_secs.clamp(5, 30));
-    let mut ticker = tokio::time::interval(TICK);
-    let mut hb = tokio::time::interval(interval);
+async fn run_poll(agent: &Shared) -> Result<()> {
+    let (client, secs) = {
+        let a = agent.lock().await;
+        (a.client.clone(), a.cfg.poll_interval_secs.clamp(5, 30))
+    };
+    let mut hb = tokio::time::interval(Duration::from_secs(secs));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let round_end = Instant::now() + POLL_ROUND;
+    let mut beats: u32 = 0;
     loop {
         if Instant::now() >= round_end {
             return Ok(());
         }
-        tokio::select! {
-            _ = ticker.tick() => {
-                let events = agent.enforcement_tick().await;
-                agent.flush_events(events).await;
+        hb.tick().await;
+        let users = crate::sysusers::login_users();
+        let usage = agent.lock().await.usage_snapshot();
+        let resp = match client.heartbeat("online", None, &users, &usage).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("heartbeat failed ({e}); will retry");
+                return Err(e); // bubble up to reconnect/backoff, retries WS
             }
-            Some(ev) = lock_rx.recv() => agent.on_lock_event(ev).await,
-            _ = hb.tick() => {
-                let users = crate::sysusers::login_users();
-                let usage = agent.usage_snapshot();
-                match agent.client.heartbeat("online", None, &users, &usage).await {
-                    Ok(resp) => {
-                        agent.record_contact();
-                        for cmd in resp.commands {
-                            let (ack, events) = agent.handle_command(cmd).await;
-                            agent.reconcile_lock().await;
-                            agent.flush_events(events).await;
-                            let _ = agent.client.ack_command(&ack).await;
-                        }
-                        // Poll mode has no push channel: a changed policy_version
-                        // is the signal to re-pull and re-apply.
-                        if resp.policy_version != agent.policy_version {
-                            match agent.client.get_policy().await {
-                                Ok(bundle) => match agent.apply_bundle(bundle) {
-                                    Ok(evs) => {
-                                        agent.flush_events(evs).await;
-                                    }
-                                    Err(e) => tracing::warn!("policy re-apply failed: {e}"),
-                                },
-                                Err(e) => tracing::warn!("policy re-pull failed: {e}"),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("heartbeat failed ({e}); will retry");
-                        return Err(e); // bubble up to reconnect/backoff, retries WS
+        };
+        let current_version = {
+            let mut a = agent.lock().await;
+            a.record_contact();
+            a.apply_person_days(resp.server_time, resp.usage);
+            a.policy_version.clone()
+        };
+        for cmd in resp.commands {
+            let ack = {
+                let mut a = agent.lock().await;
+                let (ack, events) = a.handle_command(cmd).await;
+                a.reconcile_lock().await;
+                a.queue_events(events);
+                ack
+            };
+            let _ = client.ack_command(&ack).await;
+        }
+        // Poll mode has no push channel: a changed policy_version is the
+        // signal to re-pull and re-apply.
+        if resp.policy_version != current_version {
+            match client.get_policy().await {
+                Ok(bundle) => {
+                    let mut a = agent.lock().await;
+                    match a.apply_bundle(bundle) {
+                        Ok(evs) => a.queue_events(evs),
+                        Err(e) => tracing::warn!("policy re-apply failed: {e}"),
                     }
                 }
+                Err(e) => tracing::warn!("policy re-pull failed: {e}"),
             }
+        }
+        flush_queued(agent).await;
+        beats = beats.wrapping_add(1);
+        if beats.is_multiple_of(4) {
+            post_slices(agent).await;
         }
     }
 }
@@ -3070,6 +3298,53 @@ mod tests {
         assert!(!should_evaluate_screen_time(false, false, false, false));
         // a parent-granted grace window suspends enforcement outright
         assert!(!should_evaluate_screen_time(true, true, true, false));
+    }
+
+    /// Billing is measured awake time, capped: a normal tick bills its ten
+    /// seconds, a stalled agent at most BILL_CAP, a fresh start nothing.
+    #[test]
+    fn ticks_bill_measured_time_capped() {
+        let t0 = Instant::now();
+        assert_eq!(billable_elapsed(None, t0), Duration::ZERO);
+        assert_eq!(
+            billable_elapsed(Some(t0), t0 + Duration::from_secs(10)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            billable_elapsed(Some(t0), t0 + Duration::from_secs(4 * 3600)),
+            BILL_CAP
+        );
+        // A late tick (the old code credited a fixed 10 s whatever happened).
+        assert_eq!(
+            billable_elapsed(Some(t0), t0 + Duration::from_secs(37)),
+            Duration::from_secs(37)
+        );
+    }
+
+    #[test]
+    fn warnings_come_fifteen_five_and_one_minute_before_the_stop() {
+        use chrono::TimeZone;
+        let at = |h, m| chrono::Utc.with_ymd_and_hms(2026, 9, 24, h, m, 0).unwrap();
+        assert_eq!(next_warning(at(20, 0), at(19, 30)), Some(at(19, 45)));
+        assert_eq!(next_warning(at(20, 0), at(19, 50)), Some(at(19, 55)));
+        assert_eq!(next_warning(at(20, 0), at(19, 56)), Some(at(19, 59)));
+        assert_eq!(next_warning(at(20, 0), at(19, 59)), None);
+        // The published schedule is the one the companion announces.
+        assert_eq!(WARN_BEFORE_MIN.map(|m| m as u32), crate::warn::THRESHOLDS);
+    }
+
+    #[test]
+    fn ost_unlock_marker_carries_its_minutes() {
+        assert_eq!(
+            parse_local_recovery_marker("1790000000 45\n"),
+            Some((1790000000, 45))
+        );
+        // An old marker (timestamp only) still clears the lock, no override.
+        assert_eq!(
+            parse_local_recovery_marker("1790000000"),
+            Some((1790000000, 0))
+        );
+        assert_eq!(parse_local_recovery_marker("garbage"), None);
     }
 
     /// A full retry buffer must drain in a bounded number of round-trips.
@@ -3199,6 +3474,8 @@ mod tests {
             rand::random::<u32>()
         ));
         a.tracker = screentime::UsageTracker::new();
+        a.tracker
+            .roll_to(a.trusted_now.with_timezone(&chrono::Local).date_naive());
         a.frozen.clear();
         a.pending_freeze.clear();
         a.device_locked = false;
@@ -3224,7 +3501,7 @@ mod tests {
     }
 
     fn reason(a: &Agent) -> LockReason {
-        screentime::evaluate(&a.policies["mia"], &a.tracker, "mia").unwrap()
+        a.rules_now("mia", &a.policies["mia"]).unwrap()
     }
 
     #[tokio::test]
@@ -3285,7 +3562,10 @@ mod tests {
         assert!(reply.result.unwrap().ok);
         assert!(reply.face.is_none(), "the lock is down");
         assert!(!a.frozen.contains("mia"));
-        assert!(a.unlock_until.contains_key("mia"));
+        assert!(
+            a.tracker.peek_override("mia", chrono::Utc::now()).is_some(),
+            "the code wrote the one override"
+        );
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
         // The console hears how.
@@ -3340,8 +3620,8 @@ mod tests {
         // The countdown is what the companion counts down from.
         a.update_forecasts(&["mia".to_string()]);
         let f = a.forecasts["mia"];
-        assert_eq!(f.reason, warn::StopReason::Limit);
-        assert!((f.at - chrono::Local::now()).num_seconds() > 0);
+        assert_eq!(f.0, warn::StopReason::Limit);
+        assert!((f.1 - chrono::Local::now()).num_seconds() > 0);
     }
 
     #[tokio::test]
@@ -3367,16 +3647,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_keeps_someone_whose_own_rules_still_stop_them() {
+    async fn a_resume_for_someone_else_leaves_a_rule_stop_in_place() {
         let (mut a, fake) = agent_with_mia(); // over her 60 minutes
-        let cmd = |t: &str| Command {
+        let cmd = |t: &str, payload| Command {
             id: "c1".into(),
             cmd_type: t.into(),
-            payload: json!({}),
+            payload,
         };
-        let _ = a.handle_command(cmd(CMD_LOCK)).await;
+        let _ = a.handle_command(cmd(CMD_LOCK, json!({}))).await;
         assert_eq!(a.face_for("mia").title, "Paused by a parent");
-        let _ = a.handle_command(cmd(CMD_UNLOCK)).await;
+        let _ = a
+            .handle_command(cmd(CMD_UNLOCK, json!({ "os_username": "sib" })))
+            .await;
         a.reconcile_lock().await;
         // Still stopped by her limit: no thaw, no "You're back"; the lock
         // just says why now.
@@ -3388,8 +3670,9 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_the_console_takes_the_lock_down() {
+        // Over her limit: a plain Resume writes an override for whoever a
+        // rule stops, so she's thawed at once and the lock comes down.
         let (mut a, fake) = agent_with_mia();
-        a.tracker.add_earned("mia", 30); // within her rules
         a.prev_active = Some(HashSet::new());
         let cmd = |t: &str| Command {
             id: "c1".into(),

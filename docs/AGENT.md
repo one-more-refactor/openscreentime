@@ -207,11 +207,13 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `ost-admin` and `root` always retain access. |
 | `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
-| `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Transparency snapshot for the tray: connection state, device-lock / offline-lockdown / tamper-lockdown flags, per-user used/remaining minutes, frozen state, freeze countdown, and a short queue of agent-published notifications (id, title, body, urgency, target user) for the tray to deliver as desktop notifications. |
+| `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Device-wide snapshot for the tray/app: connection state, device-lock / offline-lockdown / tamper-lockdown flags and device-wide notifications. **No per-user data** (`users: []`). |
+| `/run/openscreentime/status.<user>.json` | the user : **0600** | `run` (every tick) | That user's own view: the device-wide fields plus their **verdict** — time used, budget left, whether and when screens stop and why, the next heads-up, any parent override — and their notifications and sign-in prompts. Field by field in [The verdict](#the-verdict-statususerjson). |
 | `/run/openscreentime/lock.sock` | root : group `ost-lock`, **0660** | `run` | The graphical lock's line to the agent. The agent answers only a peer whose `SO_PEERCRED` uid is `ost-lock`; one JSON request (`face` / `code` / `ask`) and one reply per connection. |
 | `/var/lib/openscreentime/freeze_state.json` | root : default | `run` (every tick) | Who is stopped (or inside a save-your-work countdown), a confirmed-evasion lockdown, and the lock on screen (`lock`: subject, VT, mode, boot id) — so a restarted agent adopts the lock instead of forgetting it. |
 | `/var/lib/openscreentime/last_contact` | root : default | `run` (throttled, at most once/60s, on successful server contact) | RFC3339 wall-clock timestamp of the last successful server contact. Survives reboots — it's what the days-scale offline hard-lockdown timer is measured against (an `Instant` can't survive a reboot). |
-| `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time`; atomic rename via `.tmp`) | The day's per-user screen-time counters (used + earned seconds). Reloaded on startup so a restart resumes today's usage instead of granting a fresh budget. The day boundary is forward-only: a clock set backward keeps the accumulated usage rather than resetting it. |
+| `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time` / `unlock` / `ost unlock`; atomic rename via `.tmp`) | The day's ledger: per-user used and earned seconds on this device, the person's use elsewhere as last reported by the server (tagged with its day), **parent overrides** (user → end, trusted UTC), applied grant command ids (idempotency), and the **trusted-clock anchor** (boot id, boottime, wall). Reloaded on startup so a restart resumes today's usage and keeps a parent's override. The day boundary is forward-only and follows the trusted clock (see [Screen time](#screen-time)). |
+| `/var/lib/openscreentime/local_recovery` | root : default | `ost unlock` / `ost recover` | `"<unix secs> <minutes>"` — a parent recovered the device at the machine. The live agent clears every device-level lock once per marker and, when `minutes > 0`, holds the screen-time rules off for everyone on the machine for that long. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
 | `~/.config/openscreentime/intro_seen` | the desktop user : default | `__intro` (writes) / `tray` (checks) | Marker that the first-run child intro has been shown. Present = don't show it again. |
 | `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` (REQUEST MORE TIME); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
@@ -334,14 +336,68 @@ touch the tunnel.
 
 ### Screen time
 
-`client/src/enforce/screentime.rs`. Active seat users come from `loginctl
-list-sessions`; a session counts only if `Active=yes`, `Remote=no`, and
-`IdleHint=no` (idle time — lid closed, away from keyboard — never burns the
-budget; DEs that don't set the hint fall back to the old always-count
-behavior). Usage accumulates in-memory per user, resetting at local
-midnight; `earned` minutes (approved earn-time requests) extend the daily
-budget. `evaluate()` checks bedtime first, then the allowed-hours schedule,
-then the daily limit.
+Three pieces, each small and tested on its own. The full audit and the
+reasoning behind every rule is `docs/TRACKING.md`.
+
+**What counts** — `client/src/enforce/activity.rs`. A minute is billed to a
+person only while their session is the **foreground session on a seat**
+(`loginctl`: `Active=yes`, `State=active`, a `Seat`, a `user*` class) **and**
+there was keyboard/mouse/touch/gamepad input on that seat in the last
+**5 minutes**, or sound is playing. Not counted: the systemd ≥ 256
+`Class=manager` session, `closing` leftovers, SSH logins (seatless),
+fast-user-switched background sessions, a locked screen nobody touches, a
+closed lid. Input is read by root from `/dev/input/event*`
+**non-exclusively** (never grabbed; only the event *type* is looked at, one
+"last input" time per seat is kept, no key codes are stored or sent); sound
+from `/proc/asound/card*/pcm*p/sub*/status` (`state: RUNNING`). Where no input
+device can be read (a container, no `/dev/input`), the seat falls back to
+presence and the status says `measured: false`. A frozen user never accrues.
+
+**How long** — `client/src/runner.rs` (`tick_loop`, `billable_elapsed`). The
+enforcement tick runs every 10 s **on its own timer**, independent of the
+WS/poll loops, and bills the measured *awake* time since the last tick
+(`CLOCK_MONOTONIC` — a suspended laptop bills nothing), capped at 60 s per
+tick. The watchdog heartbeat is touched by this tick, so a healthy agent
+with no server stays healthy.
+
+**Which day** — `client/src/clock.rs`. Every decision reads the *trusted
+clock*: the wall clock while the kernel says it is NTP-synchronized, else
+the family server's clock (sent with every usage reply), else the last
+anchor extrapolated by `CLOCK_BOOTTIME` (real time including suspend; nobody
+can set it). A wall clock moved by hand is therefore ignored: the day rolls
+at local midnight, **forward only**, never earlier than real elapsed time
+allows, and never needs the server. On a new boot the anchor is the wall
+clock, but never earlier than the last trusted time before shutdown.
+
+**The rules** — `openscreentime_policy::rules::evaluate` (the same function
+the server uses for the console). Limit 0 = no limit; a day without an
+allowed-hours window is **any time**; a window ending `00:00` runs to
+midnight; an end before the start runs past midnight; an empty or unreadable
+window, or a whole-day bedtime, is ignored (never a 24/7 lockout — the server
+refuses them on save). It returns *allowed?*, *why*, and *when the next stop
+lands*, whichever comes first of the budget running out (assuming continuous
+use), bedtime, the end of the allowed window, or the end of an override.
+
+**Per person.** A daily limit is one budget across all of a person's
+computers. Each usage report carries this device's own seconds, its local
+day and UTC offset; the server files it under that day and answers with what
+the same person used (and was granted) on their other logins that day. The
+device enforces its own use plus that; offline, the last answer for today
+keeps applying.
+
+**One override per person on this device**, persisted in the ledger, beats
+the limit, bedtime and allowed hours, and expires on the trusted clock.
+Written by every parent action:
+
+| Parent action | Override |
+|---|---|
+| `credit_time` (approved request, console "+N min") | N minutes on today's budget **and** an override for N minutes — "N more minutes, now, whatever the rule". Idempotent by command id (a redelivery after a lost ack is acked as `duplicate`, never credited twice); a grant filed for an earlier day is acked `stale_day` and not credited. |
+| Code at the lock screen | 30 minutes (plus every device-level lock cleared). |
+| `ost unlock --minutes N` | N minutes for everyone on the machine (plus locks cleared). |
+| Console Resume (`unlock`) | Clears the pause. `minutes` or `until: "end_of_day"` in the payload override for that long (optionally one `os_username`); a plain Resume gives 30 minutes to whoever a rule is stopping right now, and everyone else carries on under their normal rules. |
+
+A **pause beats an override** (a parent who gives "+30" and then pauses
+means the pause); every source that should lift a pause clears it directly.
 
 **Warnings and grace**: every stop is announced at 15, 5 and 1 minute
 (see [The lock](#the-lock)). A stop whose 1-minute warning went out, or that
@@ -358,9 +414,38 @@ terminate-user`; a screen-time freeze (`hard=false`) never escalates to
 terminating the session — unsaved work must never be destroyed over a time
 limit, so it just logs and stays best-effort.
 
-A code typed at the lock grants 30 minutes: while that window is active,
-screen time AND an admin device lock are both suspended for that user (the
-parent always wins).
+A code typed at the lock is checked by the agent the moment it's typed
+(see [The lock](#the-lock)): it clears every device-level lock, thaws, and
+writes the override above for 30 minutes.
+
+### The verdict: `status.<user>.json`
+
+What the app window, tray and lock screen build on. Written every tick
+(10 s) by `Agent::user_status`, from the same rules function and trusted
+clock the enforcement tick uses — what it says is what will happen. Each
+file carries `users: [ {…} ]` with exactly one entry:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | The OS login. |
+| `used_minutes` | int | Minutes the **person** used today, on every computer (this one + what the server reported for the others). Floored. |
+| `used_here_minutes` | int | Of which on this computer. |
+| `remaining_minutes` | int \| null | The day's **budget** left: limit + earned − used, rounded up, may be ≤ 0. `null` = no daily limit. The ring's number. It does *not* know about bedtime — use `minutes_left` for "when do screens stop". |
+| `allowed` | bool | May they use the screen right now? |
+| `reason` | `"limit"` \| `"bedtime"` \| `"outside_hours"` \| `"paused"` \| null | Why they are stopped now (`allowed: false`), or why the **next** stop will come (`allowed: true`). `null` = no stop ahead. |
+| `minutes_left` | int \| null | Minutes until `stop_at`, **rounded up**, honouring the budget (assuming continuous use), bedtime, the end of the allowed window, the end of an override and a pending pause — whichever comes first. `0` when stopped; `null` when nothing stops them in the next 48 h. |
+| `stop_at` | RFC 3339 local \| null | When that stop lands. Equals "now" when stopped. A budget stop moves later while they're idle (idle time isn't billed). |
+| `resume_at` | RFC 3339 local \| null | When stopped: when the screen comes back on its own (bedtime ends, the window opens, midnight's fresh budget). `null` when allowed or paused. |
+| `next_warning_at` | RFC 3339 local \| null | The next heads-up: 15, 5, then 1 minute before `stop_at` — when the companion announces it. `null` when none is ahead (under a minute left, or no stop). |
+| `override_until` | RFC 3339 local \| null | A parent override is running until then. |
+| `counting` | bool | This minute is being billed (at the seat, with recent input or sound, not frozen). |
+| `measured` | bool | Input activity could be read for every present seat (`false` = presence fallback). |
+| `day` | `YYYY-MM-DD` \| null | The accounting day (trusted local date). |
+| `frozen` | bool | The agent has frozen this user. |
+| `freeze_in_secs` | int \| null | A save-your-work countdown is running; seconds left. |
+
+`--dry-run` doesn't write these files; it logs the same JSON once a minute
+as `STATUS <user>: {…}`.
 
 ### The lock
 
@@ -505,9 +590,14 @@ Kill switches (any one disables it):
 
 ## Offline behavior
 
-`client/src/runner.rs`. Two independent thresholds, both fail-closed (the
-device stays usable under its *existing* policy — self-update and offline
-handling never black out all traffic):
+`client/src/runner.rs`. Screen time is unaffected by the network: the
+enforcement tick runs on its own timer (usage counts at full rate, rules and
+stops apply, the watchdog heartbeat stays fresh), the day rolls at local
+midnight on the trusted clock with no server needed, and the person's use on
+their other computers stays at its last reported value for the day. On top
+of that, two independent thresholds, both fail-closed (the device stays
+usable under its *existing* policy — self-update and offline handling never
+black out all traffic):
 
 1. **Grace period** (`OST_OFFLINE_GRACE_SECS`, default 900s / 15 min).
    Measured against the last successful WS message or poll/heartbeat

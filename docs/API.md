@@ -12,63 +12,64 @@ with an appropriate HTTP status.
 
 Base URL in dev: `http://localhost:8080`.
 
-`GET /health` — unauthenticated liveness check → `{ "status": "ok", "service":
-"openscreentime-server" }`.
+`GET /health` — unauthenticated. `200 { "status": "ok", "service":
+"openscreentime-server", "version": "x.y.z", "db": "ok" }` while the server and
+its database answer; `503` with `"status": "degraded", "db": "unreachable"`
+when Postgres does not (checked with a 2 s timeout, cached for 2 s).
 
 ---
 
-## Auth (passkey / WebAuthn + optional OIDC SSO)
+## Auth (docs/AUTH.md)
 
-Uses `webauthn-rs`. Registration is first-boot only: while zero admins exist, any email can
-register the first admin (bootstrapping the tenant). Once at least one admin exists,
-`register/start` and `register/finish` refuse with **403 `{ error: { code:
-"registration_closed" } }`** unless `OST_OPEN_REGISTRATION=1` is set (see
-docs/DEPLOY.md). A logged-in admin adding another passkey to their *own* account (the
-Settings page reuses the register ceremony) is always allowed.
+Two doors — a name and a code shown on your own computer, or a passkey — plus
+OIDC SSO when configured. First run (zero accounts) creates the household; it
+needs the setup code (`OST_BOOTSTRAP_TOKEN`) when the server has one, and
+refuses with **403 `registration_closed`** once an account exists.
 
 | Method | Path                        | Body / Notes                                            |
 |--------|-----------------------------|---------------------------------------------------------|
-| GET    | `/api/auth/config`          | public → `{ auth: { oidc: bool, oidc_name } }`          |
-| POST   | `/api/auth/register/start`  | `{ email, display_name }` → `CreationChallengeResponse` |
-| POST   | `/api/auth/register/finish` | `{ email, credential }` → sets session, `{ admin }`     |
-| POST   | `/api/auth/login/start`     | `{ email }` → `RequestChallengeResponse`                |
-| POST   | `/api/auth/login/finish`    | `{ credential }` → sets session cookie, `{ admin }`     |
+| GET    | `/api/auth/config`          | public → `{ needs_setup, setup_code_required, auth: { oidc, oidc_name } }` |
+| POST   | `/api/auth/register/start`  | first run: `{ name, setup_token? }` → `CreationChallengeResponse` (resident key required) |
+| POST   | `/api/auth/register/finish` | `{ credential, setup_token? }` → household + session, `{ admin }` |
+| POST   | `/api/auth/code/start`      | `{ name, code_challenge }` → `{ request_id, expires_in_secs }`; the code goes to that person's own computer (identical answer for unknown names) |
+| POST   | `/api/auth/code/verify`     | `{ request_id, code_verifier, code }` → session; `401 wrong_code` (type again) or `410 code_expired` (5 min / 5 tries) |
+| POST   | `/api/auth/login/start`     | → `RequestChallengeResponse` for a discoverable passkey (no name) |
+| POST   | `/api/auth/login/finish`    | `{ credential }` → session, `{ admin }`                 |
 | GET    | `/api/auth/oidc/start`      | 302 to the provider's authorize URL                     |
 | GET    | `/api/auth/oidc/callback`   | `?code&state` → session + redirect `/` (see below)      |
+| POST   | `/api/auth/voucher`         | `{ voucher }` → session (`ost login`, 7 days)           |
+| POST   | `/api/auth/link`            | `{ token }` → session (recovery link from `openscreentime-server recover`) |
 | POST   | `/api/auth/logout`          | clears session (deletes the DB row)                     |
-| GET    | `/api/me`                   | → `{ admin, tenant }`                                   |
-| GET    | `/api/me/2fa`               | → `{ totp_enrolled, email_available, locked_until }`     |
-| POST   | `/api/me/2fa/totp/start`    | → `{ secret, otpauth_uri }`; 409 once an authenticator is confirmed |
-| POST   | `/api/me/2fa/totp/confirm`  | `{ code }` → `{ ok, expires_at }` — confirming is itself a step-up |
-| POST   | `/api/auth/stepup/email/start` | sends a single-use code (dev: server log; prod: `OST_STEPUP_WEBHOOK`) |
-| POST   | `/api/auth/stepup/verify`   | `{ method: "totp"\|"email", code }` → `{ method, expires_at, extended: false }`, rotates the session |
-| GET    | `/api/auth/stepup`          | → `{ armed_until, extended }` — is this session in change mode (plain read, survives a reload) |
-| POST   | `/api/auth/stepup/lock`     | leave change mode now → `{ armed_until: null }` (exempt from the guard) |
-| POST   | `/api/auth/stepup/extend`   | another 15 min from now, once per grant → `{ armed_until, extended: true }`; 409 `already_extended` (guarded: only works while live) |
-| POST   | `/api/auth/voucher`         | `{ voucher }` → session (device-voucher autologin); the session can read but never starts stepped up |
+| GET    | `/api/me`                   | → `{ account, household, admin, tenant }`               |
+| GET    | `/api/auth/confirm`         | → `{ armed_until, passkey, computer }`                  |
+| POST   | `/api/auth/confirm/passkey/start` / `finish` | a passkey assertion → `{ armed_until }` |
+| POST   | `/api/auth/confirm/code/start` | a code to your own computer → `{ request_id, expires_in_secs }`; 409 if none is online |
+| POST   | `/api/auth/confirm/code/verify` | `{ request_id, code }` → `{ armed_until }`         |
+| GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
+| POST   | `/api/me/passkeys/new/start` / `finish` | add a passkey to your account          |
+| DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
 
-### Step-up 2FA
+### Confirm it's you
 
-Reading is free; **every mutating `/api/*` request needs a live step-up grant**,
-enforced by a layer (`server/src/stepup.rs`) rather than per-handler, so routes
-added later are guarded automatically. Without a grant: **`428
-step_up_required`** — the client's contract is to run a step-up flow and retry
-the same request. Exempt (they are how a grant is obtained): the register/login
-ceremonies, logout, `/api/auth/voucher`, the two `/api/me/2fa/totp/*` calls,
-`/api/auth/stepup/email/start`, `/verify` and `/lock` (`/extend` is guarded).
-
-A grant — **change mode** in the console — lasts 15 minutes, can be extended
-once, and is bound to the session row. Verifying rotates the
-session token, keeping the old one valid for 2 minutes so in-flight requests and
-second tabs survive. TOTP codes are single-use (a spent counter is dead even
-inside its window); five wrong factors start a doubling lockout, capped at 15
-minutes, counted in the database so a restart does not clear it.
+Signing in is the proof; ordinary changes need nothing more. The **sensitive
+corner** — unlock codes, recovery codes, passkeys, pairing tokens, Telegram
+pairing, `assign-account`, `enroll-token`, VPN configs — answers **`428
+step_up_required`** until the session has a live 15-minute confirm window,
+opened by a fresh sign-in, a passkey, or a code from your own computer. It's a
+layer (`server/src/confirm.rs`), so routes added later are guarded
+automatically. Confirming rotates the session token, keeping the old one valid
+for 2 minutes so in-flight requests and second tabs survive.
 
 ### Agent
 
 | POST   | `/agent/voucher`            | mint a one-time (2 min) voucher for a local surface on that machine to exchange at `/api/auth/voucher` |
-| GET    | `/api/me/passkeys`          | → `{ passkeys: [{ id, nickname, created_at, last_used_at }] }` |
-| DELETE | `/api/me/passkeys/:id`      | → `{ ok: true }`; 409 if it's the last credential and OIDC is disabled |
+| POST   | `/agent/enroll/preview`     | `{ enroll_token }` → `{ owner, owner_is_parent }` without using the token (so `ost enroll` can ask which login is the owner's) |
+
+`POST /agent/enroll` also takes `installer` (the login the install ran from)
+and `owner_login` (the one the installer picked), and answers with `users:
+[{ os_username, person, parent }]`. Commands include **`login_code`**
+`{ request_id, name, os_users, code, purpose, site, expires_in_secs }` — show
+the code to exactly those OS logins (docs/AUTH.md).
 
 Sessions are DB-backed (`admin_sessions`, sha256-hashed token, 30-day TTL) and carried in the
 `ost_session` cookie: `HttpOnly`, `SameSite=Lax`, `Secure` unless
@@ -81,7 +82,7 @@ Enabled when `OST_OIDC_ISSUER`, `OST_OIDC_CLIENT_ID` and `OST_OIDC_CLIENT_SECRET
 are all set (`OST_OIDC_NAME` optionally labels the login button, default "SSO"). Endpoints
 are discovered at startup from `<issuer>/.well-known/openid-configuration`; authorization-code
 flow with scopes `openid email profile`; redirect URI is
-`<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL` falls back to `RP_ORIGIN`).
+`<OST_PUBLIC_URL>/api/auth/oidc/callback` (`OST_PUBLIC_URL`; `RP_ORIGIN` if only that is set).
 The callback matches the verified userinfo email against existing admins (any tenant). Fresh
 installs (no admins at all) bootstrap a tenant + admin; an unknown email on a non-empty install
 redirects to `/login?error=sso_unknown_account` (no auto-provisioning); other failures redirect
@@ -228,11 +229,31 @@ The `enroll_token` is consumed (single use) and expires 24 h after issue
 ### Heartbeat (poll model, fallback for WS)
 ```
 POST /agent/heartbeat
-Body: { status, public_ip?, usage: [{ os_username, used_minutes_today }], os_users: [...] }
-→ 200 { commands: [Command...], policy_version: string }
+Body: { status, public_ip?, os_users: [...],
+        usage: [{ os_username, used_minutes_today, used_seconds_today?, day?, utc_offset_secs? }] }
+→ 200 { commands: [Command...], policy_version: string,
+        usage: [PersonDay...], server_time: RFC3339 }
+
+PersonDay = { os_username, day, used_elsewhere_secs, earned_elsewhere_secs, earned_here_secs }
 ```
-`usage` is upserted into `screen_time_ledger.used_seconds` for today's row per device user.
+`usage` is **this device's own** use today. It is filed in `screen_time_ledger` under the
+**device-local `day`** the agent enforces (0.7+; an implausible or missing day falls back to the
+device's local date from `utc_offset_secs`, else UTC), `GREATEST`-clamped within that day. A
+drop of more than 300 s within the *same* day raises one critical `evasion` / `usage_regression`
+event per device user per day (never for an agent that doesn't send `day`). The reply's
+`PersonDay` is what the same person used and was granted on their **other** logins that day —
+a daily limit is one budget per person — plus the grants on record for this login
+(`earned_here_secs`; the agent takes the larger of that and its own count). `server_time` is a
+clock the agent trusts when its own isn't NTP-synchronized. See `docs/TRACKING.md`.
 Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
+
+`credit_time` commands carry `{ os_username, minutes, request_id, day }` (`day` = the device-local
+day the grant was filed under). The agent applies a grant once per command id (a redelivery is
+acked `{ credited: true, duplicate: true }`), ignores one for an earlier day
+(`{ credited: false, stale_day }`), and turns it into N minutes on today's budget plus an override
+for N minutes. `unlock` accepts an optional `{ minutes }` or `{ until: "end_of_day" }` (and
+`os_username`) to hold the screen-time rules off; without them, whoever a rule is stopping gets
+30 minutes.
 
 ### Earn-time request
 ```
@@ -257,7 +278,7 @@ Body: { events: [{ type, severity, device_user?, payload }] }
 ```
 The agent posts *all* events this way, in both WS and poll mode — there is no separate "event
 delivery only over WS" path. Batches that fail to POST (server unreachable, etc.) are buffered in
-memory (`client/src/runner.rs` `flush_events`, capped) and retried on the next tick rather than
+memory (`client/src/runner.rs` `flush_queued`, capped) and retried by the network loop rather than
 dropped. The WS `event` frame (see below) is still accepted by the server for compatibility but is
 not how the current agent sends events.
 
@@ -267,10 +288,12 @@ GET /agent/ws   (Upgrade)
 ```
 Bidirectional JSON frames, tagged with `"type"`:
 
-- server → agent: `command { command }`,
-  `ping` (reserved — accepted by the agent, not currently sent by the server)
+- server → agent: `command { command }`, `ping` (keepalive),
+  `usage { server_time, users: [PersonDay...] }` (the reply to each `heartbeat` frame — see the
+  HTTP heartbeat above; agents before 0.7 ignore it)
 - agent → server: `event { event }` (accepted for compatibility; the agent now sends events over
-  HTTP, see below), `ack { ack }`, `pong`
+  HTTP, see below), `ack { ack }`, `state { … }`, `heartbeat { usage }` (same `usage` entries as
+  the HTTP heartbeat, every 30 s), `pong`
 
 Falls back to heartbeat polling if WS is unavailable.
 
@@ -342,15 +365,21 @@ with `#[serde(default)]` on optional sub-objects.
   `device_users` and queues `apply_policy` on their devices.
 - `DELETE /api/members/{id}` (members only).
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
-  left_minutes|null, locked, devices:[{id,name,status,locked}], blocks,
+  left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name }`.
+  windows, display_name }`. "Today" is each device's own local day (the day
+  its agent enforces); `left_minutes` is the person's budget left computed
+  like the device does (seconds, rounded up). `rules` = `{ allowed, reason:
+  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at }`
+  from the agent's own rules function — when screens stop, whichever of the
+  budget, bedtime or the window end comes first. `GET /api/family` children
+  carry the same `left_minutes` and `rules`.
 - `POST /api/me/ask {minutes, reason?}` → `{ request }` (an `earn_request`
   with `task_id: "ask"`, one open per day; not step-up guarded).
 - `GET /api/catalog` → `{ categories:[{id,name,blurb,app_ids}],
   apps:[{id,name,category,has_native_client}] }`.
 - **Member sessions** may reach only `/api/me`, `/api/me/today`, `/api/me/ask`,
-  `/api/catalog`, `/api/me/2fa*`, `/api/auth/*`. Anything else under `/api/` →
+  `/api/catalog`, `/api/auth/*` (and a few more `/api/me/*` reads). Anything else under `/api/` →
   `403 forbidden_for_member` (a layer; fails closed for new routes).
 
 **Unlock code (per-device TOTP) and recovery codes.** The secret behind the

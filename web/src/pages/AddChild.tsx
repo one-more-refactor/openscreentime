@@ -25,6 +25,7 @@ import {
 } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { EnrollCommand } from "../components/EnrollCommand";
 import { PageHead } from "../layout/PageHead";
 import { familyChanged } from "../lib/family";
 
@@ -50,17 +51,11 @@ export function AddChild() {
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
 
   const derived = useMemo(() => (birthdate ? bracketForBirthdate(birthdate) : null), [birthdate]);
   const bracket: AgeBracket = override ?? derived ?? "kid";
   const autoTheme = defaultThemeFor(bracket);
-
-  const origin = window.location.origin;
-  const oneLiner = enroll
-    ? `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${enroll.enroll_token} sh -s -- --server ${origin}`
-    : "";
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -70,8 +65,7 @@ export function AddChild() {
     try {
       // The person first — with their bracket's starting rules — then the
       // computer, carrying their name so a parent can find it later, and
-      // linked to them so whoever logs in on it lands on their own page.
-      // Both are changes, so both sit behind change mode.
+      // linked to them so their login on it lands on their own page.
       const { m, dev } = await guard(async () => {
         const m = await api.createMember({
           display_name: name.trim(),
@@ -98,12 +92,6 @@ export function AddChild() {
 
   function done() {
     navigate(member ? `/child/${encodeURIComponent(member.id)}` : "/");
-  }
-
-  function copy() {
-    void navigator.clipboard?.writeText(oneLiner);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
   }
 
   return (
@@ -245,13 +233,7 @@ export function AddChild() {
               <p className="add-step-text">
                 Open a Terminal on their computer, paste this in, and press Enter.
               </p>
-              <pre className="add-code">{oneLiner}</pre>
-              <button className="ch-btn" onClick={copy}>
-                {copied ? "Copied" : "Copy command"}
-              </button>
-              <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
-                This command works for 24 hours and only once.
-              </p>
+              <EnrollCommand token={enroll.enroll_token} />
             </section>
 
             <section className="add-col card">

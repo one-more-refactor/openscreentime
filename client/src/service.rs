@@ -375,6 +375,105 @@ fn link_aliases(exec: &Exec) {
     }
 }
 
+/// The unit files whose installed copies must follow the binary.
+const MANAGED_UNITS: [(&str, &str); 4] = [
+    (UNIT_PATH, UNIT),
+    (WATCHDOG_SVC_PATH, WATCHDOG_SERVICE),
+    (WATCHDOG_TIMER_PATH, WATCHDOG_TIMER),
+    (TRAY_UNIT_PATH, TRAY_UNIT),
+];
+
+/// Installed units that differ from the ones this build carries. A unit that
+/// was never installed here (a manual `run`, no `install-service`) is left
+/// alone — this only ever refreshes, it never installs.
+fn stale_units() -> Vec<(&'static str, &'static str)> {
+    MANAGED_UNITS
+        .into_iter()
+        .filter(|(path, body)| matches!(std::fs::read_to_string(path), Ok(cur) if cur != *body))
+        .collect()
+}
+
+/// What a desktop build needs beyond the units `install-service` wrote before
+/// the lock existed: the lock's user, unit and PAM session (GUI build) and the
+/// companion's autostart (tray build). A self-updated device gets them here,
+/// so the new lock and the warnings arrive with the update — no reinstall.
+/// Only on a device `install-service` set up.
+fn desktop_setup_missing() -> bool {
+    if !std::path::Path::new(UNIT_PATH).exists() {
+        return false;
+    }
+    let differs =
+        |path: &str, body: &str| std::fs::read_to_string(path).ok().as_deref() != Some(body);
+    let lock = cfg!(feature = "gui")
+        && (users::get_user_by_name(crate::lock::LOCK_USER).is_none()
+            || differs(crate::lock::UNIT_TEMPLATE_PATH, crate::lock::UNIT_TEMPLATE)
+            || differs(crate::lock::PAM_PATH, crate::lock::PAM_BODY));
+    let companion =
+        cfg!(feature = "tray") && differs(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART);
+    lock || companion
+}
+
+/// `ost __refresh-units` (hidden): rewrite the stale units, set up what the
+/// desktop build is missing, reload systemd. Runs in a transient unit (see
+/// [`refresh_units_if_stale`]), outside the agent's sandbox.
+pub fn refresh_units() -> Result<()> {
+    let stale = stale_units();
+    for (path, body) in &stale {
+        std::fs::write(path, body).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+    }
+    if desktop_setup_missing() {
+        let exec = Exec::new(AgentCtx::new(false, false, 1));
+        if cfg!(feature = "gui") {
+            install_lock(&exec);
+        }
+        if cfg!(feature = "tray") {
+            if let Err(e) = exec.write_file(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART) {
+                tracing::warn!("could not install {COMPANION_AUTOSTART_PATH}: {e}");
+            }
+        }
+        println!("set up the lock screen and the companion for this desktop build");
+    }
+    if !stale.is_empty() {
+        let ok = std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        anyhow::ensure!(ok, "systemctl daemon-reload failed");
+        println!("refreshed {} systemd unit(s)", stale.len());
+    }
+    Ok(())
+}
+
+/// A self-update replaces the binary, but the units were written once by
+/// `install-service` — so unit fixes (like the watchdog that rolls a bad
+/// update back) would never reach an installed fleet. A freshly started agent
+/// calls this: if the installed units differ from the ones it carries, it
+/// rewrites them through `systemd-run`, because its own sandbox
+/// (ProtectSystem=strict) cannot write /etc/systemd. Takes effect at the next
+/// restart; nothing is restarted here.
+pub fn refresh_units_if_stale(exec: &Exec) {
+    if exec.dry_run()
+        || !crate::config::is_root()
+        || (stale_units().is_empty() && !desktop_setup_missing())
+    {
+        return;
+    }
+    match exec.run(
+        "systemd-run",
+        &[
+            "--quiet",
+            "--collect",
+            "--unit=openscreentime-refresh-units",
+            BIN_TARGET,
+            "__refresh-units",
+        ],
+    ) {
+        Ok(_) => tracing::info!("systemd units differ from this build's; refreshing them"),
+        Err(e) => tracing::warn!("could not refresh the systemd units: {e}"),
+    }
+}
+
 pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     ctx.require_root_for_enforcement()?;
     let exec = Exec::new(ctx.clone());

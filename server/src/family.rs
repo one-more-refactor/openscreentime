@@ -30,12 +30,17 @@ type FamilyUserRow = (
     Option<Uuid>, // du.profile_id
     i32,          // used_seconds today (ledger columns are int4)
     i32,          // earned_seconds today
+    Option<i32>,  // d.utc_offset_secs (the device's local day)
 );
 
 struct Child {
     account: AccountRow,
     used_minutes: i64,
     earned_minutes: i64,
+    used_secs: i64,
+    earned_secs: i64,
+    /// UTC offset of one of their devices (for "when do screens stop").
+    utc_offset_secs: Option<i32>,
     devices: Vec<Value>,
     pending_requests: usize,
     locked: bool,
@@ -59,17 +64,19 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     .fetch_all(&st.db)
     .await?;
 
-    // 3. Every device_user in the tenant with today's usage.
-    let user_rows: Vec<FamilyUserRow> = sqlx::query_as(
+    // 3. Every device_user in the tenant with today's usage — "today" on each
+    //    device's own calendar, the day its agent enforces (not UTC).
+    let user_rows: Vec<FamilyUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.account_id, du.profile_id,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
            LEFT JOIN screen_time_ledger l
-                  ON l.device_user_id = du.id AND l.day = CURRENT_DATE
+                  ON l.device_user_id = du.id AND l.day = {}
           WHERE d.tenant_id = $1
           ORDER BY du.os_username",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(admin.tenant_id)
     .fetch_all(&st.db)
     .await?;
@@ -151,6 +158,9 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             account,
             used_minutes: 0,
             earned_minutes: 0,
+            used_secs: 0,
+            earned_secs: 0,
+            utc_offset_secs: None,
             devices: Vec::new(),
             pending_requests: 0,
             locked: false,
@@ -162,7 +172,8 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .map(|(i, c)| (c.account.0, i))
         .collect();
 
-    for (du_id, device_id, os_username, account_id, _profile_id, used, earned) in user_rows {
+    for (du_id, device_id, os_username, account_id, _profile_id, used, earned, offset) in user_rows
+    {
         let Some(i) = account_id.and_then(|a| index.get(&a).copied()) else {
             continue;
         };
@@ -171,8 +182,13 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             .cloned()
             .unwrap_or_else(|| ("unknown".into(), "offline".into(), false, false));
         let c = &mut children[i];
-        c.used_minutes += i64::from(used) / 60;
-        c.earned_minutes += i64::from(earned) / 60;
+        c.used_secs += i64::from(used);
+        c.earned_secs += i64::from(earned);
+        // Minutes of the person's total, like the device shows (not a sum of
+        // per-device floors, which drifted up to a minute per device).
+        c.used_minutes = c.used_secs / 60;
+        c.earned_minutes = c.earned_secs / 60;
+        c.utc_offset_secs = c.utc_offset_secs.or(offset);
         c.pending_requests += asks_by_du.get(&du_id).copied().unwrap_or(0);
         c.locked |= dev_locked;
         c.devices.push(json!({
@@ -225,6 +241,23 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             v["used_minutes"] = json!(c.used_minutes);
             v["earned_minutes"] = json!(c.earned_minutes);
             v["limit_minutes"] = json!(limit);
+            // The budget left, exactly as the device computes it (seconds,
+            // rounded up to the minute) — the console and the ring agree.
+            v["left_minutes"] =
+                json!(limit.map(|l| ((l * 60 + c.earned_secs - c.used_secs).max(0) + 59) / 60));
+            // When screens stop by the rules — limit, bedtime or window end,
+            // whichever first — computed by the agent's own rules function.
+            v["rules"] = policy
+                .map(|p| {
+                    crate::ledger::rules_json(
+                        p,
+                        c.used_secs,
+                        c.earned_secs,
+                        c.utc_offset_secs,
+                        Utc::now(),
+                    )
+                })
+                .unwrap_or(Value::Null);
             v["profile_name"] = profile_name;
             v["devices"] = json!(c.devices);
             v["pending_requests"] = json!(c.pending_requests);

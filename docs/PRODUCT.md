@@ -63,7 +63,7 @@ and it practises what it preaches: silent unless a human is needed.
 | `/add` | Add a person (`AddChild.tsx`) | hub | keep |
 | `/settings` | Settings | hub | keep, trim |
 | `/me` | The person's own page | member + hub-viewing-self | keep |
-| (gate) | `Enroll2FA` first-login 2FA | hub | **demote** from forced gate to soft prompt |
+| (gate) | `Enroll2FA` first-login 2FA | hub | **cut** (done: confirm is a passkey or a computer code) |
 
 On-device client surfaces (`client/src/`): the **app window** (`app.rs`), the
 **full-screen stop** (`lockout.rs`), the **first-run intro cards** (`intro.rs`),
@@ -73,8 +73,8 @@ they don't.
 ### Per screen: purpose · must-have · primary action · cut
 
 **Login (`pages/Login.tsx`)**
-- *Purpose:* one door in. Fresh install → create the first account (passkey only). Otherwise → type username, your own computer approves (number-match), passkey beneath as fallback.
-- *Must-have:* username field; the number-match "check your computer" state; passkey fallback; SSO button when configured.
+- *Purpose:* one door in (docs/AUTH.md). Fresh install → "Create your household": your name, then a passkey (the setup link carries the setup code). Otherwise → your name, then the 6-digit code your own computer shows; or "Sign in with a passkey" (no name first).
+- *Must-have:* one name field, Continue, the "enter the code from your computer" state, the passkey button; SSO button only when configured.
 - *Primary action:* Continue (device-approval sign-in).
 - *Cut:* the mock-only "Enter design review (skip auth)" button must never ship in a prod build (already `mock`-gated — keep it gated).
 
@@ -165,7 +165,7 @@ shows no red and no trouble.**
 - *First visit (member):* the transparency intro, once per browser.
 
 **Login / Welcome**
-- *Idle / waiting:* "Check your computer" + the three-number match code + a progress bar.
+- *Waiting for the code:* "Enter the code from your computer" + the code ring; wrong code says so and empties; a spent code offers "Send a new code".
 - *Error:* one `role="alert"` line; a failed sign-in points at the passkey fallback.
 - *Registration closed / username taken:* precise inline messages (keep).
 

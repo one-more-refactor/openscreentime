@@ -4,69 +4,43 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import type { Me } from "../types";
-import { auth, getMe, usingMock } from "../api";
-import * as api from "../api";
+import { auth, getMe, pkcePair, usingMock } from "../api";
 import { resetFamily } from "./family";
+import { takeFromFragment } from "./fragment";
 
 interface SessionState {
   me: Me | null;
   loading: boolean;
   mock: boolean;
   refresh: () => Promise<void>;
-  login: (username: string) => Promise<void>;
-  /**
-   * Client-first login (CONTRACT-0.6): ask by name, the person's own computer
-   * approves. `onPrompted` fires once with the device names being asked.
-   * Resolves when the approval lands; throws on deny/timeout.
-   */
-  deviceLogin: (username: string, onPrompted?: (matchCode: string) => void) => Promise<void>;
-  register: (username: string, displayName?: string) => Promise<void>;
+  /** First run: your name, then a passkey. */
+  createHousehold: (name: string, setupToken?: string) => Promise<void>;
+  /** Door two: a passkey, no name first. */
+  signInWithPasskey: () => Promise<void>;
+  /** Door one: send a code to the computer of whoever is called `name`. */
+  sendCode: (name: string) => Promise<void>;
+  /** …then type it in. Throws `wrong_code` (type it again) or
+   * `code_expired` (ask for a new one). */
+  enterCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
 const Ctx = createContext<SessionState | null>(null);
 
-/**
- * Device-voucher autologin: `ost login` opens the console with a one-time
- * voucher in the URL **fragment**, which is never sent to a server — so the
- * credential cannot land in an access log on the way in.
- *
- * Read it, remove it from the address bar before anything else can happen
- * (history.replaceState, so it also leaves no history entry to go Back to),
- * then redeem it. A voucher is single-use and lives two minutes, so a stale
- * one simply fails and the normal sign-in screen appears.
- */
-async function redeemVoucherFromUrl(): Promise<boolean> {
-  const hash = window.location.hash;
-  const match = /[#&]v=([A-Za-z0-9_-]+)/.exec(hash);
-  if (!match) return false;
-
-  const voucher = match[1];
-  const cleanHash = hash.replace(/[#&]v=[A-Za-z0-9_-]+/, "").replace(/^#$/, "");
-  window.history.replaceState(
-    null,
-    "",
-    window.location.pathname + window.location.search + cleanHash,
-  );
-
-  try {
-    await auth.voucher(voucher);
-    return true;
-  } catch {
-    // An expired or already-spent voucher is not an error worth shouting
-    // about — it just means signing in the ordinary way.
-    return false;
-  }
-}
-
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
   const [mock, setMock] = useState(false);
+  const navigate = useNavigate();
+  // The code request in flight: its id, and the PKCE verifier that only this
+  // tab holds. In memory only — a code typed into any other browser is useless.
+  const pending = useRef<{ id: string; verifier: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -81,57 +55,53 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // The voucher has to be redeemed BEFORE the first /api/me, or the console
-    // flashes the login screen on a machine that was entitled to skip it.
+    // One-time tokens in the fragment are redeemed BEFORE the first /api/me,
+    // or the console flashes the sign-in page on a visit entitled to skip it.
+    // A stale or spent one simply fails, and the sign-in page appears.
     void (async () => {
-      await redeemVoucherFromUrl();
+      const voucher = takeFromFragment("v");
+      const link = takeFromFragment("signin");
+      let recovered = false;
+      try {
+        if (voucher) await auth.voucher(voucher);
+        if (link) {
+          await auth.link(link);
+          recovered = true;
+        }
+      } catch {
+        /* sign in the ordinary way */
+      }
       await refresh();
+      // A recovery link's whole point: add a new passkey, now.
+      if (recovered) navigate("/settings", { replace: true, state: { recovered: true } });
     })();
+  }, [refresh, navigate]);
+
+  const createHousehold = useCallback(
+    async (name: string, setupToken?: string) => {
+      await auth.register(name, setupToken);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const signInWithPasskey = useCallback(async () => {
+    await auth.passkey();
+    await refresh();
   }, [refresh]);
 
-  const login = useCallback(
-    async (username: string) => {
-      await auth.login(username);
-      await refresh();
-    },
-    [refresh],
-  );
+  const sendCode = useCallback(async (name: string) => {
+    const { verifier, challenge } = await pkcePair();
+    const started = await auth.codeStart(name, challenge);
+    pending.current = { id: started.request_id, verifier };
+  }, []);
 
-  const deviceLogin = useCallback(
-    async (username: string, onPrompted?: (matchCode: string) => void) => {
-      const { verifier, challenge } = await api.pkcePair();
-      const started = await api.startDeviceLogin(username, challenge);
-      onPrompted?.(started.match_code);
-      const deadline = Date.now() + (started.expires_in_secs + 5) * 1000;
-      // Poll until the human at the machine answers. The server answers
-      // "pending" politely; a real verdict (approved/denied) or the deadline
-      // ends the loop. A transient network blip or a rate-limit 429 is NOT a
-      // verdict — swallow it and keep polling until the window closes, so a
-      // slow walk to the machine never aborts an approval that's still coming.
-      for (;;) {
-        try {
-          const r = await api.finishDeviceLogin(started.request_id, verifier);
-          if (r.status === "approved") {
-            await refresh();
-            return;
-          }
-        } catch (e) {
-          // 401 = denied/expired, a real verdict; rethrow. Anything else
-          // (429, a dropped request) is transient — wait and retry.
-          if (e instanceof api.ApiError && e.status === 401) throw e;
-        }
-        if (Date.now() > deadline) {
-          throw new Error("Nobody approved in time — try again, or use your passkey.");
-        }
-        await new Promise((res) => setTimeout(res, 2000));
-      }
-    },
-    [refresh],
-  );
-
-  const register = useCallback(
-    async (username: string, displayName?: string) => {
-      await auth.register(username, displayName);
+  const enterCode = useCallback(
+    async (code: string) => {
+      const p = pending.current;
+      if (!p) throw new Error("Ask for a code first.");
+      await auth.codeVerify(p.id, p.verifier, code);
+      pending.current = null;
       await refresh();
     },
     [refresh],
@@ -150,8 +120,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<SessionState>(
-    () => ({ me, loading, mock, refresh, login, deviceLogin, register, logout }),
-    [me, loading, mock, refresh, login, deviceLogin, register, logout],
+    () => ({
+      me,
+      loading,
+      mock,
+      refresh,
+      createHousehold,
+      signInWithPasskey,
+      sendCode,
+      enterCode,
+      logout,
+    }),
+    [me, loading, mock, refresh, createHousehold, signInWithPasskey, sendCode, enterCode, logout],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -179,11 +179,91 @@ async fn sync_device_users(st: &AppState, account_id: Uuid, profile_id: Uuid) ->
 
 // ── OS user → person linking (enrollment, heartbeat, startup backfill) ───────
 
+/// Which of a device's OS logins belongs to its declared owner — settled
+/// once, at enrollment. Exactly one login (or none) is ever the owner's; every
+/// other login on the computer is its own person.
+///
+/// 1. The installer said so (`chosen`: the person at the keyboard picked it
+///    when `ost enroll` asked "which login is Mia's?").
+/// 2. There is only one login.
+/// 3. The owner is a **parent** ("this is my computer"): the login the install
+///    ran from. Never a guess between several — a child's login linked to a
+///    parent could ask for that parent's sign-in codes.
+/// 4. The owner is a **person** (a child's computer): the login with their
+///    name. Not "the one that isn't the installer's": a parent installing
+///    from the child's own session would then hand their admin login to the
+///    child.
+///
+/// Otherwise nobody: every login becomes a person of its own, managed as a
+/// child until a parent says who is who (Devices).
+pub fn pick_owner_login(
+    owner_is_parent: bool,
+    owner_name: &str,
+    logins: &[String],
+    installer: Option<&str>,
+    chosen: Option<&str>,
+) -> Option<String> {
+    let known = |l: &str| logins.iter().any(|x| x == l);
+    if let Some(c) = chosen.filter(|c| known(c)) {
+        return Some(c.to_string());
+    }
+    if logins.len() == 1 {
+        return Some(logins[0].clone());
+    }
+    if owner_is_parent {
+        return installer.filter(|i| known(i)).map(str::to_string);
+    }
+    let name = owner_name.trim().to_lowercase();
+    let first = name.split_whitespace().next().unwrap_or("").to_string();
+    logins
+        .iter()
+        .find(|l| !name.is_empty() && (l.to_lowercase() == name || l.to_lowercase() == first))
+        .cloned()
+}
+
+/// Settle `devices.owner_os_username` at enrollment (see [`pick_owner_login`]).
+/// A value already there (set before) is kept.
+pub async fn settle_owner_login(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_id: Uuid,
+    logins: &[String],
+    installer: Option<&str>,
+    chosen: Option<&str>,
+) -> AppResult<()> {
+    let row: Option<(Option<Uuid>, Option<String>)> =
+        sqlx::query_as("SELECT owner_account_id, owner_os_username FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_optional(db)
+            .await?;
+    let Some((Some(owner), None)) = row else {
+        return Ok(());
+    };
+    let acct = get_account(db, owner, tenant_id).await?;
+    if let Some(login) = pick_owner_login(acct.4 != "member", &acct.2, logins, installer, chosen) {
+        sqlx::query(
+            "UPDATE devices SET owner_os_username = $2 WHERE id = $1 AND owner_os_username IS NULL",
+        )
+        .bind(device_id)
+        .bind(login)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Link one OS login on a device to a person, creating the person if nobody
-/// matches. Order: an existing link wins; else an account in the tenant whose
-/// display name equals the OS display name or the username
-/// (case-insensitive); else the device's `owner_account_id` (the "this is
-/// Mia's laptop" enroll intent); else a brand-new member (bracket `kid`).
+/// matches. Order:
+///
+/// 1. an existing link wins (a parent may have re-pointed it by hand);
+/// 2. the device owner's login (`devices.owner_os_username`) → the owner;
+/// 3. a **member** whose name is the login's name or display name — never a
+///    parent: the agent declares these names, and a login linked to a parent
+///    can ask for that parent's sign-in codes;
+/// 4. a new person of their own, named after the login, with a child's
+///    rules until a parent says otherwise (fail closed: an unknown login is
+///    never quietly unmanaged).
+///
 /// Always leaves `device_users.profile_id` equal to the person's rules.
 pub async fn link_os_user(
     db: &sqlx::PgPool,
@@ -209,67 +289,70 @@ pub async fn link_os_user(
     .bind(os_username)
     .fetch_optional(db)
     .await?;
-    let linked = existing.flatten();
 
-    let account: AccountRow = match linked {
+    let account: AccountRow = match existing.flatten() {
         Some(id) => get_account(db, id, tenant_id).await?,
         None => {
-            // 2. Name match — MEMBERS ONLY. The agent declares these names, and a
-            //    rooted device that could name-link an OS user to a parent would
-            //    then hold a login that can vouch for (or approve) a parent
-            //    session. Hub accounts get linked only by an admin's hand
-            //    (assign-account) or the device's declared owner below.
-            let by_name: Option<AccountRow> = sqlx::query_as(&format!(
-                "SELECT {ACCOUNT_COLS} FROM admins
-                  WHERE tenant_id = $1
-                    AND role = 'member'
-                    AND (lower(display_name) = lower($2) OR lower(display_name) = lower($3))
-                  ORDER BY created_at LIMIT 1"
-            ))
-            .bind(tenant_id)
-            .bind(display)
+            // 2. The owner's login.
+            let owner: Option<Uuid> = sqlx::query_scalar(
+                "SELECT owner_account_id FROM devices
+                  WHERE id = $1 AND lower(owner_os_username) = lower($2)",
+            )
+            .bind(device_id)
             .bind(os_username)
             .fetch_optional(db)
-            .await?;
-            match by_name {
-                Some(a) => a,
+            .await?
+            .flatten();
+            // 3. A member by name.
+            let by_name: Option<AccountRow> = match owner {
+                Some(_) => None,
                 None => {
-                    // 3. The device's declared owner.
-                    let owner: Option<Option<Uuid>> =
-                        sqlx::query_scalar("SELECT owner_account_id FROM devices WHERE id = $1")
-                            .bind(device_id)
-                            .fetch_optional(db)
-                            .await?;
-                    match owner.flatten() {
-                        Some(id) => get_account(db, id, tenant_id).await?,
-                        // 4. A new member.
-                        None => {
-                            let bracket = AgeBracket::Kid;
-                            let pid = create_profile_for(db, tenant_id, bracket, display).await?;
-                            let id: Uuid = sqlx::query_scalar(
-                                "INSERT INTO admins (tenant_id, display_name, role, age_bracket, profile_id)
-                                 VALUES ($1, $2, 'member', $3, $4) RETURNING id",
-                            )
-                            .bind(tenant_id)
-                            .bind(display)
-                            .bind(bracket.id())
-                            .bind(pid)
-                            .fetch_one(db)
-                            .await?;
-                            let _ = events::insert(
-                                db,
-                                tenant_id,
-                                Some(device_id),
-                                None,
-                                "member",
-                                "info",
-                                json!({ "action": "auto_created", "account_id": id,
-                                        "display_name": display, "os_username": os_username }),
-                            )
-                            .await;
-                            get_account(db, id, tenant_id).await?
-                        }
-                    }
+                    sqlx::query_as(&format!(
+                        "SELECT {ACCOUNT_COLS} FROM admins
+                          WHERE tenant_id = $1
+                            AND role = 'member'
+                            AND (lower(display_name) = lower($2) OR lower(display_name) = lower($3))
+                          ORDER BY created_at LIMIT 1"
+                    ))
+                    .bind(tenant_id)
+                    .bind(display)
+                    .bind(os_username)
+                    .fetch_optional(db)
+                    .await?
+                }
+            };
+            match (owner, by_name) {
+                (Some(id), _) => get_account(db, id, tenant_id).await?,
+                (None, Some(a)) => a,
+                // 4. A person of their own.
+                (None, None) => {
+                    let bracket = AgeBracket::Kid;
+                    let pid = create_profile_for(db, tenant_id, bracket, display).await?;
+                    let id: Uuid = sqlx::query_scalar(
+                        "INSERT INTO admins (tenant_id, display_name, role, age_bracket,
+                                             self_managed, profile_id)
+                         VALUES ($1, $2, 'member', $3, $4, $5) RETURNING id",
+                    )
+                    .bind(tenant_id)
+                    .bind(display)
+                    .bind(bracket.id())
+                    .bind(!bracket.is_managed())
+                    .bind(pid)
+                    .fetch_one(db)
+                    .await?;
+                    let _ = events::insert(
+                        db,
+                        tenant_id,
+                        Some(device_id),
+                        None,
+                        "member",
+                        "info",
+                        json!({ "action": "auto_created", "account_id": id,
+                                "display_name": display, "os_username": os_username,
+                                "age_bracket": bracket.id() }),
+                    )
+                    .await;
+                    get_account(db, id, tenant_id).await?
                 }
             }
         }
@@ -739,7 +822,7 @@ async fn policy_for_account(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<P
         .unwrap_or_default())
 }
 
-type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32);
+type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32, Option<i32>);
 
 /// `GET /api/me/today` — the person's own day, across every device they use.
 pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -747,24 +830,32 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     let bracket = bracket_of(&acct);
     let policy = policy_for_account(&st.db, &acct).await?;
 
-    let rows: Vec<TodayRow> = sqlx::query_as(
+    // "Today" is each device's own local day — the day its agent enforces.
+    let rows: Vec<TodayRow> = sqlx::query_as(&format!(
         "SELECT du.id, d.id, d.name, d.status, d.locked,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
-           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = CURRENT_DATE
+           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = {}
           WHERE du.account_id = $1 AND d.tenant_id = $2
           ORDER BY d.name",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let used: i64 = rows.iter().map(|r| i64::from(r.5)).sum::<i64>() / 60;
-    let earned: i64 = rows.iter().map(|r| i64::from(r.6)).sum::<i64>() / 60;
+    let used_secs: i64 = rows.iter().map(|r| i64::from(r.5)).sum();
+    let earned_secs: i64 = rows.iter().map(|r| i64::from(r.6)).sum();
+    let used = used_secs / 60;
+    let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    let left = limit.map(|l| (l + earned - used).max(0));
+    // The same budget the device enforces: limit + earned − used, per person,
+    // in seconds, rounded up to the minute like the device's ring.
+    let left = limit.map(|l| ((l * 60 + earned_secs - used_secs).max(0) + 59) / 60);
+    let offset = rows.iter().find_map(|r| r.7);
+    let rules = crate::ledger::rules_json(&policy, used_secs, earned_secs, offset, Utc::now());
     let locked = rows.iter().any(|r| r.4);
     let du_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let pending: Option<i32> = sqlx::query_scalar(
@@ -788,6 +879,9 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "earned_minutes": earned,
         "limit_minutes": limit,
         "left_minutes": left,
+        // When screens stop by the rules (limit, bedtime or window end,
+        // whichever first) — the agent's own rules function.
+        "rules": rules,
         "locked": locked,
         "devices": devices,
         "blocks": policy.blocks,
@@ -835,29 +929,31 @@ pub async fn set_goal(
 pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
 
-    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(&format!(
         "SELECT l.day, SUM(l.used_seconds)::bigint, SUM(l.earned_seconds)::bigint
            FROM screen_time_ledger l
            JOIN device_users du ON du.id = l.device_user_id
            JOIN devices d ON d.id = du.device_id
           WHERE du.account_id = $1 AND d.tenant_id = $2
-            AND l.day > CURRENT_DATE - 14
+            AND l.day > {} - 14
           GROUP BY l.day ORDER BY l.day",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let today_by_device: Vec<(String, i64)> = sqlx::query_as(
+    let today_by_device: Vec<(String, i64)> = sqlx::query_as(&format!(
         "SELECT d.name, SUM(l.used_seconds)::bigint
            FROM screen_time_ledger l
            JOIN device_users du ON du.id = l.device_user_id
            JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = CURRENT_DATE
+          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = {}
           GROUP BY d.name HAVING SUM(l.used_seconds) > 0
           ORDER BY SUM(l.used_seconds) DESC",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
@@ -1016,7 +1112,6 @@ pub fn member_allowed(path: &str) -> bool {
         || path == "/api/me/goal"
         || path == "/api/me/ask"
         || path == "/api/catalog"
-        || path.starts_with("/api/me/2fa")
         || path.starts_with("/api/auth/")
 }
 
@@ -1071,14 +1166,109 @@ mod tests {
         assert!(member_allowed("/api/me/ask"));
         assert!(member_allowed("/api/catalog"));
         assert!(member_allowed("/api/auth/logout"));
-        assert!(member_allowed("/api/auth/stepup/verify"));
-        assert!(member_allowed("/api/me/2fa/totp/start"));
+        assert!(member_allowed("/api/auth/confirm"));
+        assert!(!member_allowed("/api/me/2fa"));
         // The hub's side, including routes nobody has written yet.
         assert!(!member_allowed("/api/family"));
         assert!(!member_allowed("/api/devices"));
         assert!(!member_allowed("/api/members"));
         assert!(!member_allowed("/api/me/passkeys"));
         assert!(!member_allowed("/api/something/new"));
+    }
+
+    fn logins(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_parents_computer_links_only_the_login_it_was_installed_from() {
+        let l = logins(&["philip", "leo"]);
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("philip"), None).as_deref(),
+            Some("philip")
+        );
+        // Several logins and no installer: never guess a parent.
+        assert_eq!(pick_owner_login(true, "Philip", &l, None, None), None);
+        // Not even by name — a child could name their login after the parent.
+        assert_eq!(pick_owner_login(true, "Leo", &l, None, None), None);
+        // An installer that isn't one of the logins (root, a system account)
+        // counts for nothing.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("root"), None),
+            None
+        );
+        // One login on a computer the parent calls theirs is theirs.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &logins(&["phil"]), None, None).as_deref(),
+            Some("phil")
+        );
+        // The person at the keyboard said so.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("leo"), Some("philip")).as_deref(),
+            Some("philip")
+        );
+    }
+
+    #[test]
+    fn a_childs_computer_never_hands_the_parents_login_to_the_child() {
+        // The parent installed from their admin login; her login's name gives
+        // nothing away → nobody is linked to her by guesswork.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("dad"),
+                None
+            ),
+            None
+        );
+        // …the same when the parent installed from HER session: "dad" must
+        // not become hers just because it isn't the installer.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("minecraftqueen"),
+                None
+            ),
+            None
+        );
+        // Asked at install time: the answer wins.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("dad"),
+                Some("minecraftqueen")
+            )
+            .as_deref(),
+            Some("minecraftqueen")
+        );
+        // An answer that isn't one of the logins counts for nothing.
+        assert_eq!(
+            pick_owner_login(false, "Mia", &logins(&["dad", "x"]), None, Some("root")),
+            None
+        );
+        // By name, whoever installed.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia Ludwig",
+                &logins(&["dad", "mia", "guest"]),
+                Some("mia"),
+                None
+            )
+            .as_deref(),
+            Some("mia")
+        );
+        // Her only login.
+        assert_eq!(
+            pick_owner_login(false, "Mia", &logins(&["m2011"]), None, None).as_deref(),
+            Some("m2011")
+        );
     }
 
     #[test]

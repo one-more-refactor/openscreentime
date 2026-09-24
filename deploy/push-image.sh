@@ -5,7 +5,8 @@
 # The production host is often a one-core LXC; `deploy/update.sh` (git pull +
 # in-place image build) takes 40+ minutes there and starves everything else on
 # the node. This script builds the exact same Containerfile locally, streams the
-# image over SSH, loads it, and recreates the stack. The host's checkout is also
+# image over SSH, loads it, and deploys it with deploy/update.sh --image (backup,
+# health check, rollback). The host's checkout is also
 # fast-forwarded so `docs/`, `compose.yaml` and `.env.example` match the image.
 #
 # Usage:
@@ -16,7 +17,7 @@
 #   --repo         checkout path on the host (default /opt/openscreentime)
 #   --via          command prefix run ON the ssh target to reach the real host
 #                  (default: none). Example: --via "pct exec 141 --"
-#   --no-build     skip the local image build (reuse localhost/openscreentime_server:latest)
+#   --no-build     skip the local image build (reuse localhost/openscreentime-server:pushed)
 #
 # Requires podman (or docker) locally; curl on the host.
 set -euo pipefail
@@ -43,12 +44,13 @@ if command -v podman >/dev/null 2>&1; then engine=podman
 elif command -v docker >/dev/null 2>&1; then engine=docker
 else echo "error: need podman or docker locally" >&2; exit 1; fi
 
-image="localhost/openscreentime_server:latest"
+image="localhost/openscreentime-server:pushed"
 rev="$(git rev-parse --short HEAD)"
 
 if [[ "$build" == 1 ]]; then
     echo "==> building ${image} from Containerfile (rev ${rev})"
-    "$engine" build -t "$image" -f Containerfile .
+    "$engine" build -t "$image" --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+        -f Containerfile .
 fi
 
 # Remote helper: everything on the host runs through $via (e.g. pct exec).
@@ -70,22 +72,13 @@ echo "==> fast-forwarding the host checkout (docs/compose only; the image is alr
 remote "cd ${repo} && git fetch -q origin && git reset -q --hard origin/main && git log --oneline -1" || \
     echo "   (checkout not updated — fine as long as compose.yaml did not change)"
 
-echo "==> recreating the server container with the new image"
-# stop+rm instead of `down`: `down` removes the compose network, and netavark
-# has been seen leaving stale port-forward rules behind when it cannot find the
-# old netns (docs/OPERATIONS.md → 'port 8080 answers nothing').
-remote "cd ${repo} && (podman stop -t 20 openscreentime-server >/dev/null 2>&1 || true) && (podman rm openscreentime-server >/dev/null 2>&1 || true) && podman-compose up -d 2>&1 | tail -2"
-
-echo "==> health"
-port="$(remote "grep -E '^OST_PORT=' ${repo}/.env | tail -n1 | cut -d= -f2-" || true)"
-port="${port:-8080}"
-bind="$(remote "grep -E '^OST_BIND_ADDR=' ${repo}/.env | tail -n1 | cut -d= -f2-" || true)"
-bind="${bind:-127.0.0.1}"
-for _ in $(seq 1 60); do
-    if remote "curl -fsS -m 5 http://${bind}:${port}/health" 2>/dev/null; then
-        echo; echo "==> deployed rev ${rev}"; exit 0
-    fi
-    sleep 2
-done
-echo "error: server did not become healthy; check: podman logs openscreentime-server" >&2
-exit 1
+echo "==> deploying it the safe way (backup, swap, health check, rollback on failure)"
+# deploy/update.sh --image does exactly what the daily update does, minus the
+# pull: pre-update backup, stop+rm+up of the server, /health, and on failure
+# the previous image plus the pre-update database back in place.
+if remote "cd ${repo} && deploy/update.sh --image ${image}"; then
+    echo "==> deployed rev ${rev}"
+else
+    echo "error: the new image was not healthy and has been rolled back; check: podman logs openscreentime-server" >&2
+    exit 1
+fi

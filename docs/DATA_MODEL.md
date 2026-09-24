@@ -140,16 +140,21 @@ existing pending row. Approval upserts `screen_time_ledger.earned_seconds` and e
 `credit_time` command.
 
 ### `screen_time_ledger`
-Per-user daily balance for the "earn time" mechanic.
+Per-login daily use and grants. One person's day is the sum of their logins'
+rows for that day (a daily limit is one budget per person — `docs/TRACKING.md`).
 | column          | type        | notes                                     |
 |-----------------|-------------|-------------------------------------------|
 | id              | uuid pk     |                                           |
 | device_user_id  | uuid fk     |                                           |
-| day             | date        |                                           |
-| earned_seconds  | int         | credits earned via tasks                  |
-| used_seconds    | int         | consumed                                  |
-| streak_days     | int         | current streak                            |
+| day             | date        | the **device-local** day the agent enforces (reported with the usage; not the server's UTC date) |
+| earned_seconds  | int         | granted (approved requests, console "+N") |
+| used_seconds    | int         | real use, monotonic within a day (`GREATEST`) |
+| streak_days     | int         | unused                                    |
 | UNIQUE(device_user_id, day)                                                |
+
+Migration `0027_device_local_day.sql` adds `devices.utc_offset_secs` (int,
+nullable): the device's UTC offset as last reported, so the console knows
+which date is "today" for each device.
 
 ## Migrations
 

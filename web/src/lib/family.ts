@@ -18,8 +18,11 @@ import type { Device, EarnRequest, FamilyChild, Profile } from "../types";
 
 export type { FamilyChild } from "../types";
 
+/** The day's budget left — the server's number when it sends one (computed
+ *  exactly as the device does, in seconds), else limit + earned − used. */
 export function minutesLeft(c: FamilyChild): number | null {
   if (c.limit_minutes === null) return null;
+  if (typeof c.left_minutes === "number") return Math.max(0, c.left_minutes);
   return Math.max(0, c.limit_minutes + c.earned_minutes - c.used_minutes);
 }
 

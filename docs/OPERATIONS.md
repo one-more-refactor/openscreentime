@@ -1,35 +1,58 @@
 # Operating OpenScreenTime (day 2)
 
-This is the day-2 operator guide: updating, backup/restore, monitoring,
-recovering access, and cleaning up. For first-time install (reverse proxy,
-`.env`, first admin, enrolling devices), see
-[`docs/DEPLOY.md`](DEPLOY.md) — this assumes that's done and doesn't repeat it.
+The day-2 guide: what runs by itself, backups and restores, monitoring and
+alerts, recovering access, cleaning up. For the first install see
+[`docs/DEPLOY.md`](DEPLOY.md).
 
-Commands below assume rootless Podman with `podman-compose`, run from the
-repo root on the VPS. Substitute `podman compose` or `docker compose` if
-that's what you run instead.
+Commands run from the checkout on the server. `podman` works as `docker` too;
+rootless installs use `systemctl --user` where this says `systemctl`.
+
+## What runs by itself
+
+`deploy/setup.sh` installs these (re-install on an older install with
+`deploy/install-auto-update.sh`):
+
+| Unit | Does |
+|---|---|
+| `openscreentime.service` | starts both containers at boot (Podman; Docker does it itself) |
+| `openscreentime-backup.timer` | nightly `deploy/backup.sh nightly` (~03:15) |
+| `openscreentime-update.timer` | daily `deploy/update.sh` (~04:30), with rollback |
+
+Check them: `systemctl list-timers 'openscreentime*'`, and what a run did:
+`journalctl -u openscreentime-update` / `-u openscreentime-backup`.
 
 ## Updating
 
 ```sh
-cd openscreentime
 deploy/update.sh
 ```
 
-This does, in order: `git pull --ff-only` (fails on a dirty or diverged
-checkout — resolve that first), rebuilds the `server` image, recreates the
-`server` container (`db` is untouched, no downtime there), then polls
-`GET /health` for up to 90s and exits non-zero with a log hint if it never
-comes back healthy. Migrations run automatically on server startup
-(`db::migrate` in `server/src/main.rs`) — no separate step.
+In order: fast-forward the checkout (a dirty or diverged checkout is reported
+and skipped, never fatal); pull `OST_IMAGE` (or build from the checkout if
+that fails); stop if that image is already running; back up the database;
+swap the server container; wait up to 3 minutes for `/health` (which checks
+the database). If it doesn't come up healthy, it puts the previous image back
+**and restores the pre-update backup**, remembers the bad image so the next
+runs skip it, and records the rollback (your phone hears about it if alerts
+are configured). Every run is recorded in the server's `ops_log`.
 
-**Devices update themselves.** `deploy/update.sh` only touches the server.
-Enrolled agents check `GET /api/agent/latest` ~2 minutes after startup and
-then daily, self-updating if the server has a newer version
-(`client/src/update.rs`). Expect the fleet to catch up over the next day,
-not instantly.
+Pin a version with `OST_IMAGE=ghcr.io/one-more-refactor/openscreentime:<x.y.z>`
+in `.env`; `OST_IMAGE=build` always builds on this machine (slow on small
+boxes — see `deploy/push-image.sh` below).
 
-To pin one device to its current version (skip a bad release):
+**Devices update themselves — from this server.** Each agent checks
+`GET /api/agent/latest` about 2 minutes after it starts and then daily, and
+installs the build this server bundles when it differs from its own (by a
+hash of the agent source, so a fix without a version bump still arrives; it
+never downgrades). Before swapping, the new binary must run on the device
+(`--version`), which refuses e.g. a build needing a newer glibc. After the
+swap, if the new build crash-loops or stops ticking within its first minute,
+the device's watchdog puts the previous binary back by itself and skips that
+build; the console's event feed shows `agent_updated`,
+`agent_update_rolled_back` or `agent_update_refused`. A newly started agent
+also refreshes its systemd units if they changed.
+
+To keep one device on its current version:
 
 ```sh
 # on the device, as root
@@ -39,136 +62,90 @@ printf '[Service]\nEnvironment=OST_NO_SELF_UPDATE=1\n' \
 systemctl daemon-reload && systemctl restart openscreentime-agent.service
 ```
 
-Remove the drop-in and restart to resume. This only stops future
-self-updates — it doesn't roll back a bad one already installed. The agent
-keeps the previous binary as a backup for exactly that case:
-
-```sh
-systemctl stop openscreentime-agent.service
-mv /usr/local/bin/openscreentime.bak /usr/local/bin/openscreentime
-systemctl start openscreentime-agent.service
-```
-
 ## Backup & restore
 
-Two things are all the durable state: the Postgres volume
-(`ost_pgdata`) and `.env`. Everything else rebuilds from git +
-`Containerfile`.
-
-**`.env` holds `POSTGRES_PASSWORD` and is not recoverable if lost.** It's
-not stored in the database. Losing it means `db` still runs (Postgres
-already has the password baked into its data dir) but `server` can't
-authenticate until you restore the correct password into `.env`. Back it up
-alongside the DB dump, not instead of it.
-
-**Passkeys live in the database only** — no separate credential store. Lose
-`ost_pgdata` with no backup and every admin passkey and every device
-identity is gone: admins re-register (see below), devices get re-enrolled
-with fresh tokens. Back up the database like you mean it.
+The durable state is the Postgres volume and `.env` (its `POSTGRES_PASSWORD`
+exists nowhere else). Passkeys and device identities live only in the
+database.
 
 ### Backup
 
-Names are from `compose.yaml`: the `db` container is `openscreentime-db`, running
-`POSTGRES_USER=openscreentime` / `POSTGRES_DB=openscreentime` by default (check `.env`
-if you changed them).
+Nightly, automatically: `backups/ost-<UTC time>-nightly.dump` in the checkout
+(pg_dump custom format, compressed; 7 kept), plus `backups/env.backup` (the
+`.env` it belongs to). Updates add `-pre-update` dumps (5 kept). By hand:
 
 ```sh
-cd openscreentime
-podman exec openscreentime-db pg_dump -U openscreentime openscreentime > backup-$(date +%F).sql
-cp .env env-backup-$(date +%F)
+deploy/backup.sh            # → backups/ost-<time>-manual.dump
 ```
 
-Store both off the VPS — the dump is plain-text SQL, pipe it through
-`gzip`/`age`/your backup pipeline. Run this on a schedule; nothing in
-OpenScreenTime does it for you.
+**Copy `backups/` off the machine** now and then (`scp`, `rsync`, your backup
+tool) — a backup on the same disk doesn't survive the disk. If a backup fails,
+or none succeeds for two days, the server tells you (see Monitoring).
 
 ### Restore
 
-Onto a fresh stack (new VPS, or recovering a wiped volume):
-
 ```sh
-cd openscreentime
-cp env-backup-<date> .env
-podman-compose -f compose.yaml up -d db
-podman-compose -f compose.yaml ps db     # wait for healthy
-cat backup-<date>.sql | podman exec -i openscreentime-db psql -U openscreentime openscreentime
-podman-compose -f compose.yaml up -d server
+deploy/restore.sh backups/ost-<time>-<label>.dump
 ```
 
-If the `db` volume already has data (e.g. retrying after a bad migration),
-wipe it first — replaying a dump into an already-populated database errors
-on duplicate keys instead of merging:
+It asks for confirmation, stops the server, drops and recreates the database,
+restores the dump, starts the server and waits for `/health`.
 
-```sh
-podman-compose -f compose.yaml down
-podman volume rm ost_pgdata
-podman-compose -f compose.yaml up -d db
-# then replay the dump as above
-```
-
-Verify with `podman exec openscreentime-db psql -U openscreentime openscreentime -c '\dt'`,
-then check `/health` and log in.
+On a fresh machine: clone, put the old `.env` back (`cp env.backup .env`),
+`podman-compose up -d db`, then `deploy/restore.sh <dump>` and
+`deploy/setup.sh` (it keeps the `.env` and installs the units).
 
 ## Monitoring
 
-**`/health`** (unauthenticated) returns `{"status":"ok","service":
-"openscreentime-server"}` once the server is accepting connections. It's a
-**liveness** check only — it never touches the DB pool (`server/src/main.rs`),
-so 200 doesn't prove Postgres is reachable. `deploy/*.sh` poll it after
-`up -d`. For a real DB check, log in or hit any `/api/*` route.
+**`/health`** (unauthenticated): `200 {"status":"ok","db":"ok","version":…}`
+when the server and its database work, `503 {"status":"degraded",
+"db":"unreachable"}` when Postgres doesn't answer. The server container's
+healthcheck uses it (`podman ps` shows `healthy`), and so do the deploy
+scripts. Point an external uptime monitor at `https://<domain>/health` if you
+want to hear about the one thing the server can't report itself: being down.
+
+**Phone alerts.** Point OpenScreenTime at a chat channel — a Discord/Slack
+incoming webhook (`OST_ALERT_WEBHOOK`) or a Telegram bot
+(`OST_TELEGRAM_BOT_TOKEN`, then pair your phone in Settings) — and it sends
+short one-way messages for:
+
+- confirmed tamper / device lockdown and new time requests (the household),
+- a device that hasn't been in touch for 24 hours (the household),
+- server problems: a failed nightly backup or none for 2 days, a failed or
+  rolled-back update (or no image pullable for 3 days), the database not
+  answering for a few minutes (webhook, plus the paired Telegram chats of
+  household owners).
+
+Each problem is sent **once** when it starts (and once more when a server
+problem clears), not on every check, and not again after a restart. The
+server logs the same notices (`system notice`) even with no channel set up.
 
 **Logs:**
+
 ```sh
-podman-compose -f compose.yaml logs -f server
-podman-compose -f compose.yaml logs -f db
+podman logs -f openscreentime-server
+podman logs -f openscreentime-db
 ```
-`RUST_LOG` in `.env` (default `openscreentime_server=info,tower_http=info,info`)
-controls verbosity — `debug` is noisy, use it temporarily.
 
-**Heartbeat cadence.** WS-connected devices (`/agent/ws`) flip `offline`
-immediately on disconnect. Polling agents fall back to
-`POST /agent/heartbeat` roughly every 15s (`server/src/agent.rs`). A
-background sweep every 60s flips any device still marked `online` with
-`last_seen` older than **3 minutes** to `offline`. A healthy device's
-`last_seen` should never be more than a few minutes old.
+`RUST_LOG` in `.env` (default `openscreentime_server=info,tower_http=info,info`).
 
-**Events feed is the audit trail.** `GET /api/events` (console: Events page)
-logs enrollment, policy changes, tamper detections, lock/unlock,
-self-updates, etc. (`server/src/events.rs`). There's no separate audit log —
-this table is the record, and it isn't auto-pruned.
+**Device presence.** A device on the WebSocket answers the server's ping
+every 6 s; one that goes quiet for 60 s is dropped and shows offline. Polling
+devices heartbeat about every 15 s; a sweep every 30 s marks any device
+unheard for 90 s offline.
 
-**Gone-dark detection is UI-computed, not server-alerted.** A device that's
-`offline` with `last_seen` 7+ days in the past is flagged gone-dark in the
-console (`goneDarkDays`, `web/src/lib/format.ts`). Nothing emails or pages
-you about it — check the console, or poll `GET /api/devices` and compute
-the same threshold yourself if you want proactive alerting.
-
-**Phone alerts (optional).** For active pushes to your phone, point OpenScreenTime at
-a chat channel you already have — a Discord/Slack incoming webhook, or a
-Telegram bot — via `.env` (`OST_ALERT_WEBHOOK`, or
-`OST_TELEGRAM_BOT_TOKEN` + `OST_TELEGRAM_CHAT_ID`; see
-`.env.example`). A background worker (`server/src/alerts.rs`) then sends a short,
-one-way message on each confirmed tamper / device lockdown and each new time
-request — it never reads anything back. It's best-effort and global to the
-deployment: the high-water mark is in memory, so a message that would have
-fired during a server restart isn't resent (the console and the tray remain the
-durable record). For a multi-tenant host, all tenants' alerts go to the one
-configured channel.
-
+**Events feed is the audit trail.** `GET /api/events` (console: Events page):
+enrollment, policy changes, tamper, lock/unlock, self-updates. Pruned after
+90 days; usage slices after 21 days.
 ## Recovering access
 
-**Lost all admin passkeys.** Registration locks the moment the first admin
-exists (`403 registration_closed`, `server/src/auth.rs`). To get back in:
-
-1. Add `OST_OPEN_REGISTRATION=1` to `.env`.
-2. `podman-compose -f compose.yaml up -d server` to pick it up.
-3. Register a new admin (email + passkey) from the login page.
-4. **Remove it from `.env` and recreate again immediately.**
-
-While that variable is set, registration is open to anyone who can reach
-your public URL, not just you — treat steps 2–4 as one uninterrupted
-operation. If you can still log in and just want a second passkey on your
-own account, don't use this path — add it from **Settings** instead.
+**Lost all admin passkeys.** As root inside the server container, run
+`podman exec openscreentime-server /app/openscreentime-server recover <name>`
+(your name or login name). It prints a one-time sign-in link for your existing
+account — single use, 30 minutes — that signs you in with "confirm it's you"
+already done; add a new passkey under **Settings → Security & access** right
+away. (If one of your computers is set up, typing your name on the sign-in page
+and the code it shows works too.)
 
 **Lost the parent PIN.** It's stored per-profile
 (`policy.parent_pin_hash`, Argon2-hashed, never returned as plaintext), not
@@ -179,34 +156,27 @@ access; the PIN itself only gates local, on-device unlock.
 
 ## Common failures & fixes
 
-**Health check times out after an update.** Check `podman-compose -f
-compose.yaml logs server` — usually a failed migration or a missing/bad env
-var. To get back to known-good (there are no release tags, so "rollback"
-means a commit SHA):
-```sh
-git log --oneline -10
-git checkout <previous-sha>   # detached HEAD
-deploy/build.sh               # rebuild WITHOUT --pull, stays on that commit
-podman-compose -f compose.yaml up -d
-```
-`deploy/update.sh` won't run from detached HEAD (`git pull --ff-only` needs
-a branch) — use `deploy/build.sh` + `up -d` by hand, then `git checkout
-main` + `deploy/update.sh` once ready to move forward again.
+**An update was rolled back.** `deploy/update.sh` already put the previous
+version and the pre-update database back; the bad image is skipped until a
+newer one appears. See why: `journalctl -u openscreentime-update` (the last
+server log lines are in there). To go back further by hand:
+`deploy/restore.sh backups/<dump>` restores any backup, and
+`podman tag localhost/openscreentime-server:previous localhost/openscreentime-server:current`
+followed by `podman-compose up -d` runs the previous image.
 
 **WebAuthn errors (invalid origin, registration/login silently fails).**
-`RP_ID`/`RP_ORIGIN` in `.env` don't match what the browser sees. `RP_ID` is
-the bare domain, no scheme; `RP_ORIGIN` is the exact `https://` origin
-including port if non-standard. Breaks if you changed the domain, hit the
-console by IP, or sit behind a proxy that rewrites Host. Fix `.env`, then
-`podman-compose -f compose.yaml up -d server`.
+`OST_PUBLIC_URL` in `.env` doesn't match what the browser sees — it must be the
+exact `https://` origin (with the port if non-standard). Breaks if you changed
+the domain, open the console by IP, or sit behind a proxy that rewrites Host.
+If you set `RP_ID`/`RP_ORIGIN` explicitly, those win — usually just remove
+them. Fix `.env`, then `podman-compose -f compose.yaml up -d`.
 
 **Port conflict on startup.** Something else has `OST_PORT` (default
 8080). Change it in `.env`, `up -d`, and repoint your reverse proxy.
 
-**`registration_closed` adding a second admin.** Expected once an admin
-exists — it's the register endpoint, not a bug. If you're logged in, use
-**Settings** to add a passkey to your account instead; only use
-`OST_OPEN_REGISTRATION=1` (above) for a genuinely new, separate admin.
+**`registration_closed` adding a second admin.** Expected once an account
+exists — first run happens once. If you're signed in, add another passkey to
+your account under **Settings** instead.
 
 **Rate limiting collapses everyone onto one bucket (mass 429s).** The
 limiter keys on the last `X-Forwarded-For` hop only when
@@ -229,11 +199,10 @@ podman-compose -f compose.yaml up -d
 Destroys running containers in that pod, not the `ost_pgdata` volume —
 data survives.
 
-**Disk filling up from old images.** Every rebuild leaves old layers
-behind:
-```sh
-podman image prune       # add -a to also drop unused-but-tagged images
-```
+**Disk filling up.** Each successful update prunes dangling images (old
+versions, on-box build layers). To reclaim more: `podman image prune -a`
+(keep `localhost/openscreentime-server:current` and `:previous`), and trim
+`backups/` if you keep copies elsewhere.
 
 ## Uninstalling a device
 
@@ -325,12 +294,12 @@ network — and its rules — stay put.
 
 ## Building elsewhere: `deploy/push-image.sh`
 
-The in-place `deploy/update.sh` compiles two Rust crates on the server. On a
-small host that is 40+ minutes of 100 % CPU and disk. `deploy/push-image.sh`
-builds the identical Containerfile on the dev box and streams the image over
-SSH (optionally through `pct exec` for an LXC without reachable sshd), then
-recreates the container and waits for `/health`. Same image, same tags; the
-host's git checkout is fast-forwarded so `compose.yaml`/`.env.example` match.
+When pulling the published image isn't an option and the server is too small
+to build (a one-core LXC takes 40+ minutes), `deploy/push-image.sh` builds the
+same Containerfile on your dev box, streams the image over SSH (optionally
+through `pct exec` for an LXC without sshd), fast-forwards the server's
+checkout, and deploys with `deploy/update.sh --image` — the same backup,
+health check and rollback as the daily update.
 
 ## Login options on the hosted instance
 
