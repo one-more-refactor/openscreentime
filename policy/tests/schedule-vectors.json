@@ -18,5 +18,18 @@
     { "start": "00:00", "end": "00:00", "valid": false },
     { "start": "07:00", "end": "07:00", "valid": false },
     { "start": "", "end": "07:00", "valid": false }
+  ],
+  "_focus": "Focus hours (a self-managed person's own site blocks): are the sites blocked at this moment? hours null = all day. day 0 = Sunday. policy/src/rules.rs (focus_blocking) and the web must agree with every row.",
+  "focus": [
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "09:30" }, "blocking": true },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "12:00" }, "blocking": false },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "08:59" }, "blocking": false },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 6, "time": "10:00" }, "blocking": false },
+    { "hours": null, "at": { "day": 0, "time": "03:00" }, "blocking": true },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 6, "time": "01:30" }, "blocking": true },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 6, "time": "02:00" }, "blocking": false },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 5, "time": "21:59" }, "blocking": false },
+    { "hours": { "days": [0,1,2,3,4,5,6], "start": "18:00", "end": "00:00" }, "at": { "day": 3, "time": "23:59" }, "blocking": true },
+    { "hours": { "days": [0,1,2,3,4,5,6], "start": "00:00", "end": "00:00" }, "at": { "day": 2, "time": "13:00" }, "blocking": true }
   ]
 }
