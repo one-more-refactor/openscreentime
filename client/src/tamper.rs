@@ -3,10 +3,10 @@
 //! enforcement, and we ALWAYS preserve an `ost-admin` root recovery path.
 //!
 //! Level 1 (default): hardened unit (see `systemd/`), watchdog heartbeat file,
-//! polkit masking of user power controls, NetworkManager disconnect guard,
-//! resolv.conf/nft re-assertion, `tamper` events.
-//! Level 3 (opt-in): + TTY switch lockdown, mask `systemctl stop` of the unit,
-//! bootloader/firmware guidance surfaced as an event.
+//! NetworkManager disconnect guard, resolv.conf/nft re-assertion, `tamper`
+//! events. Power-off, reboot and suspend are never blocked.
+//! Level 3 (opt-in): + TTY switch lockdown, a polkit rule against
+//! `systemctl stop` of the units, bootloader/firmware guidance as an event.
 
 use crate::config::HEARTBEAT_FILE;
 use crate::enforce::{dns, firewall};
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-openscreentime.rules";
-/// The recovery account that must always retain power/stop rights at every level.
+/// The recovery account that can always stop the openscreentime units.
 pub const ADMIN_USER: &str = "ost-admin";
 
 /// A tamper level the server asked for, against the one this computer runs at.
@@ -82,58 +82,73 @@ pub fn touch_heartbeat(exec: &Exec) {
     }
 }
 
-/// The polkit rule content. Denies power-off/reboot/suspend to non-root managed
-/// users; at level 3 also denies stopping the openscreentime unit — but `ost-admin`
-/// and root are always allowed (recovery path).
-pub fn render_polkit_rule(level: u8) -> String {
-    let mut js = String::new();
-    js.push_str("// Managed by openscreentime — do not edit.\n");
-    js.push_str("polkit.addRule(function(action, subject) {\n");
-    js.push_str(&format!("  if (subject.user == \"{ADMIN_USER}\" || subject.user == \"root\") {{ return polkit.Result.YES; }}\n"));
-    js.push_str("  var power = [\n");
-    js.push_str("    \"org.freedesktop.login1.power-off\",\n");
-    js.push_str("    \"org.freedesktop.login1.power-off-multiple-sessions\",\n");
-    js.push_str("    \"org.freedesktop.login1.reboot\",\n");
-    js.push_str("    \"org.freedesktop.login1.reboot-multiple-sessions\",\n");
-    js.push_str("    \"org.freedesktop.login1.halt\",\n");
-    js.push_str("    \"org.freedesktop.login1.halt-multiple-sessions\",\n");
-    js.push_str("    \"org.freedesktop.login1.suspend\",\n");
-    js.push_str("    \"org.freedesktop.login1.suspend-multiple-sessions\",\n");
-    js.push_str("    \"org.freedesktop.login1.hibernate\",\n");
-    js.push_str("    \"org.freedesktop.login1.hibernate-multiple-sessions\",\n");
-    js.push_str("    \"org.freedesktop.login1.suspend-then-hibernate\",\n");
-    js.push_str("    \"org.freedesktop.login1.suspend-then-hibernate-multiple-sessions\"\n");
-    js.push_str("  ];\n");
-    js.push_str("  if (power.indexOf(action.id) >= 0) { return polkit.Result.NO; }\n");
-    if level >= 3 {
-        js.push_str(
-            "  // Level 3: block user-initiated stop/disable of the openscreentime units.\n",
-        );
-        js.push_str("  // The watchdog is the recovery net for a killed/stopped agent, so it\n");
-        js.push_str(
-            "  // must be protected too — masking it alone would silently disarm recovery.\n",
-        );
-        js.push_str("  var guarded = [\n");
-        js.push_str(&format!("    \"{}\",\n", crate::service::AGENT_UNIT));
-        js.push_str(&format!("    \"{}\",\n", crate::service::WATCHDOG_UNIT));
-        js.push_str("    \"openscreentime-watchdog.timer\"\n");
-        js.push_str("  ];\n");
-        js.push_str("  if (action.id == \"org.freedesktop.systemd1.manage-units\" &&\n");
-        js.push_str("      guarded.indexOf(action.lookup(\"unit\")) >= 0) {\n");
-        js.push_str("    var verb = action.lookup(\"verb\");\n");
-        js.push_str("    if (verb == \"stop\" || verb == \"disable\" || verb == \"mask\") { return polkit.Result.NO; }\n");
-        js.push_str("  }\n");
+/// The polkit rule for a tamper level, or `None` when the level needs none.
+///
+/// Only level 3 has one: nobody but root and `ost-admin` may stop, disable or
+/// mask the openscreentime units (the agent and its watchdog). Power-off,
+/// reboot and suspend are left alone at every level. They used to be denied
+/// to every non-root user — parents and adults on their own computers
+/// included — which also kept laptops from sleeping and counted a closed lid
+/// as screen time. The day's time and who is stopped are kept on disk (the
+/// ledger, `freeze_state`), so a power-cycle or a suspend is no way around a
+/// stop, and the denial bought nothing.
+///
+/// `ost-admin`'s exemption covers exactly the guarded units; the rule grants
+/// nothing else to anyone.
+pub fn render_polkit_rule(level: u8) -> Option<String> {
+    if level < 3 {
+        return None;
     }
+    let mut js = String::new();
+    js.push_str("// Managed by openscreentime (tamper level 3) — do not edit.\n");
+    js.push_str("// Only root and the ost-admin recovery account may stop, disable or mask\n");
+    js.push_str("// the openscreentime units. The watchdog is the recovery net for a stopped\n");
+    js.push_str("// agent, so it is guarded too — masking it alone would disarm recovery.\n");
+    js.push_str("polkit.addRule(function(action, subject) {\n");
+    js.push_str("  if (action.id != \"org.freedesktop.systemd1.manage-units\") { return; }\n");
+    js.push_str("  var guarded = [\n");
+    js.push_str(&format!("    \"{}\",\n", crate::service::AGENT_UNIT));
+    js.push_str(&format!("    \"{}\",\n", crate::service::WATCHDOG_UNIT));
+    js.push_str("    \"openscreentime-watchdog.timer\"\n");
+    js.push_str("  ];\n");
+    js.push_str("  if (guarded.indexOf(action.lookup(\"unit\")) < 0) { return; }\n");
+    js.push_str(&format!(
+        "  if (subject.user == \"{ADMIN_USER}\" || subject.user == \"root\") \
+         {{ return polkit.Result.YES; }}\n"
+    ));
+    js.push_str("  var verb = action.lookup(\"verb\");\n");
+    js.push_str(
+        "  if (verb == \"stop\" || verb == \"disable\" || verb == \"mask\") \
+         { return polkit.Result.NO; }\n",
+    );
     js.push_str("});\n");
-    js
+    Some(js)
 }
 
-/// Install/refresh the polkit rule for the effective level.
+/// Bring the polkit rule in line with the effective level: write it when the
+/// level has one (and it differs), remove it when the level has none. Runs at
+/// every start — so an existing install, including one updating from a build
+/// that denied power-off to everyone, gets the current rule — and on every
+/// level change.
 pub fn install_polkit(exec: &Exec, level: u8) -> anyhow::Result<()> {
-    exec.write_file(POLKIT_RULE_PATH, &render_polkit_rule(level))?;
-    tracing::info!(
-        "polkit power/stop masking installed (level {level}); {ADMIN_USER} retains recovery"
-    );
+    match render_polkit_rule(level) {
+        Some(rule) => {
+            let current = std::fs::read_to_string(POLKIT_RULE_PATH).ok();
+            if current.as_deref() == Some(rule.as_str()) {
+                return Ok(());
+            }
+            exec.write_file(POLKIT_RULE_PATH, &rule)?;
+            tracing::info!(
+                "polkit rule installed (level {level}): only root and {ADMIN_USER} can stop \
+                 the openscreentime units"
+            );
+        }
+        None => {
+            if exec.remove_file(POLKIT_RULE_PATH)? {
+                tracing::info!("polkit rule removed (level {level} needs none)");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -422,40 +437,49 @@ mod tests {
 
     #[test]
     fn polkit_preserves_admin_recovery() {
-        let r = render_polkit_rule(3);
+        let r = render_polkit_rule(3).unwrap();
         assert!(r.contains("subject.user == \"ost-admin\""));
-        assert!(r.contains("org.freedesktop.login1.power-off"));
         assert!(r.contains(crate::service::AGENT_UNIT));
+        // The exemption is scoped to the guarded units: the rule's one YES
+        // comes after the unit check, never as a blanket grant.
+        assert_eq!(r.matches("polkit.Result.YES").count(), 1);
+        assert!(r.find("guarded.indexOf").unwrap() < r.find("polkit.Result.YES").unwrap());
     }
 
     #[test]
-    fn polkit_denies_every_power_path() {
-        // A gap in this list is a GUI-menu bypass (halt/hibernate) with no event.
-        let r = render_polkit_rule(1);
-        for action in [
-            "org.freedesktop.login1.power-off",
-            "org.freedesktop.login1.reboot",
-            "org.freedesktop.login1.halt",
-            "org.freedesktop.login1.suspend",
-            "org.freedesktop.login1.hibernate",
-            "org.freedesktop.login1.suspend-then-hibernate",
-        ] {
-            assert!(r.contains(action), "power path not denied: {action}");
+    fn polkit_never_denies_power_or_sleep() {
+        // Parents and adults shut down their own computers, and laptops sleep.
+        // With the ledger and freeze_state on disk, neither gets round a stop.
+        for level in 1..=3 {
+            let r = render_polkit_rule(level).unwrap_or_default();
+            for action in [
+                "org.freedesktop.login1",
+                "power-off",
+                "reboot",
+                "halt",
+                "suspend",
+                "hibernate",
+            ] {
+                assert!(!r.contains(action), "level {level} still denies {action}");
+            }
         }
     }
 
     #[test]
     fn polkit_level3_guards_the_watchdog_too() {
         // Masking the watchdog alone would silently disarm the recovery net.
-        let r = render_polkit_rule(3);
+        let r = render_polkit_rule(3).unwrap();
         assert!(r.contains(crate::service::WATCHDOG_UNIT));
         assert!(r.contains("openscreentime-watchdog.timer"));
+        assert!(r.contains("verb == \"stop\""));
     }
 
     #[test]
-    fn level1_does_not_mask_systemctl_stop() {
-        let r = render_polkit_rule(1);
-        assert!(!r.contains(crate::service::AGENT_UNIT));
+    fn below_level3_there_is_no_rule_file() {
+        // No rule means install_polkit removes the file, so an install from a
+        // build that denied power-off loses that rule on its next start.
+        assert!(render_polkit_rule(1).is_none());
+        assert!(render_polkit_rule(2).is_none());
     }
 
     #[test]

@@ -122,8 +122,9 @@ It can't make tampering impossible if you have root and the machine in your
 hands, and it doesn't claim to. What it does:
 
 - Changes to its DNS setting or firewall are put back within seconds.
-- Power off, reboot and suspend are blocked for every login except root
-  (and the `ost-admin` recovery account, if the household made one).
+- Power off, reboot and suspend are never blocked. They don't get round a
+  stop either: your time today and a stop are kept on disk, so the computer
+  comes back to the same day.
 - If the agent stops, systemd restarts it, and a watchdog checks it's alive.
 - If its firewall keeps being deleted, it stops every screen and tells a
   parent, in plain words: OpenScreenTime was changed.

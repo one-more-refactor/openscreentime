@@ -205,7 +205,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/etc/resolv.conf` | root : default, **immutable (`chattr +i`)** | `run` (DNS enforcement) | Pinned to `nameserver 127.0.0.1`; the immutable bit stops a managed user from repointing it. Re-asserted every tick if it drifts. |
 | `/etc/wireguard/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@openscreentime`. |
 | `/etc/openvpn/client/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | Same for an OpenVPN profile; runs as `openvpn-client@openscreentime`. |
-| `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `ost-admin` and `root` always retain access. |
+| `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `run` (bootstrap, and whenever the tamper level changes) | Tamper level 3 only: denies `systemctl stop/disable/mask` of the agent and watchdog units to everyone but `root` and `ost-admin`. Below level 3 there is no rule, and the agent removes the file (earlier builds wrote one denying power-off/reboot/suspend at every level). |
 | `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
 | `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Device-wide snapshot for the tray/app: connection state, device-lock / offline-lockdown / tamper-lockdown flags and device-wide notifications. **No per-user data** (`users: []`). |
@@ -260,11 +260,11 @@ Installed by `install-service` (source in `client/systemd/`):
 - A commented-out `WatchdogSec=30` line for `sd_notify`-based watchdogging,
   as an alternative to the separate `openscreentime-watchdog.timer`.
 
-The polkit rule (`49-openscreentime.rules`) denies non-root
-`power-off`/`reboot`/`suspend`; at tamper level 3 it additionally denies
-`systemctl stop/disable/mask` on `openscreentime-agent.service`. `ost-admin`
-and `root` always retain full access — that's the permanent recovery path
-at every tamper level.
+The polkit rule (`49-openscreentime.rules`) exists at tamper level 3 only:
+it denies `systemctl stop/disable/mask` on `openscreentime-agent.service` and
+the watchdog to everyone but `root` and `ost-admin` — that's the recovery
+path. Power-off, reboot and suspend are never blocked; the persisted ledger
+and `freeze_state.json` make a restart come back to the same day and stop.
 
 ## Build features matrix
 

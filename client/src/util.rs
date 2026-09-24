@@ -106,7 +106,45 @@ impl Exec {
         Ok(())
     }
 
+    /// Remove a file we manage, honoring dry-run. `Ok(true)` if it was there
+    /// (or, under dry-run, would have been removed); a missing file is `Ok(false)`.
+    pub fn remove_file(&self, path: &str) -> Result<bool> {
+        if !std::path::Path::new(path).exists() {
+            return Ok(false);
+        }
+        if self.ctx.dry_run {
+            tracing::info!(target: "dry_run", "WOULD REMOVE {path}");
+            return Ok(true);
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("removing {path}")),
+        }
+    }
+
     pub fn dry_run(&self) -> bool {
         self.ctx.dry_run
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_file_honors_dry_run_and_tolerates_absence() {
+        let path = std::env::temp_dir().join(format!("ost-rm-{}", std::process::id()));
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "x").unwrap();
+        // Dry-run says it would, and leaves the file where it is.
+        let dry = Exec::new(AgentCtx::new(true, false, 1));
+        assert!(dry.remove_file(p).unwrap());
+        assert!(path.exists());
+        // For real: gone, and a second remove is a quiet no-op.
+        let real = Exec::new(AgentCtx::new(false, false, 1));
+        assert!(real.remove_file(p).unwrap());
+        assert!(!path.exists());
+        assert!(!real.remove_file(p).unwrap());
     }
 }

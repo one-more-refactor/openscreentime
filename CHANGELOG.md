@@ -88,6 +88,13 @@ for just themselves; and the server looks after itself.
   `agent.toml`) could raise a computer to level 3 without it. Now a request
   above the computer's ceiling is capped at 1 and says so: the ack carries
   `capped: true` and the console gets a `tamper_level_capped` event.
+- **Power off, reboot and suspend work again for everyone.** A polkit rule
+  denied them to every login but root — parents and adults on their own
+  computers included — and kept laptops from sleeping. With the day's time
+  and every stop kept on disk, a restart or a suspend isn't a way around a
+  stop. The only rule left is level 3's "can't stop the agent" (root and
+  `ost-admin` exempt, and nothing else granted); below level 3 the agent
+  deletes the old rule file on its next start.
 
 ### Upgrading
 
