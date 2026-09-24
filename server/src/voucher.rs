@@ -148,6 +148,28 @@ pub async fn redeem(
     let role = role.ok_or_else(|| AppError::Unauthorized("no account on this household".into()))?;
 
     let token = insert_session(&st.db, account_id, tenant_id, VOUCHER_SESSION_DAYS, true).await?;
+    // A new session is security-relevant, like every other sign-in: a
+    // parent's is phoned out (critical) — it opens with the confirm window
+    // open, so a computer that shouldn't vouch for them is never silent. A
+    // child's `ost login` on their own laptop is logged, not phoned.
+    let display: String = sqlx::query_scalar("SELECT display_name FROM admins WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(&st.db)
+        .await?;
+    let _ = crate::events::insert(
+        &st.db,
+        tenant_id,
+        Some(device_id),
+        None,
+        "account_login",
+        if role == "member" { "info" } else { "critical" },
+        json!({
+            "message": format!("New web sign-in as {display} from this computer (ost login)."),
+            "account_id": account_id,
+            "via": "device_voucher",
+        }),
+    )
+    .await;
     Ok((
         jar.add(session_cookie(token, st.cookie_secure)),
         Json(json!({

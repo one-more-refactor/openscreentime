@@ -419,13 +419,21 @@ pub struct CreateDeviceReq {
 pub async fn create_device(
     State(st): State<AppState>,
     admin: AuthAdmin,
+    jar: axum_extra::extract::cookie::CookieJar,
     Json(req): Json<CreateDeviceReq>,
 ) -> AppResult<Json<Value>> {
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
     if let Some(acct) = req.account_id {
-        crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        let owner = crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        // A parent's own computer is a door to that parent: its enroll token
+        // becomes a device that mints vouchers — fresh sessions — for them.
+        // So setting one up is in the sensitive corner, like a fresh enroll
+        // token for any computer.
+        if owner.4 != "member" {
+            crate::confirm::require_window(&st, &jar).await?;
+        }
     }
     let enroll_token = gen_token();
     // The unlock-code secret is born with the device; only the agent ever
