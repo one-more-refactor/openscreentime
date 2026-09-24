@@ -15,12 +15,13 @@ mod config;
 mod earn;
 mod enforce;
 mod enroll;
-#[cfg(feature = "gui")]
-mod intro;
+mod glance;
+mod icons;
 mod lock;
 mod login;
 mod loginbroker;
 mod logincode;
+mod mark;
 mod pam;
 mod parent;
 mod parentcode;
@@ -264,22 +265,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Hidden first-run intro subprocess (spawned detached by the tray on first
-    // launch). Shows the skippable child-facing cards, then marks itself seen.
-    if raw_args.get(1).map(String::as_str) == Some("__intro") {
-        #[cfg(feature = "gui")]
-        {
-            return intro::run();
-        }
-        #[cfg(not(feature = "gui"))]
-        {
-            anyhow::bail!("__intro requires a build with --features gui");
-        }
-    }
-
     // The on-device window (`ost app`): dispatched here, ahead of the async
     // runtime's own threads, so the blocking egui event loop owns the main
-    // thread — the same reason `__intro` and `__lockscreen` run from here.
+    // thread — the same reason `__lockscreen` runs from here. The first-run
+    // intro lives inside it.
     if raw_args.get(1).map(String::as_str) == Some("app") {
         #[cfg(feature = "gui")]
         {
