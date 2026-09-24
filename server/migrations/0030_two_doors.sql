@@ -82,6 +82,11 @@ UPDATE device_users du
    AND a.role <> 'member'
    AND d.owner_os_username IS NULL;
 
+-- What the agent says it understands beyond the basics (`login_code`, …),
+-- from its `state` frame or heartbeat. NULL: it never said — an agent from
+-- before sign-in codes, which a code is never sent to.
+ALTER TABLE devices ADD COLUMN agent_features text[];
+
 -- ── 4. Gone ─────────────────────────────────────────────────────────────────
 -- Authenticator apps (TOTP) and their failure counters, the Telegram confirm
 -- tap, the long-retired emailed codes, change-mode extension, and untrusted

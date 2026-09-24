@@ -176,6 +176,7 @@ impl ServerClient {
             "public_ip": public_ip,
             "os_users": os_users,
             "usage": usage,
+            "features": crate::protocol::FEATURES,
         });
         let resp = self
             .http

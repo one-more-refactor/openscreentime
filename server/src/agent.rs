@@ -453,11 +453,29 @@ pub struct HeartbeatReq {
     /// Optional `state` (same shape as the WS frame) for poll-mode agents.
     #[serde(default)]
     pub state: Option<Value>,
+    /// What the agent understands beyond the basics (`["login_code"]`); an
+    /// agent that says nothing understands nothing extra.
+    #[serde(default)]
+    pub features: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
 // Presence: the agent's `state` frame
 // ---------------------------------------------------------------------------
+
+/// The `features` an agent declared (`state` frame or heartbeat), bounded:
+/// `None` when it declared none — an agent from before features existed.
+fn agent_features(v: Option<&Value>) -> Option<Vec<String>> {
+    let list = v?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(Value::as_str)
+            .filter(|f| !f.is_empty() && f.len() <= 32)
+            .take(16)
+            .map(str::to_string)
+            .collect(),
+    )
+}
 
 /// Apply an agent `state` frame — what the device *is*, read back from the
 /// kernel, not what we asked for: `{ locked, frozen_users, enforcing, gaps,
@@ -488,13 +506,14 @@ async fn apply_state(db: &sqlx::PgPool, device_id: Uuid, state: &Value) {
         .map(str::to_string);
     let _ = sqlx::query(
         "UPDATE devices SET locked = $2, last_state = $3, last_seen = now(), status = 'online',
-                agent_version = COALESCE($4, agent_version)
+                agent_version = COALESCE($4, agent_version), agent_features = $5
           WHERE id = $1",
     )
     .bind(device_id)
     .bind(locked)
     .bind(&stored)
     .bind(version)
+    .bind(agent_features(state.get("features")))
     .execute(db)
     .await;
 }
@@ -519,11 +538,13 @@ pub async fn heartbeat(
     sqlx::query(
         "UPDATE devices SET last_seen = now(),
              public_ip = COALESCE($2::inet, public_ip),
-             status = 'online'
+             status = 'online',
+             agent_features = $3
          WHERE id = $1",
     )
     .bind(agent.device_id)
     .bind(req.public_ip)
+    .bind(agent_features(req.features.as_ref()))
     .execute(&st.db)
     .await?;
 

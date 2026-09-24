@@ -122,9 +122,11 @@ impl Env {
         installer: Option<&str>,
         chosen: Option<&str>,
     ) -> Uuid {
+        // An agent of today: it says it can show a sign-in code.
         let device: Uuid = sqlx::query_scalar(
-            "INSERT INTO devices (tenant_id, name, status, owner_account_id, last_seen)
-             VALUES ($1, 'a computer', 'online', $2, now()) RETURNING id",
+            "INSERT INTO devices (tenant_id, name, status, owner_account_id, last_seen,
+                                  agent_features)
+             VALUES ($1, 'a computer', 'online', $2, now(), '{login_code}') RETURNING id",
         )
         .bind(tenant)
         .bind(owner)
