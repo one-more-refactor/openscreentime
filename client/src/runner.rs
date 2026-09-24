@@ -429,6 +429,10 @@ pub struct Agent {
     /// Consecutive ticks the upstream has been unreachable while a block was in
     /// force — relax only after this is sustained, so a blip doesn't flap.
     dns_unreach_ticks: u32,
+    /// Users whose focus hours were blocking their own sites when the network
+    /// was last applied; a change re-applies it. `None` = that re-apply failed,
+    /// try again.
+    focus_applied: Option<Vec<String>>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -616,6 +620,7 @@ impl Agent {
             probe_reported: HashMap::new(),
             dns_relaxed: false,
             dns_unreach_ticks: 0,
+            focus_applied: Some(Vec::new()),
         })
     }
 
@@ -1010,6 +1015,7 @@ impl Agent {
         crate::service::sync_managed_sudoers(&self.exec, &users_by_kind);
         // DNS/nftables are host-global: apply the most restrictive effective policy.
         let effective = self.effective_network_policy();
+        self.focus_applied = Some(self.focus_now());
         let server_host = crate::client::server_host(&self.cfg.server_url);
         let (gaps, vpn_report) = enforce::apply_network_policy(
             self.ctx.clone(),
@@ -1084,6 +1090,7 @@ impl Agent {
 
         let mut blocks = crate::policy::AppBlocks::default();
         let mut blocklist: Vec<String> = base.dns.blocklist.clone();
+        let now = self.local_now();
         for p in self.policies.values() {
             blocks.apps.extend(p.blocks.apps.iter().cloned());
             blocks
@@ -1092,6 +1099,11 @@ impl Agent {
             blocks
                 .custom_domains
                 .extend(p.blocks.custom_domains.iter().cloned());
+            // Sites someone blocks for themselves, inside their focus hours
+            // (all day without hours) — a block like any other while it holds.
+            if crate::policy::rules::focus_blocking(&p.focus, &now) {
+                blocks.custom_domains.extend(p.focus.sites.iter().cloned());
+            }
             blocklist.extend(p.dns.blocklist.iter().cloned());
             // Any user who needs it turns it on for the shared host.
             base.dns.safe_search |= p.dns.safe_search;
@@ -1133,9 +1145,41 @@ impl Agent {
 
     /// Whether the effective policy wants to force DNS (i.e. has any block).
     fn wants_force_dns(&self) -> bool {
-        self.policies
-            .values()
-            .any(|p| !p.blocks.is_empty() || !p.dns.blocklist.is_empty())
+        let now = self.local_now();
+        self.policies.values().any(|p| {
+            !p.blocks.is_empty()
+                || !p.dns.blocklist.is_empty()
+                || crate::policy::rules::focus_blocking(&p.focus, &now)
+        })
+    }
+
+    /// The trusted clock, as local wall time (what focus hours are read in).
+    fn local_now(&self) -> chrono::NaiveDateTime {
+        self.trusted_now.with_timezone(&chrono::Local).naive_local()
+    }
+
+    /// Who has their self-blocked sites blocked right now (sorted).
+    fn focus_now(&self) -> Vec<String> {
+        let now = self.local_now();
+        let mut users: Vec<String> = self
+            .policies
+            .iter()
+            .filter(|(_, p)| crate::policy::rules::focus_blocking(&p.focus, &now))
+            .map(|(u, _)| u.clone())
+            .collect();
+        users.sort();
+        users
+    }
+
+    /// Focus hours began or ended for someone since the network was last
+    /// applied: the host-global DNS must follow. Records the new state.
+    fn focus_flipped(&mut self) -> bool {
+        let now = self.focus_now();
+        if self.focus_applied.as_ref() == Some(&now) {
+            return false;
+        }
+        self.focus_applied = Some(now);
+        true
     }
 
     /// Keep DNS from bricking a device off a captive-portal / public-DNS-
@@ -1319,18 +1363,25 @@ impl Agent {
         // blocking network; re-apply the (relaxed or restored) policy on a flip.
         let (dns_events, dns_flipped) = self.update_dns_reachability();
         events.extend(dns_events);
-        if dns_flipped && !self.exec.dry_run() {
+        // Focus hours began or ended: someone's own blocked sites come or go.
+        let focus_flipped = self.focus_flipped();
+        if (dns_flipped || focus_flipped) && !self.exec.dry_run() {
             let effective = self.effective_network_policy();
             let server_host = crate::client::server_host(&self.cfg.server_url);
-            if let Ok((gaps, report)) = enforce::apply_network_policy(
+            match enforce::apply_network_policy(
                 self.ctx.clone(),
                 &self.exec,
                 server_host.as_deref(),
                 &effective,
                 &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
             ) {
-                events.extend(degraded_events(&gaps));
-                events.extend(vpn_report_event(report));
+                Ok((gaps, report)) => {
+                    events.extend(degraded_events(&gaps));
+                    events.extend(vpn_report_event(report));
+                }
+                // Try the focus change again next tick.
+                Err(_) if focus_flipped => self.focus_applied = None,
+                Err(e) => tracing::warn!("network re-apply failed: {e}"),
             }
         }
 
@@ -3688,5 +3739,118 @@ mod tests {
         assert!(a.lock.shown().is_none());
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
+    }
+}
+
+/// Focus hours: a self-managed person's own blocked sites join the host's
+/// blocks while their window holds, and leave when it ends.
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use crate::policy::{Focus, Window};
+    use chrono::TimeZone;
+
+    fn agent() -> Agent {
+        let ctx = AgentCtx::new(true, false, 1);
+        let cfg = AgentConfig {
+            server_url: "http://127.0.0.1:9".into(),
+            device_id: "d".into(),
+            device_token: "t".into(),
+            poll_interval_secs: 30,
+            tamper_level: 1,
+            auto_update: false,
+        };
+        Agent::new(ctx, cfg).unwrap()
+    }
+
+    /// 2026-09-21 is a Monday.
+    fn at_local(h: u32, m: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, h, m, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn focused(sites: &[&str], hours: Option<(&str, &str)>) -> Policy {
+        Policy {
+            focus: Focus {
+                sites: sites.iter().map(|s| s.to_string()).collect(),
+                hours: hours.map(|(s, e)| Window {
+                    days: vec![1, 2, 3, 4, 5],
+                    start: s.into(),
+                    end: e.into(),
+                }),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn own_sites_are_blocked_inside_focus_hours_only() {
+        let mut a = agent();
+        a.policies.insert(
+            "jonas".into(),
+            focused(&["reddit.com"], Some(("09:00", "12:00"))),
+        );
+        let mut kid = Policy::default();
+        kid.blocks.custom_domains = vec!["example.org".into()];
+        a.policies.insert("mia".into(), kid);
+
+        a.trusted_now = at_local(10, 0);
+        let on = a.effective_network_policy();
+        assert_eq!(
+            on.blocks.custom_domains,
+            vec!["example.org".to_string(), "reddit.com".to_string()]
+        );
+        assert!(
+            on.lockdown.force_dns,
+            "a block brings the anti-bypass posture"
+        );
+        assert_eq!(a.focus_now(), vec!["jonas".to_string()]);
+
+        a.trusted_now = at_local(12, 0);
+        let off = a.effective_network_policy();
+        assert_eq!(off.blocks.custom_domains, vec!["example.org".to_string()]);
+        assert!(a.focus_now().is_empty());
+    }
+
+    #[test]
+    fn no_hours_means_all_day_and_no_sites_means_nothing() {
+        let mut a = agent();
+        a.policies
+            .insert("jonas".into(), focused(&["youtube.com"], None));
+        a.trusted_now = at_local(3, 0);
+        let p = a.effective_network_policy();
+        assert_eq!(p.blocks.custom_domains, vec!["youtube.com".to_string()]);
+        assert!(a.wants_force_dns());
+
+        let mut a = agent();
+        a.policies
+            .insert("jonas".into(), focused(&[], Some(("09:00", "12:00"))));
+        a.trusted_now = at_local(10, 0);
+        assert!(a.effective_network_policy().blocks.is_empty());
+        assert!(!a.wants_force_dns());
+    }
+
+    #[test]
+    fn the_network_is_reapplied_when_focus_begins_and_ends_once() {
+        let mut a = agent();
+        a.policies.insert(
+            "jonas".into(),
+            focused(&["reddit.com"], Some(("09:00", "12:00"))),
+        );
+        a.trusted_now = at_local(8, 59);
+        assert!(!a.focus_flipped(), "nothing blocking yet, nothing applied");
+        a.trusted_now = at_local(9, 0);
+        assert!(a.focus_flipped(), "focus began");
+        assert!(!a.focus_flipped(), "…once");
+        a.trusted_now = at_local(11, 30);
+        assert!(!a.focus_flipped());
+        a.trusted_now = at_local(12, 0);
+        assert!(a.focus_flipped(), "focus ended");
+        // A failed re-apply is retried.
+        a.focus_applied = None;
+        assert!(a.focus_flipped());
     }
 }
