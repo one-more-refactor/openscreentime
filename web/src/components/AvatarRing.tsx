@@ -1,19 +1,53 @@
 // ============================================================================
-// AvatarRing — the family's glance (CONTRACT-0.6 "ring grid"). Identity lives
-// in the center (emoji or monogram); STATE lives in the ring around it, so a
-// two-second scan of round faces reads the whole household:
-//   ring fill  = how much of today's target is spent (goal if set, else limit)
-//   ring color = ok on a normal day; the accent only when spent/over
-//   dashed+dim = paused (a sanctioned "away" state, same grammar as StateRing)
-// No target (no goal, no limit) → a plain identity disc, no ring.
+// A person, as the console shows one: their face (a chosen emoji, else a
+// monogram on one of the eight avatar pairs) inside the house-clock ring.
+//
+// The ring is <Ring>: time used today toward their target (their goal if
+// they set one, else the limit plus anything earned), clockwise from the tick.
+// No target → the empty track (no limit set). Paused → dashed, the face dims.
 // ============================================================================
-import { useEffect, useState } from "react";
 import { avatarColors } from "../lib/avatar";
+import { Ring, ringGeometry } from "./Ring";
 
-function initials(name: string): string {
+export function initials(name: string): string {
   const p = name.trim().split(/\s+/).filter(Boolean);
   if (!p.length) return "?";
   return (p.length === 1 ? p[0].slice(0, 2) : p[0][0] + p[p.length - 1][0]).toUpperCase();
+}
+
+/** The face alone — a disc on the person's avatar pair. */
+export function Avatar({
+  name,
+  seed,
+  avatar,
+  size = 56,
+  dim = false,
+}: {
+  name: string;
+  seed: string;
+  /** parent-picked emoji face; falls back to the deterministic monogram */
+  avatar?: string | null;
+  size?: number;
+  dim?: boolean;
+}) {
+  const disc = avatarColors(seed);
+  return (
+    <span
+      className="avatar"
+      data-mono={!avatar}
+      style={{
+        width: size,
+        height: size,
+        fontSize: Math.round(size * (avatar ? 0.48 : 0.37)),
+        background: disc.bg,
+        color: disc.ink,
+        opacity: dim ? 0.7 : undefined,
+      }}
+      aria-hidden="true"
+    >
+      {avatar || initials(name)}
+    </span>
+  );
 }
 
 export function AvatarRing({
@@ -22,77 +56,33 @@ export function AvatarRing({
   avatar,
   used,
   target,
+  left,
   paused = false,
-  size = 56,
+  size = 64,
+  on = "card",
 }: {
   name: string;
   seed: string;
   avatar?: string | null;
+  /** minutes used today */
   used: number;
-  /** minutes the ring fills toward — goal if set, else the limit; null = none */
+  /** minutes the ring fills toward — goal if set, else the limit; null = no limit */
   target: number | null;
+  /** minutes left, for the amber transition (≤ 15) */
+  left?: number | null;
   paused?: boolean;
   size?: number;
+  on?: "card" | "paper";
 }) {
-  const disc = avatarColors(seed);
-  const stroke = Math.max(3, Math.round(size * 0.07));
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const pct = target && target > 0 ? Math.min(1, used / target) : 0;
-  const over = target != null && target > 0 && used >= target;
-
-  const [drawn, setDrawn] = useState(false);
-  useEffect(() => {
-    const t = requestAnimationFrame(() => setDrawn(true));
-    return () => cancelAnimationFrame(t);
-  }, []);
-
-  const ringColor = paused ? "var(--fg-faint)" : over ? "var(--accent)" : "var(--ok)";
-
+  const g = ringGeometry(size);
+  // The face sits inside the ring with a hair of air around it.
+  const inset = Math.round(g.c - (g.r - g.sw / 2) + Math.max(2, size * 0.03));
+  const frac = target && target > 0 ? used / target : target === 0 ? 1 : null;
   return (
-    <span
-      className="avring"
-      style={{ width: size, height: size, position: "relative", display: "inline-block", flex: "none" }}
-      aria-hidden="true"
-    >
-      {target != null && (
-        <svg
-          width={size}
-          height={size}
-          viewBox={`0 0 ${size} ${size}`}
-          style={{ position: "absolute", inset: 0 }}
-        >
-          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--line)" strokeWidth={stroke} />
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={r}
-            fill="none"
-            stroke={ringColor}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={paused ? `${c * 0.02} ${c * 0.04}` : c}
-            strokeDashoffset={paused ? 0 : drawn ? c * (1 - pct) : c}
-            transform={`rotate(-90 ${size / 2} ${size / 2})`}
-            style={{ transition: "stroke-dashoffset 700ms cubic-bezier(0.25,0.1,0.25,1)" }}
-          />
-        </svg>
-      )}
-      <span
-        className="fam-avatar"
-        style={{
-          position: "absolute",
-          // Inset the identity disc inside the ring.
-          inset: target != null ? stroke + 2 : 0,
-          width: "auto",
-          height: "auto",
-          fontSize: avatar ? size * 0.4 : size * 0.3,
-          background: disc.bg,
-          color: disc.ink,
-          opacity: paused ? 0.6 : 1,
-        }}
-      >
-        {avatar || initials(name)}
+    <span className="avring" style={{ width: size, height: size }} aria-hidden="true">
+      <Ring size={size} used={frac} minutesLeft={left} paused={paused} on={on} />
+      <span className="avring-face" style={{ inset }}>
+        <Avatar name={name} seed={seed} avatar={avatar} size={size - 2 * inset} dim={paused} />
       </span>
     </span>
   );

@@ -1,29 +1,28 @@
 // ============================================================================
-// PAUSE EVERYTHING — the brief's hero control: "a single prominent control
-// freezes every managed screen in the house *now*; tap again to resume."
+// PAUSE EVERYTHING — the one control that stops every screen in the house.
 //
 // Three deliberate decisions:
 //
-// 1. **Hold, don't tap.** Freezing every screen in the house mid-sentence is
-//    not an action to fire on a stray click. The ring fills under your finger
-//    for 600ms and only then commits — long enough to mean it, short enough
-//    that it never feels like a chore. Releasing early cancels, visibly.
+// 1. **Hold, don't tap.** Pausing the whole house mid-sentence is not an
+//    action to fire on a stray click. A bar fills along the card while you
+//    hold, for 600 ms, and only then commits — long enough to mean it, short
+//    enough to never feel like a chore. Releasing early cancels, visibly.
+//    (A bar, not a ring: the ring only ever means time used today.)
 //    Resuming is a plain tap: undoing a pause needs no ceremony.
 //
-// 2. **The freeze is shown, not reported.** On commit the sweep runs across
-//    the family grid (the CSS in theme.css keys off [data-sweeping]), so the
-//    parent sees the house going quiet rather than reading that it did.
+// 2. **It reports what actually happened.** Pausing N computers is N commands
+//    that can individually fail. One that is offline gets the command queued,
+//    not applied — and the copy says so, instead of claiming the house is
+//    paused when one laptop never got the message.
 //
-// 3. **It reports what actually happened.** Locking N devices means N commands
-//    that can individually fail. A device that is offline gets the command
-//    queued, not applied — and the copy says so, instead of claiming the house
-//    is paused when one laptop never got the message.
+// 3. **It can be undone** from the note that reports it.
 // ============================================================================
 import { useCallback, useEffect, useRef, useState } from "react";
 import { STEP_UP_REQUIRED, type Device } from "../types";
 import { ApiError, lockDevice, unlockDevice } from "../api";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useToast } from "../lib/toast";
+import { Icon } from "./Icon";
 
 /** How long the hold must last before the pause commits. */
 const HOLD_MS = 600;
@@ -31,12 +30,14 @@ const HOLD_MS = 600;
 interface Props {
   devices: Device[];
   allPaused: boolean;
-  /** Drives the sweep across the family grid. */
+  /** Drives the calm settle across the family grid. */
   onSweep: (sweeping: boolean) => void;
   onDone: () => void | Promise<void>;
 }
 
 type Phase = "idle" | "holding" | "working";
+
+const computers = (n: number) => `${n} ${n === 1 ? "computer" : "computers"}`;
 
 export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) {
   const { guard } = useConfirm();
@@ -46,6 +47,7 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
   const raf = useRef(0);
   const startedAt = useRef(0);
   const committed = useRef(false);
+  const runRef = useRef<(pause: boolean) => Promise<void>>(async () => {});
 
   const cancelHold = useCallback(() => {
     cancelAnimationFrame(raf.current);
@@ -66,7 +68,7 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
             devices.map((d) => (pause ? lockDevice(d.id) : unlockDevice(d.id))),
           );
           // allSettled would swallow the server's "prove it's you" — rethrow
-          // it so guard() can ask once and re-run the whole batch (locking is
+          // it so guard() can ask once and re-run the whole batch (pausing is
           // idempotent, so the retry is safe).
           const ask = settled.find(
             (r): r is PromiseRejectedResult =>
@@ -79,14 +81,13 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
         });
 
         const failed = results.filter((r) => r.status === "rejected").length;
-        // `delivered: false` means the command is queued for a device that is
-        // not currently connected — true when it next checks in, not now.
-        const queued = results.filter(
-          (r) => r.status === "fulfilled" && !r.value.delivered,
-        ).length;
+        // `delivered: false` means the command is queued for a computer that
+        // is not connected right now — true when it next checks in, not now.
+        const queued = results.filter((r) => r.status === "fulfilled" && !r.value.delivered).length;
+        const undo = { label: "Undo", run: () => runRef.current(!pause) };
 
         if (failed === results.length) {
-          toast(pause ? "Could not pause anything." : "Could not resume.", "crit");
+          toast(pause ? "Couldn't pause anything. Try again." : "Couldn't resume. Try again.", "crit");
         } else if (failed > 0) {
           toast(
             `${results.length - failed} of ${results.length} ${pause ? "paused" : "resumed"} — ${failed} failed.`,
@@ -95,12 +96,13 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
         } else if (queued > 0) {
           toast(
             pause
-              ? `Paused. ${queued} ${queued === 1 ? "device is" : "devices are"} offline and will pause on reconnect.`
-              : `Resumed. ${queued} offline ${queued === 1 ? "device" : "devices"} will follow.`,
+              ? `Paused. ${computers(queued)} ${queued === 1 ? "is" : "are"} offline and will pause when back online.`
+              : `Resumed. ${computers(queued)} offline will follow when back online.`,
             "warn",
+            undo,
           );
         } else {
-          toast(pause ? "Every screen is paused." : "Everyone is back on.", "ok");
+          toast(pause ? "Every screen is paused." : "Everyone is back on.", "ok", undo);
         }
         await onDone();
       } catch (e) {
@@ -108,7 +110,6 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
           toast(e instanceof Error ? e.message : "That didn't work.", "crit");
         }
       } finally {
-        // Let the sweep finish before the grid settles back.
         setTimeout(() => onSweep(false), 520);
         setProgress(0);
         setPhase("idle");
@@ -116,10 +117,11 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
     },
     [devices, guard, onDone, onSweep, toast],
   );
+  runRef.current = run;
 
   function beginHold() {
     if (phase === "working") return;
-    // Resuming is a plain tap — only the destructive direction is held.
+    // Resuming is a plain tap — only the pausing direction is held.
     if (allPaused) {
       void run(false);
       return;
@@ -154,22 +156,23 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
       ? "Pausing…"
       : "Pause everything";
   const hint = allPaused
-    ? "Every screen in the house is frozen."
+    ? "Every screen in the house is paused. Tap to resume."
     : phase === "holding"
       ? "Keep holding…"
-      : `Freezes ${devices.length} ${devices.length === 1 ? "screen" : "screens"} at once. Press and hold the button for a second.`;
+      : `Stops all ${computers(devices.length)} at once. Press and hold for a second.`;
 
   return (
-    <div className="pause-wrap" data-paused={allPaused} data-busy={busy}>
+    <div className="pause card" data-paused={allPaused} data-phase={phase}>
       <button
         type="button"
-        className="focusable pause-btn pause-hold"
+        className="pause-btn"
         data-phase={phase}
         aria-label={label}
         aria-pressed={allPaused}
         disabled={busy}
         onPointerDown={beginHold}
         onPointerUp={endHold}
+        onPointerLeave={endHold}
         onPointerCancel={endHold}
         // Keyboard: space/enter can't express a hold, so they commit directly.
         // Requiring a held key would make the control unusable without a mouse.
@@ -180,28 +183,13 @@ export function PauseEverything({ devices, allPaused, onSweep, onDone }: Props) 
           }
         }}
       >
-        <span
-          className="pause-ring"
-          style={{ ["--p" as string]: progress }}
-          aria-hidden="true"
-        />
-        <span className="pause-glyph" aria-hidden="true">
-          {allPaused ? (
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
-              <rect x="6" y="5" width="4" height="14" rx="1" />
-              <rect x="14" y="5" width="4" height="14" rx="1" />
-            </svg>
-          )}
-        </span>
+        <Icon name={allPaused ? "play" : "pause"} size={22} />
       </button>
       <div className="pause-copy">
         <p className="pause-label">{label}</p>
         <p className="pause-hint">{hint}</p>
       </div>
+      <span className="pause-hold" style={{ transform: `scaleX(${progress})` }} aria-hidden="true" />
     </div>
   );
 }

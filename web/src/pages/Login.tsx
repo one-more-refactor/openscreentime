@@ -1,8 +1,8 @@
 // ============================================================================
-// SIGN IN — two doors, nothing else (docs/AUTH.md).
+// SIGN IN — two doors, nothing else (docs/AUTH.md, brand board § d).
 //
 //   Your name → Continue → a 6-digit code shows up on your own computer →
-//   type it here.
+//   type it here, in six boxes.
 //   Sign in with a passkey → one tap, no name first.
 //   (Sign in with SSO — only when the server has it.)
 //
@@ -14,13 +14,13 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
 import { takeFromFragment } from "../lib/fragment";
-import { ApiError, getAuthConfig } from "../api";
+import { ApiError, getAuthConfig, usingMock } from "../api";
 import type { AuthConfig } from "../types";
 import { Wordmark } from "../components/Wordmark";
 import { PasskeyButton } from "../components/PasskeyButton";
 import { TextInput } from "../components/TextInput";
 import { Button } from "../components/Button";
-import { CodeRing } from "../components/CodeRing";
+import { CodeBoxes } from "../components/CodeBoxes";
 import { sentence } from "../lib/format";
 
 const SETUP_KEY = "ost-setup";
@@ -50,12 +50,21 @@ function dismissed(e: unknown): boolean {
   return e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError");
 }
 
+/** "4:52" */
+function clock(secs: number): string {
+  const s = Math.max(0, secs);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 type Step = "name" | "code";
 
 export function Login() {
   const { createHousehold, signInWithPasskey, sendCode, enterCode } = useSession();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  // Design review only (VITE_USE_MOCK=1): ?mock=code / ?mock=firstrun open
+  // those states directly. Compiled out of a real build.
+  const review = usingMock ? params.get("mock") : null;
 
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [setupToken, setSetupToken] = useState<string>(takeSetupToken);
@@ -64,6 +73,8 @@ export function Login() {
   const [step, setStep] = useState<Step>("name");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(() =>
     params.get("error") ? "That sign-in didn't work. Try again." : null,
   );
@@ -71,7 +82,7 @@ export function Login() {
   useEffect(() => {
     let alive = true;
     getAuthConfig()
-      .then((c) => alive && setConfig(c))
+      .then((c) => alive && setConfig(review === "firstrun" ? { ...c, needs_setup: true } : c))
       .catch(
         () =>
           alive &&
@@ -80,10 +91,28 @@ export function Login() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [review]);
+
+  useEffect(() => {
+    if (review !== "code") return;
+    setName("philip");
+    void sendCode("philip").then((secs) => {
+      setExpiresAt(Date.now() + secs * 1000);
+      setStep("code");
+    });
+  }, [review, sendCode]);
+
+  // The code's clock, in plain sight.
+  useEffect(() => {
+    if (step !== "code" || !expiresAt) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [step, expiresAt]);
 
   const firstRun = config?.needs_setup === true;
   const showSetupCode = firstRun && (askSetupCode || (config?.setup_code_required && !setupToken));
+  const secsLeft = expiresAt ? Math.round((expiresAt - now) / 1000) : null;
+  const expired = secsLeft !== null && secsLeft <= 0;
 
   async function create() {
     if (!name.trim() || busy) return;
@@ -115,7 +144,9 @@ export function Login() {
     setBusy(true);
     setError(null);
     try {
-      await sendCode(name.trim());
+      const secs = await sendCode(name.trim());
+      setExpiresAt(Date.now() + secs * 1000);
+      setNow(Date.now());
       setCode("");
       setStep("code");
     } catch (e) {
@@ -161,32 +192,35 @@ export function Login() {
     }
   }
 
+  function backToDoors() {
+    setStep("name");
+    setError(null);
+    setExpiresAt(null);
+  }
+
   return (
-    <div className="min-h-screen flex items-center justify-center px-6">
-      <div className="w-full max-w-sm">
-        <div className="mb-2">
-          <Wordmark size={2} />
-        </div>
-        <p className="mb-10 text-sm" style={{ color: "var(--fg-dim)" }}>
-          Screen time for the whole family.
-        </p>
+    <div className="signin">
+      <div className="signin-box">
+        <Wordmark size={1.625} className="signin-lockup" />
 
         {!config ? null : firstRun ? (
           // ---- First run: your name, then a passkey. ----
           <form
-            className="flex flex-col gap-4"
+            className="signin-form"
             onSubmit={(e) => {
               e.preventDefault();
               void create();
             }}
           >
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create your household</p>
+            <h1 className="signin-title">Create your household</h1>
+            <p className="signin-sub">Your name, then a passkey on this device. No password, anywhere.</p>
             <TextInput
               label="Your name"
               name="name"
               autoComplete="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Philip"
               autoFocus
             />
             {showSetupCode && (
@@ -200,56 +234,66 @@ export function Login() {
                 hint="It's in the link the installer printed."
               />
             )}
-            <Button type="submit" className="w-full" disabled={!name.trim() || busy}>
+            <Button type="submit" block icon="passkey" disabled={!name.trim() || busy}>
               {busy ? "Waiting for your passkey…" : "Create passkey"}
             </Button>
           </form>
         ) : step === "code" ? (
           // ---- Door one, part two: the code from your computer. ----
-          <div className="flex flex-col gap-4">
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>
-              Enter the code from your computer
+          <div className="signin-form">
+            <h1 className="signin-title">Check your computer</h1>
+            <p className="signin-sub">
+              Enter the code from your computer. It's in the OpenScreenTime window there.
             </p>
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              It's in the OpenScreenTime window on your computer.
-            </p>
-            <div className="cr-wrap">
-              <CodeRing
-                value={code}
-                disabled={busy}
-                error={!!error}
-                aria-label="The code from your computer"
-                onChange={(v) => {
-                  setCode(v);
-                  if (error) setError(null);
-                }}
-                onComplete={(full) => void verify(full)}
-              />
-              <p className="cr-note" data-error={!!error} role={error ? "alert" : "status"}>
-                {busy ? "Checking…" : (error ?? "It works for 5 minutes.")}
+            <CodeBoxes
+              value={code}
+              disabled={busy || expired}
+              error={!!error}
+              aria-label="The code from your computer"
+              onChange={(v) => {
+                setCode(v);
+                if (error) setError(null);
+              }}
+              onComplete={(full) => void verify(full)}
+            />
+            {error ? (
+              <p className="hint" data-error="true" role="alert">
+                {error}
               </p>
-            </div>
-            <div className="flex justify-between">
-              <Button variant="ghost" size="sm" onClick={() => void askForCode()} disabled={busy}>
+            ) : (
+              <p className="hint num" role="status">
+                {busy
+                  ? "Checking…"
+                  : expired
+                    ? "That code has run out."
+                    : secsLeft !== null
+                      ? `Expires in ${clock(secsLeft)}`
+                      : "It works for 5 minutes."}
+              </p>
+            )}
+            <div className="signin-row">
+              <Button size="sm" variant="secondary" icon="refresh" onClick={() => void askForCode()} disabled={busy}>
                 Send a new code
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setStep("name");
-                  setError(null);
-                }}
-              >
-                Back
+              <Button size="sm" variant="quiet" onClick={backToDoors}>
+                Cancel
               </Button>
             </div>
+            <p className="signin-foot">
+              Not at your computer?{" "}
+              <button type="button" className="link" onClick={() => void passkey()}>
+                Sign in with a passkey
+              </button>{" "}
+              instead.
+            </p>
           </div>
         ) : (
           // ---- The two doors. ----
-          <div className="flex flex-col gap-4">
+          <div className="signin-form">
+            <h1 className="signin-title">Sign in</h1>
+            <p className="signin-sub">Your own computer approves you. Nothing to remember.</p>
             <form
-              className="flex flex-col gap-4"
+              className="signin-form"
               onSubmit={(e) => {
                 e.preventDefault();
                 void askForCode();
@@ -264,20 +308,19 @@ export function Login() {
                 autoComplete="username"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. philip"
                 autoFocus
               />
-              <Button type="submit" className="w-full" disabled={!name.trim() || busy}>
+              <Button type="submit" block disabled={!name.trim() || busy}>
                 Continue
               </Button>
             </form>
-            <p className="text-xs text-center" style={{ color: "var(--fg-dim)" }}>
-              or
-            </p>
+            <p className="signin-or">or</p>
             <PasskeyButton label="Sign in with a passkey" onActivate={passkey} />
             {config.oidc && (
               <Button
-                variant="ghost"
-                className="w-full"
+                variant="quiet"
+                block
                 onClick={() => {
                   window.location.href = "/api/auth/oidc/start";
                 }}
@@ -289,7 +332,7 @@ export function Login() {
         )}
 
         {error && step === "name" && (
-          <p className="mt-4 text-sm" style={{ color: "var(--accent)" }} role="alert">
+          <p className="hint signin-error" data-error="true" role="alert">
             {error}
           </p>
         )}

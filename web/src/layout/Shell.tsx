@@ -1,164 +1,86 @@
-import { useEffect, useState } from "react";
+// ============================================================================
+// The shell (brand board § "Family — the web console home"): one rail, one
+// page. The rail carries the lockup, the four places (with their icons), the
+// "Today" jump list — every person's ring and time left — and who is signed
+// in, with the one sign-out in the whole console.
+//
+// Below desktop width the rail becomes a drawer, opened from a slim bar that
+// carries the lockup and a menu button.
+// ============================================================================
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { useTheme } from "../lib/theme";
-import { useFamily, minutesLeft } from "../lib/family";
+import { useFamily, minutesLeft, minutesTotal } from "../lib/family";
 import type { FamilyChild } from "../types";
 import { Wordmark } from "../components/Wordmark";
-
-// The shell is one column of chrome and one column of content — no more.
-//
-// There used to be a top bar as well, carrying a wordmark, a hamburger and the
-// unlocked-countdown chip. It cost 56px of vertical space on every screen to
-// show one logo and a chip that is usually absent, and it put the brand above
-// the family, which is backwards: the people are the product, the software is
-// not. All three moved into the rail, which already existed and already had
-// room.
+import { Icon, type IconName } from "../components/Icon";
+import { Ring } from "../components/Ring";
+import { durationShort } from "../lib/format";
+import { usingMock } from "../api";
 
 interface NavEntry {
   to: string;
   label: string;
+  icon: IconName;
 }
 
-// "My screen time" left the nav (CONTRACT-0.6): the parent appears in the
-// family, where they belong — their card on the home grid opens /me.
 const NAV: NavEntry[] = [
-  { to: "/", label: "Family" },
-  { to: "/devices", label: "Devices" },
-  { to: "/settings", label: "Settings" },
+  { to: "/", label: "Family", icon: "family" },
+  { to: "/computers", label: "Computers", icon: "laptop" },
+  { to: "/settings", label: "Settings", icon: "settings" },
+  { to: "/me", label: "Me", icon: "person" },
 ];
 
-/** A small lock, open or shut. The shackle swings on a CSS transition. */
-export function LockGlyph({ open, size = 14 }: { open: boolean; size?: number }) {
-  return (
-    <svg
-      className="lockglyph"
-      data-open={open}
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="5" y="11" width="14" height="10" rx="2" />
-      <path className="lockglyph-shackle" d="M8 11V8a4 4 0 0 1 8 0v3" />
-    </svg>
-  );
-}
-
-function NavList({ onNavigate }: { onNavigate?: () => void }) {
-  return (
-    <nav className="rail-nav-list" aria-label="Main">
-      {NAV.map((n) => (
-        <NavLink
-          key={n.to}
-          to={n.to}
-          end={n.to === "/"}
-          onClick={onNavigate}
-          className="focusable rail-nav"
-        >
-          {n.label}
-        </NavLink>
-      ))}
-    </nav>
-  );
-}
-
-function hueFor(key: string): number {
-  let h = 0;
-  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return h;
-}
-
-/** One child in the rail: hue dot, name, minutes left — the pulse at a glance. */
-function RailChild({ child, onNavigate }: { child: FamilyChild; onNavigate?: () => void }) {
+/** One person in the jump list: their ring, their name, their time left. */
+function TodayRow({ child, onNavigate }: { child: FamilyChild; onNavigate?: () => void }) {
   const left = minutesLeft(child);
-  const spent = left === 0;
+  const total = minutesTotal(child);
+  const paused = child.locked && child.devices.length > 0;
+  const used = total && total > 0 ? child.used_minutes / total : total === 0 ? 1 : null;
+  const tone = left === 0 ? "stop" : left != null && left <= 15 ? "warn" : undefined;
+  const meta = paused
+    ? "paused"
+    : left === null
+      ? "no limit"
+      : left === 0
+        ? "time's up"
+        : left < 60
+          ? `${left} min`
+          : durationShort(left);
   return (
-    <NavLink
-      to={`/child/${encodeURIComponent(child.key)}`}
-      onClick={onNavigate}
-      className="focusable rail-child"
-    >
-      <span
-        className="rail-child-dot"
-        style={{ background: `hsl(${hueFor(child.key)} 45% 70%)` }}
-        aria-hidden="true"
-      />
-      <span className="rail-child-name">{child.name}</span>
-      {child.pending_requests > 0 && (
-        <span
-          className="rail-child-asks"
-          aria-label={`${child.pending_requests} requests waiting`}
-        >
-          {child.pending_requests}
+    <li>
+      <NavLink
+        to={`/child/${encodeURIComponent(child.key)}`}
+        onClick={onNavigate}
+        className={({ isActive }) => `today-row${isActive ? " active" : ""}`}
+      >
+        <Ring size={28} used={used} minutesLeft={left} paused={paused} on="paper" />
+        <span className="today-name">{child.name}</span>
+        {child.pending_requests > 0 && (
+          <span className="today-ask" role="img" aria-label="asked for more time" />
+        )}
+        <span className="today-left num" data-tone={tone}>
+          {meta}
         </span>
-      )}
-      <span className="rail-child-left" data-spent={spent}>
-        {left === null
-          ? "—"
-          : spent
-            ? "0m"
-            : left >= 60
-              ? `${Math.floor(left / 60)}h${String(left % 60).padStart(2, "0")}`
-              : `${left}m`}
-      </span>
-    </NavLink>
+      </NavLink>
+    </li>
   );
 }
 
 function Rail({ onNavigate }: { onNavigate?: () => void }) {
-  const { children, loading } = useFamily();
-  return (
-    <div className="rail-body">
-      <NavLink
-        to="/"
-        onClick={onNavigate}
-        className="focusable rail-brand"
-        aria-label="OpenScreenTime home"
-      >
-        <Wordmark size={1.0} />
-      </NavLink>
-
-      <NavList onNavigate={onNavigate} />
-
-      {/* The rail's family list is a jump list, not a second dashboard: it
-          exists so you can reach a child from any page. On the family page
-          itself it would just repeat the cards, so it is hidden there. */}
-      {(loading || children.length > 0) && (
-        <div className="rail-fam">
-          <p className="rail-fam-head">Today</p>
-          {loading && children.length === 0
-            ? [0, 1].map((i) => <span key={i} className="rail-child-wait" aria-hidden="true" />)
-            : children.map((c) => (
-                <RailChild key={c.key} child={c} onNavigate={onNavigate} />
-              ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RailFooter() {
+  const { children, requests, loading } = useFamily();
   const { me, mock, logout } = useSession();
-  const { theme, toggle } = useTheme();
   const navigate = useNavigate();
   const [leaving, setLeaving] = useState(false);
 
-  // Signing out is the one navigation that should feel deliberate: the console
-  // dims and settles before the login screen replaces it, so it reads as a
-  // door closing rather than a page failing to load.
-  async function handleLogout() {
+  // Signing out is the one navigation that should feel deliberate: the
+  // console settles before the sign-in page replaces it.
+  async function signOut() {
     setLeaving(true);
     document.body.dataset.leaving = "true";
     try {
       await logout();
     } finally {
-      // Long enough to see the fade, short enough not to feel held up.
       setTimeout(() => {
         delete document.body.dataset.leaving;
         navigate("/login", { replace: true });
@@ -166,41 +88,133 @@ function RailFooter() {
     }
   }
 
+  const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
   return (
-    <div className="rail-foot">
-      {mock && <p className="rail-mock">Sample data</p>}
-      <p className="rail-who">{me?.account?.display_name ?? me?.admin.display_name ?? "Parent"}</p>
-      <div className="rail-foot-row">
-        <button onClick={toggle} className="focusable rail-foot-btn" type="button">
-          {theme === "dark" ? "Light" : "Dark"}
-        </button>
-        <button
-          onClick={handleLogout}
-          className="focusable rail-foot-btn"
-          type="button"
-          disabled={leaving}
-        >
-          {leaving ? "Signing out…" : "Sign out"}
-        </button>
+    <>
+      <NavLink to="/" onClick={onNavigate} className="rail-brand" aria-label="OpenScreenTime, home">
+        <Wordmark />
+      </NavLink>
+
+      <nav className="nav" aria-label="Main">
+        {NAV.map((n) => (
+          <NavLink
+            key={n.to}
+            to={n.to}
+            end={n.to === "/"}
+            onClick={onNavigate}
+            className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+          >
+            <Icon name={n.icon} size={20} />
+            {n.label}
+            {n.to === "/" && requests.length > 0 && (
+              <span className="nav-count num" aria-label={`${requests.length} waiting`}>
+                {requests.length}
+              </span>
+            )}
+          </NavLink>
+        ))}
+      </nav>
+
+      {(loading || children.length > 0) && (
+        <div className="today">
+          <p className="today-head">Today</p>
+          {loading && children.length === 0 ? (
+            [0, 1].map((i) => <span key={i} className="wait today-wait" aria-hidden="true" />)
+          ) : (
+            <ul className="today-list">
+              {children.map((c) => (
+                <TodayRow key={c.key} child={c} onNavigate={onNavigate} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <div className="rail-foot">
+        {mock && <p className="rail-mock">Sample data</p>}
+        <div className="rail-me">
+          <span className="rail-me-name">{name}</span>
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={() => void signOut()}
+            disabled={leaving}
+            aria-label="Sign out"
+            title="Sign out"
+          >
+            <Icon name="sign-out" size={18} />
+          </button>
+        </div>
       </div>
+    </>
+  );
+}
+
+/** The rail as a drawer: Escape closes it, focus stays inside while open and
+ * returns to the menu button after. */
+function Drawer({ onClose }: { onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const back = document.activeElement as HTMLElement | null;
+    ref.current?.querySelector<HTMLElement>("a, button")?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !ref.current) return;
+      const els = Array.from(ref.current.querySelectorAll<HTMLElement>("a[href], button:not([disabled])"));
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      back?.focus?.();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="drawer" role="dialog" aria-modal="true" aria-label="Menu">
+      <div className="drawer-scrim" onClick={onClose} aria-hidden="true" />
+      <aside className="rail" ref={ref}>
+        <button type="button" className="btn-icon drawer-close" onClick={onClose} aria-label="Close menu">
+          <Icon name="close" size={20} />
+        </button>
+        <Rail onNavigate={onClose} />
+      </aside>
     </div>
   );
 }
 
 export function Shell() {
-  const [menuOpen, setMenuOpen] = useState(false);
+  // Design review only: ?mock=menu opens the drawer for a screenshot.
+  const [menuOpen, setMenuOpen] = useState(
+    () => usingMock && new URLSearchParams(window.location.search).get("mock") === "menu",
+  );
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
   const { pathname } = useLocation();
   const { me } = useSession();
 
-  // Close the mobile drawer on navigation — leaving it open over the new page
-  // is the classic drawer bug.
+  // Close the drawer on navigation — leaving it open over the new page is
+  // the classic drawer bug.
+  const lastPath = useRef(pathname);
   useEffect(() => {
+    if (lastPath.current === pathname) return;
+    lastPath.current = pathname;
     setMenuOpen(false);
   }, [pathname]);
 
-  // A member has one page and no navigation to anywhere else: no rail, no
-  // drawer, no family list of siblings (members never see each other). The
-  // page itself carries the wordmark and the sign-out.
+  // A member has one page and nowhere else to go: no rail, no drawer, no
+  // list of siblings (members never see each other).
   if (me?.account?.role === "member") {
     return (
       <div className="shell shell-member">
@@ -213,37 +227,26 @@ export function Shell() {
 
   return (
     <div className="shell">
-      {/* Desktop rail */}
-      <aside className="shell-rail">
+      <aside className="rail">
         <Rail />
-        <RailFooter />
       </aside>
 
-      {/* Mobile: a single floating trigger instead of a full bar. */}
-      <button
-        className="focusable shell-menu-btn"
-        onClick={() => setMenuOpen(true)}
-        aria-label="Open navigation"
-        aria-expanded={menuOpen}
-        type="button"
-      >
-        <span aria-hidden="true" />
-        <span aria-hidden="true" />
-      </button>
+      <header className="mbar">
+        <NavLink to="/" aria-label="OpenScreenTime, home">
+          <Wordmark />
+        </NavLink>
+        <button
+          type="button"
+          className="btn-icon"
+          onClick={() => setMenuOpen(true)}
+          aria-label="Menu"
+          aria-expanded={menuOpen}
+        >
+          <Icon name="menu" size={22} />
+        </button>
+      </header>
 
-      {menuOpen && (
-        <div className="shell-drawer" role="dialog" aria-modal="true" aria-label="Navigation">
-          <div
-            className="shell-drawer-scrim"
-            onClick={() => setMenuOpen(false)}
-            aria-hidden="true"
-          />
-          <div className="shell-drawer-panel">
-            <Rail onNavigate={() => setMenuOpen(false)} />
-            <RailFooter />
-          </div>
-        </div>
-      )}
+      {menuOpen && <Drawer onClose={closeMenu} />}
 
       <main className="shell-main">
         <Outlet />

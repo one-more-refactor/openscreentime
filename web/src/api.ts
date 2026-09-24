@@ -40,7 +40,6 @@ import type {
   Me,
   Passkey,
   ParentToken,
-  MintedParentToken,
   TelegramPairing,
   TelegramStatus,
   Policy,
@@ -622,13 +621,6 @@ export async function listParentTokens(): Promise<ParentToken[]> {
     tokens: [],
   }));
   return res.tokens;
-}
-
-export async function mintParentToken(label: string): Promise<MintedParentToken> {
-  return request<MintedParentToken>("/api/parent-tokens", {
-    method: "POST",
-    body: JSON.stringify({ label }),
-  });
 }
 
 export async function revokeParentToken(id: string): Promise<void> {
