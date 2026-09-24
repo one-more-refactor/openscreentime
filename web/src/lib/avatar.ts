@@ -12,6 +12,9 @@ const PAIRS: { bg: string; ink: string }[] = [
   { bg: "#efe0f2", ink: "#6d3577" }, // lilac
 ];
 
+/** The faces a parent can pick for someone — identity, never iconography. */
+export const FACES = ["🦊", "🐼", "🦖", "🚀", "⚽", "🎨", "🐙", "🌟", "🦄", "🐸", "🎮", "🎧", "📚", "🌈", "🐳", "🐯"];
+
 /** The disc colours (background + monogram ink) for a person's avatar. */
 export function avatarColors(seed: string): { bg: string; ink: string } {
   let h = 0;

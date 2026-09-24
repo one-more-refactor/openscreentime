@@ -33,7 +33,7 @@ import { STEP_UP_REQUIRED } from "../types";
 import type { ConfirmStatus } from "../types";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-import { CodeRing } from "../components/CodeRing";
+import { CodeBoxes } from "../components/CodeBoxes";
 import { PasskeyButton } from "../components/PasskeyButton";
 import { sentence } from "./format";
 
@@ -280,66 +280,65 @@ function ConfirmModal({ open, status, onConfirmed, onCancel }: ModalProps) {
       onClose={onCancel}
       title="Confirm it's you"
       footer={
-        <Button variant="ghost" onClick={onCancel} disabled={busy}>
+        <Button variant="quiet" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
       }
     >
-      <div className="flex flex-col gap-4">
-        {requestId ? (
-          <div className="cr-wrap">
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              Type the code from the OpenScreenTime window on your computer.
-            </p>
-            <CodeRing
-              value={code}
+      {requestId ? (
+        <div className="stack">
+          <p className="dialog-lede">
+            Type the code from the OpenScreenTime window on your computer.
+          </p>
+          <CodeBoxes
+            value={code}
+            disabled={busy}
+            error={!!error}
+            aria-label="The code from your computer"
+            onChange={(v) => {
+              setCode(v);
+              if (error) setError(null);
+            }}
+            onComplete={(full) => void verify(full)}
+          />
+          <p className="hint" data-error={!!error} role={error ? "alert" : undefined}>
+            {busy ? "Checking…" : (error ?? "It works for 5 minutes.")}
+          </p>
+        </div>
+      ) : (
+        <div className="stack">
+          <p className="dialog-lede">
+            You're about to see the keys to your household. It stays confirmed for 15 minutes.
+          </p>
+          {passkey && (
+            <PasskeyButton label="Use your passkey" onActivate={withPasskey} variant="primary" />
+          )}
+          {computer && (
+            <Button
+              variant={passkey ? "secondary" : "primary"}
+              icon="laptop"
+              block
               disabled={busy}
-              error={!!error}
-              aria-label="The code from your computer"
-              onChange={(v) => {
-                setCode(v);
-                if (error) setError(null);
-              }}
-              onComplete={(full) => void verify(full)}
-            />
-            <p className="cr-note" data-error={!!error} role={error ? "alert" : undefined}>
-              {busy ? "Checking…" : (error ?? "It works for 5 minutes.")}
-            </p>
-          </div>
-        ) : (
-          <>
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              You're about to see the keys to your household. It stays confirmed for 15 minutes.
-            </p>
-            {passkey && <PasskeyButton label="Use your passkey" onActivate={withPasskey} />}
-            {computer && (
-              <Button
-                variant={passkey ? "ghost" : "primary"}
-                className="w-full"
-                disabled={busy}
-                onClick={() => void sendCode()}
-              >
-                {busy ? "Sending…" : "Get a code on your computer"}
+              onClick={() => void sendCode()}
+            >
+              {busy ? "Sending…" : "Get a code on your computer"}
+            </Button>
+          )}
+          {!passkey && !computer && (
+            <>
+              <p role="note">Sign in again to confirm. A fresh sign-in counts for 15 minutes.</p>
+              <Button block onClick={() => void signInAgain()}>
+                Sign in again
               </Button>
-            )}
-            {!passkey && !computer && (
-              <>
-                <p className="text-sm" role="note">
-                  Sign in again to confirm — a fresh sign-in counts for 15 minutes.
-                </p>
-                <Button className="w-full" onClick={() => void signInAgain()}>
-                  Sign in again
-                </Button>
-              </>
-            )}
-            {error && (
-              <p className="text-sm" role="alert" style={{ color: "var(--accent)" }}>
-                {error}
-              </p>
-            )}
-          </>
-        )}
-      </div>
+            </>
+          )}
+          {error && (
+            <p className="hint" data-error="true" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }

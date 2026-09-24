@@ -353,13 +353,6 @@ export interface ParentToken {
   revoked: boolean;
 }
 
-/** Response from minting a parent token — `token` is shown exactly once. */
-export interface MintedParentToken {
-  id: string;
-  label: string;
-  token: string;
-}
-
 // ---- People, roles, age brackets -------------------------------------------
 // The account model the "everyone has an account" pivot introduces. Grounded
 // in docs/AUTH.md. Kept alongside the legacy Admin/Tenant during the interleave
