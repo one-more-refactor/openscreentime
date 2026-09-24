@@ -36,11 +36,11 @@ asked for, and a `tamper_level_capped` event reaches the console
 - **Watchdog:** a separate `openscreentime-watchdog.timer` runs every 30 s and restarts the agent if
   its heartbeat file (`/run/openscreentime/heartbeat`, touched every enforcement tick) is missing or
   older than 90 s. Killing the agent process buys at most ~30 s.
-- **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-openscreentime.rules`) denies
-  `org.freedesktop.login1` power-off / reboot / halt / suspend / hibernate / suspend-then-hibernate
-  (and their `-multiple-sessions` variants) to everyone except root and the `ost-admin`
-  recovery account. The physical power key and Magic SysRq are kernel/firmware levers a polkit
-  rule cannot reach — see "What OpenScreenTime does not do".
+- **Power-off, reboot and suspend are never blocked.** The day's time lives in the ledger on
+  disk and who is stopped in `freeze_state.json`, so a restart or a suspend comes back to the
+  same day and the same stop — it isn't a way around one. (Earlier builds denied them to every
+  non-root user, parents included, and kept laptops from sleeping; the agent removes that
+  polkit rule on its next start.)
 - **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
   re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
 - **Firewall self-repair (fail-closed):** if the openscreentime nftables table disappears (e.g.
@@ -68,9 +68,10 @@ asked for, and a `tamper_level_capped` event reaches the console
 
 Everything in level 1 **plus**:
 
-- The polkit rule additionally denies `stop` / `disable` / `mask` of
-  `openscreentime-agent.service` **and** `openscreentime-watchdog.service` / `openscreentime-watchdog.timer`
-  (the recovery net) via `systemctl` for everyone except root and `ost-admin`.
+- A polkit rule (`/etc/polkit-1/rules.d/49-openscreentime.rules`, present at level 3 only) denies
+  `stop` / `disable` / `mask` of `openscreentime-agent.service` **and**
+  `openscreentime-watchdog.service` / `openscreentime-watchdog.timer` (the recovery net) via
+  `systemctl` for everyone except root and `ost-admin`.
 - A logind drop-in (`/etc/systemd/logind.conf.d/50-openscreentime.conf`) sets `ReserveVT=0` and
   `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
   processes at logout. `ost-admin` can revert it.
@@ -120,9 +121,9 @@ Deterrence must never become a hostage situation. At every level:
   no lock can be shown, nobody is frozen behind a blank screen. See `AGENT.md` → The lock.
 - **`ost recover`** (as root): masks the agent, stops the watchdog and tears enforcement down in
   one go, for when you need the machine back now.
-- **`ost-admin`**: a local account by this name is exempt from every polkit denial (power
-  controls, and the level-3 unit-stop mask). The agent doesn't create it; make one if you want
-  that door.
+- **`ost-admin`**: a local account by this name is exempt from the level-3 unit-stop rule — it
+  can stop, disable or mask the openscreentime units without a password. The rule grants it
+  nothing else. The agent doesn't create it; make one if you want that door.
 - Root can always stop the agent. That is by design — see the threat model.
 
 ## What OpenScreenTime does not do
