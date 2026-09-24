@@ -106,7 +106,7 @@ pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult
     if let Some(s) = existing {
         return Ok(s);
     }
-    let fresh = crate::stepup::gen_totp_secret();
+    let fresh = crate::unlock_code::gen_totp_secret();
     // Race-safe: whoever lands first wins, everybody reads the winner back.
     let secret: String = sqlx::query_scalar(
         "UPDATE devices SET parent_totp_secret = COALESCE(parent_totp_secret, $2)
@@ -123,12 +123,12 @@ pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult
 /// console. `seconds_left` lets the UI draw the countdown and refetch on the
 /// step boundary instead of polling.
 fn unlock_code_json(device_name: &str, secret: &str) -> AppResult<Value> {
-    let (code, seconds_left) = crate::stepup::current_totp(secret)
+    let (code, seconds_left) = crate::unlock_code::current_totp(secret)
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("device secret is not valid base32")))?;
     Ok(json!({
         "code": code,
         "seconds_left": seconds_left,
-        "period": crate::stepup::TOTP_STEP,
+        "period": crate::unlock_code::TOTP_STEP,
         "device_name": device_name,
     }))
 }
@@ -154,7 +154,7 @@ pub async fn rotate_unlock_code(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
-    let fresh = crate::stepup::gen_totp_secret();
+    let fresh = crate::unlock_code::gen_totp_secret();
     let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE devices SET parent_totp_secret = $2 WHERE id = $1")
         .bind(id)
@@ -221,7 +221,7 @@ pub async fn generate_recovery_codes(
         .execute(&mut *tx)
         .await?;
     for (i, code) in codes.iter().enumerate() {
-        let mac = crate::stepup::recovery_mac(&secret, code).ok_or_else(|| {
+        let mac = crate::unlock_code::recovery_mac(&secret, code).ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!("device secret is not valid base32"))
         })?;
         sqlx::query("INSERT INTO device_recovery_codes (device_id, idx, mac) VALUES ($1, $2, $3)")
@@ -431,7 +431,7 @@ pub async fn create_device(
     // The unlock-code secret is born with the device; only the agent ever
     // receives it (on its first policy pull). The parent reads codes off the
     // console.
-    let secret = crate::stepup::gen_totp_secret();
+    let secret = crate::unlock_code::gen_totp_secret();
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status,
                               parent_totp_secret, owner_account_id)
