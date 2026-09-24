@@ -8,6 +8,12 @@
 // "what does guard() do" and lets the provider's own tests live here too.
 import { mock } from "bun:test";
 import type {
+  Catalog,
+  MeHistory,
+  MeToday,
+  MyRules,
+  Policy,
+  WhereData,
   AuthConfig,
   CodeRequest,
   ConfirmGrant,
@@ -50,6 +56,10 @@ export const apiCalls = {
   recoveryCodes: [] as string[],
   generateRecovery: [] as string[],
   rotate: [] as string[],
+  credit: [] as [string, number][],
+  profileSaves: [] as { id: string; policy: Policy }[],
+  myRules: [] as MyRules[],
+  where: [] as (string | undefined)[],
 };
 
 export const MOCK_CODE = "123456";
@@ -101,6 +111,15 @@ export const apiImpl = {
     })) as (id: string) => Promise<RecoveryCodes>,
   getRecoveryCodes: ((_: string) =>
     Promise.resolve({ unused: 0, total: 8, generated_at: null })) as (id: string) => Promise<RecoveryCodesStatus>,
+  // The person page and the person's own page.
+  getMeToday: (() => Promise.reject(new Error("no getMeToday impl set"))) as () => Promise<MeToday>,
+  getMeHistory: (() => Promise.resolve({ days: [], today_by_device: [] })) as () => Promise<MeHistory>,
+  getMyRules: (() =>
+    Promise.resolve({ daily_limit_minutes: 0, focus_hours: null, sites: [] })) as () => Promise<MyRules>,
+  setMyRules: ((r: MyRules) => Promise.resolve(r)) as (r: MyRules) => Promise<MyRules>,
+  getWhere: ((_?: string) =>
+    Promise.resolve({ apps: [], sites: [], hours: [] })) as (accountId?: string) => Promise<WhereData>,
+  getCatalog: (() => Promise.resolve({ categories: [], apps: [] })) as () => Promise<Catalog>,
 };
 
 const defaults = { ...apiImpl };
@@ -125,6 +144,10 @@ export function resetApiMock() {
   apiCalls.recoveryCodes.length = 0;
   apiCalls.generateRecovery.length = 0;
   apiCalls.rotate.length = 0;
+  apiCalls.credit.length = 0;
+  apiCalls.profileSaves.length = 0;
+  apiCalls.myRules.length = 0;
+  apiCalls.where.length = 0;
   Object.assign(apiImpl, defaults);
 }
 
@@ -195,6 +218,35 @@ mock.module("../api", () => ({
   getRecoveryCodes: (id: string) => {
     apiCalls.recoveryCodes.push(id);
     return apiImpl.getRecoveryCodes(id);
+  },
+  // The person page.
+  listEvents: () => Promise.resolve([]),
+  getCatalog: () => apiImpl.getCatalog(),
+  getWhere: (accountId?: string) => {
+    apiCalls.where.push(accountId);
+    return apiImpl.getWhere(accountId);
+  },
+  creditTime: (du: string, minutes: number) => {
+    apiCalls.credit.push([du, minutes]);
+    return Promise.resolve();
+  },
+  updateProfile: (id: string, policy: Policy) => {
+    apiCalls.profileSaves.push({ id, policy });
+    return Promise.resolve({ id, policy });
+  },
+  updateMember: (id: string) => Promise.resolve({ id }),
+  deleteMember: () => Promise.resolve(),
+  unblockMember: () => Promise.resolve(),
+  approveEarnRequest: (id: string) => Promise.resolve({ id }),
+  denyEarnRequest: (id: string) => Promise.resolve({ id }),
+  // The person's own page.
+  getMeToday: () => apiImpl.getMeToday(),
+  getMeHistory: () => apiImpl.getMeHistory(),
+  askForTime: () => Promise.resolve(),
+  getMyRules: () => apiImpl.getMyRules(),
+  setMyRules: (r: MyRules) => {
+    apiCalls.myRules.push(r);
+    return apiImpl.setMyRules(r);
   },
 }));
 

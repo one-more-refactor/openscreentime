@@ -580,10 +580,14 @@ export function Computers() {
   const [devices, setDevices] = useState<Device[] | null>(lastDevices);
   const [error, setError] = useState<string | null>(null);
   const [people, setPeople] = useState<Account[]>([]);
-  // Design review only: ?mock=add opens "Add a computer" for a screenshot.
-  const [adding, setAdding] = useState<null | "any" | "mine">(() =>
-    api.usingMock && new URLSearchParams(window.location.search).get("mock") === "add" ? "any" : null,
-  );
+  // `?add=mine` (from "Add my computer" on the family page or My computer)
+  // opens "Add a computer" with the parent's own chosen. Design review only:
+  // ?mock=add opens it for a screenshot.
+  const [adding, setAdding] = useState<null | "any" | "mine">(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("add") === "mine") return "mine";
+    return api.usingMock && q.get("mock") === "add" ? "any" : null;
+  });
 
   useEffect(() => {
     let alive = true;
