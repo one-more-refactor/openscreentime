@@ -17,6 +17,7 @@ import type {
   Catalog,
   MemberPatch,
   MeHistory,
+  MyRules,
   WhereData,
   MeToday,
   NewMember,
@@ -55,14 +56,17 @@ import {
   mockCreditTime,
   mockDeleteMember,
   mockDevices,
+  mockVisibleDevices,
   mockRegenEnrollToken,
   mockCreateDevice,
   mockEarnRequests,
   mockEvents,
   mockFamily,
-  mockHouseholdAccounts,
-  mockMe,
+  mockVisibleAccounts,
+  mockMeSession,
   mockMeToday,
+  mockMyRules,
+  mockSetMyRules,
   mockPasskeys,
   mockProfiles,
   mockConfirm,
@@ -71,6 +75,7 @@ import {
   mockGenerateRecoveryCodes,
   mockRecoveryCodesStatus,
   mockUpdateMember,
+  mockUnblockMember,
   MOCK_CODE,
 } from "./mock";
 
@@ -267,7 +272,7 @@ export async function getAuthConfig(): Promise<AuthConfig> {
 // ---- Session ---------------------------------------------------------------
 
 export async function getMe(): Promise<Me> {
-  return read<Me>("/api/me", () => mockMe);
+  return read<Me>("/api/me", () => mockMeSession());
 }
 
 // ---- Confirm it's you (the sensitive corner) --------------------------------
@@ -360,16 +365,16 @@ export async function getFamily(): Promise<FamilyResponse> {
 
 export async function listDevices(): Promise<Device[]> {
   const res = await read<{ devices: Device[] }>("/api/devices", () => ({
-    devices: mockDevices,
+    devices: mockVisibleDevices(),
   }));
   return res.devices;
 }
 
 /**
  * Create a device (pending until the agent enrolls). The response carries the
- * one-time enroll token AND the device's parent code (authenticator secret),
- * both shown once. `member_id` is the enroll intent: the person this machine
- * is being set up for, so the server links its OS users to that account.
+ * one-time enroll token, shown once; the unlock code is read later, on
+ * demand. `member_id` is the enroll intent: the person this machine is being
+ * set up for, so the server links its OS users to that account.
  */
 export async function createDevice(
   name: string,
@@ -505,11 +510,9 @@ export async function assignAccount(deviceUserId: string, account_id: string): P
 
 // ---- Profiles --------------------------------------------------------------
 
-export async function updateProfile(
-  id: string,
-  policy: Policy,
-  parent_pin?: string,
-): Promise<Profile> {
+/** Save a person's rules (a parent's edit; an adult's own rules go through
+ * setMyRules and the server refuses this for them). */
+export async function updateProfile(id: string, policy: Policy): Promise<Profile> {
   if (usingMock) {
     const p = mockProfiles.find((p) => p.id === id);
     if (!p) throw new ApiError("not_found", "No such profile", 404);
@@ -519,10 +522,7 @@ export async function updateProfile(
   }
   const res = await request<{ profile: Profile }>(`/api/profiles/${id}`, {
     method: "PUT",
-    body: JSON.stringify({
-      policy,
-      ...(parent_pin !== undefined ? { parent_pin } : {}),
-    }),
+    body: JSON.stringify({ policy }),
   });
   return res.profile;
 }
@@ -694,7 +694,7 @@ export async function createMember(m: NewMember): Promise<Account> {
 /** Everyone in the household — parents first (hub only). */
 export async function listMembers(): Promise<Account[]> {
   const res = await read<{ members: Account[] }>("/api/members", () => ({
-    members: mockHouseholdAccounts,
+    members: mockVisibleAccounts(),
   }));
   return res.members;
 }
@@ -713,15 +713,13 @@ export async function deleteMember(id: string): Promise<void> {
   await request<unknown>(`/api/members/${id}`, { method: "DELETE" });
 }
 
-/** Danger zone: block a child — cuts their login and locks their devices now. */
-export async function blockMember(id: string): Promise<void> {
-  if (usingMock) return;
-  await request<unknown>(`/api/members/${id}/block`, { method: "POST" });
-}
-
-/** Danger zone: lift a block (devices stay locked until the parent resumes). */
+/** Lift an account block from before Pause was the one verb. Their computers
+ * stay as they are — resume them separately if they're paused. */
 export async function unblockMember(id: string): Promise<void> {
-  if (usingMock) return;
+  if (usingMock) {
+    mockUnblockMember(id);
+    return;
+  }
   await request<unknown>(`/api/members/${id}/unblock`, { method: "POST" });
 }
 
@@ -733,12 +731,18 @@ export async function getMeToday(): Promise<MeToday> {
   return read<MeToday>("/api/me/today", () => mockMeToday());
 }
 
-/** Set (or clear, with 0) the signed-in person's OWN daily goal. */
-export async function setMyGoal(minutes: number): Promise<void> {
-  if (usingMock) return;
-  return request<void>("/api/me/goal", {
-    method: "POST",
-    body: JSON.stringify({ minutes }),
+/** A self-managed person's own rules: their daily limit, focus hours and the
+ * sites they block for themselves. 403 for a child — a parent sets theirs. */
+export async function getMyRules(): Promise<MyRules> {
+  return read<MyRules>("/api/me/rules", () => mockMyRules());
+}
+
+/** Replace them, whole. The agent enforces them like any rules. */
+export async function setMyRules(rules: MyRules): Promise<MyRules> {
+  if (usingMock) return mockSetMyRules(rules);
+  return request<MyRules>("/api/me/rules", {
+    method: "PUT",
+    body: JSON.stringify(rules),
   });
 }
 
@@ -771,17 +775,18 @@ export async function getWhere(accountId?: string): Promise<WhereData> {
 /** The last two weeks of the person's own use, summed across their devices. */
 export async function getMeHistory(): Promise<MeHistory> {
   return read<MeHistory>("/api/me/history", () => {
-    // A believable sample week for design review: school-day dips, a weekend
-    // spike, today still in progress.
-    // Today (the last slot) stays low so the page's live "used today" wins.
-    const pattern = [95, 110, 70, 125, 88, 160, 142, 90, 105, 74, 118, 96, 150, 0];
-    const days = pattern.map((used, i) => {
+    // A believable sample fortnight for design review, around the person's
+    // own limit: mostly under it, one day over. Today (the last slot) stays
+    // low so the page's live "used today" wins.
+    const limit = mockMeToday().limit_minutes ?? 120;
+    const pattern = [0.8, 0.9, 0.55, 1.0, 0.7, 0.85, 0.75, 0.5, 0.58, 0.83, 0.29, 0.16, 1.07, 0.78, 0];
+    const days = pattern.slice(1).map((f, i, all) => {
       const d = new Date();
-      d.setDate(d.getDate() - (pattern.length - 1 - i));
+      d.setDate(d.getDate() - (all.length - 1 - i));
       return {
-        day: d.toISOString().slice(0, 10),
-        used_minutes: used,
-        earned_minutes: i % 5 === 0 ? 15 : 0,
+        day: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+        used_minutes: Math.round(limit * f),
+        earned_minutes: 0,
       };
     });
     return {
@@ -790,8 +795,6 @@ export async function getMeHistory(): Promise<MeHistory> {
         { name: "Living Room PC", used_minutes: 31 },
         { name: "Studio Laptop", used_minutes: 16 },
       ],
-      goal_minutes: 120,
-      goal_streak: 4,
     };
   });
 }
