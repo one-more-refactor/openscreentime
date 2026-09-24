@@ -212,7 +212,7 @@ cmd_install() {
     ssh_as rescue "grep -q ost-host.local /etc/hosts || echo '10.0.2.2 ost-host.local' | sudo tee -a /etc/hosts >/dev/null; \
         sudo pacman -Sy --noconfirm --needed nftables dnsmasq >/dev/null 2>&1 || true; \
         sudo install -m0755 /tmp/openscreentime /usr/local/bin/openscreentime \
-        && sudo openscreentime enroll --server $server --token '$token' \
+        && sudo OST_TOKEN='$token' openscreentime enroll --server $server \
         && sudo openscreentime install-service \
         && sudo openscreentime status"
     cat <<EOF

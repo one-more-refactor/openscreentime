@@ -34,6 +34,35 @@ fn ensure_secure_server(server: &str) -> Result<()> {
     )
 }
 
+/// Where `enroll` reads the one-time token from, most private first:
+/// `OST_TOKEN` in the environment (what `install.sh` uses — an environment
+/// is readable only by its owner and root, where argv is in everyone's `ps`
+/// and in shell history), `--token -` for one line on stdin, and `--token
+/// <TOKEN>` as a last resort.
+pub fn resolve_token(
+    arg: Option<&str>,
+    env: Option<String>,
+    stdin: &mut dyn std::io::BufRead,
+) -> Result<String> {
+    let token = match arg {
+        Some("-") => {
+            let mut line = String::new();
+            stdin.read_line(&mut line)?;
+            line
+        }
+        Some(t) => t.to_string(),
+        None => env.unwrap_or_default(),
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!(
+            "an enroll token is required: OST_TOKEN=<token> in the environment, or \
+             --token - to read it from stdin"
+        );
+    }
+    Ok(token)
+}
+
 /// The login the install ran from: `sudo` records it in `SUDO_USER`; a root
 /// shell reached through `su` still carries the login uid in
 /// `/proc/self/loginuid`. On "my computer" that login is the parent's own.
@@ -181,7 +210,29 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_secure_server, pick};
+    use super::{ensure_secure_server, pick, resolve_token};
+
+    #[test]
+    fn the_token_comes_from_the_environment_or_stdin() {
+        let mut none: &[u8] = b"";
+        // install.sh: OST_TOKEN only, nothing in argv.
+        let t = resolve_token(None, Some("env-tok\n".into()), &mut none).unwrap();
+        assert_eq!(t, "env-tok");
+        // `--token -`: one line on stdin, even with OST_TOKEN set.
+        let mut stdin: &[u8] = b"  stdin-tok \nrest\n";
+        let t = resolve_token(Some("-"), Some("env-tok".into()), &mut stdin).unwrap();
+        assert_eq!(t, "stdin-tok");
+        // `--token x` still works.
+        assert_eq!(
+            resolve_token(Some("argv-tok"), None, &mut none).unwrap(),
+            "argv-tok"
+        );
+        // Nothing anywhere, or only blanks: a plain error, never an empty token.
+        assert!(resolve_token(None, None, &mut none).is_err());
+        assert!(resolve_token(None, Some("  ".into()), &mut none).is_err());
+        let mut blank: &[u8] = b"\n";
+        assert!(resolve_token(Some("-"), None, &mut blank).is_err());
+    }
 
     #[test]
     fn the_answer_picks_a_login_or_none() {

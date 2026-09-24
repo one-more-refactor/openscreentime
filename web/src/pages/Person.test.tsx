@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import type { Device, FamilyChild, FamilyResponse, Policy } from "../types";
+import type { Device, Event, FamilyChild, FamilyResponse, Policy } from "../types";
 // Registers the shared module mocks; must be imported before the components.
 import { apiCalls, apiImpl, armConfirm, resetApiMock, resetUiMocks } from "../test/mockApi";
 
@@ -128,6 +128,20 @@ function setup(path: string) {
   );
 }
 
+/** A "time's up" moment on this login's computer, a minute ago. */
+function timesUp(deviceUserId: string): Event {
+  return {
+    id: `e-${deviceUserId}`,
+    tenant_id: "t",
+    device_id: deviceUserId === "du-jo" ? "jo-desk" : "mia-laptop",
+    device_user_id: deviceUserId,
+    type: "screen_time_exceeded",
+    severity: "info",
+    payload: {},
+    created_at: new Date(Date.now() - 60_000).toISOString(),
+  };
+}
+
 /** Words the product retired: one credential name, one stop verb. */
 const RETIRED = /parent code|\bPIN\b|authenticator|Protection|Block account|Locked-down|When time runs out|Math problem/i;
 
@@ -181,6 +195,22 @@ describe("today", () => {
     expect(await screen.findByText(/keep the details of their day to themselves/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Give 15 min" })).toBeNull();
     expect(apiCalls.where).toEqual([]);
+  });
+
+  test("an adult has no moments on their page, and none are fetched", async () => {
+    apiImpl.listEvents = () => Promise.resolve([timesUp("du-jo")]);
+    setup("/child/jo");
+    expect(await screen.findByText(/keep the details of their day to themselves/)).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(apiCalls.events).toEqual([]);
+    expect(screen.queryByText("Time's up for the day")).toBeNull();
+  });
+
+  test("a child's moments still show", async () => {
+    apiImpl.listEvents = (id) => Promise.resolve(id === "mia-laptop" ? [timesUp("du-mia")] : []);
+    setup("/child/mia");
+    expect(await screen.findByText("Time's up for the day")).toBeTruthy();
+    expect(apiCalls.events.length).toBeGreaterThan(0);
   });
 });
 

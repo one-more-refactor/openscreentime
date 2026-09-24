@@ -15,6 +15,13 @@ env:
   CARGO_INCREMENTAL: 0          # cleaner cache, smaller artifacts
   RUST_BACKTRACE: short
 
+# An explicit `bash` runs every step with `-eo pipefail`. The default shell
+# is `bash -e` without pipefail, so `cargo test … | tee` passed whatever the
+# tests did — a failing test turned the step green.
+defaults:
+  run:
+    shell: bash
+
 # ─────────────────────────────────────────────────────────────
 # Jobs run in parallel; server-test needs Postgres so it has its
 # own service container. Everything else is dependency-free.
@@ -28,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: policy
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: server
 
     services:
@@ -84,6 +93,11 @@ jobs:
 
     env:
       DATABASE_URL: postgres://openscreentime:openscreentime@localhost:5432/openscreentime
+      # Every DB-backed test (tests_auth, tests_rules, ledger) makes a
+      # throwaway database from this and drops it after. Required here, so a
+      # missing URL fails the run instead of quietly skipping them.
+      OST_TEST_DATABASE_URL: postgres://openscreentime:openscreentime@localhost:5432/openscreentime
+      OST_REQUIRE_TEST_DB: "1"
       RP_ID: localhost
       RP_ORIGIN: http://localhost:5173
       OST_INSECURE_COOKIES: "1"
@@ -143,6 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: client
 
     steps:
@@ -179,8 +194,9 @@ jobs:
       - name: test (default features)
         run: cargo test -- --nocapture 2>&1 | tee /tmp/client-test-default.txt
 
-      - name: test (tray feature)
-        run: cargo test --features tray -- --nocapture 2>&1 | tee /tmp/client-test-tray.txt
+      # The two builds that ship: headless (default) and desktop (gui+tray).
+      - name: test (desktop features gui,tray)
+        run: cargo test --features gui,tray -- --nocapture 2>&1 | tee /tmp/client-test-desktop.txt
 
       - name: "📋 Step summary"
         if: always()
@@ -188,7 +204,7 @@ jobs:
           echo "## 🤖 Client agent" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          for label in "default" "tray"; do
+          for label in "default" "desktop"; do
             FILE="/tmp/client-test-${label}.txt"
             PASSED=$(grep -c "^test .* ok$" "$FILE" 2>/dev/null || echo 0)
             FAILED=$(grep -c "^test .* FAILED$" "$FILE" 2>/dev/null || echo 0)
@@ -209,10 +225,11 @@ jobs:
 
   # ── 4. Web ─────────────────────────────────────────────────
   web:
-    name: "🌐 Web — typecheck / build"
+    name: "🌐 Web — typecheck / test / build"
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: web
 
     steps:
@@ -228,6 +245,9 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck 2>&1 | tee /tmp/web-typecheck.txt
+
+      - name: Test
+        run: bun test 2>&1 | tee /tmp/web-test.txt
 
       - name: Build
         run: bun run build 2>&1 | tee /tmp/web-build.txt

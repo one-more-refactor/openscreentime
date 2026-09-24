@@ -40,8 +40,9 @@ curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token
    never leave a truncated binary at `/usr/local/bin/openscreentime`.
 4. Verifies `sha256sum` against the hash pinned in the manifest; refuses to
    install on mismatch.
-5. `chmod 0755`, `mv -f` into place, then runs `ost enroll
-   --server ... --token ...` followed by `ost install-service`.
+5. `chmod 0755`, `mv -f` into place, then runs `OST_TOKEN=… ost enroll
+   --server ...` (the token in the environment, never in argv) followed by
+   `ost install-service`.
 
 Prefer the `OST_TOKEN=xxx` env form over `--token xxx`: the installer
 warns you if you use `--token`, because it can linger in shell history and
@@ -59,7 +60,7 @@ session (`--desktop` / `--headless` force it). To build one yourself:
 cd client
 cargo build --release --features gui,tray
 sudo install -m 0755 target/release/ost /usr/local/bin/openscreentime
-sudo ost enroll --server https://HOST --token <ENROLL_TOKEN>
+sudo OST_TOKEN=<ENROLL_TOKEN> ost enroll --server https://HOST
 sudo ost install-service
 ```
 
@@ -86,7 +87,7 @@ Subcommands:
 
 | Subcommand | Flags | What it does |
 |---|---|---|
-| `enroll` | `--server <URL>` `--token <TOKEN>` | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
+| `enroll` | `--server <URL>`, the token in `OST_TOKEN` (or `--token -` to read it from stdin; `--token <TOKEN>` works but shows in `ps`) | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
 | `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload` + enables/starts `openscreentime-agent.service` and `openscreentime-watchdog.timer`. Requires root. |
 | `status` | `--json` | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active openscreentime-agent.service`. Safe non-root. |
@@ -208,7 +209,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/etc/resolv.conf` | root : default, **immutable (`chattr +i`)** | `run` (DNS enforcement) | Pinned to `nameserver 127.0.0.1`; the immutable bit stops a managed user from repointing it. Re-asserted every tick if it drifts. |
 | `/etc/wireguard/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@openscreentime`. |
 | `/etc/openvpn/client/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | Same for an OpenVPN profile; runs as `openvpn-client@openscreentime`. |
-| `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `install-service` / `run` (bootstrap and on `set_tamper_level`) | Denies non-root power-off/reboot/suspend; at tamper level 3 also denies `systemctl stop/disable/mask` of the unit. `ost-admin` and `root` always retain access. |
+| `/etc/polkit-1/rules.d/49-openscreentime.rules` | root : default | `run` (bootstrap, and whenever the tamper level changes) | Tamper level 3 only: denies `systemctl stop/disable/mask` of the agent and watchdog units to everyone but `root` and `ost-admin`. Below level 3 there is no rule, and the agent removes the file (earlier builds wrote one denying power-off/reboot/suspend at every level). |
 | `/etc/systemd/logind.conf.d/50-openscreentime.conf` | root : default | `run` (tamper level 3 only) | `ReserveVT=0` / `KillUserProcesses=yes` drop-in — disables TTY/VT switching for managed sessions. |
 | `/run/openscreentime/heartbeat` | root : default | `run` (every tick) / `install-service` | mtime = liveness signal for `openscreentime-watchdog.timer`. |
 | `/run/openscreentime/status.json` | root : world-readable (0755 dir) | `run` (every tick, atomic rename via `.tmp`) | Device-wide snapshot for the tray/app: connection state, device-lock / offline-lockdown / tamper-lockdown flags and device-wide notifications. **No per-user data** (`users: []`). |
@@ -232,7 +233,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `server_url` | — | The enrolled server's base URL. |
 | `device_id` / `device_token` | — | Issued by the server at enroll time. |
 | `poll_interval_secs` | `30` | Heartbeat interval used by the polling fallback (when the WS bus is unavailable). |
-| `tamper_level` | `1` | Persisted tamper ceiling; the effective level is `max(this, 3 if --tamper-max else 1)`, and can be raised further by a `set_tamper_level` command up to that ceiling. |
+| `tamper_level` | `1` | Persisted starting level; the effective level is `max(this, 3 if --tamper-max else 1)`, never above the computer's ceiling (3 with `--tamper-max`, else 1). A `set_tamper_level` command moves it within that ceiling; a request above it is capped and reported (`capped` in the ack, a `tamper_level_capped` event). |
 | `auto_update` | `true` | Daily self-update from the enrolled server. `false` disables it; see [Self-update](#self-update) for the other kill switches. |
 
 ## systemd units
@@ -264,11 +265,11 @@ Installed by `install-service` (source in `client/systemd/`):
 - A commented-out `WatchdogSec=30` line for `sd_notify`-based watchdogging,
   as an alternative to the separate `openscreentime-watchdog.timer`.
 
-The polkit rule (`49-openscreentime.rules`) denies non-root
-`power-off`/`reboot`/`suspend`; at tamper level 3 it additionally denies
-`systemctl stop/disable/mask` on `openscreentime-agent.service`. `ost-admin`
-and `root` always retain full access — that's the permanent recovery path
-at every tamper level.
+The polkit rule (`49-openscreentime.rules`) exists at tamper level 3 only:
+it denies `systemctl stop/disable/mask` on `openscreentime-agent.service` and
+the watchdog to everyone but `root` and `ost-admin` — that's the recovery
+path. Power-off, reboot and suspend are never blocked; the persisted ledger
+and `freeze_state.json` make a restart come back to the same day and stop.
 
 ## Build features matrix
 

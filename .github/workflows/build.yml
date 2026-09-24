@@ -18,6 +18,12 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# An explicit `bash` runs every step with `-eo pipefail` (see ci.yml): without
+# it `cargo build … | tee` passes whatever the build did.
+defaults:
+  run:
+    shell: bash
+
 # ─────────────────────────────────────────────────────────────
 # Jobs:
 #   1. build-server   → openscreentime-server binary (glibc, x86_64)

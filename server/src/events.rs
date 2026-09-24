@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use openscreentime_policy::AgeBracket;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -142,20 +143,58 @@ fn event_to_json(r: EventRow) -> Value {
     })
 }
 
+/// The logins whose events `viewer` doesn't get to read: those of people the
+/// hub sees only the minutes of (`usage::hub_exposure` — adults, co-parents,
+/// anyone who manages themselves). Their moments are theirs, like their apps
+/// and sites. A viewer is never hidden from their own events, and events
+/// with no login (the computer's own: a tamper, a pause) stay visible — they
+/// are about the machine, not the person.
+pub async fn private_logins(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    viewer: Uuid,
+) -> AppResult<Vec<Uuid>> {
+    let rows: Vec<(Uuid, String, bool)> = sqlx::query_as(
+        "SELECT du.id, a.age_bracket, a.self_managed
+           FROM device_users du
+           JOIN devices d ON d.id = du.device_id
+           JOIN admins a ON a.id = du.account_id
+          WHERE d.tenant_id = $1 AND a.id <> $2",
+    )
+    .bind(tenant_id)
+    .bind(viewer)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, bracket, self_managed)| {
+            let bracket = AgeBracket::parse(bracket).unwrap_or(AgeBracket::Adult);
+            crate::usage::hub_exposure(bracket, *self_managed).is_none()
+        })
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
+/// A computer's recent events, as `viewer` may read them (see
+/// [`private_logins`]).
 pub async fn recent_for_device(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
+    viewer: Uuid,
     device_id: Uuid,
     limit: i64,
 ) -> AppResult<Value> {
+    let hidden = private_logins(db, tenant_id, viewer).await?;
     let rows: Vec<EventRow> = sqlx::query_as(
         "SELECT id, tenant_id, device_id, device_user_id, type, severity, payload, created_at
          FROM events WHERE tenant_id = $1 AND device_id = $2
+           AND (device_user_id IS NULL OR NOT (device_user_id = ANY($4)))
          ORDER BY created_at DESC LIMIT $3",
     )
     .bind(tenant_id)
     .bind(device_id)
     .bind(limit)
+    .bind(&hidden)
     .fetch_all(db)
     .await?;
     Ok(json!(rows
@@ -198,6 +237,8 @@ pub async fn list_events(
     Query(q): Query<EventsQuery>,
 ) -> AppResult<Json<Value>> {
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    // An adult's moments are theirs: the hub sees their minutes, not this.
+    let hidden = private_logins(&st.db, admin.tenant_id, admin.admin_id).await?;
     // Dynamic filters via COALESCE-style optional binds.
     let rows: Vec<EventRow> = sqlx::query_as(
         "SELECT id, tenant_id, device_id, device_user_id, type, severity, payload, created_at
@@ -206,6 +247,7 @@ pub async fn list_events(
            AND ($2::uuid IS NULL OR device_id = $2)
            AND ($3::text IS NULL OR type = $3)
            AND ($4::text IS NULL OR severity = $4)
+           AND (device_user_id IS NULL OR NOT (device_user_id = ANY($6)))
          ORDER BY created_at DESC
          LIMIT $5",
     )
@@ -214,6 +256,7 @@ pub async fn list_events(
     .bind(q.r#type)
     .bind(q.severity)
     .bind(limit)
+    .bind(&hidden)
     .fetch_all(&st.db)
     .await?;
 

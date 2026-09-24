@@ -16,19 +16,21 @@ OpenScreenTime window (`ost app`), your own page in the console (`/me`),
 ## What a parent sees, by age
 
 Your age bracket decides how much of your day a parent sees. The server
-decides this every time a parent looks (`server/src/usage.rs`, `Exposure`).
+decides this every time a parent looks (`server/src/usage.rs`, `hub_exposure`).
 
 | You are | A parent sees |
 |---|---|
 | **Little** (0–6), **Kid** (6–12), **Younger teen** (12–16) | Your time today and on past days. **Which apps were open**, in minutes, and when in the day. **Which sites this computer looked up**, as a count per site (for example "youtube.com ×40"). |
 | **Older teen** (16–18) | Your time today and on past days. Which apps were open, in minutes, and when. **Not the sites.** |
-| **Adult** (18+), keeping your own time | Your minutes, today and on past days. **Not your apps, not your sites, not your own rules** — the server refuses. |
+| **Adult** (18+), keeping your own time | Your minutes, today and on past days. **Not your apps, not your sites, not your own rules, not what happened in your sessions** — the server refuses. |
 
-At every age a parent also sees what happened on your computers: when it was
-paused or resumed, when time ran out, time you asked for or were given, when
-an unlock code was typed (right or wrong), when a blocked app was closed, when
-someone tried to get around the rules, and when someone signed in to the
-console from it.
+Up to older teen, a parent also sees what happened on your computers: when it
+was paused or resumed, when time ran out, time you asked for or were given,
+when an unlock code was typed (right or wrong), when a blocked app was closed,
+when someone tried to get around the rules, and when someone signed in to the
+console from it. For an adult, or anyone keeping their own time, the server
+leaves out everything that happened under your login; only what happened to
+the computer itself (a pause, someone deleting its firewall) still shows.
 
 Three details that matter:
 
@@ -122,8 +124,9 @@ It can't make tampering impossible if you have root and the machine in your
 hands, and it doesn't claim to. What it does:
 
 - Changes to its DNS setting or firewall are put back within seconds.
-- Power off, reboot and suspend are blocked for every login except root
-  (and the `ost-admin` recovery account, if the household made one).
+- Power off, reboot and suspend are never blocked. They don't get round a
+  stop either: your time today and a stop are kept on disk, so the computer
+  comes back to the same day.
 - If the agent stops, systemd restarts it, and a watchdog checks it's alive.
 - If its firewall keeps being deleted, it stops every screen and tells a
   parent, in plain words: OpenScreenTime was changed.

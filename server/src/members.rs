@@ -952,6 +952,9 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         // They set their own rules (/api/me/rules): the hub for themselves,
         // an adult, or someone who manages themselves.
         "self_managed": manages_self(&acct),
+        // What a parent sees of their day beyond the minutes — the very rule
+        // `/api/usage/where` enforces, so "What can a parent see?" is true.
+        "parent_sees": crate::usage::parent_sees(bracket, acct.8),
         // Sites they block for themselves and the hours those hold.
         "focus": { "hours": policy.focus.hours, "sites": policy.focus.sites },
     })))
@@ -993,7 +996,13 @@ pub async fn set_goal(
 /// who is an adult or manages themselves. Everyone else's rules are a
 /// parent's.
 pub fn manages_self(acct: &AccountRow) -> bool {
-    acct.4 != "member" || !bracket_of(acct).is_managed() || acct.8
+    sets_own_rules(&acct.4, bracket_of(acct), acct.8)
+}
+
+/// [`manages_self`] from the account's parts — the one rule, shared with
+/// `profiles::private_profile_ids` (whose rules nobody else may read or edit).
+pub fn sets_own_rules(role: &str, bracket: AgeBracket, self_managed: bool) -> bool {
+    role != "member" || !bracket.is_managed() || self_managed
 }
 
 fn rules_are_a_parents() -> AppError {
