@@ -84,8 +84,11 @@ enum Cmd {
     Enroll {
         #[arg(long)]
         server: String,
+        /// The one-time enroll token. Prefer OST_TOKEN=<token> in the
+        /// environment (install.sh does): argv shows up in `ps` and shell
+        /// history. `--token -` reads it from stdin.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Run the main loop (WS bus + policy enforcement).
     Run,
@@ -317,7 +320,14 @@ async fn main() -> Result<()> {
     }
 
     match cli.cmd {
-        Cmd::Enroll { server, token } => enroll::run(&server, &token).await,
+        Cmd::Enroll { server, token } => {
+            let token = enroll::resolve_token(
+                token.as_deref(),
+                std::env::var("OST_TOKEN").ok(),
+                &mut std::io::stdin().lock(),
+            )?;
+            enroll::run(&server, &token).await
+        }
         Cmd::Run => {
             // Before any state is read: adopt whatever the previous product
             // name left behind, so an upgrade doesn't start the day with an

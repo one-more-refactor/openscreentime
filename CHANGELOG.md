@@ -83,6 +83,44 @@ for just themselves; and the server looks after itself.
 - Event ingest is idempotent and enrollment retry-safe; a half-finished
   install can simply be run again.
 
+**Fixed**
+- **Tamper level 3 needs `--tamper-max` on the computer.** The server (or
+  `agent.toml`) could raise a computer to level 3 without it. Now a request
+  above the computer's ceiling is capped at 1 and says so: the ack carries
+  `capped: true` and the console gets a `tamper_level_capped` event.
+- **Power off, reboot and suspend work again for everyone.** A polkit rule
+  denied them to every login but root — parents and adults on their own
+  computers included — and kept laptops from sleeping. With the day's time
+  and every stop kept on disk, a restart or a suspend isn't a way around a
+  stop. The only rule left is level 3's "can't stop the agent" (root and
+  `ost-admin` exempt, and nothing else granted); below level 3 the agent
+  deletes the old rule file on its next start.
+- **"What can a parent see?" tells the truth for older teens.** It said
+  "apps and sites" to everyone; a parent sees an older teen's apps only. The
+  page now says what the server returns in `parent_sees` — the same rule
+  that decides what the parent's view shows.
+- **An adult's page shows a parent their minutes, and that's all.** Their
+  moments (time's up, a blocked app, a code typed) showed on the person page.
+  The server now leaves events under an adult's or self-managed person's
+  login out of `/api/events` and a computer's `recent_events` for everyone
+  but them, and the page no longer asks.
+- **A parent's own rules are theirs, even from another parent.** Only
+  members' own rules were protected; one parent could read and change
+  another's through `/api/profiles/:id`. Now that's a 403 for anyone but the
+  person, who changes them through `/api/me/rules`.
+- **The enroll token stays out of `ps`.** `install.sh` took the token from
+  `OST_TOKEN` and then passed it to `ost enroll --token`, in every user's
+  process list. It now hands it over in the environment; `ost enroll` reads
+  `OST_TOKEN` (or `--token -` for stdin) when `--token` is absent.
+- **CI tests what ships, and fails when a test does.** Steps ran `cargo test
+  | tee` without `pipefail`, so a failing test passed. Now every step runs
+  `bash -eo pipefail`; the server job runs every DB-backed test (the
+  ledger's too — one variable, `OST_TEST_DATABASE_URL` or `DATABASE_URL`,
+  for all) and fails if they would skip; the client is tested as the
+  headless and the `gui,tray` build; the web runs `bun test`.
+- **Pause everything says "Press and hold to pause."** It said "for a
+  second"; the hold is 600 ms.
+
 ### Upgrading
 
 - **Migrations run by themselves** on start (0026, 0027, 0030; 0028 and 0029

@@ -1043,6 +1043,11 @@ export function mockMeToday(): MeToday {
     windows: (!own && st?.schedule) || [],
     self_managed: own,
     focus: rules ? { sites: rules.sites, hours: rules.focus_hours } : { sites: [], hours: null },
+    // The server's rule (usage.rs `hub_exposure`), for sample data only.
+    parent_sees:
+      acc.age_bracket === "adult" || acc.self_managed
+        ? { apps: false, sites: false }
+        : { apps: true, sites: acc.age_bracket !== "older_teen" },
   };
 }
 

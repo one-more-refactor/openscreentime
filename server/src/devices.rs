@@ -392,7 +392,7 @@ pub async fn get_device(
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
     let users = device_users_json(&st.db, id).await?;
-    let recent = events::recent_for_device(&st.db, admin.tenant_id, id, 25).await?;
+    let recent = events::recent_for_device(&st.db, admin.tenant_id, admin.admin_id, id, 25).await?;
 
     let mut d = device_to_json(&row);
     d["online"] = json!(d["status"] == "online");

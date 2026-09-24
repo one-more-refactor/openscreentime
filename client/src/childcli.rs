@@ -5,7 +5,7 @@
 //! the first-run intro — every surface that was supposed to explain this system
 //! to the person living under it — are compiled out. What remains, for the
 //! child, is a session that freezes mid-game with no message, on a machine
-//! whose power button is blocked by a polkit rule.
+//! whose power button was blocked by a polkit rule.
 //!
 //! The agent already writes everything needed to
 //! `/run/openscreentime/status.<user>.json` each tick: minutes used, minutes
