@@ -597,7 +597,12 @@ pub fn refresh_units() -> Result<()> {
     }
     let exec = Exec::new(AgentCtx::new(false, false, 1));
     // A computer installed before the installer brought dnsmasq/nftables.
-    let deps = ensure_enforcement_deps(&exec);
+    // Restart the agent below only if that actually changed something — a
+    // package manager that "succeeds" without providing the program must
+    // not become a restart loop.
+    let missing_before = missing_enforcement_deps(&exec).len();
+    let deps =
+        ensure_enforcement_deps(&exec) && missing_enforcement_deps(&exec).len() < missing_before;
     let companion_new = cfg!(feature = "tray")
         && std::fs::read_to_string(COMPANION_AUTOSTART_PATH)
             .ok()
