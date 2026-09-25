@@ -21,7 +21,16 @@ import { AvatarRing } from "../components/AvatarRing";
 import { Button, buttonClass } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Mark } from "../components/Wordmark";
-import { useFamily, familyChanged, minutesLeft, minutesTotal, ringTarget, type FamilyChild } from "../lib/family";
+import {
+  useFamily,
+  familyChanged,
+  minutesLeft,
+  minutesTotal,
+  ringTarget,
+  stoppedBy,
+  type FamilyChild,
+  type StopKind,
+} from "../lib/family";
 import { unlockedUntil, whenLabel } from "../lib/day";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
@@ -51,18 +60,6 @@ function metaLine(c: FamilyChild): string {
 /** An adult keeping their own time: the hub sees their minutes, not their rules. */
 function keepsOwnTime(c: FamilyChild): boolean {
   return c.self_managed === true || c.managed === false || c.age_bracket === "adult";
-}
-
-/** Why someone's screen is stopped right now — the verdict's own reason, so a
- * bedtime never reads as "Time's up" — or null while it isn't. */
-export type StopKind = "limit" | "bedtime" | "outside_hours" | "paused";
-
-export function stoppedBy(c: FamilyChild): StopKind | null {
-  const r = c.rules;
-  if (r && !r.allowed) return r.reason ?? "limit";
-  // An older server without a verdict: out of minutes is all it can say.
-  if (!r && minutesLeft(c) === 0) return "limit";
-  return null;
 }
 
 /** The card's headline for a stop: "Bedtime until 07:00", "Outside allowed
@@ -107,20 +104,21 @@ function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
       </p>
     );
   }
+  const stop = stopHeadline(child);
+  if (stop) {
+    // The reason they're stopped, then the time they really used — never the
+    // limit printed as "used". Before "no limit": bedtime stops a child who
+    // has no daily limit just the same.
+    return (
+      <p className="pc-time" data-tone="stop">
+        <b>{stop}</b> · {duration(child.used_minutes)} used
+      </p>
+    );
+  }
   if (total === null || left === null) {
     return (
       <p className="pc-time">
         <b className="num">{duration(shown)}</b> today · no limit set
-      </p>
-    );
-  }
-  const stop = stopHeadline(child);
-  if (stop) {
-    // The reason they're stopped, then the time they really used — never the
-    // limit printed as "used".
-    return (
-      <p className="pc-time" data-tone="stop">
-        <b>{stop}</b> · {duration(child.used_minutes)} used
       </p>
     );
   }

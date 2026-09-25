@@ -36,6 +36,19 @@ export function minutesLeft(c: FamilyChild): number | null {
   return Math.max(0, c.limit_minutes + c.earned_minutes - c.used_minutes);
 }
 
+/** Why someone's screen is stopped right now. */
+export type StopKind = "limit" | "bedtime" | "outside_hours" | "paused";
+
+/** The verdict's own reason for a stop — so a bedtime never reads as "Time's
+ * up" — or null while they may use the screen. */
+export function stoppedBy(c: FamilyChild): StopKind | null {
+  const r = c.rules;
+  if (r && !r.allowed) return r.reason ?? "limit";
+  // An older server without a verdict: out of minutes is all it can say.
+  if (!r && minutesLeft(c) === 0) return "limit";
+  return null;
+}
+
 /** Total minutes available today: the limit plus anything earned on top. */
 export function minutesTotal(c: FamilyChild): number | null {
   if (c.limit_minutes === null) return null;
