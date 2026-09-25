@@ -211,6 +211,30 @@ for just themselves; and the server looks after itself.
   to someone whose time is up; no block page).
 - **Sign-in's "No code?"** says the real rule: the computer must be on and set
   up as yours.
+- **Nobody is told about a site they never opened.** The agent's minute-by-
+  minute check that blocks hold used to look up a real blocked site, so a
+  child was told "123movies.to is blocked on this computer" and her parent saw
+  "123movies.to 37×". The check has a name of its own now
+  (`selftest.openscreentime.internal`) that nothing counts. The notice names
+  only what this computer's own rules block, by the rule ("bet365.com" for
+  www.bet365.com) — not what the family resolver filters (Firefox's
+  background ads.mozilla.org was "mozilla.org is blocked").
+- **"Where the time went" leaves out what the computer looks up on its
+  own** — update checks ("debian.org 3097×"), "am I online?" checks,
+  Firefox's background services, the clock. The short list is in
+  `docs/TRANSPARENCY.md`; a site someone opens still counts.
+- **Reloading a console page works.** F5 on Computers or a bookmarked
+  person's page was a blank page (the server answered the browser's "is my
+  copy still good?" with an empty 404); every console page now reloads, and
+  its page is always checked for a newer version.
+- **The install line says what went wrong.** When the download fails — the
+  server down, a typo in the address — it says "Couldn't download the
+  installer from … — is the address right and the server up?" instead of
+  "curl: command not found".
+- **"Not yet — in 49 s" counts down** with the lock's own countdown instead of
+  keeping the number from when G was pressed.
+- **Removing a person removes the computer set up for them** if it never
+  connected ("Tmp's computer" stayed behind); a computer that did stays.
 
 ### Upgrading
 
