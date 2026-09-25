@@ -42,13 +42,17 @@ asked for, and a `tamper_level_capped` event reaches the console
   non-root user, parents included, and kept laptops from sleeping; the agent removes that
   polkit rule on its next start.)
 - **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
-  re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
+  re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event — once
+  per incident, and only while that resolver is running. Pinning to a resolver that isn't there
+  takes the computer offline, so without one the agent never pins, takes an earlier pin off
+  and gives the computer its own DNS back (reported as `enforcement_degraded`, not tamper).
 - **Firewall self-repair (fail-closed):** if the openscreentime nftables table disappears (e.g.
   `nft flush ruleset`), the tick emits an `nft_flush` (critical) event **and rebuilds the
   table from the effective policy** — a flush buys seconds of open network, not a session.
 - **NetworkManager guard:** each tick polls `nmcli` for overall state; if NetworkManager
-  reports disconnected, the agent runs `nmcli networking on` (best-effort) and emits an
-  `nm_disconnect` (warn) event. This is a 10-second poll, not a D-Bus subscription — see
+  reports disconnected **and there is no default route** (NetworkManager says "disconnected"
+  on a computer whose network it doesn't run), the agent runs `nmcli networking on`
+  (best-effort) and emits an `nm_disconnect` (warn) event, once per incident. This is a 10-second poll, not a D-Bus subscription — see
   "What OpenScreenTime does not do".
 - **The clock can't be used against it:** every decision reads the trusted clock (NTP, else
   the server's time, else boottime from the last anchor — `client/src/clock.rs`), so setting the

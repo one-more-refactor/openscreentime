@@ -21,6 +21,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gap {
     Dns(dns::DnsGap),
+    Firewall(firewall::FirewallGap),
     Vpn(vpn::VpnGap),
 }
 
@@ -29,6 +30,7 @@ impl Gap {
     pub fn kind(self) -> &'static str {
         match self {
             Gap::Dns(g) => g.kind(),
+            Gap::Firewall(g) => g.kind(),
             Gap::Vpn(g) => g.kind(),
         }
     }
@@ -37,6 +39,7 @@ impl Gap {
     pub fn explain(self) -> &'static str {
         match self {
             Gap::Dns(g) => g.explain(),
+            Gap::Firewall(g) => g.explain(),
             Gap::Vpn(g) => g.explain(),
         }
     }
@@ -81,22 +84,33 @@ pub fn apply_network_policy(
     // ever arrive. Suppress force_dns exactly in that case; every other
     // lockdown flag still applies. (The gap is already reported as critical.)
     let mut fw_lockdown = policy.lockdown.clone();
-    if dns_gaps.contains(&dns::DnsGap::NoLocalResolver) {
+    if dns_gaps.contains(&dns::DnsGap::NoLocalResolver)
+        || dns_gaps.contains(&dns::DnsGap::ResolverMissing)
+    {
         fw_lockdown.force_dns = false;
     }
     let mut gaps: Vec<Gap> = dns_gaps.into_iter().map(Gap::Dns).collect();
     // Firewall first (with the tunnel's accepts in place), THEN the tunnel —
     // bringing a wg/ovpn unit up before its endpoint accept exists would fail
     // its handshake against our own default-deny.
+    //
+    // A firewall that can't be loaded is a gap, not an abort: the DNS above
+    // and the screen time the caller applies next must not depend on `nft`
+    // being installed (a stock Debian desktop has no nftables).
     let plan = vpn::plan(vpn_state);
-    firewall::apply(
+    if !exec.has("nft") {
+        gaps.push(Gap::Firewall(firewall::FirewallGap::NotInstalled));
+    } else if let Err(e) = firewall::apply(
         exec,
         &policy.firewall,
         &fw_lockdown,
         &policy.dns.upstream,
         server_host,
         &plan,
-    )?;
+    ) {
+        tracing::error!("firewall not applied: {e:#}");
+        gaps.push(Gap::Firewall(firewall::FirewallGap::NotApplied));
+    }
     let (vpn_gaps, vpn_report) = vpn::reconcile(exec, vpn_state)?;
     gaps.extend(vpn_gaps.into_iter().map(Gap::Vpn));
     tracing::info!(
@@ -123,13 +137,17 @@ mod tests {
     #[test]
     fn every_gap_is_identified_and_actionable() {
         use dns::DnsGap::*;
+        use firewall::FirewallGap::*;
         use vpn::VpnGap::*;
 
         let all = [
+            Gap::Dns(ResolverMissing),
             Gap::Dns(NoLocalResolver),
             Gap::Dns(ResolvConfNotAFile),
             Gap::Dns(ResolvConfNotLocked),
             Gap::Dns(PolicyNotLoaded),
+            Gap::Firewall(NotInstalled),
+            Gap::Firewall(NotApplied),
             Gap::Vpn(NotRunning),
             Gap::Vpn(UnsupportedKind),
         ];
@@ -138,7 +156,9 @@ mod tests {
         for g in all {
             let kind = g.kind();
             assert!(
-                kind.starts_with("dns_") || kind.starts_with("vpn_"),
+                kind.starts_with("dns_")
+                    || kind.starts_with("firewall_")
+                    || kind.starts_with("vpn_"),
                 "{kind}: the prefix is what the console filters on"
             );
             assert!(kinds.insert(kind), "{kind}: duplicate kind, these are ids");

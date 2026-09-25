@@ -66,6 +66,54 @@ const DOH_RESOLVERS_V6: &[&str] = &[
     "2a07:a8c1::/32",
 ];
 
+/// A reason the firewall is not in force on this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirewallGap {
+    /// `nft` is not installed: there is no firewall to load.
+    NotInstalled,
+    /// `nft` refused the ruleset (or could not be run); the last good table,
+    /// if any, stays loaded.
+    NotApplied,
+}
+
+impl FirewallGap {
+    /// Stable machine-readable identifier (event payload `kind`).
+    pub fn kind(self) -> &'static str {
+        match self {
+            FirewallGap::NotInstalled => "firewall_not_installed",
+            FirewallGap::NotApplied => "firewall_not_applied",
+        }
+    }
+
+    /// Operator-facing explanation.
+    pub fn explain(self) -> &'static str {
+        match self {
+            FirewallGap::NotInstalled => {
+                "nftables (the `nft` tool) is not installed, so this computer's \
+                 firewall rules (blocked VPNs, forced DNS) are not applied. \
+                 Screen time still works. Re-run the install command (it \
+                 installs dnsmasq and nftables), or install nftables yourself."
+            }
+            FirewallGap::NotApplied => {
+                "the firewall ruleset could not be loaded with `nft`, so this \
+                 computer's firewall rules are not in force. Screen time still \
+                 works. The agent's log (`journalctl -u openscreentime-agent`) \
+                 says why."
+            }
+        }
+    }
+}
+
+/// Remove our tables (and the pre-rename one): back to the host's own
+/// firewall. For `ost unlock`/`recover` and for a retired computer.
+pub fn teardown(exec: &Exec) {
+    for table in [NFT_TABLE, LEGACY_NFT_TABLE] {
+        if let Err(e) = exec.run("nft", &["delete", "table", "inet", table]) {
+            tracing::debug!("nft table {table} delete (probably already absent): {e}");
+        }
+    }
+}
+
 /// Tor OR/directory/SOCKS ports blocked by `block_tor`.
 const TOR_PORTS: &str = "9001, 9030, 9050, 9051, 9150";
 
