@@ -2226,6 +2226,26 @@ impl Agent {
         use openscreentime_policy::rules::StopReason;
         let now = self.trusted_now.with_timezone(&chrono::Local);
         let mut v = screentime::verdict(p, &self.tracker, u, &now, false);
+        // Billing is in whole seconds, and the fraction not billed yet
+        // (`bill_carry`) was already used: without it a limit's stop moved
+        // by up to a second from tick to tick — enough to turn "ends at
+        // 03:24" into "03:23" in the last minute. An override's end is a
+        // fixed moment and stays where it is.
+        if v.allowed && v.reason == Some(StopReason::Limit) && self.counting.iter().any(|c| c == u)
+        {
+            let ov_end = self
+                .tracker
+                .peek_override(u, self.trusted_now)
+                .map(|t| t.with_timezone(&chrono::Local));
+            if let (Some(at), Ok(carry)) = (v.stop_at, chrono::Duration::from_std(self.bill_carry))
+            {
+                if ov_end.is_none_or(|e| (at - e).num_milliseconds().abs() > 1) {
+                    let at = at - carry;
+                    v.stop_at = Some(at);
+                    v.minutes_left = Some((((at - now).num_seconds().max(0) + 59) / 60) as u32);
+                }
+            }
+        }
         if self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown {
             let pending = self
                 .device_lock_grace_until
@@ -4807,6 +4827,71 @@ mod tests {
         let face = c.face_for("mia");
         assert_eq!(face.title, "Your screen is coming back");
         assert!(!face.detail.is_empty());
+    }
+
+    /// Acceptance round 2, step 4: warnings said "ends at 03:24" and, in the
+    /// last minute, "ends at 03:23" — the stop slid by the second the whole-
+    /// second billing hadn't billed yet. Tick by tick (10.37 s apart, the
+    /// fraction carried as the tick carries it), the stop the warnings
+    /// announce holds still to the millisecond, and the real stop is it.
+    #[test]
+    fn the_announced_stop_holds_still_and_is_the_real_stop() {
+        use chrono::TimeZone;
+        let (mut a, _fake) = agent_with_mia();
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 25, 3, 6, 59)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            + chrono::Duration::milliseconds(900);
+        a.trusted_now = start;
+        a.tracker = screentime::UsageTracker::new();
+        a.tracker
+            .roll_to(start.with_timezone(&chrono::Local).date_naive());
+        let mut p = Policy::default();
+        p.screen_time.enabled = true;
+        p.screen_time.daily_limit_minutes = 17;
+        a.policies.insert("mia".into(), p.clone());
+        a.counting = vec!["mia".into()];
+        a.bill_carry = Duration::ZERO;
+        let tick = Duration::from_millis(10_370);
+        let mut said = HashSet::new();
+        let mut stops = Vec::new();
+        let real_stop = loop {
+            let v = a.stop_verdict("mia", &p);
+            if !v.allowed {
+                break a.trusted_now;
+            }
+            let at = v.stop_at.expect("a limit ahead");
+            stops.push(at);
+            let secs = (at - a.trusted_now.with_timezone(&chrono::Local)).num_seconds();
+            said.insert(warn::words(warn::StopReason::Limit, secs, Some(at)).body);
+            // The next tick: bill the whole seconds, carry the rest.
+            let (whole, carry) = whole_seconds(tick + a.bill_carry);
+            a.bill_carry = carry;
+            a.tracker.add_active("mia", whole.as_secs() as u32, 1);
+            a.trusted_now += chrono::Duration::from_std(tick).unwrap();
+        };
+        assert_eq!(said.len(), 1, "one stop time, said once: {said:?}");
+        assert!(said.iter().all(|s| s.contains("03:23")), "{said:?}");
+        let first = stops[0];
+        assert!(
+            stops
+                .iter()
+                .all(|s| (*s - first).num_milliseconds().abs() <= 1),
+            "{stops:?}"
+        );
+        assert_eq!(
+            first.with_timezone(&chrono::Utc),
+            start + chrono::Duration::minutes(17)
+        );
+        // The first tick past it is where the stop really lands: within one
+        // tick of the announced moment, never before it.
+        let late = real_stop - first.with_timezone(&chrono::Utc);
+        assert!(
+            late >= chrono::Duration::zero() && late.to_std().unwrap() <= tick,
+            "{late}"
+        );
     }
 
     fn cmd_lock() -> Command {
