@@ -89,7 +89,7 @@ Subcommands:
 |---|---|---|
 | `enroll` | `--server <URL>`, the token in `OST_TOKEN` (or `--token -` to read it from stdin; `--token <TOKEN>` works but shows in `ps`) | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
-| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload` + enables/starts `openscreentime-agent.service` and `openscreentime-watchdog.timer`. Requires root. |
+| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, installs what the network rules need where it's missing (`dnsmasq` and `nftables`, via apt/dnf/pacman/zypper — dnsmasq's first start pre-seeded to listen on 127.0.0.1 only, next to systemd-resolved), writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload`, enables and **restarts** `openscreentime-agent.service` (so re-running the one-liner reaches a running agent with its new token) and enables `openscreentime-watchdog.timer`. On a tray build it also starts the companion for whoever is signed in to a desktop right now (`systemctl --user -M <user>@ start`, else in their session via `runuser`). Requires root. |
 | `status` | `--json` | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active openscreentime-agent.service`. Safe non-root. |
 | `time` | `--json` | How much screen time the calling user has left today. Reads the per-user status snapshot the agent writes each tick. Safe non-root, no display needed. |
 | `ask` | `--json` | Sends a time request to a parent, from the keyboard. Writes a marker inside the caller's own `/run/user/<uid>/openscreentime/` — which is what proves the request came from them. Safe non-root. |
@@ -303,8 +303,13 @@ allowlist) gets allowlist mode: allowlisted domains forward, a trailing
 `address=/#/` NXDOMAINs the rest. `block_tor` NXDOMAINs
 `.onion` and `torproject.org`; `safe_search` rewrites the big search/video
 providers via `cname=` redirects. `/etc/resolv.conf` is pinned to
-`127.0.0.1` and set immutable (`chattr +i`); re-pinned every tick if it
-drifts off the local resolver.
+`127.0.0.1` and set immutable (`chattr +i`) — **only while dnsmasq is
+running**: the tick re-pins on drift only then, and when the resolver is gone
+it takes its own pin off and puts back what the computer used before (kept in
+`/var/lib/openscreentime/resolv.conf.pre-pin`; else NetworkManager's or
+systemd-resolved's file; else the family resolvers). A computer that can't
+filter stays online and says so (`dns_resolver_missing`,
+`dns_no_local_resolver`).
 
 ### Firewall
 
@@ -686,7 +691,18 @@ black out all traffic):
   host can't enforce all of it. The payload `kind` says which:
   | `kind` | Meaning | Fix |
   |---|---|---|
-  | `dns_no_local_resolver` | dnsmasq isn't installed or won't start, so the allowlist filters nothing | `apt install dnsmasq` (or the distro equivalent) and check `systemctl status dnsmasq` |
+  | `dns_resolver_missing` | dnsmasq isn't installed: websites aren't filtered (the computer keeps its own DNS; screen time works) | re-run the install one-liner (it installs dnsmasq + nftables), or install dnsmasq |
+  | `dns_no_local_resolver` | dnsmasq is installed but won't start, so the allowlist filters nothing | `systemctl status dnsmasq` |
+  | `firewall_not_installed` | `nft` isn't installed: no firewall rules (screen time works) | re-run the install one-liner, or install nftables |
+  | `firewall_not_applied` | `nft` refused the ruleset | the agent's journal says why |
+  | `network_apply_failed` | the network rules couldn't be applied at all | the agent's journal says why |
+
+  Each is sent once, when it appears — not on every re-apply — and stands in
+  the `state` frame's `gaps` while it lasts, which is what the console's
+  Family and Computers pages show. None of them is a `tamper` event: a missing
+  package is a setup to fix, not someone getting around the rules. The tamper
+  loop's own findings (`resolv_conf_drift`, `nft_flush`, `nm_disconnect`, …)
+  are likewise reported once per incident, not every 10 s.
   | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` was a symlink owned by `systemd-resolved`/`resolvconf`; the agent replaced it with a real file | `systemctl disable --now systemd-resolved`, or it fights the pin on every network change |
   | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
 

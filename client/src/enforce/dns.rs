@@ -38,6 +38,8 @@ const INCLUDE_STUB: &str = "00-openscreentime.conf";
 /// as `critical` events instead of being logged and forgotten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsGap {
+    /// dnsmasq is not installed at all: nothing can serve the allowlist.
+    ResolverMissing,
     /// No local resolver is listening, so the rendered ruleset is inert.
     NoLocalResolver,
     /// `/etc/resolv.conf` was a symlink — another service (systemd-resolved's
@@ -55,6 +57,7 @@ impl DnsGap {
     /// Stable machine-readable identifier (event payload `kind`).
     pub fn kind(self) -> &'static str {
         match self {
+            DnsGap::ResolverMissing => "dns_resolver_missing",
             DnsGap::NoLocalResolver => "dns_no_local_resolver",
             DnsGap::ResolvConfNotAFile => "dns_resolv_conf_not_a_file",
             DnsGap::ResolvConfNotLocked => "dns_resolv_conf_not_locked",
@@ -65,10 +68,17 @@ impl DnsGap {
     /// Operator-facing explanation, in the terms the parent/admin needs.
     pub fn explain(self) -> &'static str {
         match self {
+            DnsGap::ResolverMissing => {
+                "dnsmasq is not installed, so websites are not filtered on this \
+                 computer. It stays online with its own DNS, and screen time \
+                 still works. Re-run the install command (it installs dnsmasq \
+                 and nftables), or install dnsmasq yourself."
+            }
             DnsGap::NoLocalResolver => {
-                "no local resolver is listening on 127.0.0.1 — dnsmasq is not \
-                 installed or failed to start, so the DNS allowlist is not \
-                 filtering anything. Install dnsmasq on this device."
+                "no local resolver is listening on 127.0.0.1 — dnsmasq failed to \
+                 start, so the DNS allowlist is not filtering anything. This \
+                 computer keeps its own DNS meanwhile. Check \
+                 `systemctl status dnsmasq` on it."
             }
             DnsGap::ResolvConfNotAFile => {
                 "/etc/resolv.conf was a symlink owned by another service \
@@ -114,12 +124,51 @@ fn ensure_include(exec: &Exec) -> Option<DnsGap> {
     };
 
     let stub = format!("{dir}/{INCLUDE_STUB}");
-    let body = format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n");
+    let body = include_stub_body();
+    // Already there (the installer seeds it): nothing to write. The agent's
+    // sandbox can only write /etc/dnsmasq.d if it existed when the agent
+    // started, so a correct stub must not turn into a "could not write" gap.
+    if exec.read_file(&stub).as_deref() == Some(body.as_str()) {
+        return None;
+    }
     if let Err(e) = exec.write_file(&stub, &body) {
         tracing::error!("could not write dnsmasq include stub {stub}: {e}");
         return Some(DnsGap::PolicyNotLoaded);
     }
     None
+}
+
+fn include_stub_body() -> String {
+    format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n")
+}
+
+/// What dnsmasq serves before the agent's first policy: answer on 127.0.0.1
+/// only (never the wildcard, which collides with systemd-resolved's stub on
+/// 127.0.0.53 and makes the package's own start fail), forwarding to whatever
+/// this computer used before. The first policy apply replaces it.
+const BOOTSTRAP_CONF: &str = "# Managed by openscreentime — replaced by the first policy.\n\
+listen-address=127.0.0.1\nbind-interfaces\n";
+
+/// Before dnsmasq is installed: make the package's first start one that works
+/// and reads our directory. Idempotent; never overwrites a ruleset.
+pub fn preseed(exec: &Exec) -> Result<()> {
+    let dir = DISTRO_CONF_DIRS[0];
+    exec.write_file(&format!("{dir}/{INCLUDE_STUB}"), &include_stub_body())?;
+    if exec.read_file(DNSMASQ_CONF).is_none() {
+        exec.write_file(DNSMASQ_CONF, BOOTSTRAP_CONF)?;
+    }
+    Ok(())
+}
+
+/// Take the ruleset out of dnsmasq (retirement): remove our include stub and
+/// ruleset, and restart dnsmasq only if it is running, so it goes back to
+/// whatever it did before. resolv.conf is [`unpin_resolv_conf`]'s job.
+pub fn remove_config(exec: &Exec) {
+    for dir in DISTRO_CONF_DIRS {
+        let _ = exec.remove_file(&format!("{dir}/{INCLUDE_STUB}"));
+    }
+    let _ = exec.remove_file(DNSMASQ_CONF);
+    let _ = exec.run("systemctl", &["try-restart", "dnsmasq"]);
 }
 
 /// Is a local resolver actually answering? A rendered allowlist that nothing
@@ -303,11 +352,14 @@ pub fn apply(
             std::fs::Permissions::from_mode(0o600),
         );
     }
-    if let Err(e) = exec.run("systemctl", &["restart", "dnsmasq"]) {
+    let installed = !exec.observes() || exec.has("dnsmasq");
+    if !installed {
+        gaps.push(DnsGap::ResolverMissing);
+    } else if let Err(e) = exec.run("systemctl", &["restart", "dnsmasq"]) {
         tracing::error!("dnsmasq restart failed: {e}");
     }
-    let no_resolver = !exec.dry_run() && !local_resolver_running(exec);
-    if no_resolver {
+    let no_resolver = exec.observes() && !local_resolver_running(exec);
+    if no_resolver && installed {
         gaps.push(DnsGap::NoLocalResolver);
     }
 
@@ -332,7 +384,7 @@ pub fn apply(
         );
         // Undo a pin from a previous run that DID have a resolver, otherwise the
         // device stays broken from then on.
-        let _ = exec.run("chattr", &["-i", RESOLV_CONF]);
+        unpin_resolv_conf(exec);
     } else {
         gaps.extend(pin_resolv_conf(exec)?);
     }
@@ -350,9 +402,60 @@ pub fn apply(
     Ok(gaps)
 }
 
+/// Where resolv.conf's contents from before the pin are kept, to put back
+/// when the pin has to go (no resolver any more, retirement, `ost unlock`).
+fn pre_pin_path() -> String {
+    crate::paths::state("resolv.conf.pre-pin")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// What resolv.conf looked like before we pinned it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PrePin {
+    /// It was a symlink to this (systemd-resolved's stub, resolvconf's file).
+    #[serde(default)]
+    symlink: Option<String>,
+    /// Its contents (read through the symlink, if it was one).
+    content: String,
+}
+
+/// Is this resolv.conf our pin?
+fn is_our_pin(content: &str) -> bool {
+    content.contains("Managed by openscreentime")
+        && content.lines().any(|l| {
+            let mut words = l.split_whitespace();
+            words.next() == Some("nameserver") && words.next() == Some(LOCAL_RESOLVER)
+        })
+}
+
 /// Pin & guard /etc/resolv.conf (removing any prior immutable bit first).
+///
+/// Callers pin only while a local resolver is running. What was there before
+/// is kept (`resolv.conf.pre-pin`), so taking the pin away gives the computer
+/// its own DNS back at once instead of a file pointing at nothing.
 pub fn pin_resolv_conf(exec: &Exec) -> Result<Vec<DnsGap>> {
     let mut gaps = Vec::new();
+
+    let current = exec.read_file(RESOLV_CONF).unwrap_or_default();
+    if !current.trim().is_empty() && !is_our_pin(&current) {
+        let symlink = if exec.dry_run() {
+            None
+        } else {
+            std::fs::read_link(RESOLV_CONF)
+                .ok()
+                .map(|t| t.to_string_lossy().into_owned())
+        };
+        let saved = PrePin {
+            symlink,
+            content: current,
+        };
+        if let Ok(json) = serde_json::to_string(&saved) {
+            if let Err(e) = exec.write_file(&pre_pin_path(), &json) {
+                tracing::warn!("could not keep resolv.conf's previous contents: {e}");
+            }
+        }
+    }
 
     // If the path is a symlink, another service owns it. Writing through the
     // link lands in *that* service's file — typically on tmpfs, where the
@@ -377,16 +480,93 @@ pub fn pin_resolv_conf(exec: &Exec) -> Result<Vec<DnsGap>> {
     Ok(gaps)
 }
 
-/// Re-assert resolv.conf if it drifted (called by the tamper loop). Returns
-/// whether it had drifted, plus any gap that stops the re-pin from sticking.
-pub fn reassert(exec: &Exec) -> Result<(bool, Vec<DnsGap>)> {
-    let current = std::fs::read_to_string(RESOLV_CONF).unwrap_or_default();
-    if !current.contains(LOCAL_RESOLVER) {
-        tracing::warn!("resolv.conf drifted off local resolver — re-pinning");
-        let gaps = pin_resolv_conf(exec)?;
-        return Ok((true, gaps));
+/// Used when nothing better is left: the family resolvers the policy
+/// defaults to (malware + adult filtered), so the computer stays online.
+const FALLBACK_RESOLV: &str =
+    "# Written by openscreentime: its local resolver is not running, and\n\
+# nothing else gave this computer a resolver. Your network manager\n\
+# replaces this on the next connection.\n\
+nameserver 1.1.1.3\nnameserver 1.0.0.3\n";
+
+/// Take our pin off /etc/resolv.conf and give the computer working DNS back:
+/// what was there before the pin, else whatever NetworkManager or
+/// systemd-resolved says, else the family resolvers. Never leaves the file
+/// pointing at a resolver that isn't running. Does nothing to a resolv.conf
+/// that isn't our pin. Returns whether it changed anything.
+pub fn unpin_resolv_conf(exec: &Exec) -> bool {
+    let current = exec.read_file(RESOLV_CONF).unwrap_or_default();
+    if !is_our_pin(&current) {
+        return false;
     }
-    Ok((false, Vec::new()))
+    let _ = exec.run("chattr", &["-i", RESOLV_CONF]);
+    let saved = exec
+        .read_file(&pre_pin_path())
+        .and_then(|s| serde_json::from_str::<PrePin>(&s).ok())
+        .filter(|p| !is_our_pin(&p.content));
+    if let Some(saved) = saved {
+        // A symlink comes back as the symlink where that's possible (outside
+        // the agent's sandbox); otherwise its contents do.
+        let relinked = saved.symlink.as_deref().is_some_and(|target| {
+            !exec.dry_run()
+                && std::path::Path::new(target).exists()
+                && std::fs::remove_file(RESOLV_CONF).is_ok()
+                && std::os::unix::fs::symlink(target, RESOLV_CONF).is_ok()
+        });
+        if relinked || exec.write_file(RESOLV_CONF, &saved.content).is_ok() {
+            let _ = exec.remove_file(&pre_pin_path());
+            tracing::warn!("resolv.conf un-pinned: put back what this computer used before");
+            return true;
+        }
+    }
+    // Nothing kept (pinned by an older agent): ask NetworkManager to write it.
+    if exec.has("nmcli") {
+        let _ = exec.run("nmcli", &["general", "reload", "dns-rc"]);
+        let now = exec.read_file(RESOLV_CONF).unwrap_or_default();
+        if !now.trim().is_empty() && !is_our_pin(&now) {
+            tracing::warn!("resolv.conf un-pinned: NetworkManager rewrote it");
+            return true;
+        }
+    }
+    // systemd-resolved keeps the real upstreams here.
+    let body = exec
+        .read_file("/run/systemd/resolve/resolv.conf")
+        .filter(|b| b.contains("nameserver"))
+        .unwrap_or_else(|| FALLBACK_RESOLV.to_string());
+    if let Err(e) = exec.write_file(RESOLV_CONF, &body) {
+        tracing::error!("could not un-pin resolv.conf: {e}");
+        return false;
+    }
+    tracing::warn!("resolv.conf un-pinned");
+    true
+}
+
+/// What the tamper loop's resolv.conf check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reassert {
+    /// Pinned to the local resolver, and the resolver is running.
+    InForce,
+    /// It had drifted and was pinned again; gaps stop the pin from sticking.
+    Repinned(Vec<DnsGap>),
+    /// No local resolver is running, so nothing was pinned — pinning to a
+    /// resolver that isn't there takes the computer offline. `unpinned`: our
+    /// earlier pin was taken off just now (the resolver went away).
+    NoResolver { unpinned: bool },
+}
+
+/// Re-assert resolv.conf if it drifted (called by the tamper loop) — only
+/// ever toward a resolver that is actually running.
+pub fn reassert(exec: &Exec) -> Result<Reassert> {
+    if exec.observes() && !local_resolver_running(exec) {
+        return Ok(Reassert::NoResolver {
+            unpinned: unpin_resolv_conf(exec),
+        });
+    }
+    let current = exec.read_file(RESOLV_CONF).unwrap_or_default();
+    if is_our_pin(&current) {
+        return Ok(Reassert::InForce);
+    }
+    tracing::warn!("resolv.conf drifted off local resolver — re-pinning");
+    Ok(Reassert::Repinned(pin_resolv_conf(exec)?))
 }
 
 #[cfg(test)]
@@ -498,6 +678,7 @@ mod tests {
     /// console filters on, so they are API. Pin them.
     #[test]
     fn gap_kinds_are_stable_identifiers() {
+        assert_eq!(DnsGap::ResolverMissing.kind(), "dns_resolver_missing");
         assert_eq!(DnsGap::NoLocalResolver.kind(), "dns_no_local_resolver");
         assert_eq!(
             DnsGap::ResolvConfNotAFile.kind(),
@@ -523,12 +704,137 @@ mod tests {
         assert!(INCLUDE_STUB.starts_with("00-"));
     }
 
+    fn pos(log: &[String], entry: &str) -> usize {
+        log.iter()
+            .position(|l| l == entry)
+            .unwrap_or_else(|| panic!("{entry:?} not in {log:#?}"))
+    }
+
+    const NM_RESOLV: &str = "# Generated by NetworkManager\nnameserver 192.168.1.1\n";
+
+    /// The acceptance bug: no dnsmasq, and the tamper loop pinned
+    /// resolv.conf to 127.0.0.1 anyway — a computer with no DNS at all.
+    #[test]
+    fn reassert_never_pins_to_a_resolver_that_is_not_running() {
+        for missing in [&["dnsmasq"][..], &[][..]] {
+            let exec = Exec::simulated(
+                missing,
+                &[
+                    ("systemctl is-active dnsmasq", "inactive\n"),
+                    ("read /etc/resolv.conf", NM_RESOLV),
+                ],
+            );
+            let r = reassert(&exec).unwrap();
+            assert_eq!(r, Reassert::NoResolver { unpinned: false });
+            assert!(
+                !exec.log().iter().any(|l| l.contains("resolv.conf")),
+                "{:?}",
+                exec.log()
+            );
+        }
+    }
+
+    /// The resolver went away under a pin: the pin comes off and the
+    /// computer's own resolv.conf comes back — not just the immutable bit.
+    #[test]
+    fn a_pin_without_a_resolver_is_taken_off_and_the_old_dns_restored() {
+        let saved = serde_json::to_string(&PrePin {
+            symlink: None,
+            content: NM_RESOLV.into(),
+        })
+        .unwrap();
+        let exec = Exec::simulated(
+            &[],
+            &[
+                ("systemctl is-active dnsmasq", "failed\n"),
+                ("read /etc/resolv.conf", &render_resolv_conf()),
+                ("read /var/lib/openscreentime/resolv.conf.pre-pin", &saved),
+            ],
+        );
+        assert_eq!(
+            reassert(&exec).unwrap(),
+            Reassert::NoResolver { unpinned: true }
+        );
+        let log = exec.log();
+        assert!(pos(&log, "run chattr -i /etc/resolv.conf") < pos(&log, "write /etc/resolv.conf"));
+        pos(&log, "remove /var/lib/openscreentime/resolv.conf.pre-pin");
+        assert!(!log.iter().any(|l| l.contains("chattr +i")));
+    }
+
+    /// Pinned by an older agent that kept nothing: the family resolvers (or
+    /// NetworkManager's own file) rather than a pin to nothing.
+    #[test]
+    fn an_old_pin_with_nothing_kept_still_gets_working_dns() {
+        let exec = Exec::simulated(
+            &["nmcli"],
+            &[
+                ("systemctl is-active dnsmasq", "inactive\n"),
+                ("read /etc/resolv.conf", &render_resolv_conf()),
+            ],
+        );
+        assert!(unpin_resolv_conf(&exec));
+        pos(&exec.log(), "write /etc/resolv.conf");
+        assert!(FALLBACK_RESOLV.contains("nameserver 1.1.1.3"));
+        assert!(!is_our_pin(FALLBACK_RESOLV));
+    }
+
+    /// With the resolver running, drift is re-pinned — and what was there
+    /// is kept first, so the pin can be taken off again cleanly.
+    #[test]
+    fn drift_is_repinned_only_with_a_running_resolver_and_keeps_the_old_file() {
+        let exec = Exec::simulated(
+            &[],
+            &[
+                ("systemctl is-active dnsmasq", "active\n"),
+                ("read /etc/resolv.conf", NM_RESOLV),
+            ],
+        );
+        assert_eq!(reassert(&exec).unwrap(), Reassert::Repinned(vec![]));
+        let log = exec.log();
+        assert!(
+            pos(&log, "write /var/lib/openscreentime/resolv.conf.pre-pin")
+                < pos(&log, "write /etc/resolv.conf")
+        );
+        pos(&log, "run chattr +i /etc/resolv.conf");
+        // Already pinned and served: nothing to do.
+        let exec = Exec::simulated(
+            &[],
+            &[
+                ("systemctl is-active dnsmasq", "active\n"),
+                ("read /etc/resolv.conf", &render_resolv_conf()),
+            ],
+        );
+        assert_eq!(reassert(&exec).unwrap(), Reassert::InForce);
+        assert!(exec.log().is_empty());
+    }
+
+    /// No dnsmasq at all: a gap of its own, no restart attempted, no pin.
+    #[test]
+    fn apply_without_dnsmasq_reports_it_and_leaves_dns_alone() {
+        let exec = Exec::simulated(&["dnsmasq"], &[("read /etc/resolv.conf", NM_RESOLV)]);
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: true,
+            upstream: "1.1.1.3".into(),
+        };
+        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]).unwrap();
+        assert_eq!(gaps, vec![DnsGap::ResolverMissing]);
+        let log = exec.log();
+        assert!(!log.iter().any(|l| l.contains("restart dnsmasq")));
+        assert!(!log
+            .iter()
+            .any(|l| l == "write /etc/resolv.conf" || l.contains("chattr +i")));
+    }
+
     /// Every gap has to tell an operator what to actually do about it — an
     /// alert nobody can action is the failure mode this whole change exists
     /// to remove.
     #[test]
     fn every_gap_explains_itself() {
         for gap in [
+            DnsGap::ResolverMissing,
             DnsGap::NoLocalResolver,
             DnsGap::ResolvConfNotAFile,
             DnsGap::ResolvConfNotLocked,

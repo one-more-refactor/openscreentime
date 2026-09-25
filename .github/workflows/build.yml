@@ -128,7 +128,7 @@ jobs:
       # into the binaries and published in manifest.json (client/src/update.rs).
       - name: Agent build id
         run: |
-          ID=$(find policy client -type f -not -path '*/target/*' -print0 \
+          ID=$(find policy client brand/icons brand/app-icon*.svg -type f -not -path '*/target/*' -print0 \
             | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
           echo "OST_BUILD_ID=$ID" >> "$GITHUB_ENV"
           echo "agent build id: $ID"

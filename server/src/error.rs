@@ -44,6 +44,13 @@ pub enum AppError {
     /// device voucher is not linked to any person on this household.
     #[error("{0}")]
     NoAccount(String),
+    /// 410 with the stable code `device_retired` and a top-level
+    /// `"retired": true`: this device token belonged to a computer that was
+    /// removed from the household. The agent's contract is to take itself off
+    /// that computer (thaw, drop the lock, the firewall and the DNS pin) and
+    /// stop — the one answer it does that on; a plain 401 never does.
+    #[error("{0}")]
+    DeviceRetired(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -62,6 +69,7 @@ impl AppError {
             AppError::CodeExpired(_) => (StatusCode::GONE, "code_expired"),
             AppError::ForbiddenForMember(_) => (StatusCode::FORBIDDEN, "forbidden_for_member"),
             AppError::NoAccount(_) => (StatusCode::NOT_FOUND, "no_account"),
+            AppError::DeviceRetired(_) => (StatusCode::GONE, "device_retired"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -81,10 +89,13 @@ impl IntoResponse for AppError {
             }
             _ => self.to_string(),
         };
-        let body = Json(json!({
+        let mut body = json!({
             "error": { "code": code, "message": message }
-        }));
-        (status, body).into_response()
+        });
+        if code == "device_retired" {
+            body["retired"] = json!(true);
+        }
+        (status, Json(body)).into_response()
     }
 }
 

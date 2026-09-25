@@ -207,14 +207,33 @@ pub fn notify(c: &LoginCode) {
 /// No graphical session → nothing to do (`ost code` still works).
 #[cfg(feature = "gui")]
 pub fn open_app_for(user: &str) {
+    if let Err(e) = spawn_in_session(user, &["app"]) {
+        tracing::warn!("could not open the app window for {user}: {e}");
+    }
+}
+
+/// `runuser` as an absolute path. It lives in /usr/sbin on Debian, and the
+/// environment handed to the child below has a user's PATH, which has no
+/// sbin — so a bare "runuser" was not found, and the window never opened.
+fn runuser() -> std::io::Result<std::path::PathBuf> {
+    crate::util::find_program("runuser").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "runuser is not installed")
+    })
+}
+
+/// Run this binary with `args` inside `user`'s graphical session, as that
+/// user: their uid, groups and a clean environment pointing at their
+/// session (Wayland socket or X display, session bus). `Ok` with nothing
+/// started when they have no graphical session.
+pub fn spawn_in_session(user: &str, args: &[&str]) -> std::io::Result<()> {
     use std::path::Path;
     let Some(pw) = users::get_user_by_name(user) else {
-        return;
+        return Ok(());
     };
     let uid = pw.uid();
     let runtime = format!("/run/user/{uid}");
     if !Path::new(&runtime).is_dir() {
-        return;
+        return Ok(());
     }
     let home = users::os::unix::UserExt::home_dir(&pw)
         .to_string_lossy()
@@ -249,33 +268,34 @@ pub fn open_app_for(user: &str) {
         };
         env.push(("XAUTHORITY".into(), xauth));
     } else {
-        return;
+        return Ok(());
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
+    // The installed binary where there is one: a self-update replaces it
+    // under a running agent, whose own path then reads "(deleted)".
+    let exe = if Path::new(crate::service::BIN_TARGET).exists() {
+        std::path::PathBuf::from(crate::service::BIN_TARGET)
+    } else {
+        std::env::current_exe()?
     };
     // runuser drops to the user (uid, gid and their groups); the environment
     // is ours, set explicitly, nothing inherited from the root agent.
-    let mut cmd = std::process::Command::new("runuser");
+    let mut cmd = std::process::Command::new(runuser()?);
     cmd.arg("-u")
         .arg(user)
         .arg("--")
         .arg(exe)
-        .arg("app")
+        .args(args)
         .env_clear()
         .envs(env)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    match cmd.spawn() {
-        // Reap it in the background so it never lingers as a zombie.
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(e) => tracing::warn!("could not open the app window for {user}: {e}"),
-    }
+    // Reap it in the background so it never lingers as a zombie.
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// `ost code` — the current sign-in code, for a terminal (and the only way to
@@ -314,6 +334,14 @@ pub fn cli(as_json: bool) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Debian keeps runuser in /usr/sbin, which a user's PATH (the one the
+    /// session child gets) doesn't reach: it is found by absolute path.
+    #[test]
+    fn runuser_is_found_outside_a_users_path() {
+        let p = runuser().expect("util-linux's runuser");
+        assert!(p.is_absolute(), "{p:?}");
+    }
 
     fn payload() -> Value {
         json!({

@@ -116,7 +116,14 @@ them.
   ```
 
   It works once, within 24 hours. Linux only for now. A computer with a
-  desktop gets the build with the app window and the graphical lock.
+  desktop gets the build with the app window and the graphical lock. The
+  installer also adds what filtering websites needs (dnsmasq and nftables) if
+  the computer doesn't have them; if it can't, the computer still keeps time
+  and Family says it can't filter websites. On a console without https the
+  line ends in `--insecure-http` — fine at home, not across the internet.
+- **Remove** frees the computer: the next time it's online it takes
+  OpenScreenTime off itself, and anyone paused or out of time there gets their
+  screen back.
 
 **Who's who.** Every login on a computer is its own person. Setting up a
 computer for Mia links one login to her; any other login becomes a new
