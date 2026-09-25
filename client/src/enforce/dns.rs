@@ -160,6 +160,17 @@ pub fn preseed(exec: &Exec) -> Result<()> {
     Ok(())
 }
 
+/// Take the ruleset out of dnsmasq (retirement): remove our include stub and
+/// ruleset, and restart dnsmasq only if it is running, so it goes back to
+/// whatever it did before. resolv.conf is [`unpin_resolv_conf`]'s job.
+pub fn remove_config(exec: &Exec) {
+    for dir in DISTRO_CONF_DIRS {
+        let _ = exec.remove_file(&format!("{dir}/{INCLUDE_STUB}"));
+    }
+    let _ = exec.remove_file(DNSMASQ_CONF);
+    let _ = exec.run("systemctl", &["try-restart", "dnsmasq"]);
+}
+
 /// Is a local resolver actually answering? A rendered allowlist that nothing
 /// serves is worse than no allowlist, because the console reports it as applied.
 fn local_resolver_running(exec: &Exec) -> bool {

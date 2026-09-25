@@ -540,14 +540,29 @@ pub async fn delete_device(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
+    // Removing a computer frees it: its token is kept as a tombstone, so the
+    // agent hears `410 device_retired` (not a 401 it would retry forever
+    // with the old rules still in force) and takes itself off the machine.
+    let mut tx = st.db.begin().await?;
+    sqlx::query(
+        "INSERT INTO retired_devices (token_hash, device_id, tenant_id)
+         SELECT device_token, id, tenant_id FROM devices
+          WHERE id = $1 AND tenant_id = $2 AND device_token IS NOT NULL
+         ON CONFLICT (token_hash) DO NOTHING",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&mut *tx)
+    .await?;
     let res = sqlx::query("DELETE FROM devices WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(admin.tenant_id)
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound("device not found".into()));
     }
+    tx.commit().await?;
     st.hub.force_unregister(id).await;
     Ok(Json(json!({ "ok": true })))
 }

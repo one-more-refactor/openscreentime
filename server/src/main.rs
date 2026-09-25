@@ -34,6 +34,8 @@ mod telegram;
 #[cfg(test)]
 mod tests_auth;
 #[cfg(test)]
+mod tests_retire;
+#[cfg(test)]
 mod tests_rules;
 mod unlock_code;
 mod usage;

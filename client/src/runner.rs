@@ -323,6 +323,9 @@ pub struct Agent {
     /// Reports each tamper / degraded observation of the tick once per
     /// incident, not every ten seconds.
     incidents: tamper::Incidents,
+    /// The server retired this computer (it was removed from its household):
+    /// nothing is enforced any more — see `retire`.
+    retired: bool,
     /// Active seat users as of the last tick.
     active_users: Vec<String>,
     /// The last `state` frame sent, and when — to send on change / at least
@@ -598,6 +601,7 @@ impl Agent {
             app_reported: HashMap::new(),
             standing_gaps: Vec::new(),
             incidents: tamper::Incidents::default(),
+            retired: false,
             active_users: Vec::new(),
             last_state: None,
             last_state_sent: Instant::now(),
@@ -1077,6 +1081,52 @@ impl Agent {
         Ok(events)
     }
 
+    /// This computer was removed from its household (the server said so,
+    /// twice): free everyone and take the rules off (`crate::retire`).
+    /// Thaw first, then the lock comes down — back to their own session —
+    /// then the network rules, then the rest outside the sandbox.
+    async fn retire(&mut self) {
+        if self.retired {
+            return;
+        }
+        self.retired = true;
+        tracing::warn!(
+            "this computer was removed from its household — taking OpenScreenTime off it"
+        );
+        let mut people: HashSet<String> = self.frozen.iter().cloned().collect();
+        people.extend(self.pending_freeze.keys().cloned());
+        people.extend(self.policies.keys().cloned());
+        if !self.exec.dry_run() {
+            people.extend(
+                crate::sysusers::login_users()
+                    .into_iter()
+                    .map(|u| u.username),
+            );
+        }
+        let mut people: Vec<String> = people.into_iter().collect();
+        people.sort();
+        for user in &people {
+            self.lock.host().freeze(user, false, false);
+        }
+        self.frozen.clear();
+        self.pending_freeze.clear();
+        self.device_locked = false;
+        self.device_lock_grace_until = None;
+        self.tamper_lockdown = false;
+        self.offline_hard_lockdown = false;
+        self.policies.clear();
+        self.kinds.clear();
+        self.self_managed.clear();
+        self.lock.release();
+        if !self.exec.dry_run() {
+            save_device_locked(false);
+            self.persist_freeze_state();
+        }
+        crate::retire::teardown_enforcement(&self.exec);
+        crate::retire::mark(&self.exec);
+        crate::retire::spawn_helper(&self.exec);
+    }
+
     /// Apply the network side of the effective policy (DNS, firewall, VPN).
     /// Never aborts the caller: an apply that fails outright is a standing
     /// gap like any other. Updates the standing gaps and returns the events
@@ -1430,6 +1480,9 @@ impl Agent {
 
     async fn enforcement_tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+        if self.retired {
+            return events;
+        }
         tamper::touch_heartbeat(&self.exec);
 
         // The trusted clock (crate::clock): the NTP-synced wall clock, the
@@ -3183,6 +3236,13 @@ type Shared = Arc<tokio::sync::Mutex<Agent>>;
 /// restarting a perfectly healthy offline agent.
 pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     ctx.require_root_for_enforcement()?;
+    // Removed from its household: never enforce again. Finish taking itself
+    // off (the helper stops this unit) and wait for that.
+    if crate::retire::marked() {
+        tracing::warn!("this computer was removed from its household; not enforcing");
+        crate::retire::spawn_helper(&Exec::new(ctx.clone()));
+        std::future::pending::<()>().await;
+    }
     let mut agent = Agent::new(ctx.clone(), cfg)?;
     tracing::info!(
         dry_run = ctx.dry_run,
@@ -3265,25 +3325,55 @@ async fn network_loop(agent: &Shared, client: &ServerClient) {
     let agent = agent.clone();
     let mut backoff_secs = BACKOFF_MIN_SECS;
     loop {
-        match client.connect_ws().await {
+        let ended = match client.connect_ws().await {
             Ok(stream) => {
                 tracing::info!("WS bus connected");
                 backoff_secs = BACKOFF_MIN_SECS;
-                if let Err(e) = run_ws(&agent, stream).await {
-                    tracing::warn!("WS loop ended: {e}");
-                }
+                run_ws(&agent, stream).await.err()
             }
+            Err(e) if crate::client::is_retired(&e) => Some(e),
             Err(e) => {
                 tracing::warn!("WS unavailable ({e}); falling back to heartbeat polling");
                 match run_poll(&agent).await {
-                    Ok(()) => backoff_secs = BACKOFF_MIN_SECS,
-                    Err(e) => tracing::warn!("poll loop ended: {e}"),
+                    Ok(()) => {
+                        backoff_secs = BACKOFF_MIN_SECS;
+                        None
+                    }
+                    Err(e) => Some(e),
                 }
             }
+        };
+        if let Some(e) = ended {
+            if retirement_confirmed(client, &e).await {
+                agent.lock().await.retire().await;
+                // Nothing left to talk about; the helper stops this unit.
+                std::future::pending::<()>().await;
+            }
+            tracing::warn!("server connection ended: {e}");
         }
         let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=backoff_secs / 2 + 1);
         tokio::time::sleep(Duration::from_secs(backoff_secs + jitter)).await;
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
+    }
+}
+
+/// The server retired this computer — asked once more, so one odd answer
+/// can't take the rules off a child's computer. Only `client::Retired`
+/// counts (410 `device_retired` from the configured server), never a 401 or
+/// a network error.
+async fn retirement_confirmed(client: &ServerClient, first: &anyhow::Error) -> bool {
+    if !crate::client::is_retired(first) {
+        return false;
+    }
+    match client.get_policy().await {
+        Err(e) if crate::client::is_retired(&e) => true,
+        other => {
+            tracing::warn!(
+                "the server said this computer was removed, then not ({:?}); keeping the rules",
+                other.err()
+            );
+            false
+        }
     }
 }
 
@@ -3972,6 +4062,48 @@ mod tests {
         assert!(evs.iter().any(
             |e| e.ev_type == EV_ENFORCEMENT_DEGRADED && kind_of(e) == GAP_NETWORK_APPLY_FAILED
         ));
+    }
+
+    /// Removed from its household: the person the rules stopped is thawed,
+    /// the lock comes down (back to her session), the network rules go, the
+    /// helper that finishes the job outside the sandbox is started — and the
+    /// agent never enforces again.
+    #[tokio::test]
+    async fn a_retired_computer_frees_the_person_it_stopped() {
+        let (mut a, fake) = agent_with_mia();
+        let pinned = crate::enforce::dns::render_resolv_conf();
+        a.exec = Exec::simulated(&[], &[("read /etc/resolv.conf", pinned.as_str())]);
+        stop_mia(&mut a).await;
+        assert!(a.lock.shown().is_some());
+        fake.w().log.clear();
+
+        a.retire().await;
+        assert!(a.frozen.is_empty() && a.policies.is_empty());
+        assert!(a.lock.shown().is_none());
+        let log = fake.w().log.clone();
+        assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"), "{log:?}");
+        assert_eq!(fake.w().vt, 2);
+
+        let ex = a.exec.log();
+        for step in [
+            "run nft delete table inet openscreentime",
+            "run chattr -i /etc/resolv.conf",
+            "write /etc/resolv.conf",
+            "remove /etc/polkit-1/rules.d/49-openscreentime.rules",
+            "remove /etc/openscreentime/policy_bundle.json",
+            "write /var/lib/openscreentime/retired",
+            "run systemd-run --quiet --collect --unit=openscreentime-retire \
+             /usr/local/bin/openscreentime __retire",
+        ] {
+            pos(&ex, step);
+        }
+        assert!(!ex.iter().any(|l| l.contains("chattr +i")));
+
+        // Nothing is enforced any more.
+        fake.w().log.clear();
+        assert!(a.enforcement_tick().await.is_empty());
+        a.reconcile_lock().await;
+        assert!(fake.w().log.iter().all(|l| !l.starts_with("freeze")));
     }
 
     #[tokio::test]
