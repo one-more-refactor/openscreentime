@@ -312,6 +312,24 @@ fn install_packages(exec: &Exec, pkgs: &[&str]) -> Option<bool> {
 /// it reports as degraded rather than pretending.
 const ENFORCEMENT_DEPS: [(&str, &str); 2] = [("dnsmasq", "dnsmasq"), ("nft", "nftables")];
 
+fn installed_marker() -> String {
+    crate::paths::state("installed-packages")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The packages `install-service` installed here (not ones the computer
+/// already had).
+pub fn installed_by_us(exec: &Exec) -> Vec<String> {
+    exec.read_file(&installed_marker())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The enforcement packages this computer lacks.
 fn missing_enforcement_deps(exec: &Exec) -> Vec<&'static str> {
     ENFORCEMENT_DEPS
@@ -342,6 +360,13 @@ fn ensure_enforcement_deps(exec: &Exec) -> bool {
             if missing.contains(&"dnsmasq") {
                 let _ = exec.run("systemctl", &["enable", "dnsmasq"]);
             }
+            // Remembered, so a retired computer switches off what only we
+            // brought (crate::retire) instead of leaving a resolver running.
+            let mut ours = installed_by_us(exec);
+            ours.extend(missing.iter().map(|p| p.to_string()));
+            ours.sort();
+            ours.dedup();
+            let _ = exec.write_file(&installed_marker(), &(ours.join("\n") + "\n"));
             println!("Installed {list} (for this computer's website and firewall rules).");
             true
         }
@@ -917,6 +942,8 @@ mod tests {
         // dnsmasq's first start finds a config it can start with.
         assert!(pos(&log, "write /etc/dnsmasq.d/00-openscreentime.conf") < apt);
         assert!(apt < restart);
+        // What it brought is remembered (a retired computer switches it off).
+        pos(&log, "write /var/lib/openscreentime/installed-packages");
         if cfg!(feature = "tray") {
             // Only mia has a desktop open (the greeter and an ssh login don't).
             let started = pos(
