@@ -41,6 +41,8 @@ struct Child {
     earned_secs: i64,
     /// UTC offset of one of their devices (for "when do screens stop").
     utc_offset_secs: Option<i32>,
+    /// The latest parent override one of their computers reports running.
+    override_until: Option<DateTime<Utc>>,
     devices: Vec<Value>,
     pending_requests: usize,
     locked: bool,
@@ -153,6 +155,13 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     .collect();
     let mut devices_json = Vec::with_capacity(device_rows.len());
     let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
+    // What each computer last said it is (its `state` frame): the overrides
+    // it is running, per login.
+    let last_state: HashMap<Uuid, Value> = device_rows
+        .iter()
+        .filter_map(|r| r.14.clone().map(|s| (r.0, s)))
+        .collect();
+    let now = Utc::now();
     for r in &device_rows {
         let mut d = device_to_json(r);
         let p = pending.get(&r.0).cloned().unwrap_or_default();
@@ -177,6 +186,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             used_secs: 0,
             earned_secs: 0,
             utc_offset_secs: None,
+            override_until: None,
             devices: Vec::new(),
             pending_requests: 0,
             locked: false,
@@ -205,6 +215,8 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         c.used_minutes = c.used_secs / 60;
         c.earned_minutes = c.earned_secs / 60;
         c.utc_offset_secs = c.utc_offset_secs.or(offset);
+        let ov = crate::ledger::reported_override(last_state.get(&device_id), &os_username, now);
+        c.override_until = c.override_until.max(ov);
         c.pending_requests += asks_by_du.get(&du_id).copied().unwrap_or(0);
         c.locked |= dev_locked;
         c.devices.push(json!({
@@ -261,23 +273,25 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             v["used_minutes"] = json!(c.used_minutes);
             v["earned_minutes"] = json!(c.earned_minutes);
             v["limit_minutes"] = json!(limit);
-            // The budget left, exactly as the device computes it (seconds,
-            // rounded up to the minute) — the console and the ring agree.
-            v["left_minutes"] =
-                json!(limit.map(|l| ((l * 60 + c.earned_secs - c.used_secs).max(0) + 59) / 60));
-            // When screens stop by the rules — limit, bedtime or window end,
-            // whichever first — computed by the agent's own rules function.
-            v["rules"] = policy
-                .map(|p| {
-                    crate::ledger::rules_json(
-                        p,
-                        c.used_secs,
-                        c.earned_secs,
-                        c.utc_offset_secs,
-                        Utc::now(),
-                    )
-                })
-                .unwrap_or(Value::Null);
+            // Time left, the number their computer shows: the agent's own
+            // rules function with the same inputs — their use and grants
+            // today and the override their computer reports (an unlock code,
+            // a grant) — on the computer's clock. `rules` says when and why.
+            let day = policy.map(|p| {
+                crate::ledger::console_day(
+                    p,
+                    c.used_secs,
+                    c.earned_secs,
+                    c.utc_offset_secs,
+                    c.override_until,
+                    now,
+                )
+            });
+            v["left_minutes"] = json!(day.as_ref().and_then(|d| d.left_minutes));
+            v["rules"] = day.map(|d| d.rules).unwrap_or(Value::Null);
+            // The computer's clock (the first of theirs that reported one),
+            // for everything that describes its day.
+            v["utc_offset_secs"] = json!(c.utc_offset_secs);
             v["profile_name"] = profile_name;
             v["devices"] = json!(c.devices);
             v["pending_requests"] = json!(c.pending_requests);

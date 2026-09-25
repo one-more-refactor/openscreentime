@@ -196,16 +196,20 @@ pub async fn where_for_account(
     exposure: Exposure,
 ) -> AppResult<Value> {
     let hide_shared_sites = exposure.hide_shared_sites;
+    // "Today" is each computer's own day (its local midnight), like the
+    // ledger — not the server's.
+    let since = crate::ledger::DEVICE_DAY_START_SQL;
     // Apps: the person's own OS logins, summed across their devices.
-    let apps: Vec<(String, i64)> = sqlx::query_as(
+    let apps: Vec<(String, i64)> = sqlx::query_as(&format!(
         "SELECT us.key, SUM(us.amount)::bigint
            FROM usage_slices us
            JOIN device_users du ON du.device_id = us.device_id
                                AND du.os_username = us.os_username
+           JOIN devices d ON d.id = us.device_id
           WHERE du.account_id = $1 AND us.tenant_id = $2
-            AND us.kind = 'app' AND us.hour >= date_trunc('day', now())
-          GROUP BY us.key ORDER BY 2 DESC LIMIT 12",
-    )
+            AND us.kind = 'app' AND us.hour >= {since}
+          GROUP BY us.key ORDER BY 2 DESC LIMIT 12"
+    ))
     .bind(account_id)
     .bind(tenant_id)
     .fetch_all(db)
@@ -228,14 +232,15 @@ pub async fn where_for_account(
     let sites: Vec<(String, i64)> = if sites_hidden || sites_hidden_age {
         Vec::new()
     } else {
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             "SELECT us.key, SUM(us.amount)::bigint
                FROM usage_slices us
+               JOIN devices d ON d.id = us.device_id
               WHERE us.tenant_id = $2 AND us.kind = 'site' AND us.os_username = ''
-                AND us.hour >= date_trunc('day', now())
+                AND us.hour >= {since}
                 AND us.device_id IN (SELECT device_id FROM device_users WHERE account_id = $1)
-              GROUP BY us.key ORDER BY 2 DESC LIMIT 12",
-        )
+              GROUP BY us.key ORDER BY 2 DESC LIMIT 12"
+        ))
         .bind(account_id)
         .bind(tenant_id)
         .fetch_all(db)
@@ -245,15 +250,16 @@ pub async fn where_for_account(
     // The day's curve: the person's own app-SECONDS per hour (only — mixing in
     // site lookup COUNTS made the intensity unit-soup, where 200 DNS hits
     // dwarfed an hour of real use). Site activity has its own list above.
-    let hours: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(
+    let hours: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(&format!(
         "SELECT us.hour, SUM(us.amount)::bigint
               FROM usage_slices us
               JOIN device_users du ON du.device_id = us.device_id
                                   AND du.os_username = us.os_username
+              JOIN devices d ON d.id = us.device_id
              WHERE du.account_id = $1 AND us.tenant_id = $2 AND us.kind = 'app'
-               AND us.hour >= date_trunc('day', now())
-             GROUP BY us.hour ORDER BY us.hour",
-    )
+               AND us.hour >= {since}
+             GROUP BY us.hour ORDER BY us.hour"
+    ))
     .bind(account_id)
     .bind(tenant_id)
     .fetch_all(db)

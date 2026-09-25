@@ -22,6 +22,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// How often the enforcement tick runs (screen-time accounting granularity).
 const TICK: Duration = Duration::from_secs(10);
+/// How long after a stop's moment its own tick runs (see `stop_wake`).
+const STOP_SLACK: Duration = Duration::from_millis(300);
 
 /// The most one tick may bill. Billing is the measured *awake* time since the
 /// last tick (CLOCK_MONOTONIC: a suspended laptop bills nothing); the cap
@@ -31,10 +33,6 @@ const BILL_CAP: Duration = Duration::from_secs(60);
 /// Heads-ups before a stop, in minutes (published as `next_warning_at`) —
 /// the same 15/5/1 the companion announces (`warn::THRESHOLDS`).
 const WARN_BEFORE_MIN: [i64; 3] = [15, 5, 1];
-
-/// Minutes an override lasts when a parent resumes a device whose user a
-/// rule is stopping right now (the same as a parent code at the lock screen).
-const RESUME_OVERRIDE_MIN: u32 = 30;
 
 /// Wall clock this far off the trusted clock is reported (once per episode).
 const CLOCK_SKEW_REPORT: chrono::Duration = chrono::Duration::minutes(60);
@@ -92,17 +90,24 @@ fn vpn_report_event(report: Option<enforce::vpn::VpnReport>) -> Option<Event> {
     })
 }
 
-fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
-    gaps.iter()
-        .map(|gap| {
+/// The gaps standing now → the `enforcement_degraded` events worth sending:
+/// one when a gap appears, none while it stays (the `state` frame carries the
+/// standing ones for the console), a fresh one if it comes back after going.
+fn new_gap_events(standing: &[String], now: &[(String, String)]) -> Vec<Event> {
+    now.iter()
+        .filter(|(kind, _)| !standing.contains(kind))
+        .map(|(kind, detail)| {
             Event::new(
                 EV_ENFORCEMENT_DEGRADED,
                 SEV_CRITICAL,
-                json!({ "kind": gap.kind(), "detail": gap.explain() }),
+                json!({ "kind": kind, "detail": detail }),
             )
         })
         .collect()
 }
+
+/// The standing gap for a network apply that failed outright.
+const GAP_NETWORK_APPLY_FAILED: &str = "network_apply_failed";
 
 /// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
 /// tampering with it requires root, at which point the game is over anyway).
@@ -313,6 +318,12 @@ pub struct Agent {
     app_reported: HashMap<(String, String), chrono::NaiveDate>,
     /// Standing enforcement gap kinds from the last network apply.
     standing_gaps: Vec<String>,
+    /// Reports each tamper / degraded observation of the tick once per
+    /// incident, not every ten seconds.
+    incidents: tamper::Incidents,
+    /// The server retired this computer (it was removed from its household):
+    /// nothing is enforced any more — see `retire`.
+    retired: bool,
     /// Active seat users as of the last tick.
     active_users: Vec<String>,
     /// The last `state` frame sent, and when — to send on change / at least
@@ -338,6 +349,13 @@ pub struct Agent {
     /// Monotonic instant of the last accounting tick — what the next tick
     /// bills from (awake time only; see `BILL_CAP`).
     last_tick: Option<Instant>,
+    /// The part of a second the last tick measured but didn't bill: carried,
+    /// so whole-second billing neither loses time nor moves a stop later.
+    bill_carry: Duration,
+    /// When the nearest stop lands that is a fixed moment (see
+    /// `update_forecasts`): the tick loop wakes for it, so the stop comes at
+    /// the minute the warnings announced, not up to a tick later.
+    next_stop_at: Option<Instant>,
     /// Trusted "now" as of the last tick (see `crate::clock`).
     trusted_now: chrono::DateTime<chrono::Utc>,
     /// Users whose time counted on the last tick (present AND active).
@@ -587,6 +605,8 @@ impl Agent {
             parent_recovery: Vec::new(),
             app_reported: HashMap::new(),
             standing_gaps: Vec::new(),
+            incidents: tamper::Incidents::default(),
+            retired: false,
             active_users: Vec::new(),
             last_state: None,
             last_state_sent: Instant::now(),
@@ -599,6 +619,8 @@ impl Agent {
             policy_version: String::new(),
             boot_id: crate::clock::boot_id(),
             last_tick: None,
+            bill_carry: Duration::ZERO,
+            next_stop_at: None,
             trusted_now: chrono::Utc::now(),
             counting: Vec::new(),
             measured: true,
@@ -733,6 +755,15 @@ impl Agent {
             agent_version: crate::client::AGENT_VERSION.to_string(),
             active_users: self.active_users.clone(),
             features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            overrides: self
+                .policies
+                .keys()
+                .filter_map(|u| {
+                    self.tracker
+                        .peek_override(u, self.trusted_now)
+                        .map(|t| (u.clone(), t))
+                })
+                .collect(),
         }
     }
 
@@ -919,21 +950,7 @@ impl Agent {
             self.contact_state = ContactState::OfflineFailClosed;
             // Aggressively re-assert the last-known policy (dns + firewall +
             // resolv pin) so nothing drifts open while unreachable.
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
-                Err(e) => tracing::warn!("offline fail-closed policy re-assert failed: {e}"),
-            }
+            events.extend(self.apply_network().0);
         } else {
             if self.contact_state == ContactState::OfflineFailClosed {
                 events.push(tamper::tamper_event(
@@ -1043,31 +1060,27 @@ impl Agent {
             .map(|(u, k)| (u.clone(), k.clone()))
             .collect();
         crate::service::sync_managed_sudoers(&self.exec, &users_by_kind);
-        // DNS/nftables are host-global: apply the most restrictive effective policy.
+        // DNS/nftables are host-global: apply the most restrictive effective
+        // policy. A computer that can't filter the network (no dnsmasq, no
+        // nftables) still gets everything else: the rules are held, cached,
+        // and screen time is enforced — loudly degraded, never half-applied.
         let effective = self.effective_network_policy();
         self.focus_applied = Some(self.focus_now());
-        let server_host = crate::client::server_host(&self.cfg.server_url);
-        let (gaps, vpn_report) = enforce::apply_network_policy(
-            self.ctx.clone(),
-            &self.exec,
-            server_host.as_deref(),
-            &effective,
-            &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-        )?;
+        let (net_events, _) = self.apply_network();
         // Best-effort cache so `ost unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
         crate::policy::save_cache(&effective);
         // …and the whole bundle, so a reboot while the server is unreachable
         // re-enforces the last known policy instead of coming up wide open.
-        // Cached only after a successful apply, and cached verbatim — rebuilding
-        // it from `self.policies` would silently drop `profile_kind`.
+        // Cached verbatim — rebuilding it from `self.policies` would silently
+        // drop `profile_kind`.
         crate::policy::save_bundle_cache(&cacheable);
         tracing::info!(
-            "policy v{} applied for {} user(s)",
+            "policy v{} applied for {} user(s), {} gap(s)",
             self.policy_version,
-            self.policies.len()
+            self.policies.len(),
+            self.standing_gaps.len()
         );
-        self.standing_gaps = gaps.iter().map(|g| g.kind().to_string()).collect();
         // "Applied" is reported alongside, not instead of, the gaps: the policy
         // really was written, it just isn't all being enforced.
         let mut events = vec![Event::new(
@@ -1076,13 +1089,104 @@ impl Agent {
             json!({
                 "policy_version": self.policy_version,
                 "users": self.policies.len(),
-                "dns_gaps": gaps.len(),
+                "dns_gaps": self.standing_gaps.len(),
             }),
         )];
-        events.extend(degraded_events(&gaps));
-        events.extend(vpn_report_event(vpn_report));
+        events.extend(net_events);
         events.extend(tamper_events);
         Ok(events)
+    }
+
+    /// This computer was removed from its household (the server said so,
+    /// twice): free everyone and take the rules off (`crate::retire`).
+    /// Thaw first, then the lock comes down — back to their own session —
+    /// then the network rules, then the rest outside the sandbox.
+    async fn retire(&mut self) {
+        if self.retired {
+            return;
+        }
+        self.retired = true;
+        tracing::warn!(
+            "this computer was removed from its household — taking OpenScreenTime off it"
+        );
+        let mut people: HashSet<String> = self.frozen.iter().cloned().collect();
+        people.extend(self.pending_freeze.keys().cloned());
+        people.extend(self.policies.keys().cloned());
+        if !self.exec.dry_run() {
+            people.extend(
+                crate::sysusers::login_users()
+                    .into_iter()
+                    .map(|u| u.username),
+            );
+        }
+        let mut people: Vec<String> = people.into_iter().collect();
+        people.sort();
+        for user in &people {
+            self.lock.host().freeze(user, false, false);
+        }
+        self.frozen.clear();
+        self.pending_freeze.clear();
+        self.device_locked = false;
+        self.device_lock_grace_until = None;
+        self.tamper_lockdown = false;
+        self.offline_hard_lockdown = false;
+        self.policies.clear();
+        self.kinds.clear();
+        self.self_managed.clear();
+        self.lock.release();
+        if !self.exec.dry_run() {
+            save_device_locked(false);
+            self.persist_freeze_state();
+        }
+        crate::retire::teardown_enforcement(&self.exec);
+        crate::retire::mark(&self.exec);
+        crate::retire::spawn_helper(&self.exec);
+    }
+
+    /// Apply the network side of the effective policy (DNS, firewall, VPN).
+    /// Never aborts the caller: an apply that fails outright is a standing
+    /// gap like any other. Updates the standing gaps and returns the events
+    /// worth sending (a gap when it appears, the VPN verdict), and whether
+    /// the apply ran through.
+    fn apply_network(&mut self) -> (Vec<Event>, bool) {
+        let effective = self.effective_network_policy();
+        let server_host = crate::client::server_host(&self.cfg.server_url);
+        let mut events = Vec::new();
+        let (gaps, ok): (Vec<(String, String)>, bool) = match enforce::apply_network_policy(
+            self.ctx.clone(),
+            &self.exec,
+            server_host.as_deref(),
+            &effective,
+            &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
+        ) {
+            Ok((gaps, report)) => {
+                events.extend(vpn_report_event(report));
+                let gaps = gaps
+                    .iter()
+                    .map(|g| (g.kind().to_string(), g.explain().to_string()))
+                    .collect();
+                (gaps, true)
+            }
+            Err(e) => {
+                tracing::error!("network policy not applied: {e:#}");
+                let detail = format!(
+                    "this computer's network rules could not be applied ({e:#}); \
+                     screen time is still enforced"
+                );
+                (vec![(GAP_NETWORK_APPLY_FAILED.to_string(), detail)], false)
+            }
+        };
+        events.extend(new_gap_events(&self.standing_gaps, &gaps));
+        self.standing_gaps = gaps.into_iter().map(|(kind, _)| kind).collect();
+        (events, ok)
+    }
+
+    /// Our nft table was loaded by the last apply (no firewall gap stands).
+    fn firewall_loaded(&self) -> bool {
+        !self
+            .standing_gaps
+            .iter()
+            .any(|g| g.starts_with("firewall_") || g == GAP_NETWORK_APPLY_FAILED)
     }
 
     /// Move to the tamper level the server asked for, within this computer's
@@ -1365,19 +1469,6 @@ impl Agent {
         }
     }
 
-    /// Users a screen-time rule is stopping right now (ignoring pauses).
-    fn stopped_by_rule(&self, users: &[String]) -> Vec<String> {
-        let now = self.trusted_now.with_timezone(&chrono::Local);
-        users
-            .iter()
-            .filter(|u| {
-                let p = self.policies.get(*u).cloned().unwrap_or_default();
-                !screentime::verdict(&p, &self.tracker, u, &now, false).allowed
-            })
-            .cloned()
-            .collect()
-    }
-
     /// The next local midnight on the trusted clock ("until end of day").
     fn end_of_day(&self) -> chrono::DateTime<chrono::Utc> {
         use chrono::TimeZone;
@@ -1392,6 +1483,9 @@ impl Agent {
 
     async fn enforcement_tick(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+        if self.retired {
+            return events;
+        }
         tamper::touch_heartbeat(&self.exec);
 
         // The trusted clock (crate::clock): the NTP-synced wall clock, the
@@ -1431,52 +1525,50 @@ impl Agent {
         // Focus hours began or ended: someone's own blocked sites come or go.
         let focus_flipped = self.focus_flipped();
         if (dns_flipped || focus_flipped) && !self.exec.dry_run() {
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
+            let (evs, ok) = self.apply_network();
+            events.extend(evs);
+            if !ok && focus_flipped {
                 // Try the focus change again next tick.
-                Err(_) if focus_flipped => self.focus_applied = None,
-                Err(e) => tracing::warn!("network re-apply failed: {e}"),
+                self.focus_applied = None;
             }
         }
 
-        // Tamper re-assertion (resolv.conf / nft drift, NM disconnect).
-        events.extend(tamper::reassert_all(&self.exec));
+        // Tamper re-assertion (resolv.conf / nft drift, NM disconnect). What
+        // it sees goes to the monitor raw, every tick; what is *reported* is
+        // each incident once.
+        let mut observed = tamper::reassert_all(&self.exec, self.firewall_loaded());
+        if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
+            observed.push(ev);
+        }
+        let raw_tamper: Vec<String> = observed
+            .iter()
+            .filter(|e| e.ev_type == EV_TAMPER)
+            .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .map(str::to_string)
+            .collect();
+        let resolver_went = observed.iter().any(|e| {
+            e.ev_type == EV_ENFORCEMENT_DEGRADED
+                && e.payload.get("kind").and_then(|k| k.as_str())
+                    == Some(tamper::KIND_RESOLVER_STOPPED)
+        });
+        events.extend(self.incidents.report(observed));
 
         // reassert_all flags a missing nft table (critical event) but can't
         // rebuild it — it has no policy. Repair it here with the effective
         // policy so a flush/delete can't leave the device with NO firewall
-        // (fail-open) until the next full policy apply.
+        // (fail-open) until the next full policy apply. The same re-apply
+        // brings a resolver that stopped back up (it restarts dnsmasq) and
+        // records the gap if it can't.
         // `Some(true)` only — if the probe itself couldn't run (`None`),
         // applying a ruleset through the same broken spawn path won't work
         // either; the reassert above already reported it, retry next tick.
-        if enforce::firewall::table_missing(&self.exec) == Some(true) && !self.exec.dry_run() {
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    tracing::info!("nft table was missing — re-applied firewall");
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
-                Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
+        let flushed = raw_tamper.iter().any(|k| k == "nft_flush");
+        if (flushed || resolver_went) && !self.exec.dry_run() {
+            let (evs, ok) = self.apply_network();
+            if ok && flushed {
+                tracing::info!("nft table was missing — re-applied firewall");
             }
+            events.extend(evs);
         }
 
         // Fail-closed offline grace: alert + aggressively re-assert last-known
@@ -1499,18 +1591,17 @@ impl Agent {
             }
         }
         events.extend(self.offline_hard_lockdown_check());
-        if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
-            events.push(ev);
-        }
 
         // Confirm sustained evasion (vs. a transient blip) and escalate to a
         // whole-device lockdown. We feed the monitor the tamper-signal kinds
-        // seen this tick; a kind that crosses its confirmation threshold is a
-        // real attempt (the "check it's real, not a packet drop" gate).
+        // seen this tick — raw, including the ones not re-reported; a kind
+        // that crosses its confirmation threshold is a real attempt (the
+        // "check it's real, not a packet drop" gate).
         let kinds: Vec<&str> = events
             .iter()
             .filter(|e| e.ev_type == EV_TAMPER)
             .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .chain(raw_tamper.iter().map(String::as_str))
             .collect();
         let confirmed = self.tamper_monitor.observe(&kinds);
         if !confirmed.is_empty() && !self.tamper_lockdown {
@@ -1538,7 +1629,9 @@ impl Agent {
         self.active_users = active.clone();
         self.measured = activity.measured;
         let now_mono = Instant::now();
-        let elapsed = billable_elapsed(self.last_tick, now_mono);
+        let (elapsed, carry) =
+            whole_seconds(billable_elapsed(self.last_tick, now_mono) + self.bill_carry);
+        self.bill_carry = carry;
         self.last_tick = Some(now_mono);
         // A frozen user is NOT spending screen time: their processes are
         // suspended at the lock screen, but logind still reports the seat
@@ -1673,10 +1766,11 @@ impl Agent {
                     self.lock.host().freeze(&user, false, false);
                     self.frozen.remove(&user);
                     tracing::info!("{user} unlocked (within policy again)");
-                    let body = match self.tracker.remaining_minutes(&user, &policy) {
-                        Some(m) if m > 0 => format!("You have {m} minutes left today."),
-                        _ => "Your screen time is back on.".to_string(),
-                    };
+                    // The verdict's time — the stop the warnings will count
+                    // down to — never the budget, which a grant on a day
+                    // already over the limit leaves short of it.
+                    let v = self.stop_verdict(&user, &policy);
+                    let body = back_words(&v);
                     self.notify_user(Some(&user), "You're back", &body, false);
                 }
                 FreezeAction::None => {}
@@ -2079,6 +2173,19 @@ impl Agent {
                 self.announced.insert(u.clone(), Instant::now());
             }
         }
+        // The nearest stop that is a fixed moment — a clock rule, the end of
+        // an override, a pause's window, a countdown, or a limit being used
+        // up right now (an idle person's limit slides later every tick).
+        self.next_stop_at = next
+            .iter()
+            .filter(|(u, (reason, _))| {
+                *reason != warn::StopReason::Limit
+                    || self.counting.contains(*u)
+                    || self.pending_freeze.contains_key(*u)
+            })
+            .filter_map(|(_, (_, at))| (*at - now).to_std().ok())
+            .min()
+            .map(|d| Instant::now() + d);
         let here: Vec<String> = active
             .iter()
             .filter(|u| self.policies.contains_key(*u))
@@ -2090,11 +2197,16 @@ impl Agent {
                 if lock::has_graphical_session(&sessions, &u) {
                     continue; // their companion warns them
                 }
+                let counting = self.counting.contains(&u);
                 let st = self.tty_warn.entry(u.clone()).or_default();
                 match next.get(&u) {
+                    // An idle person's limit slides later every tick: no
+                    // time to announce yet (warn::WarnState::observe_stop).
+                    Some((warn::StopReason::Limit, _))
+                        if !counting && !self.pending_freeze.contains_key(&u) => {}
                     Some((reason, at)) => {
                         let secs = (*at - now).num_seconds();
-                        if st.observe(*reason, secs).is_some() {
+                        if st.observe_stop(*reason, secs, at.timestamp()).is_some() {
                             let w = warn::words(*reason, secs, Some(*at));
                             self.lock
                                 .host()
@@ -2520,18 +2632,20 @@ impl Agent {
         }
     }
 
-    /// The earn offer a "more time" ask files: the first configured task, or
-    /// a plain ask.
-    fn earn_offer_for(&self, user: &str) -> earn::EarnOffer {
-        let policy = self.policies.get(user).cloned().unwrap_or_default();
-        earn::earn_offers(&policy.gamification)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| earn::EarnOffer {
-                id: "more_time".into(),
-                label: "More screen time".into(),
-                reward_minutes: 15,
-            })
+    /// What "Ask for more time" files — at the lock, in the app, from the
+    /// companion, `ost ask`: a plain ask, worded as one. (It used to pick the
+    /// first earn task, so the console read "Read for 20 min" for a child who
+    /// had only asked.)
+    fn earn_offer_for(&self, _user: &str) -> earn::EarnOffer {
+        earn::plain_ask()
+    }
+
+    /// An ask from `user` is waiting on a parent today.
+    fn ask_pending(&self, user: &str) -> bool {
+        let today = chrono::Local::now().date_naive();
+        self.requested_earn
+            .iter()
+            .any(|((u, _), d)| u == user && *d == today)
     }
 
     /// The verdict for one user as the status file publishes it (documented
@@ -2540,7 +2654,20 @@ impl Agent {
     /// enforcement tick uses, so what the app says is what will happen.
     fn user_status(&self, u: &str, p: &Policy) -> serde_json::Value {
         let now = self.trusted_now.with_timezone(&chrono::Local);
-        let v = self.stop_verdict(u, p);
+        let mut v = self.stop_verdict(u, p);
+        // A stop with a save-your-work countdown hasn't landed yet: they can
+        // still use the screen until the countdown ends, and that is when it
+        // stops — not a red zero a minute early.
+        if let Some(deadline) = self.pending_freeze.get(u) {
+            if !v.allowed && !self.frozen.contains(u) && v.reason != Some(warn::StopReason::Paused)
+            {
+                let left = deadline.saturating_duration_since(Instant::now());
+                v.allowed = true;
+                v.stop_at = Some(now + chrono::Duration::from_std(left).unwrap_or_default());
+                v.minutes_left = Some(left.as_secs().div_ceil(60) as u32);
+                v.resume_at = None;
+            }
+        }
         // Heads-ups land 15, 5 and 1 minute before a stop (docs/AGENT.md).
         let next_warning_at = v
             .stop_at
@@ -2581,6 +2708,8 @@ impl Agent {
                 .peek_override(u, self.trusted_now)
                 .map(|t| ts(t.with_timezone(&chrono::Local))),
             "counting": self.counting.iter().any(|c| c == u),
+            // An ask is waiting on a parent (a grant or a "not now" clears it).
+            "ask_pending": self.ask_pending(u),
             "measured": self.measured,
             "day": self.tracker.day(),
         })
@@ -2822,18 +2951,23 @@ impl Agent {
                 if !self.exec.dry_run() {
                     self.persist_freeze_state();
                 }
-                // Resume is a parent action, so it writes the override too —
-                // otherwise a rule re-stops the person on the next tick and
-                // "Resume" looks broken. Explicit: `minutes` or
-                // `until: "end_of_day"`, optionally for one `os_username`.
-                // A plain Resume gives RESUME_OVERRIDE_MIN to whoever a rule
-                // is stopping right now; everyone else just carries on under
-                // their normal rules.
-                let targets: Vec<String> =
-                    match cmd.payload.get("os_username").and_then(|v| v.as_str()) {
-                        Some(u) => vec![u.to_string()],
-                        None => self.policies.keys().cloned().collect(),
-                    };
+                // Resume ends the pause — and only that. Time is given with
+                // "Give 15" (`credit_time`), which the console shows; a Resume
+                // that quietly handed 30 minutes to whoever a rule was
+                // stopping made Pause → Resume a free half hour on a day
+                // that was over (and handed it to logins nobody had paused,
+                // not even signed in). Someone whose own rules still stop
+                // them stays stopped; the lock just says why now.
+                //
+                // An explicit grant in the payload (`minutes`, or `until:
+                // "end_of_day"`, for one `os_username`) is still honoured:
+                // that is a parent asking for time by name.
+                let targets: Vec<String> = cmd
+                    .payload
+                    .get("os_username")
+                    .and_then(|v| v.as_str())
+                    .map(|u| vec![u.to_string()])
+                    .unwrap_or_default();
                 let minutes = cmd
                     .payload
                     .get("minutes")
@@ -2841,21 +2975,20 @@ impl Agent {
                     .unwrap_or(0);
                 let end_of_day =
                     cmd.payload.get("until").and_then(|v| v.as_str()) == Some("end_of_day");
-                let (who, until) = if minutes > 0 {
-                    (
-                        targets,
-                        self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64),
-                    )
+                let until = if minutes > 0 {
+                    Some(self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64))
                 } else if end_of_day {
-                    (targets, self.end_of_day())
+                    Some(self.end_of_day())
                 } else {
-                    (
-                        self.stopped_by_rule(&targets),
-                        self.trusted_now
-                            + chrono::Duration::minutes(i64::from(RESUME_OVERRIDE_MIN)),
-                    )
+                    None
                 };
-                self.override_users(&who, until);
+                let who: Vec<String> = match until {
+                    Some(_) => targets,
+                    None => Vec::new(),
+                };
+                if let Some(until) = until {
+                    self.override_users(&who, until);
+                }
                 // Thaw whoever is free to go now — the pause is lifted and
                 // their override (or their own rules) lets them in. Someone a
                 // rule still stops (a Resume aimed at another person) stays
@@ -3079,6 +3212,19 @@ impl Agent {
     }
 }
 
+/// "You're back": how long, and until when — the verdict's stop, the same
+/// moment the warnings announce.
+fn back_words(v: &openscreentime_policy::rules::Verdict<chrono::Local>) -> String {
+    match (v.allowed, v.minutes_left, v.stop_at) {
+        (true, Some(m), Some(at)) if m > 0 => format!(
+            "You have {}, until {}.",
+            crate::glance::duration(m),
+            at.format("%H:%M")
+        ),
+        _ => "Your screen time is back on.".to_string(),
+    }
+}
+
 /// The warning vocabulary's name for a screen-time stop reason.
 fn stop_reason_of(r: &screentime::LockReason) -> warn::StopReason {
     match r {
@@ -3149,6 +3295,22 @@ fn billable_elapsed(last: Option<Instant>, now: Instant) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// When to wake for a stop landing at `at`: just after it (so the budget is
+/// really spent by then), if that comes before the next regular tick — never
+/// sooner than a quarter second from now, so a stop that didn't land yet
+/// can't spin the loop.
+fn stop_wake(at: Instant, now: Instant) -> Option<Instant> {
+    let wake = (at + STOP_SLACK).max(now + Duration::from_millis(250));
+    (wake < now + TICK).then_some(wake)
+}
+
+/// Split measured time into the whole seconds billed now and the fraction
+/// carried to the next tick.
+fn whole_seconds(d: Duration) -> (Duration, Duration) {
+    let whole = Duration::from_secs(d.as_secs());
+    (whole, d - whole)
+}
+
 /// The next heads-up before a stop at `stop` (`WARN_BEFORE_MIN` minutes
 /// before it), if one is still ahead of `now`.
 fn next_warning<Tz: chrono::TimeZone>(
@@ -3201,6 +3363,13 @@ type Shared = Arc<tokio::sync::Mutex<Agent>>;
 /// restarting a perfectly healthy offline agent.
 pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     ctx.require_root_for_enforcement()?;
+    // Removed from its household: never enforce again. Finish taking itself
+    // off (the helper stops this unit) and wait for that.
+    if crate::retire::marked() {
+        tracing::warn!("this computer was removed from its household; not enforcing");
+        crate::retire::spawn_helper(&Exec::new(ctx.clone()));
+        std::future::pending::<()>().await;
+    }
     let mut agent = Agent::new(ctx.clone(), cfg)?;
     tracing::info!(
         dry_run = ctx.dry_run,
@@ -3283,25 +3452,55 @@ async fn network_loop(agent: &Shared, client: &ServerClient) {
     let agent = agent.clone();
     let mut backoff_secs = BACKOFF_MIN_SECS;
     loop {
-        match client.connect_ws().await {
+        let ended = match client.connect_ws().await {
             Ok(stream) => {
                 tracing::info!("WS bus connected");
                 backoff_secs = BACKOFF_MIN_SECS;
-                if let Err(e) = run_ws(&agent, stream).await {
-                    tracing::warn!("WS loop ended: {e}");
-                }
+                run_ws(&agent, stream).await.err()
             }
+            Err(e) if crate::client::is_retired(&e) => Some(e),
             Err(e) => {
                 tracing::warn!("WS unavailable ({e}); falling back to heartbeat polling");
                 match run_poll(&agent).await {
-                    Ok(()) => backoff_secs = BACKOFF_MIN_SECS,
-                    Err(e) => tracing::warn!("poll loop ended: {e}"),
+                    Ok(()) => {
+                        backoff_secs = BACKOFF_MIN_SECS;
+                        None
+                    }
+                    Err(e) => Some(e),
                 }
             }
+        };
+        if let Some(e) = ended {
+            if retirement_confirmed(client, &e).await {
+                agent.lock().await.retire().await;
+                // Nothing left to talk about; the helper stops this unit.
+                std::future::pending::<()>().await;
+            }
+            tracing::warn!("server connection ended: {e}");
         }
         let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=backoff_secs / 2 + 1);
         tokio::time::sleep(Duration::from_secs(backoff_secs + jitter)).await;
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
+    }
+}
+
+/// The server retired this computer — asked once more, so one odd answer
+/// can't take the rules off a child's computer. Only `client::Retired`
+/// counts (410 `device_retired` from the configured server), never a 401 or
+/// a network error.
+async fn retirement_confirmed(client: &ServerClient, first: &anyhow::Error) -> bool {
+    if !crate::client::is_retired(first) {
+        return false;
+    }
+    match client.get_policy().await {
+        Err(e) if crate::client::is_retired(&e) => true,
+        other => {
+            tracing::warn!(
+                "the server said this computer was removed, then not ({:?}); keeping the rules",
+                other.err()
+            );
+            false
+        }
     }
 }
 
@@ -3319,7 +3518,20 @@ async fn tick_loop(agent: Shared) {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        // A stop due before the next tick gets a tick of its own, right as
+        // it lands: the lock comes at the minute the warnings announced.
+        let stop = agent.lock().await.next_stop_at;
+        match stop.and_then(|at| stop_wake(at, Instant::now())) {
+            Some(wake) => {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                }
+            }
+            None => {
+                ticker.tick().await;
+            }
+        }
         let mut a = agent.lock().await;
         let events = a.enforcement_tick().await;
         a.queue_events(events);
@@ -3885,6 +4097,159 @@ mod tests {
         ));
     }
 
+    fn kind_of(e: &Event) -> &str {
+        e.payload
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or_default()
+    }
+
+    fn mia_bundle() -> crate::policy::PolicyBundle {
+        let mut p = Policy::default();
+        p.screen_time.enabled = true;
+        p.screen_time.daily_limit_minutes = 60;
+        crate::policy::PolicyBundle {
+            policy_version: "7".into(),
+            device_tamper_level: 1,
+            users: vec![crate::policy::UserPolicy {
+                os_username: "mia".into(),
+                profile_kind: "kid".into(),
+                policy: p,
+                self_managed: false,
+            }],
+            vpn: None,
+            parent_code: Some(crate::policy::ParentCode {
+                totp_secret: SECRET.into(),
+                recovery_codes: Vec::new(),
+            }),
+        }
+    }
+
+    /// A stock Debian desktop has neither dnsmasq nor nftables. The rules
+    /// still arrive whole — held, the unlock code set up, screen time
+    /// enforced — resolv.conf is never pinned to a resolver that isn't
+    /// there, and the computer says so: degraded, once, and the `state`
+    /// frame the console reads is no longer "doing what it should".
+    #[tokio::test]
+    async fn a_computer_without_dnsmasq_or_nftables_keeps_its_rules() {
+        if crate::config::is_root() {
+            return; // apply_bundle writes its caches under /etc
+        }
+        let (mut a, _fake) = agent_with_mia();
+        a.policies.clear();
+        a.exec = Exec::simulated(
+            &["nft", "dnsmasq"],
+            &[("systemctl is-active dnsmasq", "inactive\n")],
+        );
+        let evs = a
+            .apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert!(a.policies.contains_key("mia"));
+        assert_eq!(a.parent_totp_secret.as_deref(), Some(SECRET));
+        assert!(evs.iter().any(|e| e.ev_type == EV_POLICY_APPLIED));
+        let degraded: Vec<&str> = evs
+            .iter()
+            .filter(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED)
+            .map(kind_of)
+            .collect();
+        assert_eq!(degraded, ["dns_resolver_missing", "firewall_not_installed"]);
+        assert!(!evs.iter().any(|e| e.ev_type == EV_TAMPER));
+        let st = a.device_state();
+        assert!(!st.enforcing);
+        assert_eq!(st.gaps, ["dns_resolver_missing", "firewall_not_installed"]);
+        assert!(
+            !a.exec
+                .log()
+                .iter()
+                .any(|l| l == "write /etc/resolv.conf" || l == "run chattr +i /etc/resolv.conf"),
+            "{:?}",
+            a.exec.log()
+        );
+
+        // The next pull with the same gaps is not news.
+        let evs = a.apply_bundle(mia_bundle()).unwrap();
+        assert!(!evs.iter().any(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED));
+
+        // Screen time still bites: she is over her 60 minutes.
+        stop_mia(&mut a).await;
+        assert!(a.frozen.contains("mia"));
+    }
+
+    /// nftables there but refusing the ruleset: a firewall gap. The whole
+    /// network apply failing (its ruleset can't even be written): a gap of
+    /// its own. Never an abort — the rules are held either way.
+    #[tokio::test]
+    async fn a_network_apply_that_fails_is_a_gap_not_an_abort() {
+        if crate::config::is_root() {
+            return;
+        }
+        let (mut a, _fake) = agent_with_mia();
+        a.policies.clear();
+        let running = [("systemctl is-active dnsmasq", "active\n")];
+        a.exec = Exec::simulated(&[], &running).failing(&["nft"]);
+        a.apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert_eq!(a.standing_gaps, ["firewall_not_applied"]);
+        assert!(
+            !a.firewall_loaded(),
+            "a missing table is the known gap, not a flush"
+        );
+
+        a.policies.clear();
+        a.exec = Exec::simulated(&[], &running)
+            .failing(&["write:/etc/openscreentime/dnsmasq.d/openscreentime.conf"]);
+        let evs = a
+            .apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert!(a.policies.contains_key("mia"));
+        assert_eq!(a.standing_gaps, [GAP_NETWORK_APPLY_FAILED]);
+        assert!(evs.iter().any(
+            |e| e.ev_type == EV_ENFORCEMENT_DEGRADED && kind_of(e) == GAP_NETWORK_APPLY_FAILED
+        ));
+    }
+
+    /// Removed from its household: the person the rules stopped is thawed,
+    /// the lock comes down (back to her session), the network rules go, the
+    /// helper that finishes the job outside the sandbox is started — and the
+    /// agent never enforces again.
+    #[tokio::test]
+    async fn a_retired_computer_frees_the_person_it_stopped() {
+        let (mut a, fake) = agent_with_mia();
+        let pinned = crate::enforce::dns::render_resolv_conf();
+        a.exec = Exec::simulated(&[], &[("read /etc/resolv.conf", pinned.as_str())]);
+        stop_mia(&mut a).await;
+        assert!(a.lock.shown().is_some());
+        fake.w().log.clear();
+
+        a.retire().await;
+        assert!(a.frozen.is_empty() && a.policies.is_empty());
+        assert!(a.lock.shown().is_none());
+        let log = fake.w().log.clone();
+        assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"), "{log:?}");
+        assert_eq!(fake.w().vt, 2);
+
+        let ex = a.exec.log();
+        for step in [
+            "run nft delete table inet openscreentime",
+            "run chattr -i /etc/resolv.conf",
+            "write /etc/resolv.conf",
+            "remove /etc/polkit-1/rules.d/49-openscreentime.rules",
+            "remove /etc/openscreentime/policy_bundle.json",
+            "write /var/lib/openscreentime/retired",
+            "run systemd-run --quiet --collect --unit=openscreentime-retire \
+             /usr/local/bin/openscreentime __retire",
+        ] {
+            pos(&ex, step);
+        }
+        assert!(!ex.iter().any(|l| l.contains("chattr +i")));
+
+        // Nothing is enforced any more.
+        fake.w().log.clear();
+        assert!(a.enforcement_tick().await.is_empty());
+        a.reconcile_lock().await;
+        assert!(fake.w().log.iter().all(|l| !l.starts_with("freeze")));
+    }
+
     #[tokio::test]
     async fn only_someone_who_set_their_own_limit_can_give_themselves_more() {
         let (mut a, _fake) = agent_with_mia();
@@ -4075,11 +4440,137 @@ mod tests {
         assert!(!fake.w().log.contains(&"thaw mia".to_string()));
     }
 
+    /// Acceptance, step 5: after the unlock code Mia's window said "0 min
+    /// left" in red — it read the spent budget — while the rules gave her 30
+    /// minutes. The status publishes the override's time as time left, and
+    /// the console hears the override in the state frame.
+    #[tokio::test]
+    async fn status_after_the_unlock_code_shows_the_override_minutes() {
+        let (mut a, _fake) = agent_with_mia(); // 61 of 60 minutes used
+        a.parent_totp_secret = Some(SECRET.into());
+        a.prev_active = Some(HashSet::new());
+        let r = reason(&a);
+        let mut ev = Vec::new();
+        a.screen_time_lockout("mia", &r, &mut ev).await;
+        let key = parentcode::base32_decode(SECRET).unwrap();
+        let counter = chrono::Utc::now().timestamp() as u64 / parentcode::STEP_SECS;
+        let code = parentcode::totp_at(&key, counter);
+        let reply = a.on_lock_request(Request::Code { code }).await;
+        assert!(reply.result.unwrap().ok);
+
+        let p = a.policies["mia"].clone();
+        let s = a.user_status("mia", &p);
+        assert_eq!(s["allowed"], true);
+        assert_eq!(s["remaining_minutes"], -1, "the budget is spent…");
+        assert_eq!(s["minutes_left"], 30, "…and the code gives 30");
+        assert!(s["override_until"].is_string());
+        assert_eq!(s["stop_at"], s["override_until"]);
+        // What every surface reads from it.
+        let clock: crate::glance::Clock = serde_json::from_value(s.clone()).unwrap();
+        match clock.left(chrono::Local::now()) {
+            crate::glance::Left::Minutes {
+                minutes,
+                unlocked_until: Some(_),
+            } => assert!((29..=30).contains(&minutes)),
+            other => panic!("{other:?}"),
+        }
+        // The console counts from the same override.
+        let st = a.device_state();
+        assert!(st.overrides.contains_key("mia"));
+    }
+
+    /// Acceptance, step 6a: "Give 15" on a day already 5 minutes over said
+    /// "You have 10 minutes left today" (the budget) while the warnings said
+    /// 15, ending 00:27 — and the lock came at 00:27. One number: the stop.
+    #[test]
+    fn a_grant_on_an_overused_day_says_the_stop_it_will_keep() {
+        let (mut a, _fake) = agent_with_mia();
+        a.tracker = screentime::UsageTracker::new();
+        a.tracker
+            .roll_to(a.trusted_now.with_timezone(&chrono::Local).date_naive());
+        let mut p = Policy::default();
+        p.screen_time.enabled = true;
+        p.screen_time.daily_limit_minutes = 5;
+        a.policies.insert("mia".into(), p.clone());
+        a.tracker.add_active("mia", 10 * 60, 1);
+        a.tracker.grant("g1", "mia", 15, a.trusted_now);
+        assert_eq!(a.tracker.remaining_minutes("mia", &p), Some(10));
+        let v = a.stop_verdict("mia", &p);
+        assert_eq!(v.minutes_left, Some(15));
+        let words = back_words(&v);
+        assert!(words.starts_with("You have 15 min, until "), "{words}");
+        let s = a.user_status("mia", &p);
+        assert_eq!(s["minutes_left"], 15);
+        assert_eq!(s["stop_at"], s["override_until"]);
+    }
+
+    /// Acceptance, step 6a: Mia pressed "Ask" at the lock and the console
+    /// read "Read for 20 min" (the first earn task); after Give 15 her ask
+    /// still said "waiting". The ask is a plain ask, and a grant answers it.
+    #[tokio::test]
+    async fn a_plain_ask_is_filed_as_one_and_a_grant_answers_it() {
+        let (mut a, _fake) = agent_with_mia();
+        let mut p = a.policies["mia"].clone();
+        p.gamification.earn_time.enabled = true;
+        p.gamification.earn_time.tasks = vec![crate::policy::EarnTask {
+            id: "reading".into(),
+            label: "Read for 20 min".into(),
+            reward_minutes: 15,
+        }];
+        a.policies.insert("mia".into(), p.clone());
+        let offer = a.earn_offer_for("mia");
+        assert_eq!(
+            (offer.id.as_str(), offer.label.as_str()),
+            ("ask", "Asked for more time")
+        );
+        // The agent filed it (the server call is the network's business).
+        a.requested_earn.insert(
+            ("mia".into(), offer.id.clone()),
+            chrono::Local::now().date_naive(),
+        );
+        assert_eq!(a.user_status("mia", &p)["ask_pending"], true);
+        let (ack, _) = a
+            .handle_command(Command {
+                id: "g1".into(),
+                cmd_type: CMD_CREDIT_TIME.into(),
+                payload: json!({ "os_username": "mia", "minutes": 15, "request_id": null }),
+            })
+            .await;
+        assert_eq!(ack.result["credited"], true);
+        assert_eq!(
+            a.user_status("mia", &p)["ask_pending"],
+            false,
+            "answered: the window offers Ask again"
+        );
+    }
+
+    #[test]
+    fn billing_carries_the_fraction_of_a_second() {
+        let mut carry = Duration::ZERO;
+        let mut billed = 0;
+        for _ in 0..30 {
+            let (whole, c) = whole_seconds(Duration::from_millis(10_040) + carry);
+            billed += whole.as_secs();
+            carry = c;
+        }
+        assert_eq!(billed, 301, "30 ticks of 10.04 s bill 301 s, not 300");
+        // A stop just ahead of the next tick gets its own; one far off doesn't.
+        let now = Instant::now();
+        let wake = stop_wake(now + Duration::from_secs(3), now).unwrap();
+        assert_eq!(wake, now + Duration::from_secs(3) + STOP_SLACK);
+        assert!(stop_wake(now + Duration::from_secs(30), now).is_none());
+        assert!(stop_wake(now, now).unwrap() >= now + Duration::from_millis(250));
+    }
+
     #[tokio::test]
     async fn resume_from_the_console_takes_the_lock_down() {
-        // Over her limit: a plain Resume writes an override for whoever a
-        // rule stops, so she's thawed at once and the lock comes down.
+        // Within her limit: Resume ends the pause, she's thawed at once and
+        // the lock comes down.
         let (mut a, fake) = agent_with_mia();
+        a.tracker = screentime::UsageTracker::new();
+        a.tracker
+            .roll_to(a.trusted_now.with_timezone(&chrono::Local).date_naive());
+        a.tracker.add_active("mia", 20 * 60, 1);
         a.prev_active = Some(HashSet::new());
         let cmd = |t: &str| Command {
             id: "c1".into(),
@@ -4089,11 +4580,49 @@ mod tests {
         let (_ack, _ev) = a.handle_command(cmd(CMD_LOCK)).await;
         assert!(a.frozen.contains("mia"));
         assert_eq!(a.face_for("mia").title, "Paused by a parent");
-        let (_ack, _ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
+        let (ack, _ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
         a.reconcile_lock().await;
         assert!(a.lock.shown().is_none());
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
+        assert_eq!(ack.result["override_users"], json!([]), "nothing given");
+    }
+
+    /// Acceptance, step 6b/7a: Resume on a computer whose child's time was
+    /// up handed her 30 free minutes (and 30 more to a login nobody had
+    /// paused, not even signed in). Resume ends a pause and nothing else.
+    #[tokio::test]
+    async fn resume_on_a_time_up_day_gives_no_time() {
+        let (mut a, _fake) = agent_with_mia(); // 61 of her 60 minutes used
+        let mut dad = Policy::default();
+        dad.screen_time.enabled = true;
+        dad.screen_time.bedtime = Some(openscreentime_policy::Bedtime {
+            start: "00:00".into(),
+            end: "23:59".into(),
+        });
+        a.policies.insert("philip".into(), dad);
+        a.prev_active = Some(HashSet::new());
+        let cmd = |t: &str| Command {
+            id: "c1".into(),
+            cmd_type: t.into(),
+            payload: json!({}),
+        };
+        let _ = a.handle_command(cmd(CMD_LOCK)).await;
+        let (ack, ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
+        a.reconcile_lock().await;
+        assert_eq!(ack.result["locked"], json!(false), "the pause is over");
+        assert_eq!(ack.result["override_users"], json!([]));
+        assert!(ev.iter().all(|e| e.payload["override_users"] == json!([])));
+        for u in ["mia", "philip"] {
+            assert!(
+                a.tracker.peek_override(u, a.trusted_now).is_none(),
+                "{u} was given time"
+            );
+        }
+        // Mia is still at her limit: stopped, and the lock says why.
+        assert!(!a.stop_verdict("mia", &a.policies["mia"].clone()).allowed);
+        assert!(a.frozen.contains("mia"));
+        assert_eq!(a.face_for("mia").title, "Time's up for today");
     }
 
     fn tamper_agent(tamper_max: bool, cfg_level: u8) -> Agent {

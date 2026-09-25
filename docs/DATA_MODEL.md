@@ -94,6 +94,13 @@ A person's rules are a non-preset copy with `kind` = their bracket.
 | public_ip | inet | |
 | last_seen, created_at | timestamptz | |
 
+### `retired_devices` — removed computers
+`token_hash` (PK, the removed device's `device_token` hash), `device_id`,
+`tenant_id` (→ tenants), `retired_at`. Written by `DELETE /api/devices/:id`
+in the same transaction as the delete. `AgentAuth` answers such a token
+`410 device_retired` instead of a plain 401, and the agent takes itself off
+the computer (docs/API.md → Retirement).
+
 ### `device_users` — logins
 One row per OS login on a computer: `id`, `device_id`, `os_username`,
 `display_name`, `profile_id` (always the linked person's rules), `account_id`
@@ -218,6 +225,7 @@ after 0030 on databases that already have it).
 | 0026 | The appliance: idempotent events (`client_id`), retry-safe enroll, `ops_log`, `ops_incidents`, `login_approval` / `other` events. |
 | 0027 | The ledger's day is the device-local day; `utc_offset_secs`. |
 | 0030 | Two doors: `login_codes`, `signin_links`, `owner_os_username`, `agent_features`, `unsorted`; drops TOTP 2FA, email codes, change mode, trusted sessions, login requests and Telegram verifications; unlinks logins it can't attribute on a parent's computer (docs/AUTH.md). |
+| 0034 | `retired_devices`: a removed computer's token answers `410 device_retired`, so the agent frees the computer. (0031–0033 left for parallel branches.) |
 
 The five bracket presets are seeded in application code
 (`server/src/presets.rs`), for every household at startup and on creation.

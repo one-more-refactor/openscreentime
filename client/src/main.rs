@@ -29,6 +29,7 @@ mod paths;
 mod pin;
 mod policy;
 mod protocol;
+mod retire;
 mod runner;
 mod service;
 mod sysusers;
@@ -236,6 +237,12 @@ async fn main() -> Result<()> {
     // Spawned via systemd-run by the agent, whose sandbox can't write them.
     if raw_args.get(1).map(String::as_str) == Some("__refresh-units") {
         return service::refresh_units();
+    }
+
+    // Hidden: finish taking OpenScreenTime off a computer that was removed
+    // from its household (retire.rs). Spawned via systemd-run by the agent.
+    if raw_args.get(1).map(String::as_str) == Some("__retire") {
+        return retire::run_helper();
     }
 
     if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {

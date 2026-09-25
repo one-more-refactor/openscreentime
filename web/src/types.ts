@@ -291,11 +291,14 @@ export interface FamilyChild {
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
   limit_minutes: number | null;
-  /** the day's budget left, computed by the server exactly as the device
-   *  does (per person, across all their computers, on the device's own day) */
+  /** time left: minutes until their screen stops — the number their computer
+   *  shows (limit, bedtime, the end of the hours or of an override, whichever
+   *  first; per person, on the computer's own day). null = no limit */
   left_minutes?: number | null;
-  /** when screens stop by the rules — limit, bedtime or window end */
+  /** when screens stop and why — the same verdict */
   rules?: RulesVerdict | null;
+  /** their computer's clock (seconds east of UTC); null = none reported yet */
+  utc_offset_secs?: number | null;
   /** the person's own daily goal (minutes), or null */
   goal_minutes?: number | null;
   profile_id: string | null;
@@ -486,9 +489,9 @@ export type MemberPatch = Partial<{
 /** Why screens stop (the agent's `reason`, policy::rules::StopReason). */
 export type StopReason = "limit" | "bedtime" | "outside_hours" | "paused";
 
-/** When screens stop by the rules — the same rules function the device
- *  enforces with, on the device's clock. A code typed at the device (a local
- *  override) isn't known to the server, so this is "by the rules". */
+/** When screens stop — the same rules function the computer enforces with,
+ *  with the same inputs (their day, the override the computer reports), on
+ *  the computer's clock. Times carry the computer's UTC offset. */
 export interface RulesVerdict {
   allowed: boolean;
   /** why they are stopped now (allowed = false) or why the next stop comes */
@@ -499,6 +502,10 @@ export interface RulesVerdict {
   stop_at: string | null;
   /** when a current stop lifts on its own (bedtime ends, window opens…) */
   resume_at: string | null;
+  /** a parent's override (an unlock code, a grant) runs until then */
+  override_until?: string | null;
+  /** the computer's clock, seconds east of UTC */
+  utc_offset_secs?: number;
 }
 
 /** GET /api/me/today — the person's own day, for their own page. */
@@ -506,8 +513,12 @@ export interface MeToday {
   used_minutes: number;
   earned_minutes: number;
   limit_minutes: number | null;
+  /** minutes until the screen stops — what the computer shows */
   left_minutes: number | null;
   rules?: RulesVerdict;
+  /** the computer's clock (seconds east of UTC): the week and focus hours
+   *  are its day, not this browser's */
+  utc_offset_secs?: number | null;
   locked: boolean;
   devices: { name: string; status: DeviceStatus; locked: boolean }[];
   blocks: AppBlocks;
