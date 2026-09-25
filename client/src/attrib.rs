@@ -16,8 +16,9 @@
 //! - **sites**: dnsmasq writes an extra-format query log (`dns.rs` enables
 //!   it); we tail it, reduce each queried name to its registrable domain, and
 //!   count queries per hour, device-wide — resolver traffic has no user.
-//!   Not counted: OpenScreenTime's own lookups (its server, its block
-//!   self-check).
+//!   Not counted: what the computer looks up on its own ([`OS_LOOKUPS`] —
+//!   update checks, connectivity checks, the browser's telemetry), and
+//!   OpenScreenTime's own lookups (its server, its block self-check).
 //!
 //! Slices accumulate in memory keyed by (user, hour, kind, key) and are
 //! drained to `POST /agent/usage` about once a minute; a failed post keeps
@@ -67,6 +68,68 @@ const INDEX_TTL: Duration = Duration::from_secs(600);
 /// round 4: "Files 1 min" for a person who never opened it). Someone who
 /// really opens one keeps it longer than that.
 const SERVICE_GRACE_SECS: i64 = 60;
+
+/// What the operating system, the desktop and the browser look up on their
+/// own — never a person opening a site. Acceptance round 5: a child's top
+/// "site" was debian.org, 3097 lookups by the system's update checks. A
+/// name is one of these when it is an entry or under one; `*` stands for one
+/// label (`ftp.*.debian.org`: a country mirror). Kept short, and listed in
+/// docs/TRANSPARENCY.md. A site someone opens — www.debian.org,
+/// www.mozilla.org, extensions.gnome.org — still counts.
+pub const OS_LOOKUPS: &[&str] = &[
+    // Distribution updates and mirrors.
+    "deb.debian.org",
+    "security.debian.org",
+    "ftp.debian.org",
+    "ftp.*.debian.org",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+    "changelogs.ubuntu.com",
+    "motd.ubuntu.com",
+    "esm.ubuntu.com",
+    "packages.linuxmint.com",
+    "fedoraproject.org",
+    // App stores' own traffic (and GNOME Software's ratings).
+    "flathub.org",
+    "snapcraft.io",
+    "snapcraftcontent.com",
+    "odrs.gnome.org",
+    // "Am I online?" checks.
+    "nmcheck.gnome.org",
+    "networkcheck.kde.org",
+    "connectivity-check.ubuntu.com",
+    "detectportal.firefox.com",
+    // Firefox in the background: settings, telemetry, push, updates,
+    // sponsored tiles, safe browsing, the DNS-over-HTTPS canary.
+    "services.mozilla.com",
+    "telemetry.mozilla.org",
+    "aus5.mozilla.org",
+    "ads.mozilla.org",
+    "cdn.mozilla.net",
+    "safebrowsing.googleapis.com",
+    "use-application-dns.net",
+    // The clock.
+    "pool.ntp.org",
+    "ntp.ubuntu.com",
+];
+
+/// Is `name` `pattern` or under it (`*` = any one label)?
+fn under_pattern(name: &str, pattern: &str) -> bool {
+    let name: Vec<&str> = name.rsplit('.').collect();
+    let pattern: Vec<&str> = pattern.rsplit('.').collect();
+    name.len() >= pattern.len()
+        && pattern
+            .iter()
+            .zip(&name)
+            .all(|(p, n)| *p == "*" || p.eq_ignore_ascii_case(n))
+}
+
+/// Is `name` one the computer looks up on its own ([`OS_LOOKUPS`])?
+pub fn is_os_lookup(name: &str) -> bool {
+    let name = name.trim_end_matches('.');
+    OS_LOOKUPS.iter().any(|p| under_pattern(name, p))
+}
 
 /// Programs that run other programs — a shell, an interpreter, a sandbox, a
 /// launcher — and OpenScreenTime itself. A desktop entry that runs one of
@@ -550,7 +613,7 @@ impl Attrib {
     }
 
     /// A lookup no person made: the block self-check's own name, the
-    /// agent's server.
+    /// agent's server, what the computer looks up on its own.
     fn not_a_visit(&self, name: &str) -> bool {
         let name = name.trim_end_matches('.');
         crate::enforce::dns::is_selftest(name)
@@ -558,6 +621,7 @@ impl Attrib {
                 .own_host
                 .as_deref()
                 .is_some_and(|h| name.eq_ignore_ascii_case(h))
+            || is_os_lookup(name)
     }
 
     /// The names this computer's rules answered as blocked since the last
@@ -894,6 +958,70 @@ Sep 25 10:50:36 dnsmasq[1234]: 33 127.0.0.1/40203 query[A] www.wikipedia.org fro
             site_keys(&mut a),
             [("wikipedia.org".to_string(), 1)].into_iter().collect()
         );
+    }
+
+    /// Acceptance round 5: a child's top site was "debian.org 3097×" — the
+    /// system's update checks. What the computer, the desktop and the
+    /// browser look up on their own is not where her time went; the same
+    /// sites opened by a person still are.
+    #[test]
+    fn what_the_computer_looks_up_on_its_own_is_not_a_site() {
+        let noise = [
+            "deb.debian.org",
+            "security.debian.org",
+            "ftp.de.debian.org",
+            "de.archive.ubuntu.com",
+            "connectivity-check.ubuntu.com",
+            "nmcheck.gnome.org",
+            "networkcheck.kde.org",
+            "odrs.gnome.org",
+            "dl.flathub.org",
+            "api.snapcraft.io",
+            "push.services.mozilla.com",
+            "firefox.settings.services.mozilla.com",
+            "incoming.telemetry.mozilla.org",
+            "aus5.mozilla.org",
+            "ads.mozilla.org",
+            "content-signature-2.cdn.mozilla.net",
+            "detectportal.firefox.com",
+            "safebrowsing.googleapis.com",
+            "use-application-dns.net",
+            "2.debian.pool.ntp.org",
+            "mirrors.fedoraproject.org",
+        ];
+        let visits = [
+            "www.debian.org",
+            "www.mozilla.org",
+            "extensions.gnome.org",
+            "www.youtube.com",
+            "de.wikipedia.org",
+        ];
+        let mut log = String::new();
+        for (i, n) in noise.iter().chain(visits.iter()).enumerate() {
+            log.push_str(&format!(
+                "Sep 25 10:5{}:00 dnsmasq[1]: {i} 127.0.0.1/1 query[A] {n} from 127.0.0.1\n",
+                i % 10
+            ));
+        }
+        let mut a = Attrib::new();
+        a.ingest_lines(&log);
+        let keys: Vec<String> = site_keys(&mut a).into_keys().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "debian.org",
+                "gnome.org",
+                "mozilla.org",
+                "wikipedia.org",
+                "youtube.com"
+            ]
+        );
+        // One label for `*`, and never a look-alike.
+        assert!(is_os_lookup("ftp.us.debian.org."));
+        assert!(!is_os_lookup("ftp.us.eu.debian.org"));
+        assert!(!is_os_lookup("notdeb.debian.org"));
+        assert!(!is_os_lookup("evilpool.ntp.org"));
+        assert!(!is_os_lookup("debian.org"));
     }
 
     fn desktop(name: &str, exec: &str, extra: &str) -> String {
