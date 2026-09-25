@@ -1018,12 +1018,17 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     .fetch_all(&st.db)
     .await?;
 
-    let used_secs: i64 = rows.iter().map(|r| i64::from(r.5)).sum();
-    let earned_secs: i64 = rows.iter().map(|r| i64::from(r.6)).sum();
+    // …and today on computers that were removed: still their day.
+    let kept = crate::ledger::kept_today(&st.db, acct.1, Some(acct.0))
+        .await?
+        .remove(&acct.0)
+        .unwrap_or_default();
+    let used_secs: i64 = rows.iter().map(|r| i64::from(r.5)).sum::<i64>() + kept.used_secs;
+    let earned_secs: i64 = rows.iter().map(|r| i64::from(r.6)).sum::<i64>() + kept.earned_secs;
     let used = used_secs / 60;
     let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    let offset = rows.iter().find_map(|r| r.7);
+    let offset = rows.iter().find_map(|r| r.7).or(kept.utc_offset_secs);
     // Time left, the number their computer shows: the same rules function
     // with the same inputs (their day, the override a computer of theirs
     // reports), on the computer's clock.
@@ -1280,15 +1285,24 @@ pub async fn set_my_rules(
 pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
 
+    // Computers that were removed count too (`retired_usage`): the minutes
+    // were spent all the same.
     let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(&format!(
-        "SELECT l.day, SUM(l.used_seconds)::bigint, SUM(l.earned_seconds)::bigint
-           FROM screen_time_ledger l
-           JOIN device_users du ON du.id = l.device_user_id
-           JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2
-            AND l.day > {} - 14
-          GROUP BY l.day ORDER BY l.day",
-        crate::ledger::DEVICE_TODAY_SQL
+        "SELECT day, SUM(used)::bigint, SUM(earned)::bigint
+           FROM (SELECT l.day, l.used_seconds AS used, l.earned_seconds AS earned
+                   FROM screen_time_ledger l
+                   JOIN device_users du ON du.id = l.device_user_id
+                   JOIN devices d ON d.id = du.device_id
+                  WHERE du.account_id = $1 AND d.tenant_id = $2
+                    AND l.day > {} - 14
+                 UNION ALL
+                 SELECT r.day, r.used_seconds, r.earned_seconds
+                   FROM retired_usage r
+                  WHERE r.account_id = $1 AND r.tenant_id = $2
+                    AND r.day > {} - 14) t
+          GROUP BY day ORDER BY day",
+        crate::ledger::DEVICE_TODAY_SQL,
+        crate::ledger::RETIRED_TODAY_SQL
     ))
     .bind(acct.0)
     .bind(acct.1)
@@ -1296,14 +1310,20 @@ pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<
     .await?;
 
     let today_by_device: Vec<(String, i64)> = sqlx::query_as(&format!(
-        "SELECT d.name, SUM(l.used_seconds)::bigint
-           FROM screen_time_ledger l
-           JOIN device_users du ON du.id = l.device_user_id
-           JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = {}
-          GROUP BY d.name HAVING SUM(l.used_seconds) > 0
-          ORDER BY SUM(l.used_seconds) DESC",
-        crate::ledger::DEVICE_TODAY_SQL
+        "SELECT name, SUM(used)::bigint
+           FROM (SELECT d.name, l.used_seconds AS used
+                   FROM screen_time_ledger l
+                   JOIN device_users du ON du.id = l.device_user_id
+                   JOIN devices d ON d.id = du.device_id
+                  WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = {}
+                 UNION ALL
+                 SELECT r.device_name, r.used_seconds
+                   FROM retired_usage r
+                  WHERE r.account_id = $1 AND r.tenant_id = $2 AND r.day = {}) t
+          GROUP BY name HAVING SUM(used) > 0
+          ORDER BY SUM(used) DESC",
+        crate::ledger::DEVICE_TODAY_SQL,
+        crate::ledger::RETIRED_TODAY_SQL
     ))
     .bind(acct.0)
     .bind(acct.1)

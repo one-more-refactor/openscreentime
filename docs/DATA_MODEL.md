@@ -9,7 +9,8 @@ security.
 ## Tables
 
 ### `tenants`
-A household. `id`, `name`, `created_at`.
+A household. `id`, `name`, `created_at`, `machine_salt` (the key its agents
+hash their machine-id with, handed out by the enroll preview).
 
 ### `admins` — accounts
 Everyone has one: parents and the people they look after. No password column
@@ -89,6 +90,7 @@ A person's rules are a non-preset copy with `kind` = their bracket.
 | agent_features | text[] | what the agent said it understands (`login_code`); null = older agent |
 | offline_allowed_until | timestamptz | "Allow offline…" |
 | utc_offset_secs | int | its UTC offset as last reported (which date is "today" there) |
+| machine_hash | text | which machine it is, for this household (docs/API.md → Enrollment); a second record of the same machine is folded into the newer one |
 | vpn_updated_at | timestamptz | |
 | recovery_pin_hash, recovery_pin_set_at | text, timestamptz | from 0011; nothing reads them |
 | public_ip | inet | |
@@ -99,7 +101,18 @@ A person's rules are a non-preset copy with `kind` = their bracket.
 `tenant_id` (→ tenants), `retired_at`. Written by `DELETE /api/devices/:id`
 in the same transaction as the delete. `AgentAuth` answers such a token
 `410 device_retired` instead of a plain 401, and the agent takes itself off
-the computer (docs/API.md → Retirement).
+the computer (docs/API.md → Retirement). `merged_into` (→ devices, `SET
+NULL`): the record was folded into the same machine's newer one, and its
+token authenticates as that record until it is removed.
+
+### `retired_usage` — a removed computer's minutes, kept per person
+`tenant_id`, `account_id` (→ admins, cascade), `device_id` + `device_name`
+(the removed record), `machine_hash`, `os_username`, `day`, `used_seconds`,
+`earned_seconds`, `utc_offset_secs`, `retired_at`; PK `(device_id,
+os_username, day)`. Filed from `screen_time_ledger` when a computer is
+removed (or a login is gone from a folded record), so a person's today,
+their week and their time elsewhere stay true. Enrolling the same machine
+again moves the rows back onto its logins. Pruned after 21 days.
 
 ### `device_users` — logins
 One row per OS login on a computer: `id`, `device_id`, `os_username`,
@@ -145,7 +158,8 @@ request per login, task and day.
 
 ### `screen_time_ledger`
 Per-login daily use and grants. A person's day is the sum of their logins'
-rows for that day — one budget per person (docs/TRACKING.md).
+rows for that day, plus what a removed computer left them (`retired_usage`)
+— one budget per person (docs/TRACKING.md).
 
 | column | type | notes |
 |---|---|---|
@@ -226,6 +240,7 @@ after 0030 on databases that already have it).
 | 0027 | The ledger's day is the device-local day; `utc_offset_secs`. |
 | 0030 | Two doors: `login_codes`, `signin_links`, `owner_os_username`, `agent_features`, `unsorted`; drops TOTP 2FA, email codes, change mode, trusted sessions, login requests and Telegram verifications; unlinks logins it can't attribute on a parent's computer (docs/AUTH.md). |
 | 0034 | `retired_devices`: a removed computer's token answers `410 device_retired`, so the agent frees the computer. (0031–0033 left for parallel branches.) |
+| 0036 | One machine, one record: `tenants.machine_salt`, `devices.machine_hash`, `retired_devices.merged_into`; `retired_usage` keeps a removed computer's minutes per person. (0035 left for parallel branches.) |
 
 The five bracket presets are seeded in application code
 (`server/src/presets.rs`), for every household at startup and on creation.
