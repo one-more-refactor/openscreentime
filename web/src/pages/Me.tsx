@@ -26,6 +26,7 @@ import { duration, durationShort, sentence } from "../lib/format";
 import { describeWindow } from "../lib/schedule";
 import { daysBefore, deviceNow, stopSentence, type WallTime } from "../lib/day";
 import { parentSeesSentence } from "../lib/parentSees";
+import { cantFilter, notBlockedSentence } from "../lib/degraded";
 import {
   DAY_LETTERS,
   DAY_SHORT,
@@ -482,7 +483,18 @@ function LimitCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
   );
 }
 
-function FocusCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save: (r: MyRules) => Promise<boolean> }) {
+function FocusCard({
+  rules,
+  busy,
+  save,
+  sitesBlocked,
+}: {
+  rules: MyRules;
+  busy: boolean;
+  save: (r: MyRules) => Promise<boolean>;
+  /** false: no computer of theirs can filter websites right now */
+  sitesBlocked: boolean;
+}) {
   const h = rules.focus_hours;
   const [editing, setEditing] = useState(false);
   const [days, setDays] = useState<number[]>(h?.days ?? [1, 2, 3, 4, 5]);
@@ -502,7 +514,13 @@ function FocusCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
       <p className="me-mrule-v num">
         {h ? describeWindow(h.start, h.end) : "All day"}{" "}
         <small>
-          {h ? `${describeDays(h.days)} · the sites below are blocked` : "· the sites below are blocked all the time"}
+          {!sitesBlocked
+            ? h
+              ? describeDays(h.days)
+              : ""
+            : h
+              ? `${describeDays(h.days)} · the sites below are blocked`
+              : "· the sites below are blocked all the time"}
         </small>
       </p>
       {editing && (
@@ -559,7 +577,18 @@ function FocusCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
   );
 }
 
-function SitesCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save: (r: MyRules) => Promise<boolean> }) {
+function SitesCard({
+  rules,
+  busy,
+  save,
+  notBlocked,
+}: {
+  rules: MyRules;
+  busy: boolean;
+  save: (r: MyRules) => Promise<boolean>;
+  /** A computer of theirs can't filter websites: said right at the list. */
+  notBlocked: string | null;
+}) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
@@ -580,6 +609,12 @@ function SitesCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
   }
   return (
     <RuleCard icon="block" title="Sites I block for myself" editing={adding} wide>
+      {notBlocked && (
+        <p className="banner banner-warn me-noblock" role="status">
+          <Icon name="warning" size={18} />
+          <span className="banner-main">{notBlocked}</span>
+        </p>
+      )}
       <ul className="me-chips" aria-label="Sites I block for myself">
         {rules.sites.map((s) => (
           <li key={s} className="chip">
@@ -632,15 +667,20 @@ function SitesCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
 }
 
 /** One sentence about the focus hours: what holds now, what happens next —
- * on the computer's clock (`now`), where the sites are really blocked. */
-export function focusLine(rules: MyRules, now: WallTime): string | null {
+ * on the computer's clock (`now`), where the sites are really blocked.
+ * `sitesBlocked` false: no computer of theirs can filter websites right now,
+ * so the hours are only hours — nothing is said to be blocked or open. */
+export function focusLine(rules: MyRules, now: WallTime, sitesBlocked = true): string | null {
   const f = { sites: rules.sites, hours: rules.focus_hours };
   if (rules.sites.length === 0) return null;
   const ends = focusEndsAt(f, now);
-  if (ends) return `Focus hours until ${ends} — the sites below open again then.`;
-  if (!rules.focus_hours) return "The sites below are blocked all day.";
+  if (ends) return sitesBlocked ? `Focus hours until ${ends} — the sites below open again then.` : `Focus hours until ${ends}.`;
+  if (!rules.focus_hours) return sitesBlocked ? "The sites below are blocked all day." : null;
   const next = nextFocusStart(f, now);
   if (!next) return null;
+  if (!sitesBlocked) {
+    return next.today ? `Focus hours start at ${next.start} today.` : `Next focus hours: ${DAY_SHORT[next.day]} at ${next.start}.`;
+  }
   return next.today
     ? `Focus hours start at ${next.start} today — the sites below are blocked then.`
     : `Next focus hours: ${DAY_SHORT[next.day]} at ${next.start}. Until then the sites below are open.`;
@@ -699,7 +739,11 @@ function MyComputer({
     today.devices.length === 1 ? today.devices[0].name : today.devices.length > 1 ? "My computers" : "My computer";
   const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
   const next = today.locked ? "This computer is paused." : stopSentence(today.rules, "you");
-  const focus = rules ? focusLine(rules, deviceNow(today.utc_offset_secs)) : null;
+  // What the computers really report: a block promised only where it holds.
+  const notBlocked = notBlockedSentence(today.devices);
+  const onlineNow = today.devices.filter((d) => d.status === "online");
+  const sitesBlocked = !(onlineNow.length > 0 && cantFilter(onlineNow).length === onlineNow.length);
+  const focus = rules ? focusLine(rules, deviceNow(today.utc_offset_secs), sitesBlocked) : null;
 
   return (
     <>
@@ -725,6 +769,7 @@ function MyComputer({
             <small>{total !== null ? `of the ${duration(today.limit_minutes ?? 0)} you set` : "· no limit set"}</small>
           </p>
           {focus && <p className="me-next">{focus}</p>}
+          {focus && notBlocked && <p className="me-next">{notBlocked}</p>}
           {next && <p className="me-next">{next}</p>}
           {total !== null && (
             <p className="me-hatch">
@@ -749,8 +794,8 @@ function MyComputer({
         ) : (
           <div className="me-mrules">
             <LimitCard rules={rules} busy={busy} save={save} />
-            <FocusCard rules={rules} busy={busy} save={save} />
-            <SitesCard rules={rules} busy={busy} save={save} />
+            <FocusCard rules={rules} busy={busy} save={save} sitesBlocked={sitesBlocked} />
+            <SitesCard rules={rules} busy={busy} save={save} notBlocked={notBlocked} />
           </div>
         )}
         {(saveError || saved) && (
