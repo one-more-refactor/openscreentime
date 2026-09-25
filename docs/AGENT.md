@@ -301,8 +301,23 @@ the blocklist — categories, apps, sites — sinkholed exactly. Only an old,
 hand-edited profile with an explicit `default_deny` (and not a `*`
 allowlist) gets allowlist mode: allowlisted domains forward, a trailing
 `address=/#/` NXDOMAINs the rest. `block_tor` NXDOMAINs
-`.onion` and `torproject.org`; `safe_search` rewrites the big search/video
-providers via `cname=` redirects. `/etc/resolv.conf` is pinned to
+`.onion` and `torproject.org`. `safe_search` points the search engines'
+own names at their safe-search front ends, as each vendor documents it:
+`www.google.<every Google country domain>` → `forcesafesearch.google.com`;
+`www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`,
+`youtube.googleapis.com`, `www.youtube-nocookie.com` →
+`restrict.youtube.com`; `www.bing.com` → `strict.bing.com`;
+`duckduckgo.com` → `safe.duckduckgo.com` (`enforce/safesearch.rs`). Never
+with `cname=`: dnsmasq only follows a CNAME to a name it knows itself, so
+that answered with no address and took the sites away. The agent looks the
+front ends up straight from the upstream (A + AAAA) and writes
+`host-record=` lines with their addresses — at start (the last lookup is
+kept in `/var/lib/openscreentime/safesearch.json`, so a reboot redirects at
+once), hourly, a minute after an incomplete lookup, and whenever the default
+routes change (a new network). A front end that doesn't resolve is not
+redirected: its names pass through, the site works without safe search, and
+the gap `dns_safesearch_unavailable` says so. A name a block covers stays
+blocked. `/etc/resolv.conf` is pinned to
 `127.0.0.1` and set immutable (`chattr +i`) — **only while dnsmasq is
 running**: the tick re-pins on drift only then, and when the resolver is gone
 it takes its own pin off and puts back what the computer used before (kept in
@@ -559,7 +574,11 @@ input and shows nothing while the lock holds the screen:
   `VT_LOCKSWITCH` and brings up the login screen: a running greeter session
   is activated, else GDM's `CreateTransientDisplay`, else the freedesktop
   `DisplayManager` seat's `SwitchToGreeter` (LightDM, SDDM). The stopped
-  person stays stopped behind it (an inactive session counts no time). The
+  person stays stopped behind it (an inactive session counts no time). A
+  stop holds for a desktop behind someone else's too: when a person's time
+  runs out (an override ends, bedtime starts) while another person has the
+  screen, their apps are frozen at the next tick — no countdown, nothing on
+  screen changes — and their session meets the lock when it comes back. The
   lock stands in front of stopped people only: someone else's session keeps
   the screen for as long as they like; a login screen keeps it for 90 s,
   then the stopped person's lock (with its "Switch user") comes back; and a
@@ -568,6 +587,13 @@ input and shows nothing while the lock holds the screen:
   and keyring, which the freeze leaves running) — meets the lock first,
   within about a second (the VT watch wakes on the kernel's `POLLPRI` on
   `/sys/class/tty/tty0/active`).
+- **A stopped session that ends** (a log-out, `loginctl terminate-user`, a
+  crash) leaves no lock behind for nobody: within about a second (the VT
+  watch also wakes when logind's session files in `/run/systemd/sessions`
+  change) the lock lets go of `VT_LOCKSWITCH`, hands the screen to the login
+  screen (the same ways "Switch user" does; the VT from before where there
+  is no display manager) and stops once the login screen has the screen.
+  The person stays stopped and meets the lock at their next login.
 - **Logging in to a stop**: the lock is in front within about a second,
   while the desktop is still starting; it finishes starting behind the lock
   and nothing of it is frozen until it is a minute old.
@@ -784,6 +810,7 @@ black out all traffic):
   | `dns_rules_not_written` | the ruleset couldn't be written; dnsmasq serves what it had | the agent's journal says why |
   | `dns_resolv_conf_not_pinned` | `/etc/resolv.conf` couldn't be pointed at 127.0.0.1: nothing filtered, still online | the agent's journal says why |
   | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` is systemd-resolved's/resolvconf's link, which the sandboxed agent can't replace | re-run the install one-liner (it makes it a file, and puts the link back on removal) |
+  | `dns_safesearch_unavailable` | safe search is on but a front end (`forcesafesearch.google.com`, `restrict.youtube.com`, `strict.bing.com`, `safe.duckduckgo.com`) couldn't be looked up: that engine opens without safe search (never broken); websites are still filtered | nothing: it's looked up again every minute and on a network change; the journal says which |
   | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
   | `firewall_not_installed` | `nft` isn't installed: no firewall rules (screen time works) | re-run the install one-liner, or install nftables |
   | `firewall_not_applied` | `nft` refused the ruleset | the agent's journal says why |

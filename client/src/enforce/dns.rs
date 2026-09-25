@@ -12,6 +12,7 @@
 //! Every way this can fail on a real host is reported as a [`DnsGap`] rather than
 //! swallowed: a device that cannot enforce DNS must never look like one that can.
 
+use super::safesearch::{self, SafeSearch};
 use crate::policy::{DnsPolicy, NetworkLockdown};
 use crate::util::Exec;
 use anyhow::Result;
@@ -88,6 +89,10 @@ pub enum DnsGap {
     /// `/etc/resolv.conf` could not be pointed at the local resolver, so
     /// programs ask their usual DNS and nothing is filtered.
     ResolvConfNotPinned,
+    /// Safe search is on, but a search engine's safe-search front end could
+    /// not be looked up: its names pass through (the site works, without
+    /// safe search) rather than being pointed at nothing.
+    SafeSearchUnavailable,
 }
 
 impl DnsGap {
@@ -101,6 +106,7 @@ impl DnsGap {
             DnsGap::PolicyNotLoaded => "dns_policy_not_loaded",
             DnsGap::RulesNotWritten => "dns_rules_not_written",
             DnsGap::ResolvConfNotPinned => "dns_resolv_conf_not_pinned",
+            DnsGap::SafeSearchUnavailable => "dns_safesearch_unavailable",
         }
     }
 
@@ -162,6 +168,15 @@ impl DnsGap {
                  programs on this computer ask their usual DNS and websites are \
                  not filtered. It stays online, and screen time still works. The \
                  agent's log (`journalctl -u openscreentime-agent`) says why."
+            }
+            DnsGap::SafeSearchUnavailable => {
+                "safe search is on, but the address of a search engine's \
+                 safe-search front end (forcesafesearch.google.com, \
+                 restrict.youtube.com, strict.bing.com or safe.duckduckgo.com) \
+                 could not be looked up from the family DNS, so that engine \
+                 opens without safe search rather than not at all. Websites \
+                 are still filtered. The agent tries again every minute and \
+                 whenever the network changes."
             }
         }
     }
@@ -343,16 +358,42 @@ fn local_resolver_running(exec: &Exec) -> bool {
     exec.probe("systemctl", &["is-active", "dnsmasq"]).trim() == "active"
 }
 
-/// Build the dnsmasq ruleset that realizes the policy. `sinkhole` is the
-/// expanded app/category block list (subdomains included by dnsmasq's
-/// `address=/d/` semantics): each name answers 0.0.0.0 / :: — an app that
-/// cannot resolve its servers is an app that does not work.
+/// The family resolver a malformed upstream falls back to (malware + adult).
+const FALLBACK_UPSTREAM: &str = "1.1.1.3";
+
+/// The upstream dnsmasq forwards to — the policy's, when it is an address.
+pub fn upstream_ip(dns: &DnsPolicy) -> std::net::IpAddr {
+    dns.upstream
+        .parse()
+        .unwrap_or_else(|_| FALLBACK_UPSTREAM.parse().expect("an address"))
+}
+
+/// The ruleset alone (tests).
+#[cfg(test)]
 pub fn render_dnsmasq(
     dns: &DnsPolicy,
     lockdown: &NetworkLockdown,
     server_host: Option<&str>,
     sinkhole: &[String],
+    safe: &SafeSearch,
 ) -> String {
+    render_rules(dns, lockdown, server_host, sinkhole, safe).0
+}
+
+/// Build the dnsmasq ruleset that realizes the policy. `sinkhole` is the
+/// expanded app/category block list (subdomains included by dnsmasq's
+/// `address=/d/` semantics): each name answers 0.0.0.0 / :: — an app that
+/// cannot resolve its servers is an app that does not work. `safe`: the
+/// safe-search front ends' addresses (`safesearch`), when safe search is on.
+/// Also returns the search engines safe search could not be forced on (their
+/// front end wasn't resolved: passed through).
+fn render_rules(
+    dns: &DnsPolicy,
+    lockdown: &NetworkLockdown,
+    server_host: Option<&str>,
+    sinkhole: &[String],
+    safe: &SafeSearch,
+) -> (String, Vec<&'static str>) {
     let mut out = String::new();
     out.push_str("# Managed by openscreentime — do not edit.\n");
     out.push_str("no-resolv\n"); // never inherit host resolv.conf upstreams
@@ -378,7 +419,7 @@ pub fn render_dnsmasq(
             "ignoring non-IP DNS upstream {:?}; using 1.1.1.3",
             dns.upstream
         );
-        "1.1.1.3"
+        FALLBACK_UPSTREAM
     };
     // A domain safe to interpolate into a resolver directive — same discipline
     // as the catalog sinkhole. Rejects anything with a control char, slash,
@@ -463,14 +504,34 @@ pub fn render_dnsmasq(
         out.push_str("address=/torproject.org/0.0.0.0\n");
     }
 
+    let mut unavailable = Vec::new();
     if dns.safe_search {
-        // Force safe-search endpoints for the big providers (CNAME rewrites).
-        out.push_str("# safe-search enforced\n");
-        out.push_str("cname=www.google.com,forcesafesearch.google.com\n");
-        out.push_str("cname=www.youtube.com,restrict.youtube.com\n");
-        out.push_str("cname=www.bing.com,strict.bing.com\n");
+        // The engines' own names answer with their safe-search front end's
+        // addresses (never a `cname=` to it: dnsmasq can't follow a CNAME to
+        // a name it only learns from upstream — see `safesearch`). A name a
+        // rule blocks stays blocked; under default-deny only allowlisted
+        // names are answered at all.
+        let blocked: Vec<String> = sinkhole
+            .iter()
+            .cloned()
+            .chain(dns.blocklist.iter().filter_map(|b| clean_domain(b)))
+            .collect();
+        let deny = dns.is_default_deny() && !dns.allows_everything();
+        let allow: Vec<String> = dns
+            .allowlist
+            .iter()
+            .filter_map(|a| clean_domain(a))
+            .collect();
+        let allowed = |h: &str| {
+            !blocked.iter().any(|b| safesearch::under(h, b))
+                && (!deny || allow.iter().any(|a| safesearch::under(h, a)))
+        };
+        let (lines, missing) = safesearch::render(safe, &allowed);
+        out.push_str("# safe search enforced\n");
+        out.push_str(&lines);
+        unavailable = missing;
     }
-    out
+    (out, unavailable)
 }
 
 pub fn render_resolv_conf() -> String {
@@ -490,9 +551,19 @@ pub fn apply(
     lockdown: &NetworkLockdown,
     server_host: Option<&str>,
     sinkhole: &[String],
+    safe: &SafeSearch,
 ) -> Vec<DnsGap> {
     let mut gaps = Vec::new();
-    let conf = render_dnsmasq(dns, lockdown, server_host, sinkhole);
+    let (conf, unavailable) = render_rules(dns, lockdown, server_host, sinkhole, safe);
+    // Not looked up yet (a first start, before the lookup a moment later) is
+    // not a gap; a lookup that found nothing is.
+    if !unavailable.is_empty() && safe.attempted() {
+        tracing::warn!(
+            "safe search not forced on {} (front end not resolved): passed through",
+            unavailable.join(", ")
+        );
+        gaps.push(DnsGap::SafeSearchUnavailable);
+    }
     if let Err(e) = exec.write_file(DNSMASQ_CONF, &conf) {
         tracing::error!("could not write the DNS ruleset: {e:#}");
         gaps.push(DnsGap::RulesNotWritten);
@@ -830,7 +901,13 @@ mod tests {
             safe_search: false,
             upstream: "1.1.1.2\nlog-facility=/tmp/x".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
+        let conf = render_dnsmasq(
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
         assert!(!conf.contains("conf-file"), "no injected directive");
         assert!(
             !conf.contains("log-facility=/tmp/x"),
@@ -853,11 +930,113 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
+        let conf = render_dnsmasq(
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
         assert!(conf.contains("server=/wikipedia.org/1.1.1.2"));
         assert!(conf.contains("server=/edu/1.1.1.2"));
         assert!(conf.contains("address=/#/"));
-        assert!(conf.contains("forcesafesearch.google.com"));
+        // Not looked up yet: nothing is redirected (and nothing un-denied).
+        assert!(!conf.contains("host-record="));
+        assert!(!conf.contains("cname="));
+    }
+
+    /// Acceptance round 3: `cname=www.google.com,forcesafesearch.google.com`
+    /// answered with the CNAME and no address — Google, YouTube and Bing
+    /// stopped resolving. Now every covered name answers with the front
+    /// end's own addresses.
+    #[test]
+    fn safe_search_answers_with_addresses_never_a_bare_cname() {
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: true,
+            upstream: "1.1.1.3".into(),
+        };
+        let safe = safesearch::tests::resolved();
+        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[], &safe);
+        assert!(!conf.contains("cname="));
+        assert!(conf.contains("host-record=www.google.com,216.239.38.120,2001:4860:4802:32::78\n"));
+        assert!(conf.contains("host-record=www.youtube.com,216.239.38.120\n"));
+        assert!(conf.contains("host-record=www.bing.com,150.171.27.16,2620:1ec:33::16\n"));
+        assert!(conf.contains("host-record=duckduckgo.com,40.114.177.246\n"));
+        // Everything else still goes to the upstream.
+        assert!(conf.contains("server=1.1.1.3\n"));
+
+        // Safe search off: none of it.
+        let off = DnsPolicy {
+            safe_search: false,
+            ..dns.clone()
+        };
+        let conf = render_dnsmasq(&off, &NetworkLockdown::default(), None, &[], &safe);
+        assert!(!conf.contains("host-record="));
+
+        // A blocked YouTube stays blocked; a custom block on a Google domain too.
+        let blocks = crate::policy::AppBlocks {
+            apps: vec!["youtube".into()],
+            ..Default::default()
+        };
+        let sinkhole = openscreentime_policy::catalog::expand(&blocks).domains;
+        let blocked = DnsPolicy {
+            blocklist: vec!["google.de".into()],
+            ..dns.clone()
+        };
+        let conf = render_dnsmasq(
+            &blocked,
+            &NetworkLockdown::default(),
+            None,
+            &sinkhole,
+            &safe,
+        );
+        assert!(conf.contains("address=/youtube.com/0.0.0.0"));
+        assert!(!conf.contains("host-record=www.youtube.com"));
+        assert!(!conf.contains("host-record=m.youtube.com"));
+        assert!(!conf.contains("host-record=www.google.de,"));
+        assert!(conf.contains("host-record=www.google.com,"));
+
+        // Default-deny: only allowlisted names are answered at all.
+        let deny = DnsPolicy {
+            mode: "default_deny".into(),
+            allowlist: vec!["google.com".into()],
+            ..dns.clone()
+        };
+        let conf = render_dnsmasq(&deny, &NetworkLockdown::default(), None, &[], &safe);
+        assert!(conf.contains("host-record=www.google.com,"));
+        assert!(!conf.contains("host-record=www.google.co.uk"));
+        assert!(!conf.contains("host-record=www.bing.com"));
+    }
+
+    /// A front end that couldn't be resolved is passed through and said; one
+    /// never looked up yet (the first start) is not a gap.
+    #[test]
+    fn unresolved_safe_search_is_a_gap_only_after_a_lookup() {
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: true,
+            upstream: "1.1.1.3".into(),
+        };
+        let lockdown = NetworkLockdown::default();
+        let exec = Exec::simulated(&[], &[("systemctl is-active dnsmasq", "active\n")]);
+        let fresh = SafeSearch::default();
+        assert!(!apply(&exec, &dns, &lockdown, None, &[], &fresh)
+            .contains(&DnsGap::SafeSearchUnavailable));
+        let mut failed = safesearch::tests::resolved();
+        let mut round = safesearch::Round::new();
+        round.insert("strict.bing.com".into(), Some(safesearch::Addrs::default()));
+        failed.merge("1.1.1.3", &round, 5);
+        let gaps = apply(&exec, &dns, &lockdown, None, &[], &failed);
+        assert!(gaps.contains(&DnsGap::SafeSearchUnavailable));
+        assert!(!DnsGap::SafeSearchUnavailable.breaks_forced_dns());
+        let conf = exec.written(DNSMASQ_CONF).unwrap_or_default();
+        assert!(!conf.contains("www.bing.com"), "Bing passes through");
+        assert!(conf.contains("host-record=www.google.com,"));
     }
 
     #[test]
@@ -869,7 +1048,13 @@ mod tests {
             safe_search: false,
             upstream: "1.1.1.2".into(),
         };
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &[]);
+        let conf = render_dnsmasq(
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
         assert!(conf.contains("server=1.1.1.2"));
         assert!(!conf.contains("address=/#/"));
     }
@@ -891,14 +1076,26 @@ mod tests {
             custom_domains: vec!["example.org".into()],
         };
         let sinkhole = openscreentime_policy::catalog::expand(&blocks).domains;
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &sinkhole);
+        let conf = render_dnsmasq(
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &sinkhole,
+            &SafeSearch::default(),
+        );
         assert!(conf.contains("address=/youtube.com/0.0.0.0\naddress=/youtube.com/::\n"));
         assert!(conf.contains("address=/googlevideo.com/0.0.0.0"));
         assert!(conf.contains("address=/pornhub.com/::"));
         assert!(conf.contains("address=/example.org/0.0.0.0"));
         // a hostile "domain" never lands in the config
         let bad = vec!["evil.com\nserver=9.9.9.9".to_string()];
-        let conf = render_dnsmasq(&dns, &NetworkLockdown::default(), None, &bad);
+        let conf = render_dnsmasq(
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &bad,
+            &SafeSearch::default(),
+        );
         assert!(!conf.contains("9.9.9.9"));
     }
 
@@ -915,7 +1112,7 @@ mod tests {
             block_tor: true,
             ..Default::default()
         };
-        let conf = render_dnsmasq(&dns, &lockdown, None, &[]);
+        let conf = render_dnsmasq(&dns, &lockdown, None, &[], &SafeSearch::default());
         assert!(conf.contains("address=/onion/0.0.0.0"));
         assert!(conf.contains("address=/torproject.org/0.0.0.0"));
     }
@@ -935,6 +1132,10 @@ mod tests {
             "dns_resolv_conf_not_locked"
         );
         assert_eq!(DnsGap::PolicyNotLoaded.kind(), "dns_policy_not_loaded");
+        assert_eq!(
+            DnsGap::SafeSearchUnavailable.kind(),
+            "dns_safesearch_unavailable"
+        );
     }
 
     /// The include stub is what makes dnsmasq read our ruleset at all, so its
@@ -1065,7 +1266,14 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.3".into(),
         };
-        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]);
+        let gaps = apply(
+            &exec,
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
         assert_eq!(gaps, vec![DnsGap::ResolverMissing]);
         let log = exec.log();
         assert!(!log.iter().any(|l| l.contains("restart dnsmasq")));
@@ -1097,7 +1305,14 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.3".into(),
         };
-        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]);
+        let gaps = apply(
+            &exec,
+            &dns,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
         assert_eq!(gaps, vec![DnsGap::ResolverMissing]);
         assert!(!exec.log().iter().any(|l| l.contains("restart dnsmasq")));
         // The real package: the unit is there.

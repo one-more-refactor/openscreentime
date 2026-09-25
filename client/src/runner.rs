@@ -55,6 +55,13 @@ const BACKOFF_MAX_SECS: u64 = 60;
 /// A stop counts as announced when its last-minute warning was published this
 /// recently.
 const ANNOUNCED_WITHIN: Duration = Duration::from_secs(180);
+/// Safe search's front ends (`enforce::safesearch`): looked up again this
+/// often, this soon after a lookup that came back incomplete, the network
+/// checked for a change this often, and each lookup given this long.
+const SAFESEARCH_REFRESH: Duration = Duration::from_secs(3600);
+const SAFESEARCH_RETRY: Duration = Duration::from_secs(60);
+const SAFESEARCH_POLL: Duration = Duration::from_secs(10);
+const SAFESEARCH_LOOKUP: Duration = Duration::from_secs(3);
 
 /// Default fail-closed offline grace period: how long the agent tolerates no
 /// server contact (WS message or successful poll/heartbeat) before treating
@@ -527,6 +534,12 @@ pub struct Agent {
     /// was last applied; a change re-applies it. `None` = that re-apply failed,
     /// try again.
     focus_applied: Option<Vec<String>>,
+    /// The safe-search front ends' addresses (`enforce::safesearch`), kept on
+    /// disk; refreshed by `safesearch_loop`.
+    safe_search: enforce::safesearch::SafeSearch,
+    /// The upstream to look them up through while the network policy wants
+    /// safe search (set by every network apply); `None`: not wanted.
+    safe_search_upstream: Option<std::net::IpAddr>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -667,6 +680,12 @@ impl Agent {
         let host = lock::SystemHost::new(exec.clone(), lock_shared.clone(), lock_tx.clone());
         // A lock this boot's previous run left on screen is adopted, not forgotten.
         let lock = LockScreen::new(Box::new(host), lock_shared.clone(), carried.lock.clone());
+        // Last looked up before the restart: a reboot redirects at once.
+        let safe_search = if ctx.dry_run {
+            enforce::safesearch::SafeSearch::default()
+        } else {
+            enforce::safesearch::SafeSearch::load()
+        };
         Ok(Agent {
             tamper_level: start_level.applied,
             tamper_cap_reported: start_level.capped().then_some(start_level.requested),
@@ -743,6 +762,8 @@ impl Agent {
             dns_relaxed: false,
             dns_unreach_ticks: 0,
             focus_applied: Some(Vec::new()),
+            safe_search,
+            safe_search_upstream: None,
         })
     }
 
@@ -763,6 +784,11 @@ impl Agent {
             self.notifications.pop_front();
         }
         tracing::info!("notify {}: {title} — {body}", user.unwrap_or("everyone"));
+        // Published now, not at the next tick: the companion watches the file,
+        // so "You're back" arrives as the desktop does (it came ~5 s late).
+        if !self.exec.dry_run() {
+            self.write_status_file();
+        }
         if let Some(u) = user {
             let sessions = self.lock.host().sessions();
             if !lock::has_graphical_session(&sessions, u) {
@@ -1245,12 +1271,17 @@ impl Agent {
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
         let mut events = Vec::new();
+        self.safe_search_upstream = effective
+            .dns
+            .safe_search
+            .then(|| enforce::dns::upstream_ip(&effective.dns));
         let (gaps, report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
             &effective,
             &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
+            &self.safe_search,
         );
         events.extend(vpn_report_event(report));
         let ok = !gaps.contains(&Gap::Dns(DnsGap::RulesNotWritten));
@@ -1266,6 +1297,53 @@ impl Agent {
         }
         self.standing_gaps = gaps.into_iter().map(|(kind, _)| kind).collect();
         (events, ok)
+    }
+
+    /// Fold a safe-search lookup in (`safesearch_loop`): kept on disk, and
+    /// the network rules re-applied when what the resolver answers changes —
+    /// new addresses, or a first lookup that found an engine unresolvable
+    /// (its gap). Returns whether every engine has addresses now.
+    fn adopt_safe_search(
+        &mut self,
+        upstream: std::net::IpAddr,
+        round: &enforce::safesearch::Round,
+    ) -> bool {
+        let before = self.safe_search.clone();
+        self.safe_search
+            .merge(&upstream.to_string(), round, chrono::Utc::now().timestamp());
+        let complete = self.safe_search.complete();
+        if !self.exec.dry_run() {
+            self.safe_search.save();
+        }
+        let answers_changed = before.targets != self.safe_search.targets;
+        let gap_news = !complete && !before.attempted();
+        let failed = || {
+            self.safe_search
+                .failed
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if complete && self.safe_search.failed.is_empty() {
+            tracing::debug!("safe-search front ends looked up via {upstream}");
+        } else if complete {
+            tracing::info!(
+                "safe search: no answer for {} via {upstream} — keeping the last known addresses",
+                failed()
+            );
+        } else {
+            tracing::warn!(
+                "safe search: could not look up {} via {upstream} — those without addresses pass through",
+                failed()
+            );
+        }
+        if (answers_changed || gap_news) && !self.exec.dry_run() {
+            tracing::info!("safe-search addresses changed; re-applying the website rules");
+            let (evs, _) = self.apply_network();
+            self.queue_events(evs);
+        }
+        complete
     }
 
     /// Keep what was reported about the degraded state (see `Reported`).
@@ -1777,9 +1855,14 @@ impl Agent {
         ));
         // Consider every user we have a policy for (so we can also UNfreeze).
         let users: Vec<String> = self.policies.keys().cloned().collect();
+        // Who has a desktop here, on screen or not. A stop holds for them
+        // either way: someone who switched away (or whose override ran out
+        // while a sibling had the screen) is stopped in the background — their
+        // apps frozen, the lock waiting for them — never left playing.
+        let sessions = self.lock.host().sessions();
         for user in users {
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
-            let is_active = active.contains(&user);
+            let is_active = active.contains(&user) || lock::has_graphical_session(&sessions, &user);
             let currently_frozen = self.frozen.contains(&user);
             // Frozen means frozen — every tick, quietly: an app that started
             // since (a timer, a re-login's desktop once it has settled), or
@@ -1811,9 +1894,10 @@ impl Agent {
             // looking lockout event. Bedtime and the daily limit are properties
             // of the clock and the ledger, not of who currently holds the seat.
             //
-            // Still gated on `is_active` for users who are NOT frozen, so an
-            // absent user is never newly frozen (and never shown an overlay)
-            // just for existing in the policy.
+            // Still gated on `is_active` (at the seat, or a desktop behind
+            // someone else's) for users who are NOT frozen, so an absent user
+            // is never newly frozen (and never shown a lock) just for existing
+            // in the policy.
             // Bedtime / allowed-window rules are about the clock, not the
             // seat: an SSH-only login (Remote=yes, never a "seat") used to
             // escape them entirely. Evaluate those for every policy user.
@@ -1995,7 +2079,11 @@ impl Agent {
         });
         //    With a DNS gap standing this is already known and said (the
         //    filter isn't running): not a second incident.
-        let dns_gap = self.standing_gaps.iter().any(|g| g.starts_with("dns_"));
+        //    (Safe search passed through is not a filter that isn't running.)
+        let dns_gap = self
+            .standing_gaps
+            .iter()
+            .any(|g| g.starts_with("dns_") && g != "dns_safesearch_unavailable");
         if let Some(domain) = probe_domain.filter(|d| !d.is_empty() && !dns_gap) {
             if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
                 let answered_routable = out.lines().any(|l| {
@@ -2072,7 +2160,13 @@ impl Agent {
         match self.pending_freeze.get(user).copied() {
             None => {
                 let bracket = self.bracket_of(user);
-                let grace = if self.stop_was_announced(user) || self.just_logged_in(user) {
+                // No work to save for someone who isn't on screen (their
+                // desktop is behind someone else's): stopped at once.
+                let sessions = self.lock.host().sessions();
+                let behind = lock::has_graphical_session(&sessions, user)
+                    && lock::on_screen_user(&sessions).as_deref() != Some(user);
+                let grace = if self.stop_was_announced(user) || self.just_logged_in(user) || behind
+                {
                     Duration::ZERO
                 } else {
                     FREEZE_GRACE.max(Duration::from_secs(u64::from(bracket.wind_down_secs())))
@@ -2503,6 +2597,9 @@ impl Agent {
     ///   it died, hung or was switched away from) and keep its words current;
     /// * the lock's person thawed (by any path — the thaw already happened) →
     ///   switch back to their session and stop the lock;
+    /// * the lock's person has no session left (logged out, or it ended) →
+    ///   the lock goes and the login screen gets the screen (they stay
+    ///   stopped);
     /// * no lock, but whoever is on screen is stopped (they switched or logged
     ///   in to a frozen session) → put it up in front of them.
     ///
@@ -2519,7 +2616,17 @@ impl Agent {
                     subject = u;
                 }
             }
-            if self.frozen.contains(&subject) {
+            if !self.frozen.contains(&subject) {
+                self.lock.release();
+            } else if lock::desktop_session(&sessions, &subject).is_none() {
+                // Their session is gone (a log-out, a crash): nobody is
+                // behind the lock. The login screen gets the screen; they
+                // stay stopped and meet the lock when they log in again.
+                tracing::info!(
+                    "{subject}'s session ended; the lock gives the screen to the login screen"
+                );
+                self.lock.hand_to_login_screen().await;
+            } else {
                 let face = self.face_for(&subject);
                 self.lock.publish(face);
                 let frozen = self.frozen.clone();
@@ -2539,8 +2646,8 @@ impl Agent {
                 self.lock.host().freeze(&subject, false, false);
                 self.frozen.remove(&subject);
                 self.lock_unavailable(&subject);
+                self.lock.release();
             }
-            self.lock.release();
         }
         let sessions = self.lock.host().sessions();
         if let Some(u) = lock::on_screen_user(&sessions) {
@@ -3429,8 +3536,9 @@ enum FreezeAction {
 /// "within policy" and unfreezes. Flipping to another session and back then
 /// re-armed the full [`FREEZE_GRACE`], handing out ~60 usable seconds per flip.
 ///
-/// A user who is neither active nor frozen is skipped, so nobody is newly
-/// frozen — or shown an overlay — merely for appearing in the policy.
+/// A user who is neither active (at the seat, or with a desktop behind
+/// someone else's) nor frozen is skipped, so nobody is newly frozen — or shown
+/// a lock — merely for appearing in the policy.
 fn should_evaluate_screen_time(
     in_grace: bool,
     is_active: bool,
@@ -3607,6 +3715,9 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     let client = agent.client.clone();
     let agent: Shared = Arc::new(tokio::sync::Mutex::new(agent));
     let tick = tokio::spawn(tick_loop(agent.clone()));
+    if !ctx.dry_run {
+        tokio::spawn(safesearch_loop(agent.clone()));
+    }
     // A code typed at the lock, or a switch to a stopped session, is answered
     // between ticks and whatever the network is doing.
     tokio::spawn(lock_loop(agent.clone(), lock_rx));
@@ -3682,6 +3793,40 @@ async fn retirement_confirmed(client: &ServerClient, first: &anyhow::Error) -> b
 async fn lock_loop(agent: Shared, mut rx: mpsc::Receiver<LockEvent>) {
     while let Some(ev) = rx.recv().await {
         agent.lock().await.on_lock_event(ev).await;
+    }
+}
+
+/// Keep the safe-search front ends' addresses current: looked up at start,
+/// hourly, a minute after a lookup that came back incomplete, and at once
+/// when the network (its default routes) or the upstream changes. The
+/// lookups run without holding the agent; one that changes what the
+/// resolver answers re-applies the network rules.
+async fn safesearch_loop(agent: Shared) {
+    let mut net: Option<String> = None;
+    let mut asked: Option<std::net::IpAddr> = None;
+    let mut due = Instant::now();
+    loop {
+        let upstream = agent.lock().await.safe_search_upstream;
+        let now_net = enforce::safesearch::network_fingerprint();
+        let net_changed = net.as_ref().is_some_and(|n| *n != now_net);
+        if net_changed {
+            tracing::info!("the network changed; looking the safe-search front ends up again");
+        }
+        net = Some(now_net);
+        if let Some(up) = upstream {
+            if net_changed || asked != Some(up) || Instant::now() >= due {
+                let round = enforce::safesearch::resolve(up, SAFESEARCH_LOOKUP).await;
+                let complete = agent.lock().await.adopt_safe_search(up, &round);
+                asked = Some(up);
+                due = Instant::now()
+                    + if complete {
+                        SAFESEARCH_REFRESH
+                    } else {
+                        SAFESEARCH_RETRY
+                    };
+            }
+        }
+        tokio::time::sleep(SAFESEARCH_POLL).await;
     }
 }
 
@@ -4695,6 +4840,133 @@ mod tests {
         drop(w);
         assert!(a.lock.is_aside());
         assert_eq!(a.lock.subject(), Some("mia"));
+    }
+
+    /// Acceptance round 3: a stopped adult's session was ended while his lock
+    /// was up, and the lock stayed on screen — countdown and all — for a
+    /// person who wasn't there, until someone pressed S. A lock for nobody
+    /// goes: `VT_LOCKSWITCH` let go, the login screen gets the screen, and
+    /// the person stays stopped for their next login.
+    #[tokio::test]
+    async fn when_the_stopped_session_ends_the_login_screen_gets_the_screen() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        fake.w().greeter_vt = Some(1);
+        stop_mia(&mut a).await;
+        assert_eq!(fake.w().vt, 14);
+        assert!(fake.w().switch_locked);
+        // Her session ends (a log-out, `loginctl terminate-user`, a crash).
+        {
+            let mut w = fake.w();
+            w.sessions.retain(|s| s.user != "mia");
+            w.logged_in.remove("mia");
+            w.log.clear();
+        }
+        a.on_lock_event(LockEvent::VtChanged).await;
+        {
+            let w = fake.w();
+            assert_eq!(w.vt, 1, "the login screen: {:?}", w.log);
+            assert!(!w.switch_locked);
+            let released = pos(&w.log, "switchlock false");
+            let asked = pos(&w.log, "login screen 1");
+            let stopped = pos(&w.log, "stop text");
+            assert!(released < asked && asked < stopped, "{:?}", w.log);
+        }
+        assert!(a.lock.shown().is_none());
+        assert!(a.frozen.contains("mia"), "still stopped for her next login");
+        // A tick changes nothing: no lock comes back for nobody.
+        a.enforcement_tick().await;
+        assert!(a.lock.shown().is_none());
+        assert_eq!(fake.w().vt, 1);
+
+        // She logs in again: the lock, not her desktop.
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("7", "mia", 3, false));
+            w.logged_in.insert("mia".into());
+        }
+        assert!(fake.user_switches_to(3));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        assert_eq!(a.lock.subject(), Some("mia"));
+        assert_eq!(fake.w().vt, 14);
+    }
+
+    /// Without a display manager, the screen goes back to where it was.
+    #[tokio::test]
+    async fn a_lock_for_nobody_goes_back_to_the_console_without_a_login_screen() {
+        let (mut a, fake) = agent_with_mia();
+        stop_mia(&mut a).await;
+        assert_eq!(fake.w().vt, 14);
+        {
+            let mut w = fake.w();
+            w.sessions.clear();
+            w.logged_in.clear();
+        }
+        a.reconcile_lock().await;
+        let w = fake.w();
+        assert_eq!(w.vt, 2);
+        assert!(!w.switch_locked);
+        assert!(!w.text_running);
+        drop(w);
+        assert!(a.lock.shown().is_none());
+    }
+
+    /// Acceptance round 3: Mia's time ran out while sam had the screen, and
+    /// her tone kept playing behind his desktop. A stop holds whether her
+    /// session is on screen or not: her apps are frozen at once (no work to
+    /// save behind someone else's desktop), sam keeps the screen, and her
+    /// session meets the lock when it comes back.
+    #[tokio::test]
+    async fn a_stop_holds_behind_someone_elses_desktop() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        a.prev_active = Some(["sam".to_string()].into_iter().collect());
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("5", "sam", 3, false));
+            w.logged_in.insert("sam".into());
+        }
+        assert!(fake.user_switches_to(3));
+        assert!(!a.frozen.contains("mia"));
+        fake.w().log.clear();
+        let events = a.enforcement_tick().await;
+        {
+            let w = fake.w();
+            assert_eq!(w.frozen.get("mia"), Some(&true), "{:?}", w.log);
+            assert_eq!(w.vt, 3, "sam keeps the screen: {:?}", w.log);
+            assert!(
+                !w.log.iter().any(|l| l.starts_with("switch")),
+                "{:?}",
+                w.log
+            );
+        }
+        assert!(a.frozen.contains("mia"));
+        assert!(
+            a.pending_freeze.is_empty(),
+            "no countdown behind sam's back"
+        );
+        assert!(a.lock.shown().is_none(), "no lock in front of sam");
+        assert!(events.iter().any(
+            |e| e.ev_type == EV_SCREEN_TIME_EXCEEDED && e.device_user.as_deref() == Some("mia")
+        ));
+
+        // She switches back: the lock, not her desktop.
+        assert!(fake.user_switches_to(2));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        assert_eq!(a.lock.subject(), Some("mia"));
+        assert_eq!(fake.w().vt, 14);
+
+        // Someone with no desktop at all is still never stopped for merely
+        // being in the policy.
+        let (mut b, fake_b) = agent_with_mia();
+        {
+            let mut w = fake_b.w();
+            w.sessions.clear();
+            w.logged_in.clear();
+        }
+        b.enforcement_tick().await;
+        assert!(!b.frozen.contains("mia"));
+        assert!(b.pending_freeze.is_empty());
     }
 
     #[tokio::test]
