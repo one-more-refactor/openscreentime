@@ -4,11 +4,13 @@
 //! be frozen to keep their hands off it: a session on another VT gets no
 //! input and draws nothing anyone sees. The freeze only has to stop what
 //! their *apps* are doing — sound, video, a game, a download. Freezing the
-//! session itself broke three things: a session frozen while it was still
-//! starting came back without its keyboard and mouse (or never registered
-//! with GDM at all), and GDM, asked to take someone back to their stopped
-//! session, re-authenticates through processes inside it (the session's
-//! worker, the keyring) and hung until it gave up.
+//! session itself broke things: a session frozen while it was still starting
+//! never registered with GDM (it ended at the login screen), and GDM, asked
+//! to take someone back to their stopped session, re-authenticates through
+//! processes inside it (the session's worker, the keyring) and hung until it
+//! gave up. (A desktop that lost the screen while starting also came back
+//! without its keyboard and mouse — frozen or not; the lock sees to that on
+//! the way back: `lock::input_back`.)
 //!
 //! So a stop freezes, under the person's `user-<uid>.slice`:
 //!
@@ -38,8 +40,15 @@
 //!
 //! **A session still starting is left alone**: until a graphical login has
 //! been up [`SETTLE`], nothing of the desktop is frozen (the lock is on screen
-//! already). A desktop frozen halfway through starting is what came back
-//! without input.
+//! already), so it finishes starting behind the lock — and a slice that
+//! doesn't exist yet can't make a starting desktop look like a legacy one.
+//!
+//! **What still runs while someone is stopped**: `session.slice` — the shell
+//! with its extensions, the session bus, the sound server — and the plumbing
+//! above. Their user manager's cgroups are delegated to them, so something
+//! they placed there beforehand could even thaw their app units; the runner
+//! freezes again what it finds each tick. They have no screen and no input
+//! meanwhile, and no time counts (see `docs/TAMPER.md`).
 //!
 //! Everything here is read from the cgroup tree ([`read_tree`]) and decided by
 //! [`plan`], a pure function the tests drive with fixture trees.

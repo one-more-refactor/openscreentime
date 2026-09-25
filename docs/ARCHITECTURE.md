@@ -109,8 +109,9 @@ watchdog timer). `runner.rs` orchestrates:
   desktop). At the stop the agent starts the lock on VT 13 — `cage` hosting
   `ost __lockscreen` as the unprivileged `ost-lock` user on a `gui` build, else
   a text lock it draws itself on VT 14 with VT switching locked — switches to
-  it, and only then freezes the person's cgroup (`cgroup.freeze`). Unlock is
-  the reverse. No lock can be shown → nobody is frozen. On a shared computer
+  it, and only then freezes the person's apps (`cgroup.freeze` on what their
+  user manager runs outside `session.slice`, never the session itself, so it
+  comes back working; `enforce/screentime/freeze.rs`). Unlock is the reverse. No lock can be shown → nobody is frozen. On a shared computer
   the lock offers "Switch user" and stands in front of stopped people only. A stop that wasn't
   announced gets a save-your-work countdown first; a pause is immediate. A
   freeze never kills a session over a time limit. The lock's state is

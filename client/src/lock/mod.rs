@@ -1,11 +1,11 @@
 //! The lock: its own session, on its own VT.
 //!
-//! Why it exists. A screen-time stop freezes the person's whole
-//! `user-<uid>.slice` with the cgroup freezer. On every modern desktop that
-//! slice contains the compositor, so anything drawn *inside* the session — the
-//! old root-run overlay — kept a dead picture on screen and never got a key.
-//! Codes could not be typed, VTs could not be switched. So the lock no longer
-//! lives in the session it stops:
+//! Why it exists. Anything drawn *inside* the stopped person's session — the
+//! old root-run overlay — was theirs to get around, and once their session
+//! was frozen it kept a dead picture on screen and never got a key. So the
+//! lock no longer lives in the session it stops, and the session no longer
+//! needs freezing: on another VT it gets no input and shows nothing. A stop
+//! freezes the person's apps only (`enforce::screentime::freeze`).
 //!
 //! * **Graphical lock**: `openscreentime-lock@<vt>.service` runs the kiosk
 //!   compositor `cage` (without `-s`: the keyboard cannot switch VTs) as the
@@ -19,7 +19,7 @@
 //!
 //! On a shared computer the lock stands in front of the stopped person only:
 //! "Switch user" steps aside for the display manager's login screen, the
-//! stopped person stays frozen behind it, and their session coming back on
+//! stopped person stays stopped behind it, and their session coming back on
 //! screen meets the lock first ([`placement`]).
 //!
 //! Both ask the agent to check a typed code — the graphical one over a
@@ -28,11 +28,11 @@
 //! [`crate::parentcode::Verifier`] as everything else. Nothing on the lock side
 //! holds a secret.
 //!
-//! Order of operations, which is the whole trick:
-//! * **lock**: start the lock → switch to its VT *while the person's compositor
-//!   is still alive* (it hands over the display and input cleanly) → only then
-//!   freeze the slice, compositor included;
-//! * **unlock**: thaw first → switch back to the person's session → stop the lock.
+//! Order of operations:
+//! * **lock**: start the lock → switch to its VT (the person's compositor
+//!   hands over the display and input) → only then freeze their apps;
+//! * **unlock**: thaw first → switch back to the person's session (and see
+//!   that it took its keyboard and mouse back: [`input_back`]) → stop the lock.
 //!
 //! The agent owns the lock's lifetime: [`LockScreen`] is driven from the runner
 //! after every tick, command and lock request, so every path that thaws someone
