@@ -78,3 +78,7 @@
 /* A computer that can't apply all of its rules (no website filter, say). */
 .cmp-degraded { display: flex; gap: 6px; align-items: flex-start; margin: 8px 0 0; }
 .cmp-degraded > .ic { flex: none; margin-top: 2px; }
+
+/* The computer's own moments (a pause, a gap, a lost connection). */
+.moments-bare { display: flex; flex-direction: column; gap: 8px; }
+.moments-bare .wt-h { margin: 0; }
