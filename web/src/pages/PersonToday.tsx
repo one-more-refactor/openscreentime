@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import * as api from "../api";
 import type { EarnRequest, Event } from "../types";
-import { useFamily, minutesLeft, minutesTotal } from "../lib/family";
+import { useFamily, minutesLeft, minutesTotal, ringTarget } from "../lib/family";
 import { ago, duration, durationShort } from "../lib/format";
 import { stopSentence } from "../lib/day";
 import { useCountUp } from "../lib/useCountUp";
@@ -32,7 +32,10 @@ function Hero({ ctx, requests }: { ctx: PersonCtx; requests: EarnRequest[] }) {
   const paused = child.locked && devices.length > 0;
   const pending = devices.find((d) => d.lock_pending);
   const shown = useCountUp(left ?? used);
-  const frac = total === null ? null : total > 0 ? used / total : 1;
+  // The ring fills toward used + left: the same number, so an unlock code's
+  // time shows as time, not as a full red ring.
+  const target = total === null ? null : ringTarget(used, left);
+  const frac = target === null ? null : target > 0 ? used / target : 1;
   const live = devices.filter((d) => d.status !== "pending");
 
   // The ring's number: what is left, the thing a person asks; with no limit,
@@ -73,8 +76,11 @@ function Hero({ ctx, requests }: { ctx: PersonCtx; requests: EarnRequest[] }) {
 
   function give(minutes: number) {
     // One budget per person across every computer: the grant lands on the
-    // computer most likely to hear it first, and the server sums the day.
-    const target = [...live].sort((a, b) => Number(b.status === "online") - Number(a.status === "online"))[0];
+    // computer they asked from (it answers the ask there, and tells them),
+    // else the one most likely to hear it first; the server sums the day.
+    const asked = requests[0] && live.find((d) => d.device_user_id === requests[0].device_user_id);
+    const target =
+      asked ?? [...live].sort((a, b) => Number(b.status === "online") - Number(a.status === "online"))[0];
     if (!target) return;
     void change(`Gave ${name} ${minutes} more minutes today.`, () => api.creditTime(target.device_user_id, minutes));
   }
@@ -307,7 +313,7 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
           </p>
         </section>
       ) : (
-        <WhereTheTime accountId={child.account_id} who="they" />
+        <WhereTheTime accountId={child.account_id} who="they" offsetSecs={child.utc_offset_secs} />
       )}
 
       <Computers

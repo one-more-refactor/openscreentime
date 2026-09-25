@@ -5,7 +5,16 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../policy/tests/schedule-vectors.json";
 import { parseHm } from "./schedule";
-import { describeDays, focusBlocking, focusEndsAt, focusProblem, normalizeSite, rulesProblem } from "./myRules";
+import {
+  describeDays,
+  focusBlocking,
+  focusEndsAt,
+  focusProblem,
+  nextFocusStart,
+  normalizeSite,
+  rulesProblem,
+} from "./myRules";
+import { deviceNow } from "./day";
 
 describe("focus hours block the sites exactly when the agent does", () => {
   for (const v of vectors.focus) {
@@ -86,8 +95,21 @@ test("days read like a week", () => {
 });
 
 test("the end of focus is said the way it's set — midnight is midnight", () => {
-  const mon1030 = new Date(2026, 8, 21, 10, 30); // a Monday
+  const mon1030 = { day: 1, minute: 10 * 60 + 30 }; // a Monday, on the computer's clock
   expect(focusEndsAt({ sites: ["x.com"], hours: { days: [1], start: "09:00", end: "12:00" } }, mon1030)).toBe("12:00");
   expect(focusEndsAt({ sites: ["x.com"], hours: { days: [1], start: "09:00", end: "00:00" } }, mon1030)).toBe("midnight");
   expect(focusEndsAt({ sites: ["x.com"], hours: { days: [2], start: "09:00", end: "12:00" } }, mon1030)).toBeNull();
+});
+
+// Acceptance, step 9: focus hours 00:00–02:00 every day, the computer (UTC)
+// at 00:3x inside them with the site blocked — and the console, reading the
+// browser's Berlin clock (02:3x), said "Next focus hours: Sat at 00:00. Until
+// then the sites below are open." Focus hours are the computer's hours.
+test("focus hours are read on the computer's clock, not the browser's", () => {
+  const f = { sites: ["example.org"], hours: { days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end: "02:00" } };
+  const at = new Date(Date.UTC(2026, 8, 25, 0, 37)); // Fri 00:37 UTC = 02:37 in Berlin
+  expect(focusEndsAt(f, deviceNow(0, at))).toBe("02:00");
+  // Berlin's clock said the opposite — "Next focus hours: Sat at 00:00".
+  expect(focusEndsAt(f, deviceNow(2 * 3600, at))).toBeNull();
+  expect(nextFocusStart(f, deviceNow(2 * 3600, at))).toEqual({ day: 6, start: "00:00", today: false });
 });

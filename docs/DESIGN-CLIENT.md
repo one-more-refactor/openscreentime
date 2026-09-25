@@ -214,8 +214,10 @@ sized `[available_width().min(300.0), 44.0]`, then the footer.
 
 **The number and its color** come from `time_headline()`, which already returns
 `(String, color)` — keep the logic, feed the ring: green when `m > 15`, WARN when
-`m <= 15`, STOP when `m <= 0` (and swap the number for a padlock glyph). `frac`
-is `used_minutes / (used_minutes + remaining_minutes)`. `None` remaining → ring
+`m <= 15`, STOP when `m <= 0` (and swap the number for a padlock glyph). `m` is
+time left from the verdict (`glance::Clock::left`: `minutes_left`, counted down to
+`stop_at`, an override included — never the bare budget). `frac` is
+`used_minutes / (used_minutes + m)`. No limit → ring
 `None` + a check + "No limit today". `frozen` → `Paused` ring, disc dimmed,
 number replaced by pause bars, label "Paused".
 

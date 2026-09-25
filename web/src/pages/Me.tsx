@@ -24,7 +24,7 @@ import { useSession } from "../lib/session";
 import { useCountUp } from "../lib/useCountUp";
 import { duration, durationShort, sentence } from "../lib/format";
 import { describeWindow } from "../lib/schedule";
-import { stopSentence } from "../lib/day";
+import { daysBefore, deviceNow, stopSentence, type WallTime } from "../lib/day";
 import { parentSeesSentence } from "../lib/parentSees";
 import {
   DAY_LETTERS,
@@ -47,16 +47,26 @@ import { PageHead } from "../layout/PageHead";
 
 // ---- the day, as a ring ---------------------------------------------------------
 
-/** Fraction of the day used — what the ring draws. Null = no limit. */
-export function usedFraction(today: MeToday): number | null {
+/** Time left — what the computer shows: minutes until the screen stops, a
+ * snooze or an unlock included. Null = no limit. */
+function timeLeft(today: MeToday): number | null {
   if (today.limit_minutes === null) return null;
-  const total = today.limit_minutes + today.earned_minutes;
+  if (typeof today.left_minutes === "number") return Math.max(0, today.left_minutes);
+  return Math.max(0, today.limit_minutes + today.earned_minutes - today.used_minutes);
+}
+
+/** Fraction of the day used — what the ring draws: used of used + left, so the
+ * ring agrees with the number. Null = no limit. */
+export function usedFraction(today: MeToday): number | null {
+  const left = timeLeft(today);
+  if (left === null) return null;
+  const total = today.used_minutes + left;
   return total > 0 ? today.used_minutes / total : 1;
 }
 
 function DayRing({ today, size }: { today: MeToday; size: number }) {
   const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
-  const left = today.left_minutes ?? (total === null ? null : Math.max(0, total - today.used_minutes));
+  const left = timeLeft(today);
   const shown = useCountUp(left ?? today.used_minutes, 700);
   const label =
     total === null
@@ -83,14 +93,15 @@ function DayRing({ today, size }: { today: MeToday; size: number }) {
 
 // ---- the week -------------------------------------------------------------------
 
-function lastSevenDays(history: MeHistory | null, today: MeToday) {
+/** The last seven days on the COMPUTER's calendar — the days its ledger is
+ * filed under — ending with its today (not this browser's). */
+export function lastSevenDays(history: MeHistory | null, today: MeToday, now = new Date()) {
   const byDay = new Map((history?.days ?? []).map((d) => [d.day, d]));
+  const base = deviceNow(today.utc_offset_secs, now).date;
   const days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const row = byDay.get(key);
-    return { key, day: d.getDay(), used: row?.used_minutes ?? 0, earned: row?.earned_minutes ?? 0, today: i === 6 };
+    const d = daysBefore(base, 6 - i);
+    const row = byDay.get(d.date);
+    return { key: d.date, day: d.day, used: row?.used_minutes ?? 0, earned: row?.earned_minutes ?? 0, today: i === 6 };
   });
   // The live numbers beat a history row that may lag behind them.
   days[6].used = Math.max(days[6].used, today.used_minutes);
@@ -389,7 +400,7 @@ function MyDay({
       </section>
       <YourRules today={today} catalog={catalog} />
       <Week history={history} today={today} title="Your week" />
-      <WhereTheTime who="you" />
+      <WhereTheTime who="you" offsetSecs={today.utc_offset_secs} />
       <section className="section">
         <div className="section-head">
           <h2 className="h2">Your computers</h2>
@@ -620,8 +631,9 @@ function SitesCard({ rules, busy, save }: { rules: MyRules; busy: boolean; save:
   );
 }
 
-/** One sentence about the focus hours: what holds now, what happens next. */
-function focusLine(rules: MyRules, now = new Date()): string | null {
+/** One sentence about the focus hours: what holds now, what happens next —
+ * on the computer's clock (`now`), where the sites are really blocked. */
+export function focusLine(rules: MyRules, now: WallTime): string | null {
   const f = { sites: rules.sites, hours: rules.focus_hours };
   if (rules.sites.length === 0) return null;
   const ends = focusEndsAt(f, now);
@@ -687,7 +699,7 @@ function MyComputer({
     today.devices.length === 1 ? today.devices[0].name : today.devices.length > 1 ? "My computers" : "My computer";
   const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
   const next = today.locked ? "This computer is paused." : stopSentence(today.rules, "you");
-  const focus = rules ? focusLine(rules) : null;
+  const focus = rules ? focusLine(rules, deviceNow(today.utc_offset_secs)) : null;
 
   return (
     <>
@@ -749,7 +761,7 @@ function MyComputer({
       </section>
 
       <Week history={history} today={today} title="My week" />
-      <WhereTheTime who="you" />
+      <WhereTheTime who="you" offsetSecs={today.utc_offset_secs} />
       <section className="section">
         <div className="section-head">
           <h2 className="h2">{today.devices.length > 1 ? "These computers" : "This computer"}</h2>
