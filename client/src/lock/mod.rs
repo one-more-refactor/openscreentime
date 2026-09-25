@@ -1,11 +1,11 @@
 //! The lock: its own session, on its own VT.
 //!
-//! Why it exists. A screen-time stop freezes the person's whole
-//! `user-<uid>.slice` with the cgroup freezer. On every modern desktop that
-//! slice contains the compositor, so anything drawn *inside* the session — the
-//! old root-run overlay — kept a dead picture on screen and never got a key.
-//! Codes could not be typed, VTs could not be switched. So the lock no longer
-//! lives in the session it stops:
+//! Why it exists. Anything drawn *inside* the stopped person's session — the
+//! old root-run overlay — was theirs to get around, and once their session
+//! was frozen it kept a dead picture on screen and never got a key. So the
+//! lock no longer lives in the session it stops, and the session no longer
+//! needs freezing: on another VT it gets no input and shows nothing. A stop
+//! freezes the person's apps only (`enforce::screentime::freeze`).
 //!
 //! * **Graphical lock**: `openscreentime-lock@<vt>.service` runs the kiosk
 //!   compositor `cage` (without `-s`: the keyboard cannot switch VTs) as the
@@ -19,7 +19,7 @@
 //!
 //! On a shared computer the lock stands in front of the stopped person only:
 //! "Switch user" steps aside for the display manager's login screen, the
-//! stopped person stays frozen behind it, and their session coming back on
+//! stopped person stays stopped behind it, and their session coming back on
 //! screen meets the lock first ([`placement`]).
 //!
 //! Both ask the agent to check a typed code — the graphical one over a
@@ -28,11 +28,11 @@
 //! [`crate::parentcode::Verifier`] as everything else. Nothing on the lock side
 //! holds a secret.
 //!
-//! Order of operations, which is the whole trick:
-//! * **lock**: start the lock → switch to its VT *while the person's compositor
-//!   is still alive* (it hands over the display and input cleanly) → only then
-//!   freeze the slice, compositor included;
-//! * **unlock**: thaw first → switch back to the person's session → stop the lock.
+//! Order of operations:
+//! * **lock**: start the lock → switch to its VT (the person's compositor
+//!   hands over the display and input) → only then freeze their apps;
+//! * **unlock**: thaw first → switch back to the person's session (and see
+//!   that it took its keyboard and mouse back: [`input_back`]) → stop the lock.
 //!
 //! The agent owns the lock's lifetime: [`LockScreen`] is driven from the runner
 //! after every tick, command and lock request, so every path that thaws someone
@@ -540,6 +540,24 @@ pub struct Session {
     pub state: String,
     /// The desktop's own screen lock is up (logind's `LockedHint`).
     pub locked: bool,
+    /// When it started, on `CLOCK_MONOTONIC` (logind's `TimestampMonotonic`).
+    pub since: Option<Duration>,
+}
+
+impl Session {
+    /// How long it has been up.
+    pub fn age(&self) -> Option<Duration> {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes into the timespec we own.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return None;
+        }
+        let now = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
+        now.checked_sub(self.since?)
+    }
 }
 
 /// Parse `loginctl show-session A B … -p …` (blank-line separated blocks).
@@ -563,6 +581,13 @@ pub fn parse_sessions(out: &str) -> Vec<Session> {
                     "Class" => s.class = v.into(),
                     "State" => s.state = v.into(),
                     "LockedHint" => s.locked = v == "yes",
+                    "TimestampMonotonic" => {
+                        s.since = v
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|us| *us > 0)
+                            .map(Duration::from_micros)
+                    }
                     _ => {}
                 }
             }
@@ -763,8 +788,15 @@ fn boot_id() -> String {
 /// The machine-facing operations of the lock and freeze, behind one seam so
 /// the lifecycle can be tested without a machine.
 pub trait Host: Send + Sync {
+    /// Freeze `user`'s apps (see `enforce::screentime::freeze`), or thaw
+    /// everything of theirs.
     fn freeze(&self, user: &str, on: bool, hard: bool);
+    /// Anything of theirs frozen right now (a stop, or what's left of one).
     fn is_frozen(&self, user: &str) -> Option<bool>;
+    /// Keep a stop holding, quietly: freeze what has appeared since (an app
+    /// a timer started, a login), never escalating. Returns whether the stop
+    /// holds now (`None`: no slice).
+    fn refreeze(&self, user: &str) -> Option<bool>;
     /// Has a login (a user slice) right now. Logged-out people are never frozen.
     fn logged_in(&self, user: &str) -> bool;
     /// Every human account on the machine.
@@ -794,6 +826,64 @@ pub trait Host: Send + Sync {
     fn login_screen(&self) -> bool;
     /// Take the desktop's own screen lock off a session (logind `Unlock`).
     fn unlock_session(&self, id: &str);
+    /// `user`'s desktop is back on screen on `vt`: see that its compositor
+    /// took its keyboard and mouse back, and give it one more VT switch if
+    /// it didn't (see [`input_back`]).
+    fn wake_input(&self, user: &str, vt: u32);
+}
+
+/// After the lock hands the screen back: how long a compositor gets to take
+/// its keyboard and mouse again before it is given another switch.
+const INPUT_BACK: Duration = Duration::from_secs(3);
+
+/// Does a person's compositor hold its keyboard and mouse? From the device
+/// files their processes have open: `None` if none of them holds a GPU (no
+/// compositor of theirs to judge — a root X server, a text login),
+/// `Some(false)` for the GPU without a single input device.
+///
+/// GNOME 43's mutter, when its session loses the screen while it is still
+/// starting (someone logs in to a stop, and the lock goes up at once), takes
+/// the GPU back when the session returns but never its input devices: a
+/// desktop that draws and can't be used. A second switch away and back
+/// makes it take them.
+pub fn input_back<'a>(open: impl IntoIterator<Item = &'a str>) -> Option<bool> {
+    let (mut gpu, mut input) = (false, false);
+    for path in open {
+        gpu |= path.starts_with("/dev/dri/card");
+        input |= path.starts_with("/dev/input/event");
+    }
+    gpu.then_some(input)
+}
+
+/// The device files `uid`'s processes have open (`/proc/<pid>/fd`).
+fn open_devices(uid: u32) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for p in procs.filter_map(|e| e.ok()) {
+        let path = p.path();
+        let is_pid = p
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()));
+        if !is_pid || std::fs::metadata(&path).map(|m| m.uid()).ok() != Some(uid) {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(path.join("fd")) else {
+            continue;
+        };
+        for fd in fds.filter_map(|e| e.ok()) {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                let t = target.to_string_lossy();
+                if t.starts_with("/dev/dri/") || t.starts_with("/dev/input/") {
+                    out.push(t.into_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The real machine.
@@ -819,6 +909,37 @@ impl SystemHost {
     }
 }
 
+/// Every logind session on the machine (`loginctl show-session`).
+pub fn query_sessions(exec: &crate::util::Exec) -> Vec<Session> {
+    let list = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
+    let ids: Vec<&str> = list
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .take(64)
+        .collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let mut args = vec!["show-session"];
+    args.extend(ids.iter().copied());
+    for p in [
+        "Id",
+        "Name",
+        "Seat",
+        "VTNr",
+        "Active",
+        "Type",
+        "TTY",
+        "Class",
+        "State",
+        "LockedHint",
+        "TimestampMonotonic",
+    ] {
+        args.extend(["-p", p]);
+    }
+    parse_sessions(&exec.probe("loginctl", &args))
+}
+
 /// Is `bin` installed in one of the usual places?
 pub fn which(bin: &str) -> bool {
     ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin"]
@@ -835,6 +956,9 @@ impl Host for SystemHost {
     fn is_frozen(&self, user: &str) -> Option<bool> {
         crate::enforce::screentime::is_frozen(user)
     }
+    fn refreeze(&self, user: &str) -> Option<bool> {
+        crate::enforce::screentime::refreeze(&self.exec, user)
+    }
     fn logged_in(&self, user: &str) -> bool {
         // A login session, not merely a user slice: a lingering user's
         // manager keeps a slice around with nobody there.
@@ -849,34 +973,7 @@ impl Host for SystemHost {
             .collect()
     }
     fn sessions(&self) -> Vec<Session> {
-        let list = self
-            .exec
-            .probe("loginctl", &["list-sessions", "--no-legend"]);
-        let ids: Vec<&str> = list
-            .lines()
-            .filter_map(|l| l.split_whitespace().next())
-            .take(64)
-            .collect();
-        if ids.is_empty() {
-            return Vec::new();
-        }
-        let mut args = vec!["show-session"];
-        args.extend(ids.iter().copied());
-        for p in [
-            "Id",
-            "Name",
-            "Seat",
-            "VTNr",
-            "Active",
-            "Type",
-            "TTY",
-            "Class",
-            "State",
-            "LockedHint",
-        ] {
-            args.extend(["-p", p]);
-        }
-        parse_sessions(&self.exec.probe("loginctl", &args))
+        query_sessions(&self.exec)
     }
     fn active_vt(&self) -> Option<u32> {
         vt::active()
@@ -1088,6 +1185,48 @@ impl Host for SystemHost {
                     continue;
                 }
                 std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+    fn wake_input(&self, user: &str, vt: u32) {
+        if self.exec.dry_run() {
+            tracing::info!(target: "dry_run", "WOULD CHECK {user}'s desktop took its input back");
+            return;
+        }
+        let Some(uid) = crate::sysusers::uid_of(user) else {
+            return;
+        };
+        let user = user.to_string();
+        std::thread::spawn(move || {
+            let settled = |limit: Duration| {
+                let until = Instant::now() + limit;
+                loop {
+                    let state = input_back(open_devices(uid).iter().map(String::as_str));
+                    if state != Some(false) || Instant::now() >= until {
+                        return state;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            };
+            if settled(INPUT_BACK) != Some(false) {
+                return;
+            }
+            // Only while their desktop still has the screen, and only once.
+            if vt::active() != Some(vt) {
+                return;
+            }
+            tracing::warn!(
+                "{user}'s desktop came back without its keyboard and mouse; \
+                 switching away and back once so it takes them"
+            );
+            vt::switch_to(TEXT_VT, Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(300));
+            vt::switch_to(vt, Duration::from_secs(2));
+            match settled(INPUT_BACK) {
+                Some(false) => {
+                    tracing::error!("{user}'s desktop still has no keyboard and mouse")
+                }
+                _ => tracing::info!("{user}'s desktop has its keyboard and mouse again"),
             }
         });
     }
@@ -1604,10 +1743,15 @@ impl LockScreen {
         let active = self.host.active_vt();
         if active == Some(LOCK_VT) || active == Some(TEXT_VT) {
             let sessions = self.host.sessions();
+            let desktop = desktop_session(&sessions, &s.subject).filter(|d| d.graphical);
             let back = session_vt(&sessions, &s.subject).or(s.return_vt);
             if let Some(v) = back {
                 if !self.host.switch_to(v) {
                     tracing::warn!("could not switch back to VT {v}");
+                } else if desktop.is_some_and(|d| d.vt == Some(v)) {
+                    // A desktop that lost the screen while it was still
+                    // starting comes back without its keyboard and mouse.
+                    self.host.wake_input(&s.subject, v);
                 }
             }
             // Their desktop saw its screen go away and may have locked
@@ -1726,6 +1870,18 @@ pub mod testing {
                 .contains(user)
                 .then(|| w.frozen.get(user).copied().unwrap_or(false))
         }
+        fn refreeze(&self, user: &str) -> Option<bool> {
+            let mut w = self.w();
+            if !w.logged_in.contains(user) {
+                return None;
+            }
+            // A slice that came back thawed (a re-login) is frozen again.
+            if w.frozen.get(user) != Some(&true) {
+                w.log.push(format!("refreeze {user}"));
+                w.frozen.insert(user.to_string(), true);
+            }
+            Some(true)
+        }
         fn logged_in(&self, user: &str) -> bool {
             self.w().logged_in.contains(user)
         }
@@ -1833,6 +1989,9 @@ pub mod testing {
             w.follow_vt();
             true
         }
+        fn wake_input(&self, user: &str, vt: u32) {
+            self.w().log.push(format!("wake input {user} {vt}"));
+        }
         fn unlock_session(&self, id: &str) {
             let mut w = self.w();
             w.log.push(format!("unlock session {id}"));
@@ -1857,6 +2016,7 @@ pub mod testing {
             class: "user".into(),
             state: if active { "active" } else { "online" }.into(),
             locked: false,
+            since: None,
         }
     }
 }
@@ -2019,6 +2179,9 @@ mod tests {
                 "switchlock false".into(),
                 "switch 13".into(),
                 "switch 2".into(),
+                // Her desktop is back: it is seen to take its keyboard and
+                // mouse again.
+                "wake input mia 2".into(),
                 // Her desktop was open when the lock went up: if it locked
                 // itself meanwhile, it is opened again.
                 "unlock session 2".into(),
@@ -2026,6 +2189,24 @@ mod tests {
             ]
         );
         assert!(current_face(&sh).is_none());
+    }
+
+    #[test]
+    fn a_desktop_without_its_input_devices_is_told_apart() {
+        // mutter back on screen with the GPU and its keyboard and mouse.
+        assert_eq!(
+            input_back(["/dev/dri/card0", "/dev/input/event3", "/dev/input/event4"]),
+            Some(true)
+        );
+        // The GPU, and not one input device: the desktop that can't be used.
+        assert_eq!(
+            input_back(["/dev/dri/card0", "/dev/dri/renderD128"]),
+            Some(false)
+        );
+        // No compositor of theirs (a root X server, a text login): not ours
+        // to judge.
+        assert_eq!(input_back(["/dev/input/event3"]), None);
+        assert_eq!(input_back([]), None);
     }
 
     #[tokio::test]
