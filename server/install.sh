@@ -1,11 +1,17 @@
 #!/bin/sh
 # OpenScreenTime agent installer — served by the server at GET /install.sh.
 #
-#   curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
-#   curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token xxx
+#   (wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) |
+#     sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 #
-# The OST_TOKEN env form is preferred: it keeps the enroll token out of
-# argv, so it never shows up in `ps` or shell history on the target machine.
+# wget where there is one (stock Debian and Ubuntu desktops ship wget, not
+# curl), else curl; with neither, `exit 1` — never an empty script that "works".
+# `--token xxx` instead of OST_TOKEN also works, but the OST_TOKEN env form is
+# preferred: it keeps the enroll token out of argv, so it never shows up in
+# `ps` or shell history on the target machine.
+#
+# Everything runs from `main` on the last line: a download cut short defines
+# nothing and runs nothing (sh stops at the unfinished function).
 set -eu
 
 SERVER="" TOKEN="${OST_TOKEN:-}" INSECURE_HTTP=0 TOKEN_VIA_ARGV=0
@@ -17,6 +23,20 @@ VARIANT=auto
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+usage() {
+  echo "OpenScreenTime agent installer: installs the agent this server bundles and enrolls it."
+  echo ""
+  echo "  ... | sudo OST_TOKEN=<token> sh -s -- --server https://HOST [options]"
+  echo ""
+  echo "  --server URL      this household's server (required)"
+  echo "  --token TOKEN     the enroll token (prefer OST_TOKEN in the environment)"
+  echo "  --headless        the build without the app window and graphical lock"
+  echo "  --desktop         the build with them (default when a desktop is running)"
+  echo "  --insecure-http   allow a plain http:// server (trying it out at home only)"
+  echo "  --help            this text"
+}
+
+main() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="${2:-}"; shift 2 ;;
@@ -24,7 +44,8 @@ while [ $# -gt 0 ]; do
     --insecure-http) INSECURE_HTTP=1; shift ;;
     --headless) VARIANT=headless; shift ;;
     --desktop) VARIANT=desktop; shift ;;
-    *) fail "unknown argument: $1" ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1 (see --help)" ;;
   esac
 done
 
@@ -44,6 +65,7 @@ esac
 [ "$(uname -m)" = x86_64 ] || fail "unsupported architecture $(uname -m) (only x86_64 for now — build from source, see the repo README)"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required (coreutils)"
 
+# Either downloader will do: curl (Fedora, Arch) or wget (Debian, Ubuntu).
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl -fsSL "$1"; }
   fetch_to() { curl -fsSL -o "$2" "$1"; }
@@ -51,7 +73,7 @@ elif command -v wget >/dev/null 2>&1; then
   fetch() { wget -qO- "$1"; }
   fetch_to() { wget -qO "$2" "$1"; }
 else
-  fail "curl or wget is required"
+  fail "curl or wget is required to download the agent (install either one, then run this again)"
 fi
 
 # The server is the release channel: install the agent build it bundles, so
@@ -156,3 +178,6 @@ if [ "$TOKEN_VIA_ARGV" = 1 ]; then
   echo "shell's history and was briefly visible in the process list. The token is"
   echo "single-use, but prefer the OST_TOKEN=... env form next time."
 fi
+}
+
+main "$@"

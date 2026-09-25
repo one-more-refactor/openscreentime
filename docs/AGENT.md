@@ -15,21 +15,28 @@ The agent is a single binary in two builds the server ships: **headless**
 ### One-liner (x86_64 — what the server serves)
 
 ```sh
-curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 ```
 
 or with the token on the command line (`--token xxx` instead of the env
 var — see the warning below):
 
 ```sh
-curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token xxx
+(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo sh -s -- --server https://HOST --token xxx
 ```
+
+The line downloads with wget where there is one (stock Debian and Ubuntu
+have wget and no curl), else curl; with neither it hands `sh` an `exit 1`
+and fails, never a quiet exit 0 with nothing installed. The script itself
+runs only from `main "$@"` on its last line, so a download cut short runs
+nothing. `sh -s -- --help` prints its options.
 
 `server/install.sh` (served at `GET /install.sh`) does, in order:
 
 1. Validates args: requires `--server https://HOST` and a token
    (`OST_TOKEN` env or `--token`); refuses plain `http://` unless
-   `--insecure-http` is passed (dev only); requires root and `x86_64`.
+   `--insecure-http` is passed (dev only); requires root and `x86_64`;
+   downloads with curl or wget, whichever is there (neither: it says so).
 2. `GET {server}/api/agent/latest`, parses out the artifact to install
    (sed, not jq — the target may not have jq): `"desktop"` where a graphical
    session exists, else `"headless"`; `--desktop` / `--headless` force it,
