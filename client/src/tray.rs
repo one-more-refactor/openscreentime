@@ -17,6 +17,7 @@
 //! the real share of the day used (`mark::tray_argb`). The first time it runs
 //! for someone it opens the app window, which shows the first-run cards.
 
+use crate::glance::Left;
 use crate::parent;
 use crate::warn::{self, StopReason, WarnState};
 use anyhow::Result;
@@ -85,11 +86,9 @@ struct UserStatus {
     name: String,
     #[serde(default)]
     used_minutes: u64,
-    /// `None` = no daily limit configured.
-    #[serde(default)]
-    remaining_minutes: Option<i64>,
-    #[serde(default)]
-    frozen: bool,
+    /// The verdict: time left, the next stop and why, a parent's override.
+    #[serde(flatten)]
+    clock: crate::glance::Clock,
     /// Countdown to an imminent session freeze, if one is pending.
     #[serde(default)]
     freeze_in_secs: Option<u64>,
@@ -99,11 +98,6 @@ struct UserStatus {
     /// May ask a parent for more (absent from older agents: yes).
     #[serde(default = "yes")]
     can_ask: bool,
-    /// The next stop (RFC 3339) and why — what the warnings count down to.
-    #[serde(default)]
-    stop_at: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
 }
 
 fn yes() -> bool {
@@ -117,9 +111,18 @@ impl Status {
 }
 
 impl UserStatus {
-    /// The share of today's time used (the ring), if there is a limit.
+    /// Time left: the verdict, the same number the app window shows.
+    fn left(&self) -> Left {
+        self.clock.left(chrono::Local::now())
+    }
+
+    /// The share of today's time used (the ring), if something counts down.
     fn frac(&self) -> Option<f32> {
-        let left = self.remaining_minutes?;
+        let left = match self.left() {
+            Left::Minutes { minutes, .. } => minutes,
+            Left::Stopped => 0,
+            Left::NoLimit => return None,
+        };
         let total = self.used_minutes as f32 + left.max(0) as f32;
         Some(if total > 0.0 {
             (self.used_minutes as f32 / total).clamp(0.0, 1.0)
@@ -171,14 +174,15 @@ impl OpenScreenTimeTray {
         if s.device_locked {
             return "Paused by a parent".to_string();
         }
-        match self.me() {
-            Some(u) if u.frozen => "Time's up for today".to_string(),
-            Some(u) => match u.remaining_minutes {
-                Some(m) if m <= 0 => "Time's up for today".to_string(),
-                Some(1) => "1 minute left today".to_string(),
-                Some(m) => format!("{m} minutes left today"),
-                None => "No limit today".to_string(),
-            },
+        match self.me().map(UserStatus::left) {
+            Some(Left::Stopped) => "Time's up for today".to_string(),
+            Some(Left::Minutes {
+                unlocked_until: Some(t),
+                ..
+            }) => format!("Unlocked until {}", t.format("%H:%M")),
+            Some(Left::Minutes { minutes: 1, .. }) => "1 minute left".to_string(),
+            Some(Left::Minutes { minutes, .. }) => format!("{minutes} minutes left"),
+            Some(Left::NoLimit) => "No limit today".to_string(),
             None => "This computer is managed".to_string(),
         }
     }
@@ -204,11 +208,12 @@ impl OpenScreenTimeTray {
             return TrayState::Stopped;
         }
         match self.me() {
-            Some(u) if u.frozen => TrayState::Stopped,
-            Some(u) => match (u.remaining_minutes, u.frac()) {
-                (Some(m), _) if m <= 0 => TrayState::Stopped,
-                (Some(m), Some(frac)) if m <= 15 => TrayState::Low { frac },
-                (Some(_), Some(frac)) => TrayState::Ok { frac },
+            Some(u) => match (u.left(), u.frac()) {
+                (Left::Stopped, _) => TrayState::Stopped,
+                (Left::Minutes { minutes, .. }, Some(frac)) if minutes <= 15 => {
+                    TrayState::Low { frac }
+                }
+                (Left::Minutes { .. }, Some(frac)) => TrayState::Ok { frac },
                 _ => TrayState::Idle,
             },
             None => TrayState::Idle,
@@ -443,42 +448,52 @@ fn notify_transitions(prev: &Status, next: &Status) {
 // Warnings before a stop
 // ---------------------------------------------------------------------------
 
-fn parse_at(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&chrono::Local))
+/// What's coming for this user, as the warnings see it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Upcoming {
+    /// No stop ahead (or already stopped, or not managed here).
+    Nothing,
+    /// A daily-limit stop while nobody is using the screen: it slides later
+    /// every tick (idle time isn't billed), so there is no true time to
+    /// announce yet — keep what was said, say the rest once they're back.
+    Hold,
+    /// The stop, the seconds until it, and when it lands.
+    Stop(StopReason, i64, chrono::DateTime<chrono::Local>),
 }
 
 /// The stop coming up for this user, from what the snapshot publishes: an
 /// armed save-your-work countdown, else the rules' next stop (`stop_at` +
 /// `reason`, a parent's scheduled pause included), else — from an agent that
-/// predates those fields — the daily limit's minutes. `None` while they are
-/// stopped, or unmanaged.
-fn next_stop(
-    status: &Status,
-    username: &str,
-    now: chrono::DateTime<chrono::Local>,
-) -> Option<(StopReason, i64, chrono::DateTime<chrono::Local>)> {
-    let me = status.user(username)?;
-    if me.frozen {
-        return None;
+/// predates those fields — the daily limit's minutes.
+fn next_stop(status: &Status, username: &str, now: chrono::DateTime<chrono::Local>) -> Upcoming {
+    let Some(me) = status.user(username) else {
+        return Upcoming::Nothing;
+    };
+    if me.clock.frozen {
+        return Upcoming::Nothing;
     }
     let reason = me
+        .clock
         .reason
         .as_deref()
         .and_then(warn::parse_reason)
         .unwrap_or(StopReason::Limit);
-    let (reason, at) = if let Some(s) = me.freeze_in_secs {
-        (reason, now + chrono::Duration::seconds(s as i64))
-    } else if let Some(at) = me.stop_at.as_deref().and_then(parse_at) {
-        (reason, at)
-    } else if me.reason.is_none() {
-        let m = me.remaining_minutes.filter(|m| *m > 0)?;
-        (StopReason::Limit, now + chrono::Duration::minutes(m))
+    let at = if let Some(s) = me.freeze_in_secs {
+        now + chrono::Duration::seconds(s as i64)
+    } else if me.clock.stop_at.is_some() {
+        match me.clock.stop_moment() {
+            Some(at) => at,
+            None => return Upcoming::Hold,
+        }
+    } else if me.clock.reason.is_none() {
+        match me.clock.remaining_minutes.filter(|m| *m > 0) {
+            Some(m) => now + chrono::Duration::minutes(m),
+            None => return Upcoming::Nothing,
+        }
     } else {
-        return None;
+        return Upcoming::Nothing;
     };
-    Some((reason, (at - now).num_seconds(), at))
+    Upcoming::Stop(reason, (at - now).num_seconds(), at)
 }
 
 /// Shows the 15/5/1-minute warnings: the last minute as ONE critical
@@ -493,26 +508,26 @@ struct Warner {
 impl Warner {
     /// `frac`: the share of today's time used (the ring on the notice), if
     /// there is a limit; `can_ask`: whether "Ask for more time" is offered.
-    fn observe(
-        &mut self,
-        stop: Option<(StopReason, i64, chrono::DateTime<chrono::Local>)>,
-        frac: Option<f32>,
-        can_ask: bool,
-    ) {
-        let Some((reason, secs, at)) = stop.filter(|(_, s, _)| *s > 0) else {
-            self.state.clear();
-            if let Some(h) = self.last_minute.take() {
-                h.close();
+    fn observe(&mut self, stop: Upcoming, frac: Option<f32>, can_ask: bool) {
+        let (reason, secs, at) = match stop {
+            Upcoming::Hold => return,
+            Upcoming::Stop(r, s, at) if s > 0 => (r, s, at),
+            _ => {
+                self.state.clear();
+                if let Some(h) = self.last_minute.take() {
+                    h.close();
+                }
+                return;
             }
-            return;
         };
-        let due = self.state.observe(reason, secs);
+        let due = self.state.observe_stop(reason, secs, at.timestamp());
         let w = warn::words(reason, secs, Some(at));
         if let Some(h) = self.last_minute.as_mut() {
-            if w.title != self.shown_title {
+            let shown = format!("{}\n{}", w.title, w.body);
+            if shown != self.shown_title {
                 h.summary(&w.title).body(&w.body);
                 let _ = h.update();
-                self.shown_title = w.title;
+                self.shown_title = shown;
             }
             return;
         }
@@ -522,7 +537,7 @@ impl Warner {
         let ask = can_ask && reason != StopReason::Paused;
         match show_warning(&w, ask, frac) {
             Some(h) if w.critical => {
-                self.shown_title = w.title;
+                self.shown_title = format!("{}\n{}", w.title, w.body);
                 self.last_minute = Some(h);
             }
             Some(h) => {
@@ -913,30 +928,54 @@ mod tests {
         let now = chrono::Local::now();
         let at = (now + chrono::Duration::minutes(5)).to_rfc3339();
         // stop_at + reason (bedtime)
+        let stop = |s: &Status| match next_stop(s, "mia", now) {
+            Upcoming::Stop(r, secs, _) => (r, secs),
+            other => panic!("expected a stop, got {other:?}"),
+        };
         let s = status(&format!(
             r#"{{"users":[{{"name":"mia","remaining_minutes":40,"stop_at":"{at}","reason":"bedtime"}}]}}"#
         ));
-        let (r, secs, _) = next_stop(&s, "mia", now).unwrap();
+        let (r, secs) = stop(&s);
         assert_eq!(r, StopReason::Bedtime);
         assert!((299..=300).contains(&secs));
         // Only the old field: the daily limit's minutes.
         let s = status(r#"{"users":[{"name":"mia","remaining_minutes":12}]}"#);
-        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Limit);
+        assert_eq!(stop(&s).0, StopReason::Limit);
         // A parent's pause with a window is published as the next stop.
         let s = status(&format!(
             r#"{{"users":[{{"name":"mia","remaining_minutes":12,"stop_at":"{at}","reason":"paused"}}]}}"#
         ));
-        assert_eq!(next_stop(&s, "mia", now).unwrap().0, StopReason::Paused);
+        assert_eq!(stop(&s).0, StopReason::Paused);
         // An armed countdown wins over the published stop.
         let s = status(&format!(
             r#"{{"users":[{{"name":"mia","stop_at":"{at}","reason":"limit","freeze_in_secs":50}}]}}"#
         ));
-        let (_, secs, _) = next_stop(&s, "mia", now).unwrap();
-        assert!((49..=50).contains(&secs));
+        assert!((49..=50).contains(&stop(&s).1));
+        // The limit while the minutes are being used: a real moment.
+        let s = status(&format!(
+            r#"{{"users":[{{"name":"mia","stop_at":"{at}","reason":"limit","counting":true}}]}}"#
+        ));
+        assert_eq!(stop(&s).0, StopReason::Limit);
         // Stopped, or not managed here: nothing to warn about.
         let s = status(r#"{"users":[{"name":"mia","remaining_minutes":0,"frozen":true}]}"#);
-        assert!(next_stop(&s, "mia", now).is_none());
-        assert!(next_stop(&s, "dad", now).is_none());
+        assert_eq!(next_stop(&s, "mia", now), Upcoming::Nothing);
+        assert_eq!(next_stop(&s, "dad", now), Upcoming::Nothing);
+    }
+
+    /// Acceptance, step 4: at login, before anyone touched anything, the
+    /// warning said "ends at 23:37" — the forecast of someone using the
+    /// screen from that second — and the stop came at 23:38:51. An idle
+    /// person's limit stop is not a moment yet: nothing is announced until
+    /// the minutes are really being used.
+    #[test]
+    fn an_idle_limit_is_not_announced_with_a_time_it_wont_keep() {
+        let now = chrono::Local::now();
+        let at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let s = status(&format!(
+            r#"{{"users":[{{"name":"mia","allowed":true,"remaining_minutes":5,"minutes_left":5,
+                "stop_at":"{at}","reason":"limit","counting":false}}]}}"#
+        ));
+        assert_eq!(next_stop(&s, "mia", now), Upcoming::Hold);
     }
 
     fn tray_for(json: &str) -> OpenScreenTimeTray {
@@ -958,7 +997,7 @@ mod tests {
             TrayState::Ok { frac } => assert!((frac - 0.64).abs() < 0.001),
             other => panic!("{other:?}"),
         }
-        assert_eq!(t.time_line(), "27 minutes left today");
+        assert_eq!(t.time_line(), "27 minutes left");
         assert_eq!(t.connection_line(), "Connected");
         let t = tray_for(r#"{"users":[{"name":"mia","used_minutes":80,"remaining_minutes":10}]}"#);
         assert!(matches!(t.tray_state(), TrayState::Low { .. }));
@@ -977,6 +1016,20 @@ mod tests {
         for t in [t.time_line(), t.connection_line().to_string()] {
             assert_ne!(t, t.to_uppercase(), "no shouting");
         }
+        // Unlocked with a code after time's up (acceptance step 5): the
+        // override's time, never "time's up".
+        let until = (chrono::Local::now() + chrono::Duration::minutes(29)).to_rfc3339();
+        let t = tray_for(&format!(
+            r#"{{"users":[{{"name":"mia","used_minutes":6,"remaining_minutes":-1,"allowed":true,
+                "reason":"limit","minutes_left":29,"stop_at":"{until}","override_until":"{until}",
+                "counting":true}}]}}"#
+        ));
+        assert!(
+            t.time_line().starts_with("Unlocked until "),
+            "{}",
+            t.time_line()
+        );
+        assert!(matches!(t.tray_state(), TrayState::Ok { .. }));
     }
 
     #[test]

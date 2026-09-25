@@ -93,10 +93,18 @@ export function focusBlocking(
   });
 }
 
+/** A moment on the COMPUTER's clock — its weekday (0 = Sunday) and minute of
+ * the day. Focus hours are the computer's hours (lib/day.ts `deviceNow`), not
+ * this browser's: a parent in another zone must not see them move. */
+export interface ClockNow {
+  day: number;
+  minute: number;
+}
+
 /** When the focus stretch in progress ends, "HH:MM" ("midnight" for 24:00),
  * or null when nothing is blocking or it never ends (no hours). */
-export function focusEndsAt(f: { sites: string[]; hours: TimeWindow | null }, now: Date): string | null {
-  if (!f.hours || !focusBlocking(f, now.getDay(), now.getHours() * 60 + now.getMinutes())) return null;
+export function focusEndsAt(f: { sites: string[]; hours: TimeWindow | null }, now: ClockNow): string | null {
+  if (!f.hours || !focusBlocking(f, now.day, now.minute)) return null;
   const sp = span(f.hours.start, f.hours.end);
   if (!sp) return null;
   return sp[1] === 1440 ? "midnight" : f.hours.end;
@@ -106,14 +114,14 @@ export function focusEndsAt(f: { sites: string[]; hours: TimeWindow | null }, no
  * start at 9:00". Looks a week ahead; null with no hours or no sites. */
 export function nextFocusStart(
   f: { sites: string[]; hours: TimeWindow | null },
-  now: Date,
+  now: ClockNow,
 ): { day: number; start: string; today: boolean } | null {
   if (!f.hours || f.sites.length === 0) return null;
   const sp = span(f.hours.start, f.hours.end);
   if (!sp) return null;
-  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const nowMin = now.minute;
   for (let i = 0; i < 8; i++) {
-    const day = (now.getDay() + i) % 7;
+    const day = (now.day + i) % 7;
     if (!f.hours.days.includes(day)) continue;
     if (i === 0 && sp[0] <= nowMin) continue;
     return { day, start: f.hours.start, today: i === 0 };

@@ -17,13 +17,23 @@ import * as api from "../api";
 import type { Catalog, WhereData } from "../types";
 import { AppGlyph } from "./AppGlyph";
 import { duration } from "../lib/format";
+import { wallTime } from "../lib/day";
 
 function minutes(secs: number): string {
   const m = Math.round(secs / 60);
   return m < 1 ? "<1 min" : duration(m);
 }
 
-export function WhereTheTime({ accountId, who }: { accountId?: string; who: "they" | "you" }) {
+export function WhereTheTime({
+  accountId,
+  who,
+  offsetSecs,
+}: {
+  accountId?: string;
+  who: "they" | "you";
+  /** the computer's clock (seconds east of UTC): the day's hours are its hours */
+  offsetSecs?: number | null;
+}) {
   const [data, setData] = useState<WhereData | null>(null);
   const [failed, setFailed] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -50,12 +60,15 @@ export function WhereTheTime({ accountId, who }: { accountId?: string; who: "the
     return m;
   }, [catalog]);
 
-  // 24 local-hour buckets from the UTC hour rows.
+  // 24 hour buckets from the UTC hour rows, on the computer's clock.
   const hourCells = useMemo(() => {
     const cells = new Array<number>(24).fill(0);
-    for (const h of data?.hours ?? []) cells[new Date(h.hour).getHours()] += h.amount;
+    for (const h of data?.hours ?? []) {
+      const ms = Date.parse(h.hour);
+      if (!Number.isNaN(ms)) cells[Math.floor(wallTime(ms, offsetSecs).minute / 60)] += h.amount;
+    }
     return cells;
-  }, [data]);
+  }, [data, offsetSecs]);
 
   // Nothing the server lets us show (or it said no): say nothing at all.
   if (failed) return null;

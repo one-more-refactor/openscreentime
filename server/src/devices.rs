@@ -761,20 +761,24 @@ pub async fn assign_account(
         .ok_or_else(|| AppError::NotFound("device user not found".into()))?
         .0;
 
-    let acct: Option<(Option<Uuid>,)> =
-        sqlx::query_as("SELECT profile_id FROM admins WHERE id = $1 AND tenant_id = $2")
-            .bind(req.account_id)
-            .bind(admin.tenant_id)
-            .fetch_optional(&st.db)
+    // The login takes that person's own rules — whoever they are. A parent
+    // or an adult with none yet gets them now, from their bracket (an adult's
+    // enforce nothing). It used to keep whatever the login had, so pointing
+    // the `philip` login at Philip left him on the child rules the unsorted
+    // login was created with.
+    let acct = crate::members::get_account(&st.db, req.account_id, admin.tenant_id)
+        .await
+        .map_err(|_| AppError::NotFound("person not found".into()))?;
+    let profile_id = crate::members::ensure_profile(&st.db, &acct).await?;
+    let previous: Option<Uuid> =
+        sqlx::query_scalar("SELECT account_id FROM device_users WHERE id = $1")
+            .bind(device_user_id)
+            .fetch_one(&st.db)
             .await?;
-    let profile_id = acct
-        .ok_or_else(|| AppError::NotFound("person not found".into()))?
-        .0;
 
     let mut tx = st.db.begin().await?;
     let login: String = sqlx::query_scalar(
-        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id),
-                unsorted = false
+        "UPDATE device_users SET account_id = $1, profile_id = $2, unsorted = false
           WHERE id = $3 RETURNING os_username",
     )
     .bind(req.account_id)
@@ -801,8 +805,14 @@ pub async fn assign_account(
     .await?;
     tx.commit().await?;
 
+    // The person this login was before may be left with no computer at all.
+    let removed = match previous.filter(|p| *p != req.account_id) {
+        Some(p) => crate::members::drop_if_leftover(&st.db, admin.tenant_id, p).await?,
+        None => false,
+    };
+
     enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "removed_person": removed })))
 }
 
 // --- Screen-time history -----------------------------------------------------
