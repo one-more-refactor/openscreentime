@@ -626,7 +626,8 @@ function Remove({ ctx }: { ctx: PersonCtx }) {
         <div className="stack">
           <p className="dialog-lede">
             This deletes {child.name}'s account, their rules and everything you can see about their day. It can't be
-            undone. Their logins stay on the computers, unmanaged.
+            undone. Their logins stay on the computers, unmanaged; a computer set up for them that never connected is
+            removed too.
           </p>
           <TextInput
             label={`Type ${child.name} to confirm`}
