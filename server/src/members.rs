@@ -710,6 +710,21 @@ pub async fn delete_member(
     ] {
         sqlx::query(q).bind(id).execute(&st.db).await?;
     }
+    // A computer set up for them that never joined ("Tmp's computer", still
+    // waiting for its install line — acceptance round 5) goes with them: no
+    // agent holds a token for it, no login or day is on it, and without its
+    // person it is nobody's. A computer that joined stays, under its own
+    // removal rules (Computers → Remove: its day kept, its agent retired).
+    let unfinished = sqlx::query(
+        "DELETE FROM devices
+          WHERE owner_account_id = $1 AND tenant_id = $2
+            AND status = 'pending' AND device_token IS NULL",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
     sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(admin.tenant_id)
@@ -732,7 +747,13 @@ pub async fn delete_member(
         None,
         "member",
         "info",
-        json!({ "action": "deleted", "account_id": id, "display_name": row.2, "by": admin.admin_id }),
+        json!({
+            "action": "deleted",
+            "account_id": id,
+            "display_name": row.2,
+            "by": admin.admin_id,
+            "unfinished_computers_removed": unfinished,
+        }),
     )
     .await?;
     Ok(Json(json!({ "ok": true })))

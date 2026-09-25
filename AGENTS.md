@@ -86,8 +86,9 @@ podman exec openscreentime-server /app/openscreentime-server recover <name>   # 
 ```
 
 A computer joins with the line the console gives:
-`(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`
-(wget where there is one — stock Debian and Ubuntu have no curl — else curl).
+`(wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`
+(wget where there is one — stock Debian and Ubuntu have no curl — else curl;
+when neither download works, one sentence naming the server and exit 1).
 
 ### Settings that matter
 

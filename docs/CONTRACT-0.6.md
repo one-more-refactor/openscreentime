@@ -75,7 +75,9 @@ The idea: **install the client once, then never touch a terminal again.**
 
 - The agent must **detect silent failure**, not just log actions: after a
   lock, read back the freezer/session state and *verify the stop is real*;
-  after a DNS block, resolve a blocked domain and expect the sinkhole. A
+  after a DNS block, resolve a name the rules block and expect the sinkhole
+  (since 0.6.x the agent's own `selftest.openscreentime.internal`, never a
+  real blocked site — that lookup read as the child's browsing). A
   failed probe is `enforcement_degraded` — a critical event the console
   surfaces as plainly as a tamper.
 - "Your tests are fine" is not the bar. The bar is §6.

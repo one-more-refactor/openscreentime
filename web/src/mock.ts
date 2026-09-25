@@ -915,6 +915,15 @@ export function mockUpdateMember(id: string, patch: MemberPatch): Account {
 export function mockDeleteMember(id: string): void {
   const i = mockHouseholdAccounts.findIndex((a) => a.id === id);
   if (i >= 0) mockHouseholdAccounts.splice(i, 1);
+  // Like the server: a computer set up for them that never joined goes too.
+  for (let d = mockDevices.length - 1; d >= 0; d--) {
+    const dev = mockDevices[d];
+    const theirs = mockDeviceMember.get(dev.id) === id || dev.owner_account_id === id;
+    if (theirs && dev.status === "pending") {
+      mockDevices.splice(d, 1);
+      mockDeviceMember.delete(dev.id);
+    }
+  }
 }
 
 // ---- Unlock codes -------------------------------------------------------------

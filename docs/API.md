@@ -134,7 +134,7 @@ Install one-liner (shown in the web enroll modal; the `OST_TOKEN` env form keeps
 token out of argv/shell history):
 
 ```
-(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
 A console served over plain `http://` (trying it out at home) shows the same
@@ -533,7 +533,10 @@ with `#[serde(default)]` on optional sub-objects.
 - `PATCH /api/members/{id} {display_name?, birthdate?, age_bracket?, theme?,
   profile_id?}` → `{ member }`. `profile_id` re-points all of the person's
   `device_users` and queues `apply_policy` on their devices.
-- `DELETE /api/members/{id}` (members only).
+- `DELETE /api/members/{id}` (members only) — erases the person, their rules
+  and their logins' usage, days, requests and events. A computer set up for
+  them that never joined (`status: "pending"`, no agent token) is removed with
+  them; one that joined stays, nobody's, until it's removed as a computer.
 - `POST /api/members/{id}/block` / `unblock` (members only) — suspend an
   account: it can't sign in, live sessions end, and its computers get `lock`
   `{ reason: "paused_by_parent", grace_secs: 120 }`. Unblock doesn't resume the

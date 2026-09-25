@@ -45,6 +45,11 @@ pub enum Request {
 pub struct Outcome {
     pub ok: bool,
     pub message: String,
+    /// "Not yet — in N s …" ([`Outcome::too_soon`]): its number is the wait
+    /// at the press, and the wait counts down on screen, so a lock says it
+    /// with the count as it stands (`super::shown_message`), never frozen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub too_soon: bool,
 }
 
 impl Outcome {
@@ -52,12 +57,21 @@ impl Outcome {
         Outcome {
             ok: true,
             message: m.into(),
+            too_soon: false,
         }
     }
     pub fn no(m: &str) -> Self {
         Outcome {
             ok: false,
             message: m.into(),
+            too_soon: false,
+        }
+    }
+    /// "Give me 15 more minutes" pressed `secs` before the wait is over.
+    pub fn too_soon(secs: u64) -> Self {
+        Outcome {
+            too_soon: true,
+            ..Outcome::no(&super::too_soon_words(secs))
         }
     }
 }

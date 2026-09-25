@@ -171,6 +171,12 @@ impl Ui {
     fn draw(&mut self) {
         let face = current_face(&self.shared).unwrap_or_else(Face::waiting);
         let face = counted(face, super::now_ms());
+        // A "not yet" is over with its wait: gone, not back with a new stop.
+        if self.message.as_ref().is_some_and(|m| m.too_soon)
+            && !matches!(face.snooze, Snooze::Wait { .. })
+        {
+            self.message = None;
+        }
         let (cols, rows) = size(&self.tty);
         let screen = render(&face, &self.typed, self.message.as_ref(), cols, rows);
         if screen == self.drawn {
@@ -314,7 +320,16 @@ pub fn render(
             lines.push(("There's no unlock code on this computer yet.".into(), ""));
         }
     }
-    if let Some(m) = message {
+    // A "not yet" says the wait as it stands, in place of the countdown line
+    // below — one live number (acceptance round 5: the red line kept the
+    // number of the press next to the live one).
+    let live_wait = match &face.snooze {
+        Snooze::Wait { secs, .. } => Some(*secs),
+        _ => None,
+    };
+    let message = super::shown_message(message, live_wait);
+    let not_yet = message.as_ref().is_some_and(|m| m.too_soon);
+    if let Some(m) = &message {
         lines.push((
             ascii(&m.message),
             if m.ok { "\x1b[32m" } else { "\x1b[31m" },
@@ -330,6 +345,7 @@ pub fn render(
     }
     match &face.snooze {
         Snooze::Hidden => {}
+        Snooze::Wait { .. } if not_yet => {}
         Snooze::Wait { secs, .. } => lines.push((
             format!("In {secs} s you can give yourself 15 more minutes."),
             "\x1b[2m",
@@ -431,7 +447,7 @@ mod tests {
         let s = render(&counted(adult.clone(), 1_042_000), "", None, 80, 25);
         assert!(s.contains("Press G to give yourself 15 more minutes."));
         // An early G hears how long, in the same words.
-        let early = Outcome::no(&super::super::too_soon_words(2));
+        let early = Outcome::too_soon(2);
         let s = render(&counted(adult.clone(), 1_040_000), "", Some(&early), 80, 25);
         assert!(s.contains("Not yet - in 2 s you can give yourself 15 more minutes."));
         let none = Face {
@@ -442,5 +458,76 @@ mod tests {
         let s = render(&none, "", None, 80, 25);
         assert!(s.contains("no unlock code on this computer yet"));
         assert!(!s.contains("Unlock code:"));
+    }
+
+    /// Acceptance round 5: G pressed with 49 s to go, and the red "Not yet -
+    /// in 49 s" kept its number next to the live "In 46 s". The "not yet"
+    /// says the wait as it stands, in place of the countdown line — one
+    /// live number — and goes when the wait is over.
+    #[test]
+    fn a_not_yet_counts_down_with_the_wait() {
+        let face = Face {
+            look: Look::Wall,
+            title: "Time's up for today".into(),
+            detail: String::new(),
+            who: "philip".into(),
+            code: CodeState::Ready { tries_left: 5 },
+            ask: AskState::Hidden,
+            snooze: Snooze::Wait {
+                secs: 49,
+                opens_at_ms: Some(1_049_000),
+            },
+            help: super::super::HELP.into(),
+            code_hint: super::super::CODE_HINT.into(),
+            switch_user: false,
+        };
+        let early = Outcome::too_soon(49);
+        // What the screen says, without the escapes that place and colour it.
+        let text = |s: String| -> String {
+            let mut out = String::new();
+            let mut esc = false;
+            for c in s.chars() {
+                match (esc, c) {
+                    (_, '\x1b') => esc = true,
+                    (true, c) if c.is_ascii_alphabetic() => {
+                        esc = false;
+                        out.push('\n');
+                    }
+                    (true, _) => {}
+                    (false, c) => out.push(c),
+                }
+            }
+            out
+        };
+        // At the press: 49, said once.
+        let s = text(render(
+            &counted(face.clone(), 1_000_000),
+            "",
+            Some(&early),
+            80,
+            25,
+        ));
+        assert!(s.contains("Not yet - in 49 s you can give yourself 15 more minutes."));
+        assert_eq!(s.matches(" s you can").count(), 1, "one line says it: {s}");
+        // Three seconds on: 46, and no 49 anywhere.
+        let s = text(render(
+            &counted(face.clone(), 1_003_000),
+            "",
+            Some(&early),
+            80,
+            25,
+        ));
+        assert!(s.contains("Not yet - in 46 s you can give yourself 15 more minutes."));
+        assert!(!s.contains("49"), "{s}");
+        assert_eq!(s.matches(" s you can").count(), 1, "{s}");
+        // The wait is over: no "not yet", just G.
+        let s = render(&counted(face.clone(), 1_049_000), "", Some(&early), 80, 25);
+        assert!(!s.contains("Not yet"), "{s}");
+        assert!(s.contains("Press G to give yourself 15 more minutes."));
+        // Any other reply stands as given, next to the countdown.
+        let wrong = Outcome::no("That code didn't work.");
+        let s = render(&counted(face, 1_003_000), "", Some(&wrong), 80, 25);
+        assert!(s.contains("That code didn't work."));
+        assert!(s.contains("In 46 s you can give yourself 15 more minutes."));
     }
 }
