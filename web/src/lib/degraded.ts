@@ -19,9 +19,17 @@ export function gapPhrase(kind: string): string {
   return "can't apply all of its rules";
 }
 
-/** A missing piece that re-running the install command brings. */
+/** A missing piece — or a setup step — that re-running the install command
+ * brings: the resolver service and nftables, and the resolv.conf the installer
+ * turns into a real file so the filter's pin holds. */
+const FIXED_BY_REINSTALL = new Set([
+  "dns_resolver_missing",
+  "dns_policy_not_loaded",
+  "dns_resolv_conf_not_a_file",
+  "firewall_not_installed",
+]);
 function fixedByReinstall(kind: string): boolean {
-  return kind === "dns_resolver_missing" || kind === "firewall_not_installed";
+  return FIXED_BY_REINSTALL.has(kind);
 }
 
 /** Online computers whose rules aren't all in force right now. An offline
