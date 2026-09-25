@@ -3,7 +3,7 @@
 // empty here), a child sees their rules and a way to ask, and someone keeping
 // their own time gets "My computer" — their own limit, focus hours and sites,
 // validated exactly the way the agent reads them, with no "parent" anywhere.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { MeToday, MyRules } from "../types";
@@ -128,6 +128,45 @@ test("the week is the computer's week", () => {
   expect(days[6]).toMatchObject({ key: "2026-09-24", today: true, used: 1 });
   expect(days[5]).toMatchObject({ key: "2026-09-23", day: 3, used: 40 });
   expect(days.filter((d) => d.used === 1)).toHaveLength(1);
+});
+
+// Acceptance round 4: "My week" still showed today's minutes on Thu and on
+// Today in a Europe/Berlin browser — when the computer's offset wasn't in the
+// answer, the week fell back to the browser's date while the server files a
+// day on UTC's. In a Berlin browser, around its midnight and in its morning,
+// with every kind of offset: today's minutes are on today, once.
+describe("in a Europe/Berlin browser", () => {
+  const tz = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = "Europe/Berlin";
+  });
+  afterAll(() => {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  });
+
+  test("the week is the server's week, whatever the offset", () => {
+    expect(new Date(Date.UTC(2026, 8, 24, 22, 30)).getDate()).toBe(25); // the browser is in Berlin
+    for (const off of [0, 7200, -4 * 3600, null, undefined]) {
+      for (const at of [
+        new Date(Date.UTC(2026, 8, 25, 9, 0)), // Friday morning everywhere
+        new Date(Date.UTC(2026, 8, 24, 22, 30)), // Fri 00:30 in Berlin, still Thu in UTC
+        new Date(Date.UTC(2026, 8, 24, 23, 59)),
+      ]) {
+        // Where the server files today (ledger::DEVICE_TODAY_SQL): the
+        // computer's day, UTC's when it never said.
+        const filed = new Date(at.getTime() + (off ?? 0) * 1000).toISOString().slice(0, 10);
+        const history = { days: [{ day: filed, used_minutes: 25, earned_minutes: 0 }], today_by_device: [] };
+        const days = lastSevenDays(history, today({ used_minutes: 25, utc_offset_secs: off }), at);
+        const shown = days.filter((d) => d.used === 25);
+        expect({ off, at: at.toISOString(), shown }).toEqual({
+          off,
+          at: at.toISOString(),
+          shown: [expect.objectContaining({ key: filed, today: true })],
+        });
+      }
+    }
+  });
 });
 
 test("focus hours are only hours where nothing can be blocked", () => {
