@@ -873,11 +873,22 @@ pub fn run() -> Result<()> {
             warner.observe(next_stop(n, &username, chrono::Local::now()), frac, ask);
             last_notif_id = deliver_notifications(&username, n, last_notif_id);
             let now = chrono::Utc::now();
-            for c in n.login_codes.iter().filter(|c| c.is_live(now)) {
+            let live: Vec<_> = n
+                .login_codes
+                .iter()
+                .filter(|c| c.is_live(now))
+                .cloned()
+                .collect();
+            crate::logincode::close_stale(&live);
+            for c in &live {
                 if crate::logincode::first_sighting(c) {
                     crate::logincode::notify(c);
                 }
             }
+        } else {
+            // The agent is gone (stopped, or taken off this computer): a
+            // code it published is no longer anyone's to type.
+            crate::logincode::close_stale(&[]);
         }
         if prev != next {
             let for_tray = next.clone();

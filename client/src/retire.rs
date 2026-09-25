@@ -15,8 +15,12 @@
 //! 3. `ost __retire` runs in a transient unit, outside the agent's sandbox:
 //!    the same teardown again (it can restore a symlinked resolv.conf, which
 //!    the sandbox can't), then the units are disabled and stopped, the
-//!    files `install-service` put down are removed, and the enrollment is
-//!    forgotten. Re-running the install one-liner enrolls it afresh.
+//!    companion and any app window are stopped for everyone signed in, the
+//!    files `install-service` put down are removed, and so is the rest of
+//!    it: the config and the enrollment, the state (the ledger, the unlock
+//!    code's state, the marker), the runtime files, the binary. Packages it
+//!    brought (dnsmasq, nftables, cage) stay installed, with their own
+//!    config back. Re-running the install one-liner sets it up afresh.
 //!
 //! A plain 401, a network error or an answer from anywhere else never does
 //! any of this: the agent keeps enforcing its last rules, as it must.
@@ -129,11 +133,55 @@ fn run_helper_with(exec: &Exec) -> Result<()> {
     }
     teardown_enforcement(exec);
     crate::service::remove_installed(exec);
-    // Forget the enrollment: the token is dead anyway.
-    let _ = exec.remove_file(&crate::config::config_path().to_string_lossy());
-    let _ = exec.remove_file(crate::config::LEGACY_CONFIG_PATH);
+    remove_the_rest(exec);
+    let _ = exec.run("systemctl", &["daemon-reload"]);
     println!("This computer was removed from its household; OpenScreenTime took itself off it.");
     Ok(())
+}
+
+/// Everything else of ours, last — after the units, which could start the
+/// agent again, are gone: the enrollment (its token is dead anyway) and the
+/// rest of the config, the state (the ledger, the unlock code's counters,
+/// the retirement marker, whose job is done once nothing can start), the
+/// runtime files, each person's own runtime files (seen-code markers, the
+/// warning ring), the binary with its aliases and its update leftovers. This
+/// process runs from that binary; unlinking it under itself is fine.
+fn remove_the_rest(exec: &Exec) {
+    let _ = exec.remove_file(&crate::config::config_path().to_string_lossy());
+    let _ = exec.remove_file(crate::config::LEGACY_CONFIG_PATH);
+    let config_dir = std::path::Path::new(crate::config::CONFIG_PATH)
+        .parent()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for dir in [
+        config_dir.as_str(),
+        crate::paths::STATE_DIR,
+        crate::paths::RUN_DIR,
+    ] {
+        if let Err(e) = exec.remove_dir_all(dir) {
+            tracing::warn!("could not remove {dir}: {e:#}");
+        }
+    }
+    let uids: Vec<u32> = if exec.dry_run() {
+        Vec::new()
+    } else {
+        crate::sysusers::login_users()
+            .into_iter()
+            .filter_map(|u| u.uid)
+            .collect()
+    };
+    for uid in uids {
+        let _ = exec.remove_dir_all(&format!("/run/user/{uid}/openscreentime"));
+    }
+    for path in [
+        crate::service::BIN_ALIAS,
+        crate::service::LEGACY_BIN,
+        crate::update::STAGING_PATH,
+        crate::update::BACKUP_PATH,
+        crate::service::BIN_TARGET,
+    ] {
+        let _ = exec.remove_file(path);
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +211,18 @@ mod tests {
                     "read /var/lib/openscreentime/installed-packages",
                     "dnsmasq\nnftables\n",
                 ),
+                // …and on this Arch box it named our rules in dnsmasq.conf.
+                (
+                    "read /etc/dnsmasq.conf",
+                    "#conf-dir=/etc/dnsmasq.d/,*.conf\n# Added by OpenScreenTime: its \
+                     website rules. Removed when it leaves this computer.\n\
+                     conf-dir=/etc/openscreentime/dnsmasq.d\n",
+                ),
+                // mia at her desktop, philip over ssh, the greeter.
+                (
+                    "loginctl list-sessions --no-legend",
+                    "c1 120 Debian-gdm seat0 tty1\n2 1000 mia seat0 tty2\n3 1001 philip - pts/0\n",
+                ),
             ],
         );
         run_helper_with(&exec).unwrap();
@@ -190,5 +250,96 @@ mod tests {
         );
         pos(&log, "remove /etc/openscreentime/agent.toml");
         assert!(!log.iter().any(|l| l.contains("chattr +i")));
+        // dnsmasq stays installed, with its own config back.
+        pos(&log, "write /etc/dnsmasq.conf");
+        assert!(!log
+            .iter()
+            .any(|l| l.contains("remove") && l.contains("dnsmasq.conf")));
+
+        // Acceptance round 2: after the removal the binary, the ledger and
+        // the rest of the state, the rules' directory and both companions
+        // were still there — and a used sign-in code popped up again. The
+        // companion stops for everyone signed in, desktop or not, whoever
+        // started it; then everything of ours goes, the binary last.
+        let units = pos(
+            &log,
+            "remove /etc/systemd/system/openscreentime-agent.service",
+        );
+        for who in ["mia", "philip"] {
+            let stop = pos(
+                &log,
+                &format!("run systemctl --user -M {who}@ stop openscreentime-tray.service"),
+            );
+            assert!(stop < units);
+        }
+        assert!(!log.iter().any(|l| l.contains("Debian-gdm@")));
+        let killed = pos(
+            &log,
+            "run pkill -TERM -f ^(/usr/local/bin/)?(openscreentime|ost) (tray|app)( |$)",
+        );
+        let gone = [
+            "remove -r /etc/openscreentime",
+            "remove -r /var/lib/openscreentime",
+            "remove -r /run/openscreentime",
+            "remove /usr/local/bin/ost",
+            "remove /usr/local/bin/openscreentime.bak",
+        ]
+        .map(|step| pos(&log, step));
+        let binary = pos(&log, "remove /usr/local/bin/openscreentime");
+        assert!(gone
+            .iter()
+            .all(|g| killed < *g && units < *g && *g < binary));
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("run systemctl daemon-reload")
+        );
+    }
+
+    /// What pkill is given (a POSIX extended regex over the whole command
+    /// line — checked here with grep -E, the same syntax) stops the
+    /// companion and the app window however they were started, and nothing
+    /// else of ours.
+    #[test]
+    fn the_companion_pattern_is_the_companion() {
+        let log = {
+            let exec = Exec::simulated(&[], &[]);
+            crate::service::remove_installed(&exec);
+            exec.log()
+        };
+        let pattern = log
+            .iter()
+            .find_map(|l| l.strip_prefix("run pkill -TERM -f "))
+            .expect("pkill is asked")
+            .to_string();
+        let matches = |line: &str| {
+            std::process::Command::new("grep")
+                .args(["-qE", &pattern])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut c| {
+                    use std::io::Write;
+                    c.stdin.take().unwrap().write_all(line.as_bytes())?;
+                    c.wait()
+                })
+                .map(|s| s.success())
+                .unwrap_or_else(|e| panic!("grep: {e}"))
+        };
+        for yes in [
+            "/usr/local/bin/openscreentime tray",
+            "/usr/local/bin/openscreentime app",
+            "ost app",
+            "openscreentime tray --verbose",
+        ] {
+            assert!(matches(yes), "{yes}");
+        }
+        for no in [
+            "/usr/local/bin/openscreentime run",
+            "/usr/local/bin/openscreentime __retire",
+            "/usr/local/bin/openscreentime __lockscreen",
+            "/usr/local/bin/openscreentime trayx",
+            "bash -c ost app",
+        ] {
+            assert!(!matches(no), "{no}");
+        }
     }
 }
