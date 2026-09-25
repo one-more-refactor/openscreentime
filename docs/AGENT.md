@@ -104,7 +104,7 @@ Some subcommands are intentionally hidden — not in `--help`, not real
 
 | Hidden subcommand | Who spawns it | Purpose |
 |---|---|---|
-| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock. |
+| `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock (on VT 14). |
 | `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" / "snooze" over `/run/openscreentime/lock.sock`; holds no secret. |
 | `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
@@ -490,13 +490,40 @@ session on its own VT (13):
   graphical lock comes up where wlroots won't use the GPU path — current
   wlroots refuses llvmpipe ("Software rendering detected") on virtual and
   driverless GPUs.
-- **Text**: with no `cage`, a headless build, or a graphical lock that
-  doesn't answer within 14 s, the agent draws a plain text lock on the same
-  VT itself (the same sentences, the ring with its tick) and locks VT
-  switching (`VT_LOCKSWITCH`, as `vlock -a`). That still includes Debian 12:
-  its wlroots 0.15 refuses a KMS device without PRIME import (seen on QEMU's
-  standard VGA, bochs-drm) in the DRM backend, before any renderer is
+- **Text**: with no `cage`, a headless build, or a graphical lock that gave
+  up or is slow, the agent draws a plain text lock itself (the same
+  sentences, the ring with its tick) on **VT 14** — its own VT, because the
+  lock unit resets, hangs up and deallocates VT 13 on every cage start and
+  stop — and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). A cage that
+  gives up (its unit in `auto-restart` or `failed`) is noticed at once, so
+  the text lock is on screen within about a second; a cage that is only
+  slow gets 2.5 s, then the text lock shows while it keeps starting, and the
+  graphical lock takes over when it says hello. That still includes Debian
+  12: its wlroots 0.15 refuses a KMS device without PRIME import (seen on
+  QEMU's standard VGA, bochs-drm) in the DRM backend, before any renderer is
   chosen, so the software retry fails the same way.
+- **Switch user** (a shared computer): with a display manager and more than
+  one login, the lock offers a quiet "Switch user" (the text lock: `S`),
+  except during a whole-computer pause. The agent lets go of
+  `VT_LOCKSWITCH` and brings up the login screen: a running greeter session
+  is activated, else GDM's `CreateTransientDisplay`, else the freedesktop
+  `DisplayManager` seat's `SwitchToGreeter` (LightDM, SDDM). The stopped
+  person stays frozen behind it (an inactive session counts no time). The
+  lock stands in front of stopped people only: someone else's session keeps
+  the screen for as long as they like; a login screen keeps it for 90 s,
+  then the stopped person's lock (with its "Switch user") comes back; and a
+  stopped session coming on screen — switched to, or logged in to — meets
+  the lock first (the VT watch wakes on the kernel's `POLLPRI` on
+  `/sys/class/tty/tty0/active`). GDM can't take anyone *back into* a frozen
+  session from its login screen: it re-authenticates through the session's
+  own worker and keyring, which are frozen too, and gives up after 25 s —
+  the way back to a stopped session is its lock (or switching to its VT).
+- **The way back**: the lock records whether the person's own desktop lock
+  was up when it went up (logind `LockedHint`). If it was open, for a few
+  seconds after switching back the agent takes a desktop lock that appears
+  off again (`loginctl unlock-session`) — a code or a parent's time doesn't
+  end at a second password prompt. A desktop its owner had locked stays
+  locked.
 
 Codes are checked by the agent (root), never by the lock: the graphical lock
 sends them over `/run/openscreentime/lock.sock`, which answers only uid

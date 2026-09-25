@@ -197,8 +197,9 @@ questions, checked against `policy/tests/schedule-vectors.json`.
   parent action writes the same **one override** per person.
 - **The stop.** Warnings at 15, 5 and 1 minute. Then the lock starts on VT
   13 — `cage` running `ost __lockscreen` as `ost-lock` on a `gui` build,
-  else a text lock drawn by the agent — the agent switches to it, *then*
-  freezes the person's cgroup. Unlock is the reverse. Codes typed at the lock
+  else a text lock drawn by the agent on VT 14 — the agent switches to it,
+  *then* freezes the person's cgroup. "Switch user" steps aside for the
+  login screen; a stopped session coming back on screen meets the lock first. Unlock is the reverse. Codes typed at the lock
   go to the agent over `/run/openscreentime/lock.sock` (peer-checked); the
   lock holds no secret. No lock can be shown → nobody is frozen.
 - **Keys.** The unlock code is a per-computer TOTP the agent checks offline;

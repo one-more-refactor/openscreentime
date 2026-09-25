@@ -37,6 +37,32 @@ pub fn active() -> Option<u32> {
     parse_active(&s)
 }
 
+/// Wait (at most `timeout`) for the active VT to change. The kernel signals a
+/// switch on `/sys/class/tty/tty0/active` with `POLLPRI`; a fresh descriptor
+/// read once is armed for the next one. Falls back to a plain sleep.
+pub fn wait_change(timeout: Duration) {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open("/sys/class/tty/tty0/active") else {
+        std::thread::sleep(timeout);
+        return;
+    };
+    let mut buf = [0u8; 32];
+    let _ = f.read(&mut buf);
+    let mut pfd = libc::pollfd {
+        fd: f.as_raw_fd(),
+        events: libc::POLLPRI | libc::POLLERR,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for a descriptor we own.
+    let r = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) };
+    if r < 0 {
+        std::thread::sleep(timeout);
+    } else if r > 0 {
+        // Never a busy loop, whatever the kernel reports.
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn parse_active(s: &str) -> Option<u32> {
     s.trim().strip_prefix("tty")?.parse().ok()
 }
