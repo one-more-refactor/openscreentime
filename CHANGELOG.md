@@ -144,6 +144,22 @@ for just themselves; and the server looks after itself.
   it installed stay, with their own config back), and an old sign-in code no
   longer pops up again.
 - **No kernel messages over the text lock.**
+- **"Where the time went" names the apps people use.** Only the blocking
+  catalog could name an app, so an afternoon of Firefox and Text Editor was
+  "Nothing yet today". Any app the computer's menu lists now counts while it
+  is open (background parts of the desktop don't); `TRANSPARENCY.md` says so.
+- **Moments are the right person's.** A parent's own snooze on a child's
+  computer showed on the child's page, and a code typed at the child's lock
+  never did. Every event about a person is filed under their login (the
+  server also reads it from older agents' events); the computer's own — a
+  pause, a gap, a lost connection — shows on Computers and on its owner's
+  page. A gap the computer has fixed reads as fixed, not red.
+- **Signing in by name never just waits.** After 30 s the code page says what
+  a code needs (your computer on, your own login) or offers a passkey; when
+  the code runs out it says so, with Send a new code and the passkey door —
+  the same for every name, so it tells nobody who exists.
+- **/me with no computer** says your rules are saved for when one is added,
+  instead of promising focus hours nothing enforces.
 
 ### Upgrading
 

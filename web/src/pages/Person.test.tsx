@@ -259,6 +259,72 @@ describe("today", () => {
     expect(screen.queryByText("Time's up for the day")).toBeNull();
   });
 
+  // Acceptance round 3: 37 minutes of Firefox and Text Editor were "Nothing
+  // yet today". The computer now names desktop apps; the page shows the name.
+  test("where the time went names a desktop app as the computer does", async () => {
+    apiImpl.getWhere = () =>
+      Promise.resolve({
+        apps: [
+          { key: "Firefox ESR", seconds: 25 * 60 },
+          { key: "Text Editor", seconds: 12 * 60 },
+        ],
+        sites: [],
+        hours: [],
+        sites_hidden_shared: false,
+        sites_hidden_age: false,
+      });
+    setup("/child/mia");
+    expect((await screen.findAllByText("Firefox ESR")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Text Editor").length).toBeGreaterThan(0);
+    expect(screen.getByText("25 min")).toBeTruthy();
+    expect(screen.queryByText("Nothing yet today.")).toBeNull();
+  });
+
+  // Acceptance round 3: Philip's own snoozes showed on Mia's page as "Got
+  // some more minutes", her code unlocks never showed, and a red "can't
+  // filter websites" stayed after her computer fixed itself.
+  test("her moments are hers: her unlock, her computer's gap as over — never a parent's snooze", async () => {
+    const f = family();
+    f.devices = f.devices.map((d) =>
+      d.id === "mia-laptop"
+        ? {
+            ...d,
+            owner_account_id: "mia",
+            last_state: { locked: false, frozen_users: [], enforcing: true, gaps: [] },
+          }
+        : d.id === "old-pc"
+          ? { ...d, owner_account_id: "leo" }
+          : d,
+    );
+    apiImpl.getFamily = () => Promise.resolve(f);
+    const ago = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+    const base = { tenant_id: "t", severity: "info" as const };
+    apiImpl.listEvents = (id) =>
+      Promise.resolve(
+        id === "mia-laptop"
+          ? [
+              // Philip's own login on her computer gave himself 15 minutes.
+              { ...base, id: "snooze", device_id: "mia-laptop", device_user_id: "du-philip", type: "screen_time_earned",
+                payload: { user: "philip", minutes: 15, via: "self" }, created_at: ago(2) },
+              { ...base, id: "code", device_id: "mia-laptop", device_user_id: "du-mia", type: "parent_code_ok",
+                payload: { via: "lock_screen", user: "mia" }, created_at: ago(5) },
+              { ...base, id: "gap", device_id: "mia-laptop", device_user_id: null, type: "enforcement_degraded",
+                severity: "critical", payload: { kind: "dns_resolver_stopped" }, created_at: ago(9) },
+            ]
+          : id === "old-pc"
+            ? // Leo's computer, which she also uses: its pause isn't her story.
+              [{ ...base, id: "pause", device_id: "old-pc", device_user_id: null, type: "lock", payload: {},
+                 created_at: ago(3) }]
+            : [],
+      );
+    setup("/child/mia");
+    expect(await screen.findByText("Unlocked with the unlock code")).toBeTruthy();
+    const fixed = screen.getByText("Mia's laptop couldn't filter websites for a while — it's working again");
+    expect(fixed.closest("li")?.getAttribute("data-tone")).toBe("ok");
+    expect(screen.queryByText(/more minutes/)).toBeNull();
+    expect(screen.queryByText("Paused")).toBeNull();
+  });
+
   test("a child's moments still show", async () => {
     apiImpl.listEvents = (id) => Promise.resolve(id === "mia-laptop" ? [timesUp("du-mia")] : []);
     setup("/child/mia");

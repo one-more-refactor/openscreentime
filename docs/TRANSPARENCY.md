@@ -56,9 +56,12 @@ Everything the agent sends the server, and nothing else:
   version, which OS logins exist, who is logged in right now, and whether
   enforcement is working.
 - **Your time**: seconds of screen time, per login, per day.
-- **Apps**: which apps from a fixed list were open, in seconds per hour, per
-  login. This is sent for everyone, adults included; the server only shows it
-  as the table above allows.
+- **Apps**: which apps were open, in seconds per hour, per login — by name
+  ("Firefox", "Text Editor", "Minecraft"): the apps the computer's app menu
+  lists, and the well-known ones OpenScreenTime can block. Background parts
+  of the desktop (what starts with every login, the shell, services) are not
+  apps and aren't sent. This is sent for everyone, adults included; the
+  server only shows it as the table above allows.
 - **Sites**: how many times the computer looked up each site, per hour, for
   the whole computer.
 - **Events**: the things listed above (paused, time's up, codes, blocked apps,

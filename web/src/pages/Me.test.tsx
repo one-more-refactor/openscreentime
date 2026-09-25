@@ -220,6 +220,35 @@ describe("my computer (keeping my own time)", () => {
     expect(text).not.toMatch(/open again then|Until then the sites below are open/);
   });
 
+  // Acceptance round 3: after Philip's computer was removed, /me still said
+  // "Focus hours until 09:00 — the sites below open again then." while no
+  // computer blocked anything.
+  test("with no computer left, the rules are saved — not promised", async () => {
+    apiImpl.getMeToday = () =>
+      Promise.resolve(
+        today({
+          bracket: "adult",
+          self_managed: true,
+          limit_minutes: 180,
+          left_minutes: 150,
+          bedtime: null,
+          devices: [],
+          // Inside the focus hours, on the clock it had.
+          focus: { sites: mine.sites, hours: { days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end: "00:00" } },
+        }),
+      );
+    apiImpl.getMyRules = () =>
+      Promise.resolve({ ...mine, focus_hours: { days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end: "23:59" } });
+    setup();
+    expect(await screen.findByText("Your rules are saved; they'll apply on your computer once it's added.")).toBeTruthy();
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/Focus hours until|Focus hours start|Next focus hours/);
+    expect(text).not.toMatch(/sites below are blocked|open again then|Until then the sites below are open/);
+    // The rules themselves are all still there to change.
+    expect(screen.getByRole("heading", { name: "My focus hours" })).toBeTruthy();
+    expect(screen.getByText("reddit.com")).toBeTruthy();
+  });
+
   test("a site is checked before it's saved, and saved the way the server stores it", async () => {
     setup();
     const card = (await screen.findByRole("heading", { name: "Sites I block for myself" })).closest(

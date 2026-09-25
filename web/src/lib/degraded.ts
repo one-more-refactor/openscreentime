@@ -10,6 +10,13 @@
 // ============================================================================
 import type { Device, Event } from "../types";
 
+/** The part of the computer a gap is about — `dns`, `firewall`, `vpn`, or the
+ * kind itself — the same areas the agent reports incidents by
+ * (client/src/runner.rs `gap_area`). */
+export function gapArea(kind: string): string {
+  return /^(dns|firewall|vpn)_/.exec(kind)?.[1] ?? kind;
+}
+
 /** What a gap means, as the end of "Mia's computer …". */
 export function gapPhrase(kind: string): string {
   if (kind === "screen_time_no_freezer") return "can't stop the screen when time is up";
