@@ -82,6 +82,10 @@ pub const OS_LOOKUPS: &[&str] = &[
     "security.debian.org",
     "ftp.debian.org",
     "ftp.*.debian.org",
+    // Debian's updater and app catalogue, at every login and unlock
+    // (acceptance round 6: "debian.org" topped a child's sites).
+    "ftp-master.debian.org",
+    "appstream.debian.org",
     "archive.ubuntu.com",
     "security.ubuntu.com",
     "ports.ubuntu.com",
@@ -109,6 +113,8 @@ pub const OS_LOOKUPS: &[&str] = &[
     "cdn.mozilla.net",
     "safebrowsing.googleapis.com",
     "use-application-dns.net",
+    // NAT64 discovery (RFC 7050), asked by the resolver library itself.
+    "ipv4only.arpa",
     // The clock.
     "pool.ntp.org",
     "ntp.ubuntu.com",
@@ -532,6 +538,11 @@ pub struct Attrib {
     desktop: DesktopIndex,
     desktop_read: Option<Instant>,
     log_offset: u64,
+    /// Whether the log has been read since this agent started. The first read
+    /// starts at the log's end: what was looked up before (the log survives
+    /// reboots) was already counted by the run that saw it, and can't be
+    /// credited to this hour or to whoever is on screen now.
+    log_primed: bool,
     /// (user, app) seen at the last walk: counting, or a bus-started one
     /// still being held (see [`SERVICE_GRACE_SECS`]).
     seen: HashMap<(String, String), Seen>,
@@ -600,6 +611,7 @@ impl Attrib {
             desktop: DesktopIndex::default(),
             desktop_read: None,
             log_offset: 0,
+            log_primed: false,
             seen: HashMap::new(),
             blocked: HashMap::new(),
             own_host: None,
@@ -764,10 +776,22 @@ impl Attrib {
     /// Tail the dnsmasq query log: one hit per query, keyed by registrable
     /// domain, attributed to the device. Handles rotation-by-truncation.
     pub fn ingest_dns_log(&mut self) {
-        let Ok(mut f) = std::fs::File::open(DNSQ_LOG) else {
+        self.ingest_dns_log_at(DNSQ_LOG);
+    }
+
+    fn ingest_dns_log_at(&mut self, path: &str) {
+        let Ok(mut f) = std::fs::File::open(path) else {
             return;
         };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if !self.log_primed {
+            // Acceptance round 6: every restart re-read the whole day — the
+            // counts doubled and a reboot re-sent "bet365.com is blocked" to a
+            // child with no browser open.
+            self.log_primed = true;
+            self.log_offset = len;
+            return;
+        }
         if len < self.log_offset {
             self.log_offset = 0; // someone rotated/truncated it
         }
@@ -804,7 +828,7 @@ impl Attrib {
             let _ = std::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
-                .open(DNSQ_LOG);
+                .open(path);
             self.log_offset = 0;
         }
     }
@@ -924,6 +948,45 @@ Sep 25 09:12:06 dnsmasq[1234]: 25 127.0.0.1/40131 config WWW.Bet365.com. is 0.0.
         assert!(sites.contains("example.org") && sites.contains("google.com"));
     }
 
+    /// Acceptance round 6: the log survives reboots and every agent start
+    /// read it from the top — each site's count doubled and a child with no
+    /// browser open got "bet365.com is blocked" again. A new run starts at the
+    /// log's end and counts only what is looked up from then on.
+    #[test]
+    fn a_restart_does_not_count_the_log_again() {
+        let path = std::env::temp_dir().join(format!("ost-dnsq-{}.log", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let before = "\
+Sep 25 13:00:01 dnsmasq[1]: 1 127.0.0.1/1 query[A] www.bet365.com from 127.0.0.1
+Sep 25 13:00:01 dnsmasq[1]: 1 127.0.0.1/1 config www.bet365.com is 0.0.0.0
+Sep 25 13:00:02 dnsmasq[1]: 2 127.0.0.1/2 query[A] www.nasa.gov from 127.0.0.1
+";
+        std::fs::write(&path, before).unwrap();
+
+        let mut a = Attrib::new(); // a fresh run, after a reboot
+        a.ingest_dns_log_at(&path);
+        assert!(a.take_blocked().is_empty(), "no repeat block notice");
+        assert!(site_keys(&mut a).is_empty(), "no recount of the old day");
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write;
+        writeln!(
+            f,
+            "Sep 25 13:05:00 dnsmasq[1]: 3 127.0.0.1/3 query[A] www.nasa.gov from 127.0.0.1"
+        )
+        .unwrap();
+        a.ingest_dns_log_at(&path);
+        assert_eq!(
+            site_keys(&mut a).get("nasa.gov"),
+            Some(&1),
+            "only the new lookup"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn site_keys(a: &mut Attrib) -> std::collections::BTreeMap<String, i64> {
         let mut out = std::collections::BTreeMap::new();
         for s in a.drain(1000) {
@@ -1022,6 +1085,12 @@ Sep 25 10:50:36 dnsmasq[1234]: 33 127.0.0.1/40203 query[A] www.wikipedia.org fro
         assert!(!is_os_lookup("notdeb.debian.org"));
         assert!(!is_os_lookup("evilpool.ntp.org"));
         assert!(!is_os_lookup("debian.org"));
+        // Debian's updater and app catalogue, incl. the SRV lookup; not the site.
+        assert!(is_os_lookup("metadata.ftp-master.debian.org"));
+        assert!(is_os_lookup("_http._tcp.metadata.ftp-master.debian.org"));
+        assert!(is_os_lookup("appstream.debian.org"));
+        assert!(!is_os_lookup("www.debian.org"));
+        assert!(is_os_lookup("ipv4only.arpa"));
     }
 
     fn desktop(name: &str, exec: &str, extra: &str) -> String {
