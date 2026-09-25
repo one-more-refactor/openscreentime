@@ -160,6 +160,24 @@ for just themselves; and the server looks after itself.
   the same for every name, so it tells nobody who exists.
 - **/me with no computer** says your rules are saved for when one is added,
   instead of promising focus hours nothing enforces.
+- **Safe search no longer takes Google, YouTube and Bing away.** It pointed
+  them at their safe-search front ends with a DNS `cname=` the local resolver
+  can't follow, so with safe search on (every child's default) those sites
+  didn't open at all. The agent now looks the front ends up itself and
+  answers with their addresses — every Google country domain, the five
+  YouTube names, Bing, and now DuckDuckGo too — refreshed hourly and when the
+  network changes, and kept across a reboot. One it can't look up is left
+  alone (the site works, without safe search) and the console hears
+  `dns_safesearch_unavailable`.
+- **A stop holds behind someone else's desktop.** When a child's time ran
+  out while a sibling had the screen, her video kept playing until she came
+  back; now her apps stop at once, the sibling keeps the screen, and her
+  session meets the lock when it comes back.
+- **A lock for nobody goes.** When a stopped person's session ends (a
+  log-out, a crash), their lock no longer waits on screen for someone to
+  press S: the login screen gets the screen within about a second, and they
+  meet the lock at their next login.
+- **"You're back" arrives with the desktop**, not five seconds after it.
 
 ### Upgrading
 

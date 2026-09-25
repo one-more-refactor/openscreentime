@@ -6,6 +6,7 @@ pub mod activity;
 pub mod apps;
 pub mod dns;
 pub mod firewall;
+pub mod safesearch;
 pub mod screentime;
 pub mod vpn;
 
@@ -69,6 +70,9 @@ impl Gap {
 /// once took the whole apply down with it, firewall included: a computer
 /// with nothing in force and one line in the journal.)
 ///
+/// `safe`: the safe-search front ends' addresses as last looked up
+/// ([`safesearch`]); an engine without them is passed through, not redirected.
+///
 /// Returns the [`Gap`]s that prevent this host from actually enforcing the
 /// policy — an empty vec means enforcement is genuinely in force. Callers
 /// must surface a non-empty result rather than treating it as "applied".
@@ -78,12 +82,20 @@ pub fn apply_network_policy(
     server_host: Option<&str>,
     policy: &Policy,
     vpn_state: &vpn::VpnState,
+    safe: &safesearch::SafeSearch,
 ) -> (Vec<Gap>, Option<vpn::VpnReport>) {
     // 1. DNS. App/category blocks → DNS sinkholes (the catalog is the single
     // source; `policy.blocks` on the effective policy is the union over every
     // user).
     let sinkhole = openscreentime_policy::catalog::expand(&policy.blocks).domains;
-    let dns_gaps = dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole);
+    let dns_gaps = dns::apply(
+        exec,
+        &policy.dns,
+        &policy.lockdown,
+        server_host,
+        &sinkhole,
+        safe,
+    );
     // Nothing answering on 127.0.0.1, or resolv.conf not pointing there: the
     // firewall's `force_dns` drops would then sever ALL name resolution — for
     // the child AND for the agent's own control channel, so no relaxing
@@ -204,6 +216,7 @@ mod tests {
             Gap::Dns(D::PolicyNotLoaded),
             Gap::Dns(D::RulesNotWritten),
             Gap::Dns(D::ResolvConfNotPinned),
+            Gap::Dns(D::SafeSearchUnavailable),
             Gap::Firewall(F::NotInstalled),
             Gap::Firewall(F::NotApplied),
             Gap::Firewall(F::LockdownNotApplied),
@@ -244,6 +257,7 @@ mod tests {
             None,
             p,
             &vpn::VpnState::Keep,
+            &safesearch::SafeSearch::default(),
         );
         gaps.into_iter().map(Gap::kind).collect()
     }

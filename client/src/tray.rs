@@ -143,6 +143,35 @@ fn read_status(username: &str) -> Option<Status> {
     serde_json::from_str(&raw).ok()
 }
 
+/// When this user's status file was last written (the private one if there
+/// is one, else the shared one).
+fn status_written(username: &str) -> Option<std::time::SystemTime> {
+    let per_user = crate::paths::run_str(&format!("status.{username}.json"));
+    std::fs::metadata(&per_user)
+        .or_else(|_| std::fs::metadata(status_path()))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Wait until the agent writes this user's status again, or `at_most`. It
+/// writes it the moment it has something to say ("You're back" as the lock
+/// comes down), so a notification goes out within a fifth of a second of
+/// it, not up to a whole poll later — and a companion thawed with the
+/// person's apps doesn't sleep through the news of its own thaw.
+fn wait_for_status(username: &str, at_most: Duration) {
+    let since = status_written(username);
+    let start = std::time::Instant::now();
+    while start.elapsed() < at_most {
+        std::thread::sleep(STATUS_WATCH);
+        if status_written(username) != since {
+            return;
+        }
+    }
+}
+
+/// How often the companion looks for a fresh status file between polls.
+const STATUS_WATCH: Duration = Duration::from_millis(200);
+
 // ---------------------------------------------------------------------------
 // Tray model
 // ---------------------------------------------------------------------------
@@ -782,8 +811,9 @@ fn spawn_parent_worker(
     });
 }
 
-/// Blocking loop: spawn the ksni DBus service, then poll the status file
-/// every 5s, pushing updates into the tray via the service handle.
+/// Blocking loop: spawn the ksni DBus service, then read the status file
+/// whenever the agent rewrites it (at least every 5 s), pushing updates into
+/// the tray via the service handle.
 pub fn run() -> Result<()> {
     let username = std::env::var("USER")
         .ok()
@@ -859,7 +889,7 @@ pub fn run() -> Result<()> {
             let (frac, ask) = ring_of(n);
             warner.observe(next_stop(n, &username, chrono::Local::now()), frac, ask);
         }
-        std::thread::sleep(POLL_INTERVAL);
+        wait_for_status(&username, POLL_INTERVAL);
         let next = read_status(&username);
         if let (Some(p), Some(n)) = (&prev, &next) {
             if p != n {
