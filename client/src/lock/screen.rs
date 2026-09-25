@@ -546,9 +546,27 @@ impl LockWindow {
     fn snooze(&mut self, uic: &mut egui::Ui, s: &Snooze, face_at: Option<Instant>, busy: bool) {
         match s {
             Snooze::Hidden => {}
-            Snooze::Wait { secs } => {
-                let gone = face_at.map_or(0, |t| t.elapsed().as_secs());
-                let left = secs.saturating_sub(gone);
+            Snooze::Wait { secs, opens_at_ms } => {
+                let left = match opens_at_ms {
+                    Some(_) => s.wait_left(super::now_ms()).unwrap_or(0),
+                    None => {
+                        let gone = face_at.map_or(0, |t| t.elapsed().as_secs());
+                        secs.saturating_sub(gone)
+                    }
+                };
+                if left == 0 {
+                    // The agent agrees now; its next face will say so.
+                    if Button::new("Give me 15 more minutes", Kind::Secondary)
+                        .size(Size::Lg)
+                        .enabled(!busy)
+                        .show(uic)
+                        .clicked()
+                    {
+                        let _ = self.tx.send(Request::Snooze);
+                    }
+                    uic.ctx().request_repaint_after(Duration::from_millis(250));
+                    return;
+                }
                 Button::new("Give me 15 more minutes", Kind::Secondary)
                     .size(Size::Lg)
                     .enabled(false)

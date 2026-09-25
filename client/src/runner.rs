@@ -292,6 +292,11 @@ struct FreezeState {
     /// `expected_wall` starts every run as `None`.
     #[serde(default)]
     saved_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the lock first went up in front of each stopped person, for the
+    /// stop they are in: the self-set snooze's one-minute wait runs from it,
+    /// through a log-out, a fresh login and an agent restart.
+    #[serde(default)]
+    snooze_wait: HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 /// The lock the agent last recorded as on screen — for `ost unlock` /
@@ -373,9 +378,12 @@ pub struct Agent {
     /// OS logins whose person sets their own limits (the bundle's
     /// `self_managed`; the adult bracket always counts).
     self_managed: HashSet<String>,
-    /// Who the lock went up for, and when — what the self-set snooze's
-    /// one-minute wait is measured from.
-    lock_since: Option<(String, Instant)>,
+    /// When the lock first went up in front of each stopped person, for the
+    /// stop they're in — what the self-set snooze's one-minute wait is
+    /// measured from. Kept per stop, not per lock: a fresh login to the same
+    /// stop (acceptance round 4: the wait restarted at 60 s) or an agent
+    /// restart carries on counting; the stop ending forgets it.
+    snooze_wait: HashMap<String, chrono::DateTime<chrono::Utc>>,
     /// The device's unlock-code secret from the last bundle.
     parent_totp_secret: Option<String>,
     /// Unused one-time recovery codes from the last bundle.
@@ -728,7 +736,7 @@ impl Agent {
             input: crate::enforce::activity::InputTracker::new(),
             requested_earn: HashMap::new(),
             self_managed: HashSet::new(),
-            lock_since: None,
+            snooze_wait: carried.snooze_wait.clone(),
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
             offline_grace: offline_grace_from_env(),
@@ -2160,6 +2168,7 @@ impl Agent {
             lock: self.lock.shown().cloned(),
             tamper_lockdown: self.tamper_lockdown,
             saved_at: Some(chrono::Utc::now()),
+            snooze_wait: self.snooze_wait.clone(),
         });
     }
 
@@ -2572,13 +2581,20 @@ impl Agent {
                     .map(|t| warn::back_words(t, now))
             }
         };
-        let snooze = lock::snooze_state(
+        let mut snooze = lock::snooze_state(
             self_set,
             own_rules,
             self.lock_waited(user),
             self.tracker.snoozes(user),
             back,
         );
+        // The moment it opens, for the locks to count down to between faces.
+        if let lock::Snooze::Wait { opens_at_ms, .. } = &mut snooze {
+            *opens_at_ms = self
+                .snooze_wait
+                .get(user)
+                .map(|t| t.timestamp_millis() + lock::SNOOZE_WAIT_SECS as i64 * 1000);
+        }
         let (help, code_hint) = lock::way_out(self_set, code != CodeState::Unavailable);
         Face {
             look,
@@ -2594,23 +2610,27 @@ impl Agent {
         }
     }
 
-    /// Seconds the lock has been up in front of `user` (0 if it isn't).
+    /// Seconds since the lock first went up in front of `user` for the stop
+    /// they're in (0 if it hasn't).
     fn lock_waited(&self, user: &str) -> u64 {
-        self.lock_since
-            .as_ref()
-            .filter(|(u, _)| u == user)
-            .map(|(_, t)| t.elapsed().as_secs())
+        self.snooze_wait
+            .get(user)
+            .map(|t| (chrono::Utc::now() - *t).num_seconds().max(0) as u64)
             .unwrap_or(0)
     }
 
-    /// Remember when the lock went up in front of whom (the snooze's wait).
+    /// Remember when the lock first went up in front of whom, per stop (the
+    /// snooze's wait). A stop that ended — the person is neither stopped nor
+    /// about to be — is forgotten, so the next one waits again; one they
+    /// logged out of and back into is still the same stop.
     fn note_lock_subject(&mut self) {
-        match self.lock.subject() {
-            Some(s) if self.lock_since.as_ref().map(|(u, _)| u.as_str()) != Some(s) => {
-                self.lock_since = Some((s.to_string(), Instant::now()));
-            }
-            None => self.lock_since = None,
-            _ => {}
+        let (frozen, pending) = (&self.frozen, &self.pending_freeze);
+        self.snooze_wait
+            .retain(|u, _| frozen.contains(u) || pending.contains_key(u));
+        if let Some(s) = self.lock.subject() {
+            self.snooze_wait
+                .entry(s.to_string())
+                .or_insert_with(chrono::Utc::now);
         }
     }
 
@@ -2803,7 +2823,7 @@ impl Agent {
             return Outcome::no(match why {
                 SnoozeRefusal::NotSelfSet => "Only a parent can add time here.",
                 SnoozeRefusal::NotTheirStop => "This stop isn't yours to skip.",
-                SnoozeRefusal::TooSoon => "In a moment — it opens after a minute.",
+                SnoozeRefusal::TooSoon { secs } => return Outcome::no(&lock::too_soon_words(secs)),
                 SnoozeRefusal::UsedUp => "That's today's extra time.",
             });
         }
@@ -4266,6 +4286,7 @@ mod tests {
             lock: Some(shown.clone()),
             tamper_lockdown: true,
             saved_at: Some(chrono::Utc::now()),
+            snooze_wait: HashMap::new(),
         };
         let json = serde_json::to_string(&st).unwrap();
         let back: FreezeState = serde_json::from_str(&json).unwrap();
@@ -4319,6 +4340,7 @@ mod tests {
             .roll_to(a.trusted_now.with_timezone(&chrono::Local).date_naive());
         a.frozen.clear();
         a.pending_freeze.clear();
+        a.snooze_wait.clear();
         a.device_locked = false;
         a.tamper_lockdown = false;
         let mut p = Policy::default();
@@ -4451,10 +4473,10 @@ mod tests {
         let mut ev = Vec::new();
         a.screen_time_lockout("mia", &r, &mut ev).await;
         assert!(a.frozen.contains("mia"));
-        a.lock_since = Some((
+        a.snooze_wait.insert(
             "mia".into(),
-            Instant::now() - Duration::from_secs(lock::SNOOZE_WAIT_SECS + 1),
-        ));
+            chrono::Utc::now() - chrono::Duration::seconds(lock::SNOOZE_WAIT_SECS as i64 + 1),
+        );
     }
 
     fn kind_of(e: &Event) -> &str {
@@ -4760,14 +4782,86 @@ mod tests {
         let (mut b, _fake) = agent_with_mia();
         b.kinds.insert("mia".into(), "adult".into());
         stop_mia(&mut b).await;
-        b.lock_since = Some(("mia".into(), Instant::now()));
+        b.snooze_wait.insert(
+            "mia".into(),
+            chrono::Utc::now() - chrono::Duration::seconds(50),
+        );
         assert!(matches!(
             b.face_for("mia").snooze,
-            lock::Snooze::Wait { .. }
+            lock::Snooze::Wait {
+                secs: 10 | 9,
+                opens_at_ms: Some(_)
+            }
         ));
-        let reply = b.on_lock_request(Request::Snooze).await;
-        assert!(!reply.result.unwrap().ok);
+        // Pressed early, it says how long — never silence (acceptance
+        // round 4: a G while it said "In 1 s" went nowhere).
+        let reply = b.on_lock_request(Request::Snooze).await.result.unwrap();
+        assert!(!reply.ok);
+        assert!(
+            reply.message.starts_with("Not yet - in ") && reply.message.contains(" s you can"),
+            "{}",
+            reply.message
+        );
         assert!(b.frozen.contains("mia"));
+    }
+
+    /// Acceptance round 4: after a log-out (the lock handed the screen to
+    /// the login screen) and a fresh login into the same stop, the
+    /// one-minute wait began again at 60 s. It runs from the first time the
+    /// lock stood in front of her for this stop — across the new login, an
+    /// agent restart — and starts over only for a new stop.
+    #[tokio::test]
+    async fn the_snooze_wait_runs_per_stop_not_per_login() {
+        let (mut a, _fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "adult".into());
+        a.prev_active = Some(HashSet::new());
+        let r = reason(&a);
+        let mut ev = Vec::new();
+        a.screen_time_lockout("mia", &r, &mut ev).await;
+        assert!(a.frozen.contains("mia"));
+        let first = *a
+            .snooze_wait
+            .get("mia")
+            .expect("the wait starts with the lock");
+        // 40 s of it went by, then she logged out and in again: the lock
+        // goes, the lock comes back — the same stop.
+        let started = first - chrono::Duration::seconds(40);
+        a.snooze_wait.insert("mia".into(), started);
+        a.lock.release();
+        a.note_lock_subject();
+        a.reconcile_lock().await;
+        assert_eq!(a.lock.subject(), Some("mia"), "her login meets the lock");
+        assert_eq!(
+            a.snooze_wait.get("mia"),
+            Some(&started),
+            "not from 60 again"
+        );
+        assert!(matches!(
+            a.face_for("mia").snooze,
+            lock::Snooze::Wait {
+                secs: 20 | 19,
+                opens_at_ms: Some(_)
+            }
+        ));
+        // It survives the agent restarting, too.
+        let saved: FreezeState = serde_json::from_str(
+            &serde_json::to_string(&FreezeState {
+                snooze_wait: a.snooze_wait.clone(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.snooze_wait.get("mia"), Some(&started));
+        // The stop ends (a code at the lock) and a new one begins: it waits
+        // the whole minute again.
+        a.frozen.remove("mia");
+        a.lock.release();
+        a.note_lock_subject();
+        assert!(a.snooze_wait.is_empty(), "the stop ended");
+        a.screen_time_lockout("mia", &r, &mut ev).await;
+        let again = *a.snooze_wait.get("mia").unwrap();
+        assert!(again > started + chrono::Duration::seconds(30));
     }
 
     #[tokio::test]

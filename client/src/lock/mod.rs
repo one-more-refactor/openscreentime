@@ -253,8 +253,14 @@ pub const SNOOZE_WAIT_SECS: u64 = 60;
 pub enum Snooze {
     #[default]
     Hidden,
-    /// Offered, usable in `secs`.
-    Wait { secs: u64 },
+    /// Offered, usable in `secs` — at `opens_at_ms` (unix milliseconds), the
+    /// moment the agent's own count agrees. A lock counts down to it between
+    /// the agent's faces, which come every tick, not every second.
+    Wait {
+        secs: u64,
+        #[serde(default)]
+        opens_at_ms: Option<i64>,
+    },
     /// Usable now; `left` of today's remain after this one.
     Ready { left: u32 },
     /// Today's are used; `back` when screens come back, if known.
@@ -271,8 +277,39 @@ pub enum SnoozeRefusal {
     NotSelfSet,
     /// A pause, a tamper stop or an offline stop: not theirs to skip.
     NotTheirStop,
-    TooSoon,
+    /// The wait isn't over: this many seconds to go.
+    TooSoon {
+        secs: u64,
+    },
     UsedUp,
+}
+
+impl Snooze {
+    /// Seconds of the wait left at `now_ms` (unix milliseconds), if it is a
+    /// wait, rounded up: 0 only once the agent's own count agrees, so at 0 a
+    /// press is taken (acceptance round 4: "In 1 s" stood on the text lock
+    /// until the next face, and a G pressed then went nowhere).
+    pub fn wait_left(&self, now_ms: i64) -> Option<u64> {
+        match self {
+            Snooze::Wait {
+                opens_at_ms: Some(at),
+                ..
+            } => Some(((at - now_ms).max(0) as u64).div_ceil(1000)),
+            Snooze::Wait { secs, .. } => Some(*secs),
+            _ => None,
+        }
+    }
+}
+
+/// Now, in unix milliseconds (what [`Snooze::wait_left`] counts against).
+pub fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The answer to "Give me 15 more minutes" pressed before the wait is over:
+/// how long, in the countdown's own words — never silence.
+pub fn too_soon_words(secs: u64) -> String {
+    format!("Not yet - in {secs} s you can give yourself {SNOOZE_MINUTES} more minutes.")
 }
 
 /// May `user` give themselves more time now? `waited`: seconds the lock has
@@ -290,7 +327,9 @@ pub fn snooze_check(
     } else if used >= SNOOZES_PER_DAY {
         Err(SnoozeRefusal::UsedUp)
     } else if waited < SNOOZE_WAIT_SECS {
-        Err(SnoozeRefusal::TooSoon)
+        Err(SnoozeRefusal::TooSoon {
+            secs: SNOOZE_WAIT_SECS - waited,
+        })
     } else {
         Ok(())
     }
@@ -307,8 +346,9 @@ pub fn snooze_state(
     match snooze_check(self_set, own_rules_stop, waited, used) {
         Err(SnoozeRefusal::NotSelfSet | SnoozeRefusal::NotTheirStop) => Snooze::Hidden,
         Err(SnoozeRefusal::UsedUp) => Snooze::UsedUp { back },
-        Err(SnoozeRefusal::TooSoon) => Snooze::Wait {
-            secs: SNOOZE_WAIT_SECS - waited,
+        Err(SnoozeRefusal::TooSoon { secs }) => Snooze::Wait {
+            secs,
+            opens_at_ms: None,
         },
         Ok(()) => Snooze::Ready {
             left: SNOOZES_PER_DAY - used - 1,
@@ -2172,14 +2212,17 @@ mod tests {
         // An adult at their own limit, after the wait: yes.
         assert_eq!(snooze_check(true, true, 60, 0), Ok(()));
         // Not before the wait, not past three, not a parent's pause.
-        assert_eq!(snooze_check(true, true, 59, 0), Err(TooSoon));
+        assert_eq!(snooze_check(true, true, 59, 0), Err(TooSoon { secs: 1 }));
         assert_eq!(snooze_check(true, true, 600, 3), Err(UsedUp));
         assert_eq!(snooze_check(true, false, 600, 0), Err(NotTheirStop));
         // What the lock shows follows the same rule.
         assert_eq!(snooze_state(false, true, 600, 0, None), Snooze::Hidden);
         assert_eq!(
             snooze_state(true, true, 20, 0, None),
-            Snooze::Wait { secs: 40 }
+            Snooze::Wait {
+                secs: 40,
+                opens_at_ms: None
+            }
         );
         assert_eq!(
             snooze_state(true, true, 90, 1, None),
@@ -2191,6 +2234,28 @@ mod tests {
                 back: Some("tomorrow at 07:00".into())
             }
         );
+        // Acceptance round 4: "In 1 s" stayed on the text lock for seconds
+        // and a G pressed then went nowhere. A lock counts down between
+        // faces; at 0 it takes the press, and early it says how long.
+        let w = Snooze::Wait {
+            secs: 10,
+            opens_at_ms: Some(100_000),
+        };
+        assert_eq!(w.wait_left(93_000), Some(7));
+        assert_eq!(w.wait_left(99_001), Some(1), "rounded up: never 0 early");
+        assert_eq!(w.wait_left(100_000), Some(0));
+        assert_eq!(w.wait_left(190_000), Some(0));
+        assert_eq!(
+            snooze_state(true, true, 50, 0, None).wait_left(0),
+            Some(10),
+            "without the moment, the face's own count"
+        );
+        assert_eq!(Snooze::Ready { left: 2 }.wait_left(0), None);
+        assert_eq!(
+            too_soon_words(7),
+            "Not yet - in 7 s you can give yourself 15 more minutes."
+        );
+        assert!(too_soon_words(7).is_ascii(), "the text lock shows it too");
     }
 
     #[test]
