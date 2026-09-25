@@ -32,6 +32,13 @@ use crate::events;
 pub const DEVICE_TODAY_SQL: &str = "((now() AT TIME ZONE 'UTC') \
      + make_interval(secs => COALESCE(d.utc_offset_secs, 0)))::date";
 
+/// SQL for the moment the device's own today began (its local midnight, as a
+/// `timestamptz`). Needs the `devices` row aliased `d`. For "today" in the
+/// hour-by-hour slices: the computer's day, not the server's.
+pub const DEVICE_DAY_START_SQL: &str = "(((((now() AT TIME ZONE 'UTC') \
+     + make_interval(secs => COALESCE(d.utc_offset_secs, 0)))::date)::timestamp \
+     - make_interval(secs => COALESCE(d.utc_offset_secs, 0))) AT TIME ZONE 'UTC')";
+
 /// A reported daily total may dip this far below the recorded total without
 /// being flagged — absorbs the minute-granularity of older agents. A larger
 /// drop within the same device day is a real regression (a wiped or

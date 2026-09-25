@@ -357,3 +357,45 @@ async fn whos_who_keeps_a_person_someone_made_their_own() {
     assert_eq!(on, mias);
     env.drop_db().await;
 }
+
+/// "Where the time went" today is the computer's today. It used to start at
+/// the server's (UTC) midnight: for a computer in UTC+2 the first two hours
+/// of its day went missing, and the last two of yesterday counted as today.
+#[tokio::test]
+async fn where_the_time_went_is_the_computers_day() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, _philip) = env.household("Philip").await;
+    let mia = env.member(tenant, "Mia").await;
+    let laptop = env.computer(tenant, Some(mia), &["mia"], None, None).await;
+    sqlx::query("UPDATE devices SET utc_offset_secs = 7200 WHERE id = $1")
+        .bind(laptop)
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    // The computer's midnight, in UTC.
+    let local = crate::ledger::local_today(Some(7200), Utc::now());
+    let midnight = local.and_hms_opt(0, 0, 0).unwrap().and_utc() - Duration::hours(2);
+    for (hour, secs) in [
+        (midnight - Duration::hours(1), 600), // 23:00 yesterday, there
+        (midnight, 300),                      // 00:00 today, there
+    ] {
+        sqlx::query(
+            "INSERT INTO usage_slices (device_id, tenant_id, os_username, hour, kind, key, amount)
+             VALUES ($1, $2, 'mia', $3, 'app', 'minecraft', $4)",
+        )
+        .bind(laptop)
+        .bind(tenant)
+        .bind(hour)
+        .bind(secs as i64)
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    }
+    let w =
+        crate::usage::where_for_account(&env.st.db, tenant, mia, crate::usage::Exposure::HUB_FULL)
+            .await
+            .unwrap();
+    assert_eq!(w["apps"], json!([{ "key": "minecraft", "seconds": 300 }]));
+    assert_eq!(w["hours"].as_array().unwrap().len(), 1);
+    env.drop_db().await;
+}
