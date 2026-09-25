@@ -60,6 +60,14 @@ pub fn teardown_enforcement(exec: &Exec) {
     // The computer's own DNS back before the resolver's rules go.
     dns::unpin_resolv_conf(exec);
     dns::remove_config(exec);
+    // A resolver only we brought is switched off, not left serving port 53
+    // with its stock config. (The package stays; it's inert disabled.)
+    if crate::service::installed_by_us(exec)
+        .iter()
+        .any(|p| p == "dnsmasq")
+    {
+        let _ = exec.run("systemctl", &["disable", "--now", "dnsmasq"]);
+    }
     for path in [crate::tamper::POLKIT_RULE_PATH, LOGIND_DROPIN] {
         if let Err(e) = exec.remove_file(path) {
             tracing::warn!("could not remove {path}: {e}");
@@ -150,10 +158,16 @@ mod tests {
                     "read /var/lib/openscreentime/resolv.conf.pre-pin",
                     r#"{"symlink":null,"content":"nameserver 192.168.1.1\n"}"#,
                 ),
+                // install-service brought dnsmasq: it's switched off again.
+                (
+                    "read /var/lib/openscreentime/installed-packages",
+                    "dnsmasq\nnftables\n",
+                ),
             ],
         );
         run_helper_with(&exec).unwrap();
         let log = exec.log();
+        pos(&log, "run systemctl disable --now dnsmasq");
         let timer = pos(
             &log,
             "run systemctl disable --now openscreentime-watchdog.timer",
