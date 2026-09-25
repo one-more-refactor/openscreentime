@@ -490,18 +490,26 @@ with `#[serde(default)]` on optional sub-objects.
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
   left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name }`. "Today" is each device's own local day (the day
-  its agent enforces); `left_minutes` is the person's budget left computed
-  like the device does (seconds, rounded up). `rules` = `{ allowed, reason:
-  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at }`
-  from the agent's own rules function — when screens stop, whichever of the
-  budget, bedtime or the window end comes first; plus `goal_minutes`, and
+  windows, display_name, utc_offset_secs }`. "Today" is each device's own
+  local day (the day its agent enforces); `utc_offset_secs` is that
+  computer's clock, for everything the console says about its day (focus
+  hours, the week, the hours strip). `left_minutes` is **time left**, the
+  number the computer shows: the agent's own rules function with the same
+  inputs — the day's use and grants and the override the computer reports in
+  its `state` frame — so minutes until the screen stops (the budget,
+  bedtime, the end of the hours or of an override, whichever first); `0` =
+  stopped, `null` = no limit. `rules` = `{ allowed, reason:
+  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at,
+  override_until, utc_offset_secs }` is the same verdict, times in the
+  computer's offset; when `stop_at` is `override_until`, an unlock code or a
+  grant is what keeps them going ("Unlocked until 00:27"); plus `goal_minutes`, and
   for a self-managed person `self_managed` and `focus: { hours, sites }`.
   `parent_sees: { apps, sites }` is what a parent sees of this person's day
   besides the minutes — the same rule `/api/usage/where` enforces
   (`usage.rs` `hub_exposure`); both false = minutes only. The page's "What
   can a parent see?" is said from it.
-  `GET /api/family` children carry the same `left_minutes` and `rules`.
+  `GET /api/family` children carry the same `left_minutes`, `rules` and
+  `utc_offset_secs`.
 - `GET /api/me/history` → the last 14 days `{ days: [{ day, used_minutes,
   earned_minutes }], today_by_device: [{ name, used_minutes }], goal_minutes,
   goal_streak }` (the console shows neither goal nor streak).
