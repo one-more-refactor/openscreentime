@@ -713,8 +713,9 @@ notification naming the rule that blocks it, "example.org is blocked on this
 computer" (for `www.example.org` too) — once per site per day, one a minute
 at most, never to someone stopped. What the family resolver filters upstream
 is not named (Firefox's background `ads.mozilla.org` is not "mozilla.org is
-blocked"). Resolver traffic has no user, so it is said as a fact about the
-computer. There is no block page of our own: an HTTPS site can't
+blocked"), and neither is anything the computer looks up on its own
+(`attrib::OS_LOOKUPS`). Resolver traffic has no user, so it is said as a
+fact about the computer. There is no block page of our own: an HTTPS site can't
 be answered for without a certificate warning.
 
 Every minute the agent checks the block is real: `getent hosts
