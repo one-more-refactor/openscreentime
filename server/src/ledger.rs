@@ -280,22 +280,50 @@ async fn report_regression(
     .await;
 }
 
-/// The rules' view of a person's day for the console, on a device's clock
-/// (the same function the agent enforces with). A local override at the
-/// device (a parent code) isn't known here — this is "by the rules".
-pub fn rules_json(
+/// A parent override a device reports running for one of its logins (the
+/// `overrides` of its `state` frame: a code at the lock, a grant, a snooze),
+/// if it still runs at `now`.
+pub fn reported_override(
+    last_state: Option<&Value>,
+    os_username: &str,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    last_state?
+        .get("overrides")?
+        .get(os_username)?
+        .as_str()?
+        .parse::<DateTime<Utc>>()
+        .ok()
+        .filter(|t| *t > now)
+}
+
+/// A person's day as the console shows it, from the rules function the agent
+/// enforces with and the same inputs: their use and grants today, the
+/// override their computer reports, on the computer's clock. `left_minutes`
+/// is the number the computer shows — minutes until the screen stops (the
+/// limit, bedtime, the end of the hours or of the override, whichever first)
+/// — or `None` with no daily limit and nothing holding the rules off.
+pub struct ConsoleDay {
+    pub left_minutes: Option<i64>,
+    /// The verdict, for the console's sentences (`web/src/lib/day.ts`).
+    pub rules: Value,
+}
+
+pub fn console_day(
     policy: &Policy,
     used_secs: i64,
     earned_secs: i64,
     offset_secs: Option<i32>,
+    override_until: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Value {
-    let tz = FixedOffset::east_opt(
-        offset_secs
-            .unwrap_or(0)
-            .clamp(-MAX_OFFSET_SECS, MAX_OFFSET_SECS),
-    )
-    .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+) -> ConsoleDay {
+    let off = offset_secs
+        .unwrap_or(0)
+        .clamp(-MAX_OFFSET_SECS, MAX_OFFSET_SECS);
+    let tz = FixedOffset::east_opt(off).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let ov = override_until
+        .filter(|t| *t > now)
+        .map(|t| t.with_timezone(&tz));
     let v = rules::evaluate(
         &policy.screen_time,
         &now.with_timezone(&tz),
@@ -303,16 +331,47 @@ pub fn rules_json(
             used_secs: used_secs.max(0) as u64,
             earned_secs: earned_secs.max(0) as u64,
         },
-        None,
+        ov.as_ref(),
         false,
     );
-    json!({
-        "allowed": v.allowed,
-        "reason": v.reason.map(|r| r.id()),
-        "minutes_left": v.minutes_left,
-        "stop_at": v.stop_at,
-        "resume_at": v.resume_at,
-    })
+    let limited = crate::members::limit_minutes(policy).is_some();
+    let left_minutes = if !limited && !v.override_active {
+        None
+    } else if !v.allowed {
+        Some(0)
+    } else {
+        match v.minutes_left {
+            Some(m) => Some(i64::from(m)),
+            // Nothing stops them within two days (a 24-hour limit): the budget.
+            None => v.budget_left_secs.map(|s| (s as i64 + 59) / 60),
+        }
+    };
+    ConsoleDay {
+        left_minutes,
+        rules: json!({
+            "allowed": v.allowed,
+            "reason": v.reason.map(|r| r.id()),
+            "minutes_left": v.minutes_left,
+            "stop_at": v.stop_at,
+            "resume_at": v.resume_at,
+            "override_until": ov,
+            // The computer's clock, for everything the console says about
+            // its day (focus hours, the week, "tomorrow at 07:00").
+            "utc_offset_secs": off,
+        }),
+    }
+}
+
+/// [`console_day`]'s verdict alone.
+#[cfg(test)]
+pub fn rules_json(
+    policy: &Policy,
+    used_secs: i64,
+    earned_secs: i64,
+    offset_secs: Option<i32>,
+    now: DateTime<Utc>,
+) -> Value {
+    console_day(policy, used_secs, earned_secs, offset_secs, None, now).rules
 }
 
 /// The device-local date for a given device, at `now` (for writes that the
@@ -385,6 +444,49 @@ mod tests {
                 .unwrap();
         assert_eq!(old.seconds(), 600);
         assert!(old.day.is_none());
+    }
+
+    /// The console says what the computer says, for the same inputs — the
+    /// agent checks the same vectors (client/src/glance.rs).
+    #[test]
+    fn time_left_matches_the_computer_for_the_same_inputs() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../policy/tests/verdict-vectors.json")).unwrap();
+        let now: DateTime<Utc> = v["now"].as_str().unwrap().parse().unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let policy: Policy =
+                serde_json::from_value(json!({ "screen_time": c["screen_time"] })).unwrap();
+            let ov = c["override_in_min"]
+                .as_i64()
+                .map(|m| now + Duration::minutes(m));
+            let day = console_day(
+                &policy,
+                c["used_secs"].as_i64().unwrap(),
+                c["earned_secs"].as_i64().unwrap(),
+                Some(0),
+                ov,
+                now,
+            );
+            assert_eq!(json!(day.left_minutes), c["left_minutes"], "{}", c["name"]);
+            if ov.is_some() {
+                assert!(day.rules["override_until"].is_string(), "{}", c["name"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_reported_override_counts_only_while_it_runs() {
+        let now = utc(25, 20, 0);
+        let st = json!({ "locked": false, "overrides": { "mia": "2026-09-25T20:30:00Z" } });
+        assert_eq!(
+            reported_override(Some(&st), "mia", now),
+            Some(utc(25, 20, 30))
+        );
+        assert_eq!(reported_override(Some(&st), "mia", utc(25, 20, 31)), None);
+        assert_eq!(reported_override(Some(&st), "sib", now), None);
+        assert_eq!(reported_override(None, "mia", now), None);
+        let old_agent = json!({ "locked": false });
+        assert_eq!(reported_override(Some(&old_agent), "mia", now), None);
     }
 
     #[test]

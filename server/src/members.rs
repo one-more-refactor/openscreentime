@@ -876,7 +876,18 @@ async fn policy_for_account(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<P
         .unwrap_or_default())
 }
 
-type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32, Option<i32>);
+type TodayRow = (
+    Uuid,          // du.id
+    Uuid,          // d.id
+    String,        // d.name
+    String,        // d.status
+    bool,          // d.locked
+    i32,           // used_seconds today
+    i32,           // earned_seconds today
+    Option<i32>,   // d.utc_offset_secs
+    String,        // du.os_username
+    Option<Value>, // d.last_state (the overrides it runs)
+);
 
 /// `GET /api/me/today` — the person's own day, across every device they use.
 pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -887,7 +898,8 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     // "Today" is each device's own local day — the day its agent enforces.
     let rows: Vec<TodayRow> = sqlx::query_as(&format!(
         "SELECT du.id, d.id, d.name, d.status, d.locked,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs,
+                du.os_username, d.last_state
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
            LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = {}
@@ -905,11 +917,19 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     let used = used_secs / 60;
     let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    // The same budget the device enforces: limit + earned − used, per person,
-    // in seconds, rounded up to the minute like the device's ring.
-    let left = limit.map(|l| ((l * 60 + earned_secs - used_secs).max(0) + 59) / 60);
     let offset = rows.iter().find_map(|r| r.7);
-    let rules = crate::ledger::rules_json(&policy, used_secs, earned_secs, offset, Utc::now());
+    // Time left, the number their computer shows: the same rules function
+    // with the same inputs (their day, the override a computer of theirs
+    // reports), on the computer's clock.
+    let now = Utc::now();
+    let override_until = rows
+        .iter()
+        .filter_map(|r| crate::ledger::reported_override(r.9.as_ref(), &r.8, now))
+        .max();
+    let day =
+        crate::ledger::console_day(&policy, used_secs, earned_secs, offset, override_until, now);
+    let left = day.left_minutes;
+    let rules = day.rules;
     let locked = rows.iter().any(|r| r.4);
     let du_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let pending: Option<i32> = sqlx::query_scalar(
@@ -936,6 +956,8 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         // When screens stop by the rules (limit, bedtime or window end,
         // whichever first) — the agent's own rules function.
         "rules": rules,
+        // The computer's clock: focus hours and the week are its day.
+        "utc_offset_secs": offset,
         "locked": locked,
         "devices": devices,
         "blocks": policy.blocks,

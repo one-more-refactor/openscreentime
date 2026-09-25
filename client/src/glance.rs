@@ -367,6 +367,51 @@ mod tests {
         );
     }
 
+    /// The computer says what the console says, for the same inputs — the
+    /// server checks the same vectors (server/src/ledger.rs, `console_day`).
+    /// Through the agent's own path: its ledger, its verdict, the status
+    /// fields, and what the window reads from them.
+    #[test]
+    fn time_left_matches_the_console_for_the_same_inputs() {
+        use crate::enforce::screentime::{self, UsageTracker};
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../policy/tests/verdict-vectors.json")).unwrap();
+        let now_utc: chrono::DateTime<chrono::Utc> = v["now"].as_str().unwrap().parse().unwrap();
+        let now = now_utc.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap());
+        for c in v["cases"].as_array().unwrap() {
+            let policy: crate::policy::Policy =
+                serde_json::from_value(serde_json::json!({ "screen_time": c["screen_time"] }))
+                    .unwrap();
+            let mut t = UsageTracker::new();
+            t.roll_to(now.date_naive());
+            t.add_active("mia", c["used_secs"].as_u64().unwrap() as u32, 1);
+            t.add_earned("mia", (c["earned_secs"].as_u64().unwrap() / 60) as u32);
+            if let Some(m) = c["override_in_min"].as_i64() {
+                t.set_override("mia", now_utc + chrono::Duration::minutes(m));
+            }
+            let verdict = screentime::verdict(&policy, &t, "mia", &now, false);
+            let ts = |x: chrono::DateTime<chrono::FixedOffset>| x.to_rfc3339();
+            let status = Clock {
+                remaining_minutes: t.remaining_minutes("mia", &policy),
+                allowed: Some(verdict.allowed),
+                reason: verdict.reason.map(|r| r.id().to_string()),
+                minutes_left: verdict.minutes_left,
+                stop_at: verdict.stop_at.map(ts),
+                override_until: t
+                    .peek_override("mia", now_utc)
+                    .map(|x| x.to_rfc3339()),
+                counting: true,
+                frozen: false,
+            };
+            let left = match status.left(now_utc.with_timezone(&chrono::Local)) {
+                Left::NoLimit => None,
+                Left::Stopped => Some(0),
+                Left::Minutes { minutes, .. } => Some(minutes),
+            };
+            assert_eq!(serde_json::json!(left), c["left_minutes"], "{}", c["name"]);
+        }
+    }
+
     #[test]
     fn todays_rules_read_like_the_board() {
         let st: ScreenTime = serde_json::from_value(serde_json::json!({
