@@ -151,8 +151,12 @@ pub fn evaluate<Tz: TimeZone>(
     // something stops them.
     let horizon = now.clone() + Duration::hours(HORIZON_HOURS);
     let mut t = now.clone();
-    let mut used = day.used_secs as i64;
-    let mut budget = limit_secs.map(|l| l + day.earned_secs as i64);
+    // In milliseconds: `now` carries a fraction of a second, and truncating
+    // the first, partial minute to whole seconds put a stop computed a
+    // quarter of an hour ahead up to a second later than the same stop
+    // computed in its last minute — "ends at 03:24", then "03:23".
+    let mut used = day.used_secs as i64 * 1000;
+    let mut budget = limit_secs.map(|l| (l + day.earned_secs as i64) * 1000);
     loop {
         let ov = ov_end.as_ref().is_some_and(|e| t < *e);
         if !ov {
@@ -186,7 +190,7 @@ pub fn evaluate<Tz: TimeZone>(
         }
         // The budget can run out mid-minute.
         if let (false, Some(b)) = (ov, budget) {
-            let at = t.clone() + Duration::seconds(b - used);
+            let at = t.clone() + Duration::milliseconds(b - used);
             if at < next {
                 return Verdict {
                     allowed: true,
@@ -199,12 +203,12 @@ pub fn evaluate<Tz: TimeZone>(
                 };
             }
         }
-        used += (next.clone() - t.clone()).num_seconds();
+        used += (next.clone() - t.clone()).num_milliseconds();
         if next.date_naive() != t.date_naive() {
             // Local midnight: a fresh day, a fresh budget (earned time and
             // time used elsewhere belonged to yesterday).
             used = 0;
-            budget = limit_secs;
+            budget = limit_secs.map(|l| l * 1000);
         }
         t = next;
     }
@@ -693,6 +697,33 @@ mod tests {
         );
         assert_eq!(v.minutes_left, Some(1));
         assert_eq!(v.stop_at, Some(mon(12, 0) + Duration::seconds(30)));
+    }
+
+    /// Acceptance round 2: "ends at 03:24" for a quarter of an hour, then
+    /// "ends at 03:23" in the last minute. The same stop, computed from far
+    /// off (walking the minutes from a `now` with a fraction of a second) and
+    /// from its last minute, is the same moment — to the millisecond.
+    #[test]
+    fn the_stop_is_the_same_moment_from_far_off_and_up_close() {
+        let s = st(17, vec![], None);
+        let t0 = mon(3, 6) + Duration::milliseconds(59_900); // 03:06:59.9
+        let far = eval(&s, t0, used(0));
+        let stop = t0 + Duration::minutes(17); // 03:23:59.9
+        assert_eq!(far.stop_at, Some(stop));
+        for ahead in [60, 300, 845, 959, 1019] {
+            let now = t0 + Duration::seconds(ahead);
+            let day = Day {
+                used_secs: ahead as u64,
+                earned_secs: 0,
+            };
+            assert_eq!(eval(&s, now, day).stop_at, Some(stop), "{ahead} s in");
+        }
+        // Whole-second `now`s were always exact; they still are.
+        assert_eq!(
+            eval(&s, mon(3, 7), used(0)).stop_at,
+            Some(mon(3, 24)),
+            "on the minute"
+        );
     }
 
     #[test]

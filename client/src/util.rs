@@ -25,9 +25,13 @@ pub struct Sim {
     log: Mutex<Vec<String>>,
     missing: HashSet<String>,
     /// Installed, but fails when run (`nft` refusing a ruleset); a
-    /// `write:<path>` entry makes writing that file fail.
+    /// `write:<path>` entry makes writing that file fail, a `stdin:<text>`
+    /// entry makes any program fed input containing `<text>` fail (`nft`
+    /// refusing one kind of rule).
     failing: HashSet<String>,
     probes: HashMap<String, String>,
+    /// What was written where, last write wins (see [`Exec::written`]).
+    files: Mutex<HashMap<String, String>>,
 }
 
 /// Where a service's `PATH` usually reaches; used when `PATH` itself is unset.
@@ -71,8 +75,17 @@ impl Exec {
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
+                files: Mutex::default(),
             })),
         }
+    }
+
+    /// What the simulated machine last had written to `path`. Tests only.
+    #[cfg(test)]
+    pub fn written(&self, path: &str) -> Option<String> {
+        self.sim
+            .as_ref()
+            .and_then(|s| s.files.lock().unwrap().get(path).cloned())
     }
 
     /// The same pretend machine, where these programs (or `write:<path>`
@@ -87,6 +100,7 @@ impl Exec {
                 missing: sim.missing.clone(),
                 failing: what.iter().map(|w| w.to_string()).collect(),
                 probes: sim.probes.clone(),
+                files: Mutex::default(),
             })),
         }
     }
@@ -156,6 +170,15 @@ impl Exec {
         use std::io::Write;
         if self.ctx.dry_run {
             self.sim_missing(program)?;
+            if let Some(sim) = &self.sim {
+                let refused = sim.failing.iter().any(|f| {
+                    f.strip_prefix("stdin:")
+                        .is_some_and(|needle| stdin_data.contains(needle))
+                });
+                if refused {
+                    anyhow::bail!("{program} refused its input (simulated)");
+                }
+            }
             self.record(format!("run {} {}", program, args.join(" ")));
             tracing::info!(target: "dry_run", "WOULD RUN: {} {} <<EOF\n{}\nEOF", program, args.join(" "), stdin_data);
             return Ok(String::new());
@@ -226,6 +249,18 @@ impl Exec {
         std::fs::read_to_string(path).ok()
     }
 
+    /// Where `path` points, if it is a symlink (always read — it's safe under
+    /// --dry-run). On a simulated machine the answer is the probe
+    /// `readlink <path>`, absent = not a link.
+    pub fn read_link(&self, path: &str) -> Option<String> {
+        if let Some(sim) = &self.sim {
+            return sim.probes.get(&format!("readlink {path}")).cloned();
+        }
+        std::fs::read_link(path)
+            .ok()
+            .map(|t| t.to_string_lossy().into_owned())
+    }
+
     /// Write a file, honoring dry-run. Used for resolv.conf, dnsmasq confs, polkit rules.
     pub fn write_file(&self, path: &str, contents: &str) -> Result<()> {
         if self.ctx.dry_run {
@@ -233,6 +268,10 @@ impl Exec {
                 if sim.failing.contains(&format!("write:{path}")) {
                     anyhow::bail!("writing {path} failed (simulated)");
                 }
+                sim.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_string(), contents.to_string());
             }
             self.record(format!("write {path}"));
             tracing::info!(target: "dry_run", "WOULD WRITE {} ({} bytes):\n{}", path, contents.len(), contents);
@@ -252,7 +291,8 @@ impl Exec {
             self.record(format!("remove {path}"));
             return Ok(true);
         }
-        if !std::path::Path::new(path).exists() {
+        // The entry itself: a symlink whose target is gone is still ours to remove.
+        if std::fs::symlink_metadata(path).is_err() {
             return Ok(false);
         }
         if self.ctx.dry_run {
@@ -264,6 +304,24 @@ impl Exec {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e).with_context(|| format!("removing {path}")),
         }
+    }
+
+    /// Remove a directory we own and everything in it, honoring dry-run.
+    /// `Ok(true)` if it was there; a missing one is `Ok(false)`.
+    pub fn remove_dir_all(&self, path: &str) -> Result<bool> {
+        if self.sim.is_some() {
+            self.record(format!("remove -r {path}"));
+            return Ok(true);
+        }
+        if !std::path::Path::new(path).exists() {
+            return Ok(false);
+        }
+        if self.ctx.dry_run {
+            tracing::info!(target: "dry_run", "WOULD REMOVE {path} and everything in it");
+            return Ok(true);
+        }
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {path}"))?;
+        Ok(true)
     }
 
     pub fn dry_run(&self) -> bool {

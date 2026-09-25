@@ -35,6 +35,8 @@ pub enum VpnGap {
     NotRunning,
     /// The server sent a profile kind this agent doesn't know how to apply.
     UnsupportedKind,
+    /// The profile could not be written to this computer at all.
+    NotApplied,
 }
 
 impl VpnGap {
@@ -43,6 +45,7 @@ impl VpnGap {
         match self {
             VpnGap::NotRunning => "vpn_not_running",
             VpnGap::UnsupportedKind => "vpn_unsupported_kind",
+            VpnGap::NotApplied => "vpn_not_applied",
         }
     }
 
@@ -58,6 +61,12 @@ impl VpnGap {
             VpnGap::UnsupportedKind => {
                 "the server sent a VPN profile kind this agent version does not \
                  support — update the agent or re-upload as WireGuard/OpenVPN."
+            }
+            VpnGap::NotApplied => {
+                "the VPN profile could not be written to this computer, so \
+                 traffic is NOT going through the VPN. The rest of its rules \
+                 are applied. The agent's log (`journalctl -u \
+                 openscreentime-agent`) says why."
             }
         }
     }

@@ -74,6 +74,9 @@ pub enum FirewallGap {
     /// `nft` refused the ruleset (or could not be run); the last good table,
     /// if any, stays loaded.
     NotApplied,
+    /// The firewall is loaded, but its anti-bypass lockdown rules were
+    /// refused, so it was loaded without them.
+    LockdownNotApplied,
 }
 
 impl FirewallGap {
@@ -82,6 +85,7 @@ impl FirewallGap {
         match self {
             FirewallGap::NotInstalled => "firewall_not_installed",
             FirewallGap::NotApplied => "firewall_not_applied",
+            FirewallGap::LockdownNotApplied => "firewall_lockdown_not_applied",
         }
     }
 
@@ -99,6 +103,12 @@ impl FirewallGap {
                  computer's firewall rules are not in force. Screen time still \
                  works. The agent's log (`journalctl -u openscreentime-agent`) \
                  says why."
+            }
+            FirewallGap::LockdownNotApplied => {
+                "the firewall is loaded, but this computer's nftables refused its \
+                 anti-bypass rules (forced DNS, blocked DNS-over-HTTPS/TLS, VPN \
+                 and Tor ports), so a browser can go around the website rules. \
+                 The agent's log (`journalctl -u openscreentime-agent`) says why."
             }
         }
     }

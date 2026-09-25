@@ -442,6 +442,8 @@ impl eframe::App for AppView {
                     .collect()
             })
             .unwrap_or_default();
+        #[cfg(feature = "tray")]
+        crate::logincode::close_stale(&codes);
         if let Some(c) = codes.last() {
             if self.shown_code.as_deref() != Some(c.id.as_str()) {
                 self.shown_code = Some(c.id.clone());
