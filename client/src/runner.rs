@@ -3743,9 +3743,25 @@ async fn post_slices(agent: &Shared) {
     if batch.is_empty() {
         return;
     }
-    if let Err(e) = client.post_usage_slices(&batch).await {
-        tracing::debug!("usage post failed, keeping batch: {e}");
-        agent.lock().await.attrib.requeue(batch);
+    // Said once per episode, not at debug: "where the time went" staying
+    // empty with nothing in the journal is how the last break went unseen.
+    static FAILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = batch.len();
+    match client.post_usage_slices(&batch).await {
+        Err(e) => {
+            if !FAILING.swap(true, Relaxed) {
+                tracing::warn!(
+                    "where-the-time-went post failed, keeping {n} slice(s) for the next try: {e}"
+                );
+            }
+            agent.lock().await.attrib.requeue(batch);
+        }
+        Ok(()) => {
+            if FAILING.swap(false, Relaxed) {
+                tracing::info!("where-the-time-went posts go through again ({n} slice(s))");
+            }
+        }
     }
 }
 
