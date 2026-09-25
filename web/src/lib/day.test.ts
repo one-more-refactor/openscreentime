@@ -21,6 +21,19 @@ describe("the computer's clock", () => {
     expect(deviceNow(7200, now)).toEqual({ date: "2026-09-26", day: 6, minute: 90, hm: "01:30" });
   });
 
+  test("a computer that never said is on UTC, like the server's day — even in a Berlin browser", () => {
+    const tz = process.env.TZ;
+    process.env.TZ = "Europe/Berlin";
+    try {
+      expect(now.getDate()).toBe(26); // the browser's own clock is already Saturday
+      expect(deviceNow(null, now)).toEqual(deviceNow(0, now));
+      expect(deviceNow(undefined, now).date).toBe("2026-09-25");
+    } finally {
+      if (tz === undefined) delete process.env.TZ;
+      else process.env.TZ = tz;
+    }
+  });
+
   test("a week back from the computer's today", () => {
     expect(daysBefore("2026-09-25", 0)).toEqual({ date: "2026-09-25", day: 5 });
     expect(daysBefore("2026-09-25", 6)).toEqual({ date: "2026-09-19", day: 6 });

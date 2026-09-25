@@ -44,6 +44,8 @@ mod tests_numbers;
 mod tests_retire;
 #[cfg(test)]
 mod tests_rules;
+#[cfg(test)]
+mod tests_shapes;
 mod unlock_code;
 mod usage;
 mod voucher;

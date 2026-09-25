@@ -34,19 +34,13 @@ export function isoOffsetSecs(iso: string): number | null {
   return /z$/i.test(iso.trim()) ? 0 : null;
 }
 
-/** `ms` read on the wall clock of a computer `offsetSecs` east of UTC — or on
- * this browser's clock when the computer never said. */
+/** `ms` read on the wall clock of a computer `offsetSecs` east of UTC. A
+ * computer that never said is on UTC — never this browser's clock: the
+ * server files its day as UTC's (`COALESCE(utc_offset_secs, 0)`), and a
+ * browser in Berlin reading its own date put today's minutes on two days of
+ * "My week" (acceptance round 4). */
 export function wallTime(ms: number, offsetSecs: number | null | undefined): WallTime {
-  if (offsetSecs === null || offsetSecs === undefined) {
-    const d = new Date(ms);
-    return {
-      date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
-      day: d.getDay(),
-      minute: d.getHours() * 60 + d.getMinutes(),
-      hm: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
-    };
-  }
-  const d = new Date(ms + offsetSecs * 1000);
+  const d = new Date(ms + (offsetSecs ?? 0) * 1000);
   return {
     date: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`,
     day: d.getUTCDay(),

@@ -57,6 +57,11 @@ cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings   # 
   `ledger.rs`) make a throwaway database per test from
   `OST_TEST_DATABASE_URL`, else `DATABASE_URL`, and skip when neither is set
   (a failure instead with `OST_REQUIRE_TEST_DB`, as in CI).
+- **Server ↔ console shapes.** `server/src/tests_shapes.rs` records what the
+  person page's endpoints really send in `web/src/test/server-shapes.json`;
+  `web/src/test/shapes.test.ts` holds `types.ts` and the mock to it (a
+  declared field the server doesn't send, or a mock field it doesn't, fails).
+  Changed a response? `OST_WRITE_SHAPES=1 cargo test shapes`, then `bun test`.
 - **Container harness** (`deploy/test/run.sh build|up|sh|status|dns|offline|online|logs|down`):
   a rootless Debian box with systemd and the musl agent — enroll, WS, DNS
   sinkhole, PAM. No display, no real freeze.
@@ -81,7 +86,8 @@ podman exec openscreentime-server /app/openscreentime-server recover <name>   # 
 ```
 
 A computer joins with the line the console gives:
-`curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`.
+`(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`
+(wget where there is one — stock Debian and Ubuntu have no curl — else curl).
 
 ### Settings that matter
 

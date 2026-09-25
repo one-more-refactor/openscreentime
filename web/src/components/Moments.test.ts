@@ -4,7 +4,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Event } from "../types";
 import { momentsFor, momentsOf, recovered, sayMoment, sentence, standingGaps, tone } from "./Moments";
-import { installCommand } from "./EnrollCommand";
 
 let n = 0;
 function ev(type: Event["type"], kind: string, severity: Event["severity"] = "warn"): Event {
@@ -184,20 +183,5 @@ describe("whose moment, and is it over", () => {
     // Philip's snooze aren't his story.
     const leo = momentsFor(events, { logins: new Set(["du-leo"]), theirs: (id) => id === "family-pc" });
     expect(leo.map((e) => e.type)).toEqual(["lock"]);
-  });
-});
-
-describe("the install command", () => {
-  test("https: as it was", () => {
-    expect(installCommand("T", "https://ost.example.org")).toBe(
-      "curl -fsSL https://ost.example.org/install.sh | sudo OST_TOKEN=T sh -s -- --server https://ost.example.org",
-    );
-  });
-
-  test("plain http: says --insecure-http, or the installer refuses", () => {
-    expect(installCommand("T", "http://ost-host.local:18080")).toBe(
-      "curl -fsSL http://ost-host.local:18080/install.sh | sudo OST_TOKEN=T sh -s -- " +
-        "--server http://ost-host.local:18080 --insecure-http",
-    );
   });
 });

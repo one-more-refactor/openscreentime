@@ -62,6 +62,8 @@ export const apiCalls = {
   profileSaves: [] as { id: string; policy: Policy }[],
   myRules: [] as MyRules[],
   where: [] as (string | undefined)[],
+  /** per-person calls, as [verb, id] */
+  members: [] as [string, string][],
   events: [] as (string | undefined)[],
 };
 
@@ -120,8 +122,9 @@ export const apiImpl = {
   getMyRules: (() =>
     Promise.resolve({ daily_limit_minutes: 0, focus_hours: null, sites: [] })) as () => Promise<MyRules>,
   setMyRules: ((r: MyRules) => Promise.resolve(r)) as (r: MyRules) => Promise<MyRules>,
-  getWhere: ((_?: string) =>
-    Promise.resolve({ apps: [], sites: [], hours: [] })) as (accountId?: string) => Promise<WhereData>,
+  getWhere: ((_: string) =>
+    Promise.resolve({ apps: [], sites: [], hours: [] })) as (accountId: string) => Promise<WhereData>,
+  getMyWhere: (() => Promise.resolve({ apps: [], sites: [], hours: [] })) as () => Promise<WhereData>,
   getCatalog: (() => Promise.resolve({ categories: [], apps: [] })) as () => Promise<Catalog>,
   listEvents: ((_?: string) => Promise.resolve([])) as (deviceId?: string) => Promise<Event[]>,
 };
@@ -153,6 +156,7 @@ export function resetApiMock() {
   apiCalls.profileSaves.length = 0;
   apiCalls.myRules.length = 0;
   apiCalls.where.length = 0;
+  apiCalls.members.length = 0;
   apiCalls.events.length = 0;
   Object.assign(apiImpl, defaults);
 }
@@ -236,9 +240,13 @@ mock.module("../api", () => ({
     return apiImpl.listEvents(filter.device_id);
   },
   getCatalog: () => apiImpl.getCatalog(),
-  getWhere: (accountId?: string) => {
+  getWhere: (accountId: string) => {
     apiCalls.where.push(accountId);
     return apiImpl.getWhere(accountId);
+  },
+  getMyWhere: () => {
+    apiCalls.where.push("me");
+    return apiImpl.getMyWhere();
   },
   creditTime: (du: string, minutes: number) => {
     apiCalls.credit.push([du, minutes]);
@@ -248,9 +256,18 @@ mock.module("../api", () => ({
     apiCalls.profileSaves.push({ id, policy });
     return Promise.resolve({ id, policy });
   },
-  updateMember: (id: string) => Promise.resolve({ id }),
-  deleteMember: () => Promise.resolve(),
-  unblockMember: () => Promise.resolve(),
+  updateMember: (id: string) => {
+    apiCalls.members.push(["update", id]);
+    return Promise.resolve({ id });
+  },
+  deleteMember: (id: string) => {
+    apiCalls.members.push(["delete", id]);
+    return Promise.resolve();
+  },
+  unblockMember: (id: string) => {
+    apiCalls.members.push(["unblock", id]);
+    return Promise.resolve();
+  },
   approveEarnRequest: (id: string) => Promise.resolve({ id }),
   denyEarnRequest: (id: string) => Promise.resolve({ id }),
   // Named imports of pages no test drives (the whole App is rendered in

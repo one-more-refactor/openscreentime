@@ -134,7 +134,7 @@ Install one-liner (shown in the web enroll modal; the `OST_TOKEN` env form keeps
 token out of argv/shell history):
 
 ```
-curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
 A console served over plain `http://` (trying it out at home) shows the same
@@ -602,7 +602,8 @@ linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
 
 **Family.** `GET /api/family` → `{ children, devices, profiles, requests,
 server_time }` — the whole home screen in one request. `children` are the
-**members** (`key` = account id) with the account fields plus `name, avatar,
+**members** (`key` = `account_id` = `id`, the account id every per-person call
+addresses) with the account fields plus `name, avatar,
 used_minutes, earned_minutes, limit_minutes, left_minutes, rules, goal_minutes,
 profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
 os_username}], pending_requests, locked, blocked, blocks, blocked_apps,
