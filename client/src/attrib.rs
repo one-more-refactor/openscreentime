@@ -470,6 +470,9 @@ pub struct Attrib {
     /// (user, app) seen at the last walk: counting, or a bus-started one
     /// still being held (see [`SERVICE_GRACE_SECS`]).
     seen: HashMap<(String, String), Seen>,
+    /// Sites looked up and answered as blocked since the last
+    /// [`Attrib::take_blocked`], with how often.
+    blocked: HashMap<String, u32>,
 }
 
 fn hour_now() -> String {
@@ -494,6 +497,22 @@ pub fn registrable(domain: &str) -> String {
     labels[labels.len().saturating_sub(take)..].join(".")
 }
 
+/// The name a log line says was answered with the blocked address — `0.0.0.0`
+/// or `::`, what this computer's block rules answer (`config`) and what the
+/// family resolver answers for what it filters (`reply`, then `cached`).
+/// Safe search's own addresses and a name that simply doesn't exist
+/// (`NXDOMAIN`) are not blocks.
+fn blocked_name(line: &str) -> Option<&str> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let i = words
+        .iter()
+        .position(|w| matches!(*w, "config" | "reply" | "cached"))?;
+    match (words.get(i + 1), words.get(i + 2), words.get(i + 3)) {
+        (Some(name), Some(&"is"), Some(&("0.0.0.0" | "::"))) => Some(name),
+        _ => None,
+    }
+}
+
 /// Pull the queried name out of one extra-format dnsmasq log line:
 /// `... query[A] www.youtube.com from 127.0.0.1`.
 fn queried_name(line: &str) -> Option<&str> {
@@ -514,6 +533,36 @@ impl Attrib {
             desktop_read: None,
             log_offset: 0,
             seen: HashMap::new(),
+            blocked: HashMap::new(),
+        }
+    }
+
+    /// The sites answered as blocked since the last call, most looked-up
+    /// first — what lets the companion say "example.org is blocked on this
+    /// computer" instead of leaving the browser's "Unable to connect".
+    pub fn take_blocked(&mut self) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = self.blocked.drain().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out
+    }
+
+    /// Read what one stretch of the query log says: a hit per queried site,
+    /// and which sites were answered as blocked.
+    fn ingest_lines(&mut self, text: &str) {
+        for line in text.lines() {
+            if let Some(name) = queried_name(line) {
+                let site = registrable(name);
+                if !site.is_empty() && site.contains('.') {
+                    self.bump("", "site", site, 1);
+                }
+            } else if let Some(name) = blocked_name(line) {
+                let site = registrable(name);
+                if site.contains('.')
+                    && (self.blocked.len() < 256 || self.blocked.contains_key(&site))
+                {
+                    *self.blocked.entry(site).or_insert(0) += 1;
+                }
+            }
         }
     }
 
@@ -652,15 +701,8 @@ impl Attrib {
             None => return, // partial line still being written; wait for more
         };
         self.log_offset += consume as u64;
-        let text = String::from_utf8_lossy(&buf[..consume]);
-        for line in text.lines() {
-            if let Some(name) = queried_name(line) {
-                let site = registrable(name);
-                if !site.is_empty() && site.contains('.') {
-                    self.bump("", "site", site, 1);
-                }
-            }
-        }
+        let text = String::from_utf8_lossy(&buf[..consume]).into_owned();
+        self.ingest_lines(&text);
         // Keep the log from eating the disk; dnsmasq appends, so this is safe.
         if len > TRUNCATE_AT {
             let _ = std::fs::OpenOptions::new()
@@ -738,6 +780,46 @@ mod tests {
             queried_name("Aug 27 dnsmasq[1]: reply youtube.com is 1.2.3.4"),
             None
         );
+    }
+
+    /// Acceptance round 4: example.org, blocked, was only Firefox's "Unable
+    /// to connect". What the query log says was answered as blocked — by
+    /// this computer's rules or by the family resolver — is collected per
+    /// site; safe search's addresses and names that don't exist are not.
+    #[test]
+    fn blocked_answers_are_collected_per_site() {
+        let log = "\
+Sep 25 09:12:01 dnsmasq[1234]: 17 127.0.0.1/40123 query[A] example.org from 127.0.0.1
+Sep 25 09:12:01 dnsmasq[1234]: 17 127.0.0.1/40123 config example.org is 0.0.0.0
+Sep 25 09:12:01 dnsmasq[1234]: 18 127.0.0.1/40124 query[AAAA] www.example.org from 127.0.0.1
+Sep 25 09:12:01 dnsmasq[1234]: 18 127.0.0.1/40124 config www.example.org is ::
+Sep 25 09:12:02 dnsmasq[1234]: 19 127.0.0.1/40125 query[A] www.pornhub.com from 127.0.0.1
+Sep 25 09:12:02 dnsmasq[1234]: 19 127.0.0.1/40125 forwarded www.pornhub.com to 1.1.1.3
+Sep 25 09:12:02 dnsmasq[1234]: 19 127.0.0.1/40125 reply www.pornhub.com is 0.0.0.0
+Sep 25 09:12:03 dnsmasq[1234]: 20 127.0.0.1/40126 query[A] www.google.com from 127.0.0.1
+Sep 25 09:12:03 dnsmasq[1234]: 20 127.0.0.1/40126 config www.google.com is 216.239.38.120
+Sep 25 09:12:03 dnsmasq[1234]: 21 127.0.0.1/40127 query[AAAA] www.google.com from 127.0.0.1
+Sep 25 09:12:03 dnsmasq[1234]: 21 127.0.0.1/40127 config www.google.com is NODATA-IPv6
+Sep 25 09:12:04 dnsmasq[1234]: 22 127.0.0.1/40128 reply nosuch.example.net is NXDOMAIN
+Sep 25 09:12:04 dnsmasq[1234]: 23 127.0.0.1/40129 reply en.wikipedia.org is 185.15.59.224
+";
+        let mut a = Attrib::new();
+        a.ingest_lines(log);
+        assert_eq!(
+            a.take_blocked(),
+            vec![
+                ("example.org".to_string(), 2),
+                ("pornhub.com".to_string(), 1)
+            ]
+        );
+        assert!(a.take_blocked().is_empty(), "taken");
+        // The queries still count as sites looked up.
+        let sites: HashSet<String> = a
+            .drain(100)
+            .iter()
+            .map(|s| s["key"].as_str().unwrap().to_string())
+            .collect();
+        assert!(sites.contains("example.org") && sites.contains("google.com"));
     }
 
     fn desktop(name: &str, exec: &str, extra: &str) -> String {

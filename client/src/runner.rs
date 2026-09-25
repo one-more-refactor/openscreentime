@@ -384,6 +384,12 @@ pub struct Agent {
     /// stop (acceptance round 4: the wait restarted at 60 s) or an agent
     /// restart carries on counting; the stop ending forgets it.
     snooze_wait: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Sites answered as blocked lately: site → (answers, first seen).
+    blocked_recent: HashMap<String, (u32, Instant)>,
+    /// (person, site) → the day they were told it's blocked here.
+    blocked_told: HashMap<(String, String), chrono::NaiveDate>,
+    /// Person → when they were last told a site is blocked.
+    blocked_told_at: HashMap<String, Instant>,
     /// The device's unlock-code secret from the last bundle.
     parent_totp_secret: Option<String>,
     /// Unused one-time recovery codes from the last bundle.
@@ -737,6 +743,9 @@ impl Agent {
             requested_earn: HashMap::new(),
             self_managed: HashSet::new(),
             snooze_wait: carried.snooze_wait.clone(),
+            blocked_recent: HashMap::new(),
+            blocked_told: HashMap::new(),
+            blocked_told_at: HashMap::new(),
             last_contact: Instant::now(),
             contact_state: ContactState::Online,
             offline_grace: offline_grace_from_env(),
@@ -1869,6 +1878,8 @@ impl Agent {
                 .collect();
             self.attrib.sample_apps(&uids, elapsed.as_secs() as i64);
             self.attrib.ingest_dns_log();
+            let blocked = self.attrib.take_blocked();
+            self.tell_blocked(&counting, blocked);
             self.attrib_ticks += 1;
             if self.attrib_ticks >= 6 {
                 self.attrib_ticks = 0;
@@ -2607,6 +2618,50 @@ impl Agent {
             help: help.to_string(),
             code_hint: code_hint.to_string(),
             switch_user: self.can_switch_user(),
+        }
+    }
+
+    /// A blocked site is only the browser's "Unable to connect" — nothing
+    /// says why (acceptance round 4). When a site is answered as blocked
+    /// again and again ([`BLOCKED_REPEAT`] within [`BLOCKED_WINDOW`]), the
+    /// person whose time is counting hears it once that day: "example.org
+    /// is blocked on this computer". Resolver traffic has no user, so it is
+    /// said as a fact about the computer, never as "you visited"; one site
+    /// a minute at most. No page of our own: an HTTPS site can't be answered
+    /// for without a certificate warning.
+    fn tell_blocked(&mut self, counting: &[String], hits: Vec<(String, u32)>) {
+        let now = Instant::now();
+        self.blocked_recent
+            .retain(|_, (_, t)| now.duration_since(*t) < BLOCKED_WINDOW);
+        for (site, n) in hits {
+            self.blocked_recent.entry(site).or_insert((0, now)).0 += n;
+        }
+        let today = self.trusted_now.with_timezone(&chrono::Local).date_naive();
+        self.blocked_told.retain(|_, d| *d == today);
+        for user in counting {
+            if !self.policies.contains_key(user) || self.frozen.contains(user) {
+                continue;
+            }
+            if self
+                .blocked_told_at
+                .get(user)
+                .is_some_and(|t| now.duration_since(*t) < BLOCKED_TELL_GAP)
+            {
+                continue;
+            }
+            let Some(site) = blocked_to_tell(&self.blocked_recent, &self.blocked_told, user, today)
+            else {
+                continue;
+            };
+            self.blocked_told
+                .insert((user.clone(), site.clone()), today);
+            self.blocked_told_at.insert(user.clone(), now);
+            self.notify_user(
+                Some(user),
+                &format!("{site} is blocked on this computer"),
+                "That's why the browser can't connect to it.",
+                false,
+            );
         }
     }
 
@@ -3531,6 +3586,31 @@ impl Agent {
             events,
         )
     }
+}
+
+/// Blocked answers for one site within this long count together.
+const BLOCKED_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How many blocked answers make "tried to open it" (a browser asks for the
+/// name's IPv4 and IPv6 addresses, or tries again).
+const BLOCKED_REPEAT: u32 = 2;
+/// At most one "is blocked" a minute per person.
+const BLOCKED_TELL_GAP: Duration = Duration::from_secs(60);
+
+/// The blocked site to tell `user` about now, if any: looked up repeatedly,
+/// not told today — the most looked-up first.
+fn blocked_to_tell(
+    recent: &HashMap<String, (u32, Instant)>,
+    told: &HashMap<(String, String), chrono::NaiveDate>,
+    user: &str,
+    today: chrono::NaiveDate,
+) -> Option<String> {
+    recent
+        .iter()
+        .filter(|(site, (n, _))| {
+            *n >= BLOCKED_REPEAT && told.get(&(user.to_string(), (*site).clone())) != Some(&today)
+        })
+        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then_with(|| b.0.cmp(a.0)))
+        .map(|(site, _)| site.clone())
 }
 
 /// "You're back": how long, and until when — the verdict's stop, the same
@@ -4803,6 +4883,56 @@ mod tests {
             reply.message
         );
         assert!(b.frozen.contains("mia"));
+    }
+
+    /// Acceptance round 4: example.org, blocked, was Firefox's "Unable to
+    /// connect" with nothing to say why. Looked up again and again, a
+    /// blocked site is named to the person whose time is counting — once a
+    /// day, one a minute, never to someone stopped or not at the computer.
+    #[tokio::test]
+    async fn a_site_that_keeps_being_blocked_is_named_once() {
+        let (mut a, _fake) = agent_with_mia();
+        let mia = vec!["mia".to_string()];
+        let said = |a: &Agent| -> Vec<String> {
+            a.notifications
+                .iter()
+                .filter(|n| n.user.as_deref() == Some("mia"))
+                .map(|n| n.title.clone())
+                .collect()
+        };
+        // One lookup: nothing yet (a page's stray request isn't a visit).
+        a.tell_blocked(&mia, vec![("example.org".into(), 1)]);
+        assert!(said(&a).is_empty());
+        // Tried again: named, as a fact about this computer.
+        a.tell_blocked(&mia, vec![("example.org".into(), 1)]);
+        assert_eq!(said(&a), vec!["example.org is blocked on this computer"]);
+        let n = a.notifications.back().unwrap();
+        assert_eq!(n.body, "That's why the browser can't connect to it.");
+        assert!(!n.critical && !n.back);
+        // Again and again: once that day.
+        a.tell_blocked(&mia, vec![("example.org".into(), 5)]);
+        a.blocked_told_at.clear();
+        a.tell_blocked(&mia, vec![("example.org".into(), 5)]);
+        assert_eq!(said(&a).len(), 1);
+        // Another site within the minute waits its turn; then it's said.
+        a.blocked_told_at.insert("mia".into(), Instant::now());
+        a.tell_blocked(&mia, vec![("pornhub.com".into(), 2)]);
+        assert_eq!(said(&a).len(), 1);
+        a.blocked_told_at.clear();
+        a.tell_blocked(&mia, Vec::new());
+        assert_eq!(
+            said(&a).last().unwrap(),
+            "pornhub.com is blocked on this computer"
+        );
+        // Nobody whose time is counting, or someone stopped: nothing said.
+        let (mut b, _fake) = agent_with_mia();
+        b.tell_blocked(&[], vec![("example.org".into(), 3)]);
+        b.frozen.insert("mia".into());
+        b.tell_blocked(&mia, vec![("example.org".into(), 3)]);
+        assert!(b.notifications.is_empty());
+        // Someone with no rules here gets no status file: nothing said.
+        b.tell_blocked(&["dad".to_string()], vec![("example.org".into(), 3)]);
+        assert!(b.notifications.is_empty());
     }
 
     /// Acceptance round 4: after a log-out (the lock handed the screen to
