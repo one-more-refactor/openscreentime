@@ -397,9 +397,7 @@ mod tests {
                 reason: verdict.reason.map(|r| r.id().to_string()),
                 minutes_left: verdict.minutes_left,
                 stop_at: verdict.stop_at.map(ts),
-                override_until: t
-                    .peek_override("mia", now_utc)
-                    .map(|x| x.to_rfc3339()),
+                override_until: t.peek_override("mia", now_utc).map(|x| x.to_rfc3339()),
                 counting: true,
                 frozen: false,
             };

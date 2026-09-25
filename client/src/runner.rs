@@ -2491,18 +2491,20 @@ impl Agent {
         }
     }
 
-    /// The earn offer a "more time" ask files: the first configured task, or
-    /// a plain ask.
-    fn earn_offer_for(&self, user: &str) -> earn::EarnOffer {
-        let policy = self.policies.get(user).cloned().unwrap_or_default();
-        earn::earn_offers(&policy.gamification)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| earn::EarnOffer {
-                id: "more_time".into(),
-                label: "More screen time".into(),
-                reward_minutes: 15,
-            })
+    /// What "Ask for more time" files — at the lock, in the app, from the
+    /// companion, `ost ask`: a plain ask, worded as one. (It used to pick the
+    /// first earn task, so the console read "Read for 20 min" for a child who
+    /// had only asked.)
+    fn earn_offer_for(&self, _user: &str) -> earn::EarnOffer {
+        earn::plain_ask()
+    }
+
+    /// An ask from `user` is waiting on a parent today.
+    fn ask_pending(&self, user: &str) -> bool {
+        let today = chrono::Local::now().date_naive();
+        self.requested_earn
+            .iter()
+            .any(|((u, _), d)| u == user && *d == today)
     }
 
     /// The verdict for one user as the status file publishes it (documented
@@ -2565,6 +2567,8 @@ impl Agent {
                 .peek_override(u, self.trusted_now)
                 .map(|t| ts(t.with_timezone(&chrono::Local))),
             "counting": self.counting.iter().any(|c| c == u),
+            // An ask is waiting on a parent (a grant or a "not now" clears it).
+            "ask_pending": self.ask_pending(u),
             "measured": self.measured,
             "day": self.tracker.day(),
         })
@@ -4117,6 +4121,46 @@ mod tests {
         let s = a.user_status("mia", &p);
         assert_eq!(s["minutes_left"], 15);
         assert_eq!(s["stop_at"], s["override_until"]);
+    }
+
+    /// Acceptance, step 6a: Mia pressed "Ask" at the lock and the console
+    /// read "Read for 20 min" (the first earn task); after Give 15 her ask
+    /// still said "waiting". The ask is a plain ask, and a grant answers it.
+    #[tokio::test]
+    async fn a_plain_ask_is_filed_as_one_and_a_grant_answers_it() {
+        let (mut a, _fake) = agent_with_mia();
+        let mut p = a.policies["mia"].clone();
+        p.gamification.earn_time.enabled = true;
+        p.gamification.earn_time.tasks = vec![crate::policy::EarnTask {
+            id: "reading".into(),
+            label: "Read for 20 min".into(),
+            reward_minutes: 15,
+        }];
+        a.policies.insert("mia".into(), p.clone());
+        let offer = a.earn_offer_for("mia");
+        assert_eq!(
+            (offer.id.as_str(), offer.label.as_str()),
+            ("ask", "Asked for more time")
+        );
+        // The agent filed it (the server call is the network's business).
+        a.requested_earn.insert(
+            ("mia".into(), offer.id.clone()),
+            chrono::Local::now().date_naive(),
+        );
+        assert_eq!(a.user_status("mia", &p)["ask_pending"], true);
+        let (ack, _) = a
+            .handle_command(Command {
+                id: "g1".into(),
+                cmd_type: CMD_CREDIT_TIME.into(),
+                payload: json!({ "os_username": "mia", "minutes": 15, "request_id": null }),
+            })
+            .await;
+        assert_eq!(ack.result["credited"], true);
+        assert_eq!(
+            a.user_status("mia", &p)["ask_pending"],
+            false,
+            "answered: the window offers Ask again"
+        );
     }
 
     #[test]

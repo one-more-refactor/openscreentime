@@ -27,6 +27,18 @@ pub struct EarnOffer {
     pub reward_minutes: u32,
 }
 
+/// A plain "can I have more time?" — the same task id and words the
+/// console's own ask files (`/api/me/ask`), so a parent reads "Asked for 15
+/// more minutes", never an earn task the child didn't pick.
+pub fn plain_ask() -> EarnOffer {
+    EarnOffer {
+        id: "ask".into(),
+        label: "Asked for more time".into(),
+        reward_minutes: 15,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn earn_offers(g: &Gamification) -> Vec<EarnOffer> {
     if !g.earn_time.enabled {
         return Vec::new();
