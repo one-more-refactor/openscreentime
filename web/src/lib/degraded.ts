@@ -71,6 +71,13 @@ const NOT_AN_ATTEMPT = new Set([
   "dns_filter_restored",
   "tamper_level_capped",
   "boot_guidance",
+  "agent_updated",
+  "agent_update_rolled_back",
+  "lock_screen_unavailable",
+  "lock_without_offline_credential",
+  "offline_lockdown_no_credential",
+  "offline_hard_lockdown_lifted",
+  "parent_pin_override",
 ]);
 
 export function isNotAnAttempt(e: Event): boolean {
