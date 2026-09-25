@@ -12,7 +12,7 @@ import { apiCalls, apiImpl, resetApiMock, resetUiMocks } from "../test/mockApi";
 
 const { MemoryRouter } = await import("react-router-dom");
 const { SessionProvider } = await import("../lib/session");
-const { Me } = await import("./Me");
+const { Me, lastSevenDays } = await import("./Me");
 const { arcPath, ringGeometry } = await import("../components/Ring");
 
 function today(p: Partial<MeToday> = {}): MeToday {
@@ -110,6 +110,24 @@ describe("my day (a child)", () => {
     // The first-visit banner says the same, not the old "apps and sites".
     expect(document.body.textContent ?? "").not.toMatch(/apps and sites/);
   });
+});
+
+// Acceptance, step 9: "My week" showed the same minute on Thu and on Today —
+// the week was the browser's (Berlin, already Friday) while the computer's
+// ledger was filed on its own day (UTC, still Thursday).
+test("the week is the computer's week", () => {
+  const thuNightUtc = new Date(Date.UTC(2026, 8, 24, 23, 30)); // Fri 01:30 in Berlin
+  const history = {
+    days: [
+      { day: "2026-09-23", used_minutes: 40, earned_minutes: 0 },
+      { day: "2026-09-24", used_minutes: 1, earned_minutes: 0 },
+    ],
+    today_by_device: [],
+  };
+  const days = lastSevenDays(history, today({ used_minutes: 1, utc_offset_secs: 0 }), thuNightUtc);
+  expect(days[6]).toMatchObject({ key: "2026-09-24", today: true, used: 1 });
+  expect(days[5]).toMatchObject({ key: "2026-09-23", day: 3, used: 40 });
+  expect(days.filter((d) => d.used === 1)).toHaveLength(1);
 });
 
 describe("my computer (keeping my own time)", () => {

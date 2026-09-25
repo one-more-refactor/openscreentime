@@ -190,6 +190,59 @@ describe("today", () => {
     await waitFor(() => expect(apiCalls.credit).toEqual([["du-mia", 15]]));
   });
 
+  // Acceptance, step 6a: Give 15 left her ask pending. The grant goes to the
+  // computer she asked from — the server answers the ask, the computer tells her.
+  test("more time lands on the computer they asked from", async () => {
+    const f = family();
+    f.requests = [
+      {
+        id: "r1",
+        device_id: "old-pc",
+        device_user_id: "du-old",
+        os_username: "mia",
+        task_id: "ask",
+        task_label: "Asked for more time",
+        minutes: 15,
+        status: "pending",
+        created_at: new Date().toISOString(),
+        decided_at: null,
+      },
+    ];
+    apiImpl.getFamily = () => Promise.resolve(f);
+    setup("/child/mia");
+    // A plain ask reads as one: no quoted "reason".
+    expect(await screen.findByText(/Asked for 15 more minutes/)).toBeTruthy();
+    expect(screen.queryByText(/“/)).toBeNull();
+    const hero = screen.getByRole("region", { name: "Today" });
+    // The verb, not the answer on the request row.
+    const give = within(hero)
+      .getAllByRole("button", { name: "Give 15 min" })
+      .find((b) => !b.closest('[aria-label="A request for time"]'));
+    fireEvent.click(give!);
+    await waitFor(() => expect(apiCalls.credit).toEqual([["du-old", 15]]));
+  });
+
+  // Acceptance, step 5: after the unlock code the console showed a red "0 min
+  // left / time's up" while she was unlocked for 30 minutes.
+  test("an unlock code's time shows as time, and says until when", async () => {
+    const until = new Date(Date.now() + 29 * 60_000).toISOString();
+    const f = family();
+    f.children[0] = {
+      ...f.children[0],
+      used_minutes: 66,
+      left_minutes: 29,
+      rules: { allowed: true, reason: "limit", minutes_left: 29, stop_at: until, resume_at: null, override_until: until },
+    };
+    apiImpl.getFamily = () => Promise.resolve(f);
+    setup("/child/mia");
+    const hero = await screen.findByRole("region", { name: "Today" });
+    expect(within(hero).getByText(/^Unlocked until \d\d:\d\d\.$/)).toBeTruthy();
+    const ring = within(hero).getByRole("img");
+    expect(ring.getAttribute("data-state")).not.toBe("full");
+    expect(ring.getAttribute("aria-label")).toMatch(/29 min left/);
+    expect(hero.textContent ?? "").not.toMatch(/Time's up/);
+  });
+
   test("an adult's day stays theirs: minutes only, never where it went", async () => {
     setup("/child/jo");
     expect(await screen.findByText(/keep the details of their day to themselves/)).toBeTruthy();
