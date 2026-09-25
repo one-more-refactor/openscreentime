@@ -190,7 +190,7 @@ frame does, so the console shows "Pausing…" until the computer confirms.
 | GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
 | POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }` → `{ ok: true }`  |
 | POST   | `/api/device-users/:id/assign-account`       | `{ account_id }` — Who's who: move this OS login to another person (their rules follow). Confirm-gated. Pointing it at the computer's owner makes it the owner's login (`devices.owner_os_username`) |
-| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; Give time: credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id: null, day }`; audited as an `earn_request` event, `action: "granted"` |
+| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes, answered: [request ids] }`; Give time: credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id: null, day }`; audited as an `earn_request` event, `action: "granted"`. Giving time answers the person's asks: every request of theirs still pending (on any of their logins) becomes `approved` — without crediting it again — and is listed in `answered` |
 | GET    | `/api/device-users/:id/usage`                | `?days=` (default 30, max 90) → per-day `{ day, used_minutes, earned_minutes }` for that login, plus a computed `streak` (the console doesn't show it) |
 
 ## Earn-time requests
@@ -204,7 +204,7 @@ existing pending row). Requests and decisions are audited with `earn_request` ev
 | Method | Path                              | Notes                                             |
 |--------|-----------------------------------|---------------------------------------------------|
 | GET    | `/api/earn-requests`              | `?status=pending` → `{ requests: [...] }` (joined with device name + user display name) |
-| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id, day }` |
+| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id, day }`; the person's other pending requests are answered with it (approved, not credited again) |
 | POST   | `/api/earn-requests/:id/deny`     | → `{ request }`; enqueues `deny_earn` `{ os_username, task_id, request_id }` so the agent clears its once-per-day dedupe and says "not this time" instead of "waiting" |
 
 A request: `{ id, device_id, device_name, device_user_id, os_username, user_display_name, task_id,
@@ -361,7 +361,9 @@ Body: { os_username, task_id, task_label, minutes }   // 1 <= minutes <= 240
 → 200 { request: { id, status: "pending", ... } }
 ```
 Deduped per (user, task, day): a repeat while today's request is still pending returns the
-existing row.
+existing row. "Ask for more time" (the lock, the app, the companion, `ost ask`) files a plain
+ask — `task_id: "ask"`, `task_label: "Asked for more time"`, 15 minutes — the same words as
+`/api/me/ask`, never an earn task the person didn't pick.
 
 ### Policy pull
 ```

@@ -4,12 +4,13 @@
 //! rules. Each reproduces a failure from the end-to-end acceptance run.
 //! Same harness and skip rule as `tests_auth`.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::Json;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::state::AuthAdmin;
+use crate::state::{AgentAuth, AuthAdmin};
 use crate::tests_auth::{session_for, Env};
 
 fn clone(a: &AuthAdmin) -> AuthAdmin {
@@ -116,5 +117,91 @@ async fn the_console_counts_the_override_the_computer_reports() {
         .await
         .unwrap();
     assert_eq!(family_card(&env, &hub, "Mia").await["left_minutes"], 0);
+    env.drop_db().await;
+}
+
+async fn ask(env: &Env, tenant: Uuid, device: Uuid, task: &str, label: &str) -> Uuid {
+    let r = crate::earn::create_request(
+        State(env.st.clone()),
+        AgentAuth {
+            device_id: device,
+            tenant_id: tenant,
+        },
+        Json(crate::earn::EarnRequestReq {
+            os_username: "mia".into(),
+            task_id: task.into(),
+            task_label: label.into(),
+            minutes: 15,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    r["request"]["id"].as_str().unwrap().parse().unwrap()
+}
+
+async fn status_of(env: &Env, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM earn_requests WHERE id = $1")
+        .bind(id)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap()
+}
+
+/// Acceptance, step 6a: Mia asked for more time; the parent pressed Give 15
+/// on her — and her ask stayed pending on the console (and "waiting" on her
+/// computer). Giving someone time answers their asks.
+#[tokio::test]
+async fn giving_time_answers_the_ask() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    let mia = env.member(tenant, "Mia").await;
+    let laptop = env.computer(tenant, Some(mia), &["mia"], None, None).await;
+    let du = du_of(&env, laptop, "mia").await;
+    let (_, hub) = session_for(&env, philip, tenant).await;
+
+    let asked = ask(&env, tenant, laptop, "ask", "Asked for more time").await;
+    let card = family_card(&env, &hub, "Mia").await;
+    assert_eq!(card["pending_requests"], 1);
+
+    let r = crate::earn::credit_time(
+        State(env.st.clone()),
+        clone(&hub),
+        Path(du),
+        Json(crate::earn::CreditTimeReq { minutes: 15 }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(r["answered"], json!([asked]));
+    assert_eq!(status_of(&env, asked).await, "approved");
+    let card = family_card(&env, &hub, "Mia").await;
+    assert_eq!(card["pending_requests"], 0, "the ask is answered");
+    // Her computer hears it (credit_time clears the ask and tells her), once.
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM commands WHERE device_id = $1 AND type = 'credit_time'",
+    )
+    .bind(laptop)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap();
+    assert_eq!(grants, 1);
+
+    // Two asks waiting: answering one answers both, and credits once.
+    let a = ask(&env, tenant, laptop, "ask", "Asked for more time").await;
+    let b = ask(&env, tenant, laptop, "reading", "Read for 20 min").await;
+    let _ = crate::earn::approve_request(State(env.st.clone()), clone(&hub), Path(b))
+        .await
+        .unwrap();
+    assert_eq!(status_of(&env, a).await, "approved");
+    assert_eq!(status_of(&env, b).await, "approved");
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM commands WHERE device_id = $1 AND type = 'credit_time'",
+    )
+    .bind(laptop)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap();
+    assert_eq!(grants, 2, "one more grant, not two");
     env.drop_db().await;
 }
