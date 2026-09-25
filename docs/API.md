@@ -345,9 +345,10 @@ Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
 day the grant was filed under). The agent applies a grant once per command id (a redelivery is
 acked `{ credited: true, duplicate: true }`), ignores one for an earlier day
 (`{ credited: false, stale_day }`), and turns it into N minutes on today's budget plus an override
-for N minutes. The agent's `unlock` also understands `{ minutes }` or `{ until: "end_of_day" }`
-(and `os_username`), but the console's Resume always sends `{}`: whoever a rule is stopping gets
-30 minutes.
+for N minutes. The agent's `unlock` also understands an explicit grant, `{ os_username, minutes }`
+or `{ os_username, until: "end_of_day" }`, but the console's Resume always sends `{}`: it ends the
+pause and gives nobody time — someone whose own rules stop them (time's up, bedtime) stays stopped.
+Time is given with `credit_time`.
 
 **Commands** (`commands.type`): `lock` (`{}`, or `{ reason, grace_secs }`
 when an account is suspended), `unlock`, `apply_policy`, `set_tamper_level

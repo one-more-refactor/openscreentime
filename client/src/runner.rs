@@ -34,10 +34,6 @@ const BILL_CAP: Duration = Duration::from_secs(60);
 /// the same 15/5/1 the companion announces (`warn::THRESHOLDS`).
 const WARN_BEFORE_MIN: [i64; 3] = [15, 5, 1];
 
-/// Minutes an override lasts when a parent resumes a device whose user a
-/// rule is stopping right now (the same as a parent code at the lock screen).
-const RESUME_OVERRIDE_MIN: u32 = 30;
-
 /// Wall clock this far off the trusted clock is reported (once per episode).
 const CLOCK_SKEW_REPORT: chrono::Duration = chrono::Duration::minutes(60);
 
@@ -1383,19 +1379,6 @@ impl Agent {
         if !self.exec.dry_run() {
             self.tracker.save();
         }
-    }
-
-    /// Users a screen-time rule is stopping right now (ignoring pauses).
-    fn stopped_by_rule(&self, users: &[String]) -> Vec<String> {
-        let now = self.trusted_now.with_timezone(&chrono::Local);
-        users
-            .iter()
-            .filter(|u| {
-                let p = self.policies.get(*u).cloned().unwrap_or_default();
-                !screentime::verdict(&p, &self.tracker, u, &now, false).allowed
-            })
-            .cloned()
-            .collect()
     }
 
     /// The next local midnight on the trusted clock ("until end of day").
@@ -2823,18 +2806,23 @@ impl Agent {
                 if !self.exec.dry_run() {
                     self.persist_freeze_state();
                 }
-                // Resume is a parent action, so it writes the override too —
-                // otherwise a rule re-stops the person on the next tick and
-                // "Resume" looks broken. Explicit: `minutes` or
-                // `until: "end_of_day"`, optionally for one `os_username`.
-                // A plain Resume gives RESUME_OVERRIDE_MIN to whoever a rule
-                // is stopping right now; everyone else just carries on under
-                // their normal rules.
-                let targets: Vec<String> =
-                    match cmd.payload.get("os_username").and_then(|v| v.as_str()) {
-                        Some(u) => vec![u.to_string()],
-                        None => self.policies.keys().cloned().collect(),
-                    };
+                // Resume ends the pause — and only that. Time is given with
+                // "Give 15" (`credit_time`), which the console shows; a Resume
+                // that quietly handed 30 minutes to whoever a rule was
+                // stopping made Pause → Resume a free half hour on a day
+                // that was over (and handed it to logins nobody had paused,
+                // not even signed in). Someone whose own rules still stop
+                // them stays stopped; the lock just says why now.
+                //
+                // An explicit grant in the payload (`minutes`, or `until:
+                // "end_of_day"`, for one `os_username`) is still honoured:
+                // that is a parent asking for time by name.
+                let targets: Vec<String> = cmd
+                    .payload
+                    .get("os_username")
+                    .and_then(|v| v.as_str())
+                    .map(|u| vec![u.to_string()])
+                    .unwrap_or_default();
                 let minutes = cmd
                     .payload
                     .get("minutes")
@@ -2842,21 +2830,20 @@ impl Agent {
                     .unwrap_or(0);
                 let end_of_day =
                     cmd.payload.get("until").and_then(|v| v.as_str()) == Some("end_of_day");
-                let (who, until) = if minutes > 0 {
-                    (
-                        targets,
-                        self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64),
-                    )
+                let until = if minutes > 0 {
+                    Some(self.trusted_now + chrono::Duration::minutes(minutes.min(24 * 60) as i64))
                 } else if end_of_day {
-                    (targets, self.end_of_day())
+                    Some(self.end_of_day())
                 } else {
-                    (
-                        self.stopped_by_rule(&targets),
-                        self.trusted_now
-                            + chrono::Duration::minutes(i64::from(RESUME_OVERRIDE_MIN)),
-                    )
+                    None
                 };
-                self.override_users(&who, until);
+                let who: Vec<String> = match until {
+                    Some(_) => targets,
+                    None => Vec::new(),
+                };
+                if let Some(until) = until {
+                    self.override_users(&who, until);
+                }
                 // Thaw whoever is free to go now — the pause is lifted and
                 // their override (or their own rules) lets them in. Someone a
                 // rule still stops (a Resume aimed at another person) stays
@@ -4168,11 +4155,49 @@ mod tests {
         let (_ack, _ev) = a.handle_command(cmd(CMD_LOCK)).await;
         assert!(a.frozen.contains("mia"));
         assert_eq!(a.face_for("mia").title, "Paused by a parent");
-        let (_ack, _ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
+        let (ack, _ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
         a.reconcile_lock().await;
         assert!(a.lock.shown().is_none());
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
+        assert_eq!(ack.result["override_users"], json!([]), "nothing given");
+    }
+
+    /// Acceptance, step 6b/7a: Resume on a computer whose child's time was
+    /// up handed her 30 free minutes (and 30 more to a login nobody had
+    /// paused, not even signed in). Resume ends a pause and nothing else.
+    #[tokio::test]
+    async fn resume_on_a_time_up_day_gives_no_time() {
+        let (mut a, _fake) = agent_with_mia(); // 61 of her 60 minutes used
+        let mut dad = Policy::default();
+        dad.screen_time.enabled = true;
+        dad.screen_time.bedtime = Some(openscreentime_policy::Bedtime {
+            start: "00:00".into(),
+            end: "23:59".into(),
+        });
+        a.policies.insert("philip".into(), dad);
+        a.prev_active = Some(HashSet::new());
+        let cmd = |t: &str| Command {
+            id: "c1".into(),
+            cmd_type: t.into(),
+            payload: json!({}),
+        };
+        let _ = a.handle_command(cmd(CMD_LOCK)).await;
+        let (ack, ev) = a.handle_command(cmd(CMD_UNLOCK)).await;
+        a.reconcile_lock().await;
+        assert_eq!(ack.result["locked"], json!(false), "the pause is over");
+        assert_eq!(ack.result["override_users"], json!([]));
+        assert!(ev.iter().all(|e| e.payload["override_users"] == json!([])));
+        for u in ["mia", "philip"] {
+            assert!(
+                a.tracker.peek_override(u, a.trusted_now).is_none(),
+                "{u} was given time"
+            );
+        }
+        // Mia is still at her limit: stopped, and the lock says why.
+        assert!(!a.stop_verdict("mia", &a.policies["mia"].clone()).allowed);
+        assert!(a.frozen.contains("mia"));
+        assert_eq!(a.face_for("mia").title, "Time's up for today");
     }
 
     fn tamper_agent(tamper_max: bool, cfg_level: u8) -> Agent {

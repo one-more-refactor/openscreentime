@@ -402,7 +402,7 @@ Written by every parent action:
 | `credit_time` (approved request, console "+N min") | N minutes on today's budget **and** an override for N minutes — "N more minutes, now, whatever the rule". Idempotent by command id (a redelivery after a lost ack is acked as `duplicate`, never credited twice); a grant filed for an earlier day is acked `stale_day` and not credited. |
 | Code at the lock screen | 30 minutes (plus every device-level lock cleared). |
 | `ost unlock --minutes N` | N minutes for everyone on the machine (plus locks cleared). |
-| Console Resume (`unlock`) | Clears the pause. `minutes` or `until: "end_of_day"` in the payload override for that long (optionally one `os_username`); a plain Resume gives 30 minutes to whoever a rule is stopping right now, and everyone else carries on under their normal rules. |
+| Console Resume (`unlock`) | Clears the pause — and gives nobody time: whoever their own rules stop (time's up, bedtime) stays stopped, and the lock says why. An explicit grant in the payload (`os_username` with `minutes` or `until: "end_of_day"`) overrides that person for that long. |
 
 A **pause beats an override** (a parent who gives "+30" and then pauses
 means the pause); every source that should lift a pause clears it directly.
