@@ -67,11 +67,15 @@ pub fn teardown_enforcement(exec: &Exec) {
     // port 53 — nor restarted on its stock config, which binds every
     // address and fails next to systemd-resolved. (The package stays; it's
     // inert disabled.) One that was here before goes back to its own config.
+    // Stopped on its own: inside the agent's sandbox `disable` fails on
+    // Debian (its SysV links can't be written), and `disable --now` then
+    // never stops it — the restart below brought it up on the stock config.
     if crate::service::installed_by_us(exec)
         .iter()
         .any(|p| p == "dnsmasq")
     {
-        let _ = exec.run("systemctl", &["disable", "--now", "dnsmasq"]);
+        let _ = exec.run("systemctl", &["stop", "dnsmasq"]);
+        let _ = exec.run("systemctl", &["disable", "dnsmasq"]);
     }
     dns::remove_config(exec);
     for path in [crate::tamper::POLKIT_RULE_PATH, LOGIND_DROPIN] {
@@ -230,10 +234,9 @@ mod tests {
         run_helper_with(&exec).unwrap();
         let log = exec.log();
         // Off before its config goes, never restarted on the stock one.
-        assert!(
-            pos(&log, "run systemctl disable --now dnsmasq")
-                < pos(&log, "remove /etc/dnsmasq.d/00-openscreentime.conf")
-        );
+        let stop = pos(&log, "run systemctl stop dnsmasq");
+        assert!(stop < pos(&log, "run systemctl disable dnsmasq"));
+        assert!(stop < pos(&log, "remove /etc/dnsmasq.d/00-openscreentime.conf"));
         let timer = pos(
             &log,
             "run systemctl disable --now openscreentime-watchdog.timer",
