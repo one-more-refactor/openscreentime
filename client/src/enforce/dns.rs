@@ -17,19 +17,50 @@ use crate::util::Exec;
 use anyhow::Result;
 
 const DNSMASQ_CONF: &str = "/etc/openscreentime/dnsmasq.d/openscreentime.conf";
-const OST_CONF_DIR: &str = "/etc/openscreentime/dnsmasq.d";
+pub const OST_CONF_DIR: &str = "/etc/openscreentime/dnsmasq.d";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const LOCAL_RESOLVER: &str = "127.0.0.1";
 
+/// The service that serves the website rules. The `dnsmasq` program alone
+/// proves nothing: a Debian or Ubuntu desktop carries it in `dnsmasq-base`,
+/// a NetworkManager dependency with no service, no config and no
+/// `/etc/dnsmasq.d` — so "dnsmasq is installed" there, and nothing filters.
+pub const DNSMASQ_UNIT: &str = "dnsmasq.service";
+
 /// Distro directories dnsmasq already reads on startup. We drop a one-line
-/// `conf-dir=` stub into the first one that exists, because nothing makes
-/// dnsmasq read [`OST_CONF_DIR`] on its own — a stock Debian
-/// `/etc/dnsmasq.conf` has no active directives at all.
+/// `conf-dir=` stub into the one this dnsmasq reads (see [`include_route`]),
+/// because nothing makes dnsmasq read [`OST_CONF_DIR`] on its own — a stock
+/// Debian `/etc/dnsmasq.conf` has no active directives at all.
 const DISTRO_CONF_DIRS: &[&str] = &["/etc/dnsmasq.d", "/usr/local/etc/dnsmasq.d"];
 
 /// Filename for that stub. `00-` so it is parsed before anything else in the
 /// directory, since ordering decides who wins on conflicting options.
 const INCLUDE_STUB: &str = "00-openscreentime.conf";
+
+/// dnsmasq's own config file, and Debian's defaults file for it (the Debian
+/// and Ubuntu unit runs an init script that adds `-7 $CONFIG_DIR` from there,
+/// `/etc/dnsmasq.d` as shipped).
+const DNSMASQ_MAIN_CONF: &str = "/etc/dnsmasq.conf";
+const DEBIAN_DEFAULTS: &str = "/etc/default/dnsmasq";
+
+/// The two lines [`wire_main_conf`] adds to dnsmasq.conf on a distro whose
+/// dnsmasq reads no directory at all (Arch). Removed again, exactly, by
+/// [`remove_config`].
+const MAIN_CONF_MARK: &str =
+    "# Added by OpenScreenTime: its website rules. Removed when it leaves this computer.";
+
+/// Is dnsmasq installed *as a service* here — what serving the website rules
+/// needs (see [`DNSMASQ_UNIT`])?
+pub fn resolver_installed(exec: &Exec) -> bool {
+    exec.has("dnsmasq")
+        && exec
+            .probe(
+                "systemctl",
+                &["show", "-p", "LoadState", "--value", DNSMASQ_UNIT],
+            )
+            .trim()
+            != "not-found"
+}
 
 /// A reason DNS enforcement is not actually in force on this host.
 ///
@@ -51,6 +82,12 @@ pub enum DnsGap {
     /// reads could be found to include it from — so dnsmasq is running with
     /// its stock config and the policy is a file nobody parses.
     PolicyNotLoaded,
+    /// The ruleset itself could not be written: dnsmasq keeps serving what
+    /// it had (the previous rules, or none).
+    RulesNotWritten,
+    /// `/etc/resolv.conf` could not be pointed at the local resolver, so
+    /// programs ask their usual DNS and nothing is filtered.
+    ResolvConfNotPinned,
 }
 
 impl DnsGap {
@@ -62,17 +99,30 @@ impl DnsGap {
             DnsGap::ResolvConfNotAFile => "dns_resolv_conf_not_a_file",
             DnsGap::ResolvConfNotLocked => "dns_resolv_conf_not_locked",
             DnsGap::PolicyNotLoaded => "dns_policy_not_loaded",
+            DnsGap::RulesNotWritten => "dns_rules_not_written",
+            DnsGap::ResolvConfNotPinned => "dns_resolv_conf_not_pinned",
         }
+    }
+
+    /// With this gap standing, nothing on this computer resolves names
+    /// through a running local resolver — so forcing all DNS there
+    /// (`force_dns`) would leave it with no DNS at all.
+    pub fn breaks_forced_dns(self) -> bool {
+        matches!(
+            self,
+            DnsGap::ResolverMissing | DnsGap::NoLocalResolver | DnsGap::ResolvConfNotPinned
+        )
     }
 
     /// Operator-facing explanation, in the terms the parent/admin needs.
     pub fn explain(self) -> &'static str {
         match self {
             DnsGap::ResolverMissing => {
-                "dnsmasq is not installed, so websites are not filtered on this \
-                 computer. It stays online with its own DNS, and screen time \
-                 still works. Re-run the install command (it installs dnsmasq \
-                 and nftables), or install dnsmasq yourself."
+                "the dnsmasq service is not installed (a desktop's NetworkManager \
+                 only brings the program, not the service), so websites are not \
+                 filtered on this computer. It stays online with its own DNS, and \
+                 screen time still works. Re-run the install command (it installs \
+                 dnsmasq and nftables), or install the dnsmasq package yourself."
             }
             DnsGap::NoLocalResolver => {
                 "no local resolver is listening on 127.0.0.1 — dnsmasq failed to \
@@ -95,11 +145,118 @@ impl DnsGap {
                 "the DNS ruleset was written but dnsmasq never reads it: no \
                  dnsmasq config directory was found to include it from, so \
                  dnsmasq is serving its stock config and NOTHING is filtered. \
-                 Add `conf-dir=/etc/openscreentime/dnsmasq.d` to this host's \
+                 Re-run the install command, or add \
+                 `conf-dir=/etc/openscreentime/dnsmasq.d` to this host's \
                  dnsmasq.conf."
+            }
+            DnsGap::RulesNotWritten => {
+                "the website rules could not be written for dnsmasq, so it keeps \
+                 serving the rules it had before (or none). Screen time and the \
+                 firewall are not affected. The agent's log \
+                 (`journalctl -u openscreentime-agent`) says why."
+            }
+            DnsGap::ResolvConfNotPinned => {
+                "/etc/resolv.conf could not be pointed at the local resolver, so \
+                 programs on this computer ask their usual DNS and websites are \
+                 not filtered. It stays online, and screen time still works. The \
+                 agent's log (`journalctl -u openscreentime-agent`) says why."
             }
         }
     }
+}
+
+/// How dnsmasq on this computer comes to read [`OST_CONF_DIR`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Include {
+    /// It reads this distro directory — Debian and Ubuntu's `/etc/dnsmasq.d`
+    /// (from `CONFIG_DIR` in /etc/default/dnsmasq), or a `conf-dir=` in
+    /// dnsmasq.conf (Fedora) — where a one-line stub points at ours.
+    Stub(String),
+    /// dnsmasq.conf names our directory itself ([`wire_main_conf`], on a
+    /// distro whose dnsmasq reads no directory — Arch).
+    MainConf,
+    /// Nothing: dnsmasq serves its stock config.
+    Nothing,
+}
+
+/// The directories named by active `conf-dir=` lines (the part before the
+/// first comma, which lists extensions), without a trailing slash.
+fn active_conf_dirs(conf: &str) -> Vec<String> {
+    conf.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("conf-dir="))
+        .filter_map(|v| v.split(',').next())
+        .map(|d| d.trim().trim_end_matches('/').to_string())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
+fn include_route(exec: &Exec) -> Include {
+    let main = exec.read_file(DNSMASQ_MAIN_CONF).unwrap_or_default();
+    let dirs = active_conf_dirs(&main);
+    if dirs.iter().any(|d| d == OST_CONF_DIR) {
+        return Include::MainConf;
+    }
+    // Debian/Ubuntu: `CONFIG_DIR=/etc/dnsmasq.d,.dpkg-dist,…`, passed as -7.
+    if let Some(dir) = exec.read_file(DEBIAN_DEFAULTS).and_then(|d| {
+        d.lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix("CONFIG_DIR="))
+            .next_back()
+            .and_then(|v| v.trim_matches('"').split(',').next().map(str::to_string))
+    }) {
+        let dir = dir.trim().trim_end_matches('/').to_string();
+        if !dir.is_empty() {
+            return Include::Stub(dir);
+        }
+    }
+    dirs.into_iter()
+        .find(|d| DISTRO_CONF_DIRS.contains(&d.as_str()))
+        .map(Include::Stub)
+        .unwrap_or(Include::Nothing)
+}
+
+/// On a distro whose dnsmasq reads no directory at all (Arch's dnsmasq.conf
+/// is all comments), name ours in dnsmasq.conf — two marked lines,
+/// [`remove_config`] takes exactly them out again. Outside the agent's
+/// sandbox only (install-service): the agent can't write /etc/dnsmasq.conf.
+pub fn wire_main_conf(exec: &Exec) -> Result<()> {
+    if include_route(exec) != Include::Nothing {
+        return Ok(());
+    }
+    let Some(main) = exec.read_file(DNSMASQ_MAIN_CONF) else {
+        return Ok(()); // no dnsmasq.conf: nothing installed to wire
+    };
+    let mut body = main;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&format!("{MAIN_CONF_MARK}\nconf-dir={OST_CONF_DIR}\n"));
+    exec.write_file(DNSMASQ_MAIN_CONF, &body)
+}
+
+/// dnsmasq is here but reads nothing of ours, and [`wire_main_conf`] would
+/// fix that.
+pub fn needs_wiring(exec: &Exec) -> bool {
+    resolver_installed(exec)
+        && include_route(exec) == Include::Nothing
+        && exec.read_file(DNSMASQ_MAIN_CONF).is_some()
+}
+
+/// dnsmasq.conf without the lines [`wire_main_conf`] added.
+fn unwired(main: &str) -> Option<String> {
+    let ours = format!("conf-dir={OST_CONF_DIR}");
+    let kept: Vec<&str> = main
+        .lines()
+        .filter(|l| l.trim() != MAIN_CONF_MARK && l.trim() != ours)
+        .collect();
+    (kept.len() != main.lines().count()).then(|| {
+        let mut s = kept.join("\n");
+        if main.ends_with('\n') {
+            s.push('\n');
+        }
+        s
+    })
 }
 
 /// Make dnsmasq actually read [`OST_CONF_DIR`].
@@ -111,16 +268,12 @@ impl DnsGap {
 /// enforcing device while dnsmasq serves its default forward-everything
 /// config — the exact silent-green failure this module exists to prevent.
 fn ensure_include(exec: &Exec) -> Option<DnsGap> {
-    let dir = DISTRO_CONF_DIRS
-        .iter()
-        .find(|d| std::path::Path::new(d).is_dir());
-
-    // Under --dry-run nothing exists to probe; log the intent, claim no gap.
-    let Some(dir) = dir else {
-        if exec.dry_run() {
-            return None;
-        }
-        return Some(DnsGap::PolicyNotLoaded);
+    let dir = match include_route(exec) {
+        Include::MainConf => return None,
+        Include::Stub(dir) => dir,
+        // Under --dry-run nothing exists to probe; log the intent, claim no gap.
+        Include::Nothing if exec.dry_run() => return None,
+        Include::Nothing => return Some(DnsGap::PolicyNotLoaded),
     };
 
     let stub = format!("{dir}/{INCLUDE_STUB}");
@@ -150,7 +303,8 @@ const BOOTSTRAP_CONF: &str = "# Managed by openscreentime — replaced by the fi
 listen-address=127.0.0.1\nbind-interfaces\n";
 
 /// Before dnsmasq is installed: make the package's first start one that works
-/// and reads our directory. Idempotent; never overwrites a ruleset.
+/// and reads our directory (Debian and Ubuntu start it at once, next to
+/// systemd-resolved). Idempotent; never overwrites a ruleset.
 pub fn preseed(exec: &Exec) -> Result<()> {
     let dir = DISTRO_CONF_DIRS[0];
     exec.write_file(&format!("{dir}/{INCLUDE_STUB}"), &include_stub_body())?;
@@ -160,12 +314,22 @@ pub fn preseed(exec: &Exec) -> Result<()> {
     Ok(())
 }
 
-/// Take the ruleset out of dnsmasq (retirement): remove our include stub and
-/// ruleset, and restart dnsmasq only if it is running, so it goes back to
-/// whatever it did before. resolv.conf is [`unpin_resolv_conf`]'s job.
+/// Take the ruleset out of dnsmasq (retirement): remove our include stubs,
+/// the lines we added to dnsmasq.conf and the ruleset, and restart dnsmasq
+/// only if it is running, so it goes back to its own config. resolv.conf is
+/// [`unpin_resolv_conf`]'s job.
 pub fn remove_config(exec: &Exec) {
     for dir in DISTRO_CONF_DIRS {
         let _ = exec.remove_file(&format!("{dir}/{INCLUDE_STUB}"));
+    }
+    if let Some(main) = exec
+        .read_file(DNSMASQ_MAIN_CONF)
+        .as_deref()
+        .and_then(unwired)
+    {
+        if let Err(e) = exec.write_file(DNSMASQ_MAIN_CONF, &main) {
+            tracing::warn!("could not take our lines out of {DNSMASQ_MAIN_CONF}: {e}");
+        }
     }
     let _ = exec.remove_file(DNSMASQ_CONF);
     let _ = exec.run("systemctl", &["try-restart", "dnsmasq"]);
@@ -316,17 +480,21 @@ pub fn render_resolv_conf() -> String {
 /// Apply DNS policy and pin resolv.conf.
 ///
 /// Returns the [`DnsGap`]s that stop this host from actually enforcing the
-/// policy. An empty vec means DNS is genuinely in force.
+/// policy. An empty vec means DNS is genuinely in force. Never fails: a step
+/// that can't be done is a gap, and the steps after it still run.
 pub fn apply(
     exec: &Exec,
     dns: &DnsPolicy,
     lockdown: &NetworkLockdown,
     server_host: Option<&str>,
     sinkhole: &[String],
-) -> Result<Vec<DnsGap>> {
+) -> Vec<DnsGap> {
     let mut gaps = Vec::new();
     let conf = render_dnsmasq(dns, lockdown, server_host, sinkhole);
-    exec.write_file(DNSMASQ_CONF, &conf)?;
+    if let Err(e) = exec.write_file(DNSMASQ_CONF, &conf) {
+        tracing::error!("could not write the DNS ruleset: {e:#}");
+        gaps.push(DnsGap::RulesNotWritten);
+    }
 
     // Writing the ruleset does not make dnsmasq read it. Drop the include stub
     // BEFORE the restart so the policy goes live on this cycle, not the next.
@@ -352,7 +520,7 @@ pub fn apply(
             std::fs::Permissions::from_mode(0o600),
         );
     }
-    let installed = !exec.observes() || exec.has("dnsmasq");
+    let installed = !exec.observes() || resolver_installed(exec);
     if !installed {
         gaps.push(DnsGap::ResolverMissing);
     } else if let Err(e) = exec.run("systemctl", &["restart", "dnsmasq"]) {
@@ -386,7 +554,18 @@ pub fn apply(
         // device stays broken from then on.
         unpin_resolv_conf(exec);
     } else {
-        gaps.extend(pin_resolv_conf(exec)?);
+        match pin_resolv_conf(exec) {
+            Ok(g) => gaps.extend(g),
+            // Still our pin from before (it couldn't be rewritten, but it
+            // points at the resolver): nothing is lost.
+            Err(e) if is_our_pin(&exec.read_file(RESOLV_CONF).unwrap_or_default()) => {
+                tracing::warn!("could not rewrite /etc/resolv.conf, the pin stands: {e:#}");
+            }
+            Err(e) => {
+                tracing::error!("could not pin /etc/resolv.conf: {e:#}");
+                gaps.push(DnsGap::ResolvConfNotPinned);
+            }
+        }
     }
 
     for gap in &gaps {
@@ -399,7 +578,7 @@ pub fn apply(
         dns.upstream,
         gaps.len()
     );
-    Ok(gaps)
+    gaps
 }
 
 /// Where resolv.conf's contents from before the pin are kept, to put back
@@ -819,13 +998,100 @@ mod tests {
             safe_search: true,
             upstream: "1.1.1.3".into(),
         };
-        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]).unwrap();
+        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]);
         assert_eq!(gaps, vec![DnsGap::ResolverMissing]);
         let log = exec.log();
         assert!(!log.iter().any(|l| l.contains("restart dnsmasq")));
         assert!(!log
             .iter()
             .any(|l| l == "write /etc/resolv.conf" || l.contains("chattr +i")));
+    }
+
+    /// Acceptance round 2: a Debian GNOME desktop has /usr/sbin/dnsmasq from
+    /// `dnsmasq-base` (NetworkManager's), but no dnsmasq service. That is a
+    /// computer without the resolver — one clear gap, not "restart failed" +
+    /// "not loaded" — and it's what the installer installs the package for.
+    #[test]
+    fn nm_s_dnsmasq_program_without_the_service_is_no_resolver() {
+        let base_only = [
+            (
+                "systemctl show -p LoadState --value dnsmasq.service",
+                "not-found\n",
+            ),
+            ("read /etc/resolv.conf", NM_RESOLV),
+        ];
+        let exec = Exec::simulated(&[], &base_only);
+        assert!(exec.has("dnsmasq"), "the program is there");
+        assert!(!resolver_installed(&exec));
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: true,
+            upstream: "1.1.1.3".into(),
+        };
+        let gaps = apply(&exec, &dns, &NetworkLockdown::default(), None, &[]);
+        assert_eq!(gaps, vec![DnsGap::ResolverMissing]);
+        assert!(!exec.log().iter().any(|l| l.contains("restart dnsmasq")));
+        // The real package: the unit is there.
+        let exec = Exec::simulated(
+            &[],
+            &[(
+                "systemctl show -p LoadState --value dnsmasq.service",
+                "loaded\n",
+            )],
+        );
+        assert!(resolver_installed(&exec));
+    }
+
+    /// Where dnsmasq reads our rules from, per distro — and nowhere means a
+    /// gap, even when an /etc/dnsmasq.d exists that this dnsmasq never reads.
+    #[test]
+    fn the_include_follows_what_this_dnsmasq_really_reads() {
+        const DEBIAN_CONF: &str = "# Configuration file for dnsmasq.\n#conf-dir=/etc/dnsmasq.d\n";
+        const DEBIAN_DEFAULTS_FILE: &str =
+            "ENABLED=1\nCONFIG_DIR=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new\n";
+        let debian = Exec::simulated(
+            &[],
+            &[
+                ("read /etc/dnsmasq.conf", DEBIAN_CONF),
+                ("read /etc/default/dnsmasq", DEBIAN_DEFAULTS_FILE),
+            ],
+        );
+        assert_eq!(
+            include_route(&debian),
+            Include::Stub("/etc/dnsmasq.d".into())
+        );
+        let fedora = Exec::simulated(
+            &[],
+            &[(
+                "read /etc/dnsmasq.conf",
+                "user=dnsmasq\nconf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig\n",
+            )],
+        );
+        assert_eq!(
+            include_route(&fedora),
+            Include::Stub("/etc/dnsmasq.d".into())
+        );
+
+        // Arch: all comments. Nothing reads us until dnsmasq.conf names us.
+        const ARCH_CONF: &str =
+            "# Configuration file for dnsmasq.\n#conf-dir=/etc/dnsmasq.d/,*.conf\n";
+        let arch = Exec::simulated(&[], &[("read /etc/dnsmasq.conf", ARCH_CONF)]);
+        assert_eq!(include_route(&arch), Include::Nothing);
+        wire_main_conf(&arch).unwrap();
+        assert_eq!(arch.log(), ["write /etc/dnsmasq.conf"]);
+        let wired = format!("{ARCH_CONF}{MAIN_CONF_MARK}\nconf-dir={OST_CONF_DIR}\n");
+        let arch = Exec::simulated(&[], &[("read /etc/dnsmasq.conf", wired.as_str())]);
+        assert_eq!(include_route(&arch), Include::MainConf);
+        assert_eq!(ensure_include(&arch), None);
+        // …and the lines come out again, exactly, leaving the rest as it was.
+        assert_eq!(unwired(&wired).as_deref(), Some(ARCH_CONF));
+        assert_eq!(unwired(ARCH_CONF), None, "nothing of ours: untouched");
+        // Wiring is idempotent and never touches Debian or Fedora.
+        wire_main_conf(&arch).unwrap();
+        wire_main_conf(&debian).unwrap();
+        assert!(arch.log().is_empty() && debian.log().is_empty());
     }
 
     /// Every gap has to tell an operator what to actually do about it — an
@@ -839,6 +1105,8 @@ mod tests {
             DnsGap::ResolvConfNotAFile,
             DnsGap::ResolvConfNotLocked,
             DnsGap::PolicyNotLoaded,
+            DnsGap::RulesNotWritten,
+            DnsGap::ResolvConfNotPinned,
         ] {
             assert!(gap.explain().len() > 40, "{} has no guidance", gap.kind());
         }

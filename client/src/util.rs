@@ -25,7 +25,9 @@ pub struct Sim {
     log: Mutex<Vec<String>>,
     missing: HashSet<String>,
     /// Installed, but fails when run (`nft` refusing a ruleset); a
-    /// `write:<path>` entry makes writing that file fail.
+    /// `write:<path>` entry makes writing that file fail, a `stdin:<text>`
+    /// entry makes any program fed input containing `<text>` fail (`nft`
+    /// refusing one kind of rule).
     failing: HashSet<String>,
     probes: HashMap<String, String>,
 }
@@ -156,6 +158,15 @@ impl Exec {
         use std::io::Write;
         if self.ctx.dry_run {
             self.sim_missing(program)?;
+            if let Some(sim) = &self.sim {
+                let refused = sim.failing.iter().any(|f| {
+                    f.strip_prefix("stdin:")
+                        .is_some_and(|needle| stdin_data.contains(needle))
+                });
+                if refused {
+                    anyhow::bail!("{program} refused its input (simulated)");
+                }
+            }
             self.record(format!("run {} {}", program, args.join(" ")));
             tracing::info!(target: "dry_run", "WOULD RUN: {} {} <<EOF\n{}\nEOF", program, args.join(" "), stdin_data);
             return Ok(String::new());
