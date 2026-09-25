@@ -47,6 +47,7 @@ impl WarnState {
     /// there is and until when, so the warning that would follow it within
     /// moments is already said: it counts as announced, and stays quiet. The
     /// later ones — and the last minute, always — are said as usual.
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))] // the companion hears it
     pub fn heard_back(&mut self, now: i64) {
         self.back_at = Some(now);
     }
