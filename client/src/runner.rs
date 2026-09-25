@@ -4878,7 +4878,7 @@ mod tests {
         let reply = b.on_lock_request(Request::Snooze).await.result.unwrap();
         assert!(!reply.ok);
         assert!(
-            reply.message.starts_with("Not yet - in ") && reply.message.contains(" s you can"),
+            reply.message.starts_with("Not yet — in ") && reply.message.contains(" s you can"),
             "{}",
             reply.message
         );
