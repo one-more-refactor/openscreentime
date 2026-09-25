@@ -131,10 +131,12 @@ impl DnsGap {
                  `systemctl status dnsmasq` on it."
             }
             DnsGap::ResolvConfNotAFile => {
-                "/etc/resolv.conf was a symlink owned by another service \
-                 (systemd-resolved or resolvconf). It has been replaced with a \
-                 real file; disable that service or it will fight the pin on \
-                 every network change."
+                "/etc/resolv.conf is a symlink owned by another service \
+                 (systemd-resolved or resolvconf), which replaces it on every \
+                 network change, and the agent can't make it a file from inside \
+                 its sandbox — so the filter comes and goes. Re-run the install \
+                 command: it makes it a file the filter owns (and puts the link \
+                 back when OpenScreenTime leaves)."
             }
             DnsGap::ResolvConfNotLocked => {
                 "the immutable bit could not be set on /etc/resolv.conf — the \
@@ -599,6 +601,59 @@ struct PrePin {
     content: String,
 }
 
+fn saved_pre_pin(exec: &Exec) -> Option<PrePin> {
+    exec.read_file(&pre_pin_path())
+        .and_then(|s| serde_json::from_str::<PrePin>(&s).ok())
+}
+
+fn keep_pre_pin(exec: &Exec, saved: &PrePin) {
+    if let Ok(json) = serde_json::to_string(saved) {
+        if let Err(e) = exec.write_file(&pre_pin_path(), &json) {
+            tracing::warn!("could not keep resolv.conf's previous contents: {e}");
+        }
+    }
+}
+
+/// Make /etc/resolv.conf a file of ours to pin where it is another service's
+/// symlink — systemd-resolved's stub (Ubuntu, Fedora, Debian cloud images),
+/// resolvconf's. The agent can't replace a symlink from inside its sandbox,
+/// and writing through it lands in that service's file on /run, which the
+/// service replaces on the next network change with a new file the sandbox
+/// can't write: the filter silently off — and with forced DNS, no DNS at
+/// all. So this runs outside the sandbox (install-service, `__refresh-units`).
+/// The link is kept, and comes back when the pin goes ([`unpin_resolv_conf`]
+/// outside the sandbox: the retirement). Returns whether it changed anything.
+pub fn own_resolv_conf(exec: &Exec) -> Result<bool> {
+    let Some(target) = exec.read_link(RESOLV_CONF) else {
+        return Ok(false);
+    };
+    let content = exec.read_file(RESOLV_CONF).unwrap_or_default();
+    keep_pre_pin(
+        exec,
+        &PrePin {
+            symlink: Some(target.clone()),
+            content: content.clone(),
+        },
+    );
+    // Its contents as a file: DNS goes on working exactly as before until
+    // the agent pins it to the local resolver.
+    let body = if content.contains("nameserver") {
+        content
+    } else {
+        FALLBACK_RESOLV.to_string()
+    };
+    exec.remove_file(RESOLV_CONF)?;
+    exec.write_file(RESOLV_CONF, &body)?;
+    tracing::info!("/etc/resolv.conf was a link to {target}; it is a file now (the link comes back when OpenScreenTime leaves)");
+    Ok(true)
+}
+
+/// Is /etc/resolv.conf another service's symlink that [`own_resolv_conf`]
+/// would make ours?
+pub fn resolv_conf_is_a_link(exec: &Exec) -> bool {
+    exec.read_link(RESOLV_CONF).is_some()
+}
+
 /// Is this resolv.conf our pin?
 fn is_our_pin(content: &str) -> bool {
     content.contains("Managed by openscreentime")
@@ -617,37 +672,30 @@ pub fn pin_resolv_conf(exec: &Exec) -> Result<Vec<DnsGap>> {
     let mut gaps = Vec::new();
 
     let current = exec.read_file(RESOLV_CONF).unwrap_or_default();
+    let link = exec.read_link(RESOLV_CONF);
     if !current.trim().is_empty() && !is_our_pin(&current) {
-        let symlink = if exec.dry_run() {
-            None
-        } else {
-            std::fs::read_link(RESOLV_CONF)
-                .ok()
-                .map(|t| t.to_string_lossy().into_owned())
-        };
-        let saved = PrePin {
-            symlink,
-            content: current,
-        };
-        if let Ok(json) = serde_json::to_string(&saved) {
-            if let Err(e) = exec.write_file(&pre_pin_path(), &json) {
-                tracing::warn!("could not keep resolv.conf's previous contents: {e}");
-            }
-        }
+        // A link [`own_resolv_conf`] replaced is still the one to put back.
+        let symlink = link
+            .clone()
+            .or_else(|| saved_pre_pin(exec).and_then(|p| p.symlink));
+        keep_pre_pin(
+            exec,
+            &PrePin {
+                symlink,
+                content: current,
+            },
+        );
     }
 
     // If the path is a symlink, another service owns it. Writing through the
     // link lands in *that* service's file — typically on tmpfs, where the
     // immutable bit does not exist — so `chattr +i` silently no-ops and the
     // owner rewrites our nameserver on the next network change. Replace the
-    // link with a real file we control.
-    if !exec.dry_run() {
-        if let Ok(md) = std::fs::symlink_metadata(RESOLV_CONF) {
-            if md.file_type().is_symlink() {
-                gaps.push(DnsGap::ResolvConfNotAFile);
-                let _ = std::fs::remove_file(RESOLV_CONF);
-            }
-        }
+    // link with a real file we control (outside the agent's sandbox only —
+    // install-service does it first, see [`own_resolv_conf`]).
+    if link.is_some() {
+        gaps.push(DnsGap::ResolvConfNotAFile);
+        let _ = exec.remove_file(RESOLV_CONF);
     }
 
     let _ = exec.run("chattr", &["-i", RESOLV_CONF]); // ignore if not set / unsupported fs
@@ -671,18 +719,21 @@ nameserver 1.1.1.3\nnameserver 1.0.0.3\n";
 /// what was there before the pin, else whatever NetworkManager or
 /// systemd-resolved says, else the family resolvers. Never leaves the file
 /// pointing at a resolver that isn't running. Does nothing to a resolv.conf
-/// that isn't our pin. Returns whether it changed anything.
+/// that isn't our pin — except put back a symlink that was there before
+/// (systemd-resolved's), which only works outside the agent's sandbox: the
+/// agent puts back its contents meanwhile, the retirement the link itself.
+/// Returns whether it changed anything.
 pub fn unpin_resolv_conf(exec: &Exec) -> bool {
     let current = exec.read_file(RESOLV_CONF).unwrap_or_default();
-    if !is_our_pin(&current) {
+    let ours = is_our_pin(&current);
+    let saved = saved_pre_pin(exec);
+    let link_to_restore = saved.as_ref().is_some_and(|p| p.symlink.is_some())
+        && exec.read_link(RESOLV_CONF).is_none();
+    if !ours && !link_to_restore {
         return false;
     }
     let _ = exec.run("chattr", &["-i", RESOLV_CONF]);
-    let saved = exec
-        .read_file(&pre_pin_path())
-        .and_then(|s| serde_json::from_str::<PrePin>(&s).ok())
-        .filter(|p| !is_our_pin(&p.content));
-    if let Some(saved) = saved {
+    if let Some(saved) = saved.filter(|p| p.symlink.is_some() || !is_our_pin(&p.content)) {
         // A symlink comes back as the symlink where that's possible (outside
         // the agent's sandbox); otherwise its contents do.
         let relinked = saved.symlink.as_deref().is_some_and(|target| {
@@ -691,11 +742,27 @@ pub fn unpin_resolv_conf(exec: &Exec) -> bool {
                 && std::fs::remove_file(RESOLV_CONF).is_ok()
                 && std::os::unix::fs::symlink(target, RESOLV_CONF).is_ok()
         });
-        if relinked || exec.write_file(RESOLV_CONF, &saved.content).is_ok() {
+        if relinked {
             let _ = exec.remove_file(&pre_pin_path());
+            tracing::warn!("resolv.conf un-pinned: it is {}'s link again", {
+                saved.symlink.as_deref().unwrap_or_default()
+            });
+            return true;
+        }
+        if !ours {
+            return false; // the pin is off already; the link waits for the retirement
+        }
+        if !is_our_pin(&saved.content) && exec.write_file(RESOLV_CONF, &saved.content).is_ok() {
+            // A link still to come back keeps its record.
+            if saved.symlink.is_none() {
+                let _ = exec.remove_file(&pre_pin_path());
+            }
             tracing::warn!("resolv.conf un-pinned: put back what this computer used before");
             return true;
         }
+    }
+    if !ours {
+        return false;
     }
     // Nothing kept (pinned by an older agent): ask NetworkManager to write it.
     if exec.has("nmcli") {
@@ -1042,6 +1109,94 @@ mod tests {
             )],
         );
         assert!(resolver_installed(&exec));
+    }
+
+    const STUB: &str = "../run/systemd/resolve/stub-resolv.conf";
+    const STUB_RESOLV: &str =
+        "# This is /run/systemd/resolve/stub-resolv.conf\nnameserver 127.0.0.53\n";
+
+    /// Acceptance round 2 (and the container proof): /etc/resolv.conf was
+    /// systemd-resolved's link. The agent pinned it by writing through the
+    /// link into resolved's file, which resolved replaced on the next
+    /// network change — the filter off, and with forced DNS no DNS at all,
+    /// while the sandboxed agent's re-pin failed every 10 s. The installer
+    /// makes it a file first (keeping the link), the pin keeps the link on
+    /// record, and the link comes back only where it can: outside the sandbox.
+    #[test]
+    fn systemd_resolved_s_link_becomes_a_file_and_comes_back() {
+        let exec = Exec::simulated(
+            &[],
+            &[
+                ("readlink /etc/resolv.conf", STUB),
+                ("read /etc/resolv.conf", STUB_RESOLV),
+            ],
+        );
+        assert!(resolv_conf_is_a_link(&exec));
+        assert!(own_resolv_conf(&exec).unwrap());
+        assert_eq!(
+            exec.log(),
+            [
+                "write /var/lib/openscreentime/resolv.conf.pre-pin",
+                "remove /etc/resolv.conf",
+                "write /etc/resolv.conf",
+            ]
+        );
+        assert_eq!(exec.written(RESOLV_CONF).as_deref(), Some(STUB_RESOLV));
+        let kept = exec.written(&pre_pin_path()).unwrap();
+        // A file already: nothing to do.
+        let file = Exec::simulated(&[], &[("read /etc/resolv.conf", STUB_RESOLV)]);
+        assert!(!own_resolv_conf(&file).unwrap() && file.log().is_empty());
+
+        // The agent pins the file; the link stays on record.
+        let agent = Exec::simulated(
+            &[],
+            &[
+                ("read /etc/resolv.conf", STUB_RESOLV),
+                ("read /var/lib/openscreentime/resolv.conf.pre-pin", &kept),
+            ],
+        );
+        assert_eq!(pin_resolv_conf(&agent).unwrap(), vec![], "a file: no gap");
+        let record: PrePin =
+            serde_json::from_str(&agent.written(&pre_pin_path()).unwrap()).unwrap();
+        assert_eq!(record.symlink.as_deref(), Some(STUB));
+        let record = serde_json::to_string(&record).unwrap();
+
+        // Inside the sandbox the pin comes off as the stub's contents, and
+        // the record waits for the link to come back…
+        let pinned = render_resolv_conf();
+        let agent = Exec::simulated(
+            &[],
+            &[
+                ("read /etc/resolv.conf", &pinned),
+                ("read /var/lib/openscreentime/resolv.conf.pre-pin", &record),
+            ],
+        );
+        assert!(unpin_resolv_conf(&agent));
+        assert_eq!(agent.written(RESOLV_CONF).as_deref(), Some(STUB_RESOLV));
+        assert!(
+            !agent.log().iter().any(|l| l.contains("remove")),
+            "{:?}",
+            agent.log()
+        );
+        // …which a dry run can't do either: nothing claimed.
+        let later = Exec::simulated(
+            &[],
+            &[
+                ("read /etc/resolv.conf", STUB_RESOLV),
+                ("read /var/lib/openscreentime/resolv.conf.pre-pin", &record),
+            ],
+        );
+        assert!(!unpin_resolv_conf(&later));
+        // Once it is the link again, there's nothing left to do.
+        let relinked = Exec::simulated(
+            &[],
+            &[
+                ("readlink /etc/resolv.conf", STUB),
+                ("read /etc/resolv.conf", STUB_RESOLV),
+                ("read /var/lib/openscreentime/resolv.conf.pre-pin", &record),
+            ],
+        );
+        assert!(!unpin_resolv_conf(&relinked) && relinked.log().is_empty());
     }
 
     /// Where dnsmasq reads our rules from, per distro — and nowhere means a

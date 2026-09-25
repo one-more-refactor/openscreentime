@@ -63,15 +63,17 @@ pub fn teardown_enforcement(exec: &Exec) {
     firewall::teardown(exec);
     // The computer's own DNS back before the resolver's rules go.
     dns::unpin_resolv_conf(exec);
-    dns::remove_config(exec);
-    // A resolver only we brought is switched off, not left serving port 53
-    // with its stock config. (The package stays; it's inert disabled.)
+    // A resolver only we brought is switched off first, not left serving
+    // port 53 — nor restarted on its stock config, which binds every
+    // address and fails next to systemd-resolved. (The package stays; it's
+    // inert disabled.) One that was here before goes back to its own config.
     if crate::service::installed_by_us(exec)
         .iter()
         .any(|p| p == "dnsmasq")
     {
         let _ = exec.run("systemctl", &["disable", "--now", "dnsmasq"]);
     }
+    dns::remove_config(exec);
     for path in [crate::tamper::POLKIT_RULE_PATH, LOGIND_DROPIN] {
         if let Err(e) = exec.remove_file(path) {
             tracing::warn!("could not remove {path}: {e}");
@@ -227,7 +229,11 @@ mod tests {
         );
         run_helper_with(&exec).unwrap();
         let log = exec.log();
-        pos(&log, "run systemctl disable --now dnsmasq");
+        // Off before its config goes, never restarted on the stock one.
+        assert!(
+            pos(&log, "run systemctl disable --now dnsmasq")
+                < pos(&log, "remove /etc/dnsmasq.d/00-openscreentime.conf")
+        );
         let timer = pos(
             &log,
             "run systemctl disable --now openscreentime-watchdog.timer",

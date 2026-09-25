@@ -355,6 +355,21 @@ fn wire_resolver(exec: &Exec) {
     }
 }
 
+/// Where dnsmasq is here to serve the website rules, /etc/resolv.conf has to
+/// be a file the agent can pin — not systemd-resolved's link, which the
+/// agent can't replace from inside its sandbox and whose file resolved swaps
+/// out on every network change (see `dns::own_resolv_conf`). Returns whether
+/// it changed anything.
+fn own_resolv_conf(exec: &Exec) -> bool {
+    if !crate::enforce::dns::resolver_installed(exec) {
+        return false;
+    }
+    crate::enforce::dns::own_resolv_conf(exec).unwrap_or_else(|e| {
+        tracing::warn!("could not make /etc/resolv.conf a file the filter can pin: {e:#}");
+        false
+    })
+}
+
 /// Install what the network rules need. Returns whether anything was
 /// installed. Never fatal: the agent reports what is still missing.
 fn ensure_enforcement_deps(exec: &Exec) -> bool {
@@ -651,6 +666,7 @@ pub fn refresh_units() -> Result<()> {
     let installed = ensure_enforcement_deps(&exec);
     let deps = (installed && missing_enforcement_deps(&exec).len() < missing_before)
         || (unwired_before && !crate::enforce::dns::needs_wiring(&exec));
+    let deps = own_resolv_conf(&exec) || deps;
     let companion_new = cfg!(feature = "tray")
         && std::fs::read_to_string(COMPANION_AUTOSTART_PATH)
             .ok()
@@ -703,7 +719,8 @@ pub fn refresh_units_if_stale(exec: &Exec) {
         || (stale_units().is_empty()
             && !desktop_setup_missing()
             && missing_enforcement_deps(exec).is_empty()
-            && !crate::enforce::dns::needs_wiring(exec))
+            && !crate::enforce::dns::needs_wiring(exec)
+            && !crate::enforce::dns::resolv_conf_is_a_link(exec))
     {
         return;
     }
@@ -749,8 +766,10 @@ fn install_service_with(exec: &Exec) -> Result<()> {
     link_aliases(&exec);
 
     // What the website and firewall rules need, before the agent (re)starts:
-    // its sandbox sees /etc/dnsmasq.d only if it exists at start.
+    // its sandbox sees /etc/dnsmasq.d only if it exists at start, and can
+    // pin /etc/resolv.conf only if it is a file.
     ensure_enforcement_deps(&exec);
+    own_resolv_conf(&exec);
 
     exec.write_file(UNIT_PATH, UNIT)?;
     exec.write_file(WATCHDOG_SVC_PATH, WATCHDOG_SERVICE)?;
