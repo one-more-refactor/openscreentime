@@ -83,6 +83,39 @@ fn installer() -> Option<String> {
     users::get_user_by_uid(uid).map(|u| u.name().to_string_lossy().into_owned())
 }
 
+/// Which machine this is, for one household: HMAC-SHA256 keyed with the
+/// machine-id, over an app tag and the household's salt (the enroll preview
+/// hands it out) — systemd's advice for an app-specific id. Never the raw
+/// id: the server can recognise this machine when it is enrolled again
+/// (re-running the one-liner with a new token folds the older record in, so
+/// nobody's day is counted twice), and nothing more — no other household or
+/// server can match it. `None` for an id that isn't one (an image's
+/// "uninitialized", all zeros) or without a salt.
+pub fn machine_hash(machine_id: &str, salt: &str) -> Option<String> {
+    use hmac::{Hmac, Mac};
+    let id = machine_id.trim();
+    let salt = salt.trim();
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.bytes().all(|b| b == b'0')
+    {
+        return None;
+    }
+    if salt.is_empty() {
+        return None;
+    }
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(id.to_ascii_lowercase().as_bytes()).ok()?;
+    mac.update(b"openscreentime-machine:");
+    mac.update(salt.as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// [`machine_hash`] of this computer's `/etc/machine-id`.
+fn machine_identity(salt: &str) -> Option<String> {
+    let id = std::fs::read_to_string("/etc/machine-id")
+        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+        .ok()?;
+    machine_hash(&id, salt)
+}
+
 /// Parse the answer to "which login is Mia's?": a number from the list, or
 /// nothing (0, blank, nonsense) = "none of these".
 fn pick(answer: &str, logins: &[String]) -> Option<String> {
@@ -155,13 +188,22 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
     // linked to them; every other login is its own person (docs/AUTH.md).
     let installer = installer();
     let logins: Vec<String> = os_users.iter().map(|u| u.username.clone()).collect();
-    let owner_login = match client::enroll_preview(server, token).await {
-        Ok(preview) => ask_owner_login(&preview, &logins, installer.as_deref()),
+    let preview = match client::enroll_preview(server, token).await {
+        Ok(preview) => Some(preview),
         Err(e) => {
             tracing::debug!("no enroll preview ({e}); not asking whose login is whose");
             None
         }
     };
+    let owner_login = preview
+        .as_ref()
+        .and_then(|p| ask_owner_login(p, &logins, installer.as_deref()));
+    // This machine, as this household may know it (a server without a salt
+    // hears nothing).
+    let machine_id = preview
+        .as_ref()
+        .and_then(|p| p.machine_salt.as_deref())
+        .and_then(machine_identity);
 
     let req = EnrollRequest {
         enroll_token: token.to_string(),
@@ -171,6 +213,7 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         os_users,
         installer,
         owner_login,
+        machine_id,
     };
 
     let resp = client::enroll(server, &req).await?;
@@ -213,7 +256,7 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_secure_server, pick, resolve_token};
+    use super::{ensure_secure_server, machine_hash, pick, resolve_token};
 
     #[test]
     fn the_token_comes_from_the_environment_or_stdin() {
@@ -246,6 +289,36 @@ mod tests {
         assert_eq!(pick("", &l), None);
         assert_eq!(pick("3", &l), None);
         assert_eq!(pick("mia", &l), None);
+    }
+
+    /// The machine identity: stable for one household, unrelated across
+    /// households, lower-case hex the server accepts — and never the id.
+    #[test]
+    fn the_machine_identity_is_per_household_and_never_the_id() {
+        let id = "5f0c3a6b9e2d4c1f8a7b6c5d4e3f2a1b";
+        let a = machine_hash(id, "salt-of-the-smiths").unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        // Stable: the same machine, the same household, the same answer —
+        // whatever whitespace or case the file has.
+        assert_eq!(
+            machine_hash(&format!("{}\n", id.to_uppercase()), "salt-of-the-smiths").as_deref(),
+            Some(a.as_str())
+        );
+        // Another household can't match it; another machine doesn't.
+        assert_ne!(machine_hash(id, "salt-of-the-joneses").unwrap(), a);
+        assert_ne!(
+            machine_hash("5f0c3a6b9e2d4c1f8a7b6c5d4e3f2a1c", "salt-of-the-smiths").unwrap(),
+            a
+        );
+        assert!(!a.contains(id));
+        // Not a machine-id, or no salt (an older server): nothing is sent.
+        assert_eq!(machine_hash("uninitialized", "s"), None);
+        assert_eq!(machine_hash(&"0".repeat(32), "s"), None);
+        assert_eq!(machine_hash("", "s"), None);
+        assert_eq!(machine_hash(id, " "), None);
     }
 
     #[test]

@@ -520,7 +520,9 @@ export interface MeToday {
    *  are its day, not this browser's */
   utc_offset_secs?: number | null;
   locked: boolean;
-  devices: { name: string; status: DeviceStatus; locked: boolean }[];
+  /** `gaps`: what an online computer can't do right now (last_state.gaps) —
+   *  only for someone who sets their own rules. */
+  devices: { name: string; status: DeviceStatus; locked: boolean; gaps?: string[] }[];
   blocks: AppBlocks;
   bracket: AgeBracket;
   theme: Theme;
