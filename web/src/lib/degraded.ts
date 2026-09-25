@@ -20,6 +20,9 @@ export function gapArea(kind: string): string {
 /** What a gap means, as the end of "Mia's computer …". */
 export function gapPhrase(kind: string): string {
   if (kind === "screen_time_no_freezer") return "can't stop the screen when time is up";
+  // Safe search that can't be forced still filters every blocked site — it
+  // only means search results aren't forced safe right now.
+  if (kind === "dns_safesearch_unavailable") return "can't force safe search right now";
   if (kind.startsWith("dns_")) return "can't filter websites";
   if (kind.startsWith("firewall_")) return "can't apply its firewall rules";
   if (kind.startsWith("vpn_")) return "can't start its VPN";
@@ -92,7 +95,9 @@ function gapsOf(d: FilteringComputer): string[] {
 /** The computers that can't filter websites right now — online, with a
  * standing DNS gap. What's "blocked" there is a list, not a block. */
 export function cantFilter<T extends FilteringComputer>(devices: T[]): T[] {
-  return devices.filter((d) => gapsOf(d).some((g) => g.startsWith("dns_")));
+  return devices.filter((d) =>
+    gapsOf(d).some((g) => g.startsWith("dns_") && g !== "dns_safesearch_unavailable"),
+  );
 }
 
 /** "A", "A or B", "A, B or C". */

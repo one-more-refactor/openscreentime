@@ -64,6 +64,14 @@ describe("a computer that can't apply all of its rules", () => {
     }
   });
 
+  test("safe search that can't be forced is not \"can't filter websites\"", () => {
+    const d = device("Mia's computer", ["dns_safesearch_unavailable"]);
+    expect(degradedSentence(d)).toBe(
+      "Mia's computer can't force safe search right now. Screen time still works there.",
+    );
+    expect(cantFilter([d])).toEqual([]);
+  });
+
   test("a computer that can't freeze doesn't claim screen time works", () => {
     const s = degradedSentence(device("Old laptop", ["screen_time_no_freezer"]));
     expect(s).toBe("Old laptop can't stop the screen when time is up.");
