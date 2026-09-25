@@ -738,6 +738,112 @@ pub async fn delete_member(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Who's who moved a login away from `account_id`. If that leaves a person the
+/// server made up for an unsorted login (the `auto_created` trail) with no
+/// login and no computer anywhere — and nobody has touched them since: same
+/// name, same bracket, their rules as created, no email, face, birthday,
+/// goal or theme, never signed in — they are removed: they were only ever a
+/// guess about who that login was ("philip", Kid, once the `philip` login
+/// turned out to be Philip). Anyone else is kept; Family shows them with no
+/// computer. Returns whether the person was removed.
+pub async fn drop_if_leftover(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    account_id: Uuid,
+) -> AppResult<bool> {
+    let still_here: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM device_users WHERE account_id = $1)
+             OR EXISTS (SELECT 1 FROM devices WHERE owner_account_id = $1)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if still_here {
+        return Ok(false);
+    }
+    let Ok(acct) = get_account(db, account_id, tenant_id).await else {
+        return Ok(false);
+    };
+    if acct.4 != "member" {
+        return Ok(false);
+    }
+    let trail: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM events
+          WHERE tenant_id = $1 AND type = 'member'
+            AND payload->>'action' = 'auto_created' AND payload->>'account_id' = $2
+          ORDER BY created_at LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(account_id.to_string())
+    .fetch_optional(db)
+    .await?;
+    let Some(trail) = trail else {
+        return Ok(false);
+    };
+    let as_made = trail["display_name"].as_str() == Some(acct.2.as_str())
+        && trail["age_bracket"].as_str() == Some(acct.5.as_str())
+        && acct.3.is_none()
+        && acct.6.is_none()
+        && acct.7.is_none()
+        && acct.11.is_none()
+        && acct.12.is_none();
+    if !as_made {
+        return Ok(false);
+    }
+    let rules_as_made: bool = match acct.9 {
+        None => true,
+        Some(pid) => sqlx::query_scalar(
+            "SELECT policy = $2::jsonb AND NOT EXISTS (
+                        SELECT 1 FROM admins WHERE profile_id = $1 AND id <> $3)
+               FROM profiles WHERE id = $1",
+        )
+        .bind(pid)
+        .bind(presets::policy_for(bracket_of(&acct)))
+        .bind(acct.0)
+        .fetch_optional(db)
+        .await?
+        .unwrap_or(false),
+    };
+    let signed_in: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM webauthn_credentials WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admin_sessions WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admins WHERE id = $1 AND blocked_at IS NOT NULL)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if !rules_as_made || signed_in {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
+        .bind(account_id)
+        .bind(tenant_id)
+        .execute(db)
+        .await?;
+    if let Some(pid) = acct.9 {
+        sqlx::query(
+            "DELETE FROM profiles WHERE id = $1 AND NOT is_preset
+               AND NOT EXISTS (SELECT 1 FROM device_users WHERE profile_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM admins WHERE profile_id = $1)",
+        )
+        .bind(pid)
+        .execute(db)
+        .await?;
+    }
+    events::insert(
+        db,
+        tenant_id,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "removed_leftover", "account_id": account_id,
+                "display_name": acct.2 }),
+    )
+    .await?;
+    Ok(true)
+}
+
 /// `POST /api/members/{id}/block` — members only. A parent Danger-Zone action:
 /// blocks the account (it can no longer authenticate; live sessions are cut) and
 /// locks every device the child uses so their screens stop right away.
