@@ -686,6 +686,13 @@ export function focusLine(rules: MyRules, now: WallTime, sitesBlocked = true): s
     : `Next focus hours: ${DAY_SHORT[next.day]} at ${next.start}. Until then the sites below are open.`;
 }
 
+/** With no computer of theirs, rules are only saved: said once, instead of
+ * a focus line that promises a block nothing enforces. Null with no rules. */
+export function savedForLater(rules: MyRules): string | null {
+  const any = rules.daily_limit_minutes > 0 || rules.sites.length > 0 || rules.focus_hours !== null;
+  return any ? "Your rules are saved; they'll apply on your computer once it's added." : null;
+}
+
 function MyComputer({
   today,
   history,
@@ -739,11 +746,18 @@ function MyComputer({
     today.devices.length === 1 ? today.devices[0].name : today.devices.length > 1 ? "My computers" : "My computer";
   const total = today.limit_minutes === null ? null : today.limit_minutes + today.earned_minutes;
   const next = today.locked ? "This computer is paused." : stopSentence(today.rules, "you");
-  // What the computers really report: a block promised only where it holds.
+  // What the computers really report: a block promised only where it holds —
+  // and with no computer at all, nothing is blocked anywhere (acceptance
+  // round 3: "Focus hours until 09:00" after the computer was removed).
   const notBlocked = notBlockedSentence(today.devices);
   const onlineNow = today.devices.filter((d) => d.status === "online");
-  const sitesBlocked = !(onlineNow.length > 0 && cantFilter(onlineNow).length === onlineNow.length);
-  const focus = rules ? focusLine(rules, deviceNow(today.utc_offset_secs), sitesBlocked) : null;
+  const noComputer = today.devices.length === 0;
+  const sitesBlocked = !noComputer && !(onlineNow.length > 0 && cantFilter(onlineNow).length === onlineNow.length);
+  const focus = rules
+    ? noComputer
+      ? savedForLater(rules)
+      : focusLine(rules, deviceNow(today.utc_offset_secs), sitesBlocked)
+    : null;
 
   return (
     <>

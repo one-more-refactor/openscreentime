@@ -35,6 +35,8 @@ mod telegram;
 #[cfg(test)]
 mod tests_auth;
 #[cfg(test)]
+mod tests_console;
+#[cfg(test)]
 mod tests_machine;
 #[cfg(test)]
 mod tests_numbers;

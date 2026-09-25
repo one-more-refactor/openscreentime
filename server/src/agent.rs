@@ -765,7 +765,8 @@ pub async fn push_events(
         else {
             continue;
         };
-        let device_user_id = resolve_device_user(&mut *tx, agent.device_id, ev.device_user).await?;
+        let login = event_login(ev.device_user, &payload);
+        let device_user_id = resolve_device_user(&mut *tx, agent.device_id, login).await?;
         let new = events::insert_from_agent(
             &mut *tx,
             agent.tenant_id,
@@ -830,6 +831,24 @@ async fn event_side_effects(db: &sqlx::PgPool, device_id: Uuid, etype: &str, pay
         }
         _ => {}
     }
+}
+
+/// Whose event it is: the login the agent named — or, from an agent that
+/// didn't name one, the login its payload is about (`user`, `os_username`).
+/// Agents up to 0.6.1 sent a self-given snooze as `screen_time_earned
+/// {user: "philip", via: "self"}` with no login, and the console told it on
+/// every person of that computer — Philip's snoozes on Mia's page. Only a
+/// login of this very computer counts ([`resolve_device_user`]), so a payload
+/// can't hand an event to anyone else.
+pub(crate) fn event_login(device_user: Option<String>, payload: &Value) -> Option<String> {
+    device_user.filter(|u| !u.trim().is_empty()).or_else(|| {
+        ["user", "os_username"]
+            .iter()
+            .find_map(|k| payload.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+    })
 }
 
 async fn resolve_device_user<'e, E: sqlx::PgExecutor<'e>>(
@@ -1108,9 +1127,8 @@ async fn handle_ws_frame(st: &AppState, agent: AgentAuth, v: Value) {
             else {
                 return;
             };
-            if let Ok(device_user_id) =
-                resolve_device_user(&st.db, agent.device_id, device_user).await
-            {
+            let login = event_login(device_user, &payload);
+            if let Ok(device_user_id) = resolve_device_user(&st.db, agent.device_id, login).await {
                 if let Ok(true) = events::insert_from_agent(
                     &st.db,
                     agent.tenant_id,

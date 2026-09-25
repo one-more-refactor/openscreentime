@@ -12,7 +12,7 @@
 // ============================================================================
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
-import type { Account, Device, DeviceUser, EnrollTokenResponse } from "../types";
+import type { Account, Device, DeviceUser, EnrollTokenResponse, Event } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { useSession } from "../lib/session";
 import { familyChanged } from "../lib/family";
@@ -25,6 +25,7 @@ import { TextInput, Select } from "../components/TextInput";
 import { PageHead } from "../layout/PageHead";
 import { ago } from "../lib/format";
 import { degradedDevices, degradedSentence } from "../lib/degraded";
+import { Moments, standingGaps } from "../components/Moments";
 
 function offlineAllowed(d: Device): boolean {
   return !!d.offline_allowed_until && new Date(d.offline_allowed_until).getTime() > Date.now();
@@ -149,6 +150,25 @@ function ComputerCard({
   const state = stateOf(d);
   const pending = d.status === "pending";
   const away = offlineAllowed(d);
+
+  // The computer's own moments — a pause, a gap, a lost connection: its
+  // events with no login (a person's are told on their page). Asked again
+  // when what it says about itself changes.
+  const [moments, setMoments] = useState<Event[]>([]);
+  const said = `${d.status}|${d.locked}|${(d.last_state?.gaps ?? []).join(",")}`;
+  useEffect(() => {
+    if (pending) return;
+    let alive = true;
+    api
+      .listEvents({ device_id: d.id, limit: 30 })
+      .then((evs) => alive && setMoments(evs.filter((e) => e.device_user_id === null)))
+      .catch(() => {
+        /* the card stands without them */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [d.id, pending, said]);
 
   async function run(done: string, fn: () => Promise<unknown>, undo?: () => Promise<unknown>) {
     setBusy(true);
@@ -288,6 +308,7 @@ function ComputerCard({
               <Icon name="warning" size={16} /> {degradedSentence(d)}
             </p>
           )}
+          <Moments events={moments} standing={standingGaps([d])} max={3} bare />
 
           <div className="cmp-actions">
             {d.locked ? (

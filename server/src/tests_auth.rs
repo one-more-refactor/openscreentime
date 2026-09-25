@@ -428,6 +428,16 @@ async fn a_parents_code_only_goes_to_the_parents_own_computer() {
     // …a child's computer never gets the parent's code.
     let s = env.start("Philip", VERIFIER).await;
     assert!(env.sent_code(id_of(&s)).await.is_none());
+    // And the browser can't tell (acceptance round 3): the answer is the one
+    // any name gets — a code on the same clock, which the page runs out and
+    // then offers a new code and the passkey door (web/src/pages/Login.tsx).
+    let nobody = env.start("nobody-here", VERIFIER).await;
+    let mut keys: Vec<&String> = s.as_object().unwrap().keys().collect();
+    keys.sort();
+    let mut decoy_keys: Vec<&String> = nobody.as_object().unwrap().keys().collect();
+    decoy_keys.sort();
+    assert_eq!(keys, decoy_keys);
+    assert_eq!(s["expires_in_secs"], nobody["expires_in_secs"]);
 
     // "This is my computer", installed from the parent's own login, with the
     // child's login on it too.
