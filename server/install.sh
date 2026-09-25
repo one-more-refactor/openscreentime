@@ -1,11 +1,12 @@
 #!/bin/sh
 # OpenScreenTime agent installer — served by the server at GET /install.sh.
 #
-#   (wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) |
+#   (wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null |
 #     sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 #
 # wget where there is one (stock Debian and Ubuntu desktops ship wget, not
-# curl), else curl; with neither, `exit 1` — never an empty script that "works".
+# curl), else curl; when neither download works, one sentence naming the
+# server and `exit 1` — never an empty script that "works".
 # `--token xxx` instead of OST_TOKEN also works, but the OST_TOKEN env form is
 # preferred: it keeps the enroll token out of argv, so it never shows up in
 # `ps` or shell history on the target machine.

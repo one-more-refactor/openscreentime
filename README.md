@@ -33,7 +33,7 @@ that's your household. Then **Computers → Add a computer** gives you the line
 to paste on each Linux computer you look after:
 
 ```bash
-(wget -qO- https://ost.example.com/install.sh 2>/dev/null || curl -fsSL https://ost.example.com/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://ost.example.com
+(wget -qO- https://ost.example.com/install.sh || curl -fsSL https://ost.example.com/install.sh || echo "echo \"Couldn't download the installer from https://ost.example.com — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo OST_TOKEN=<token> sh -s -- --server https://ost.example.com
 ```
 
 It shows up online within a minute. From then on the server starts at boot,

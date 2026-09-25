@@ -42,7 +42,8 @@ Three details that matter:
   can't tell which window you're looking at.
 - **"Looked up" is not "visited".** It's the name your computer asked for:
   one visit can mean many lookups, and background apps look things up too.
-  It's activity, not a history.
+  It's activity, not a history. What the computer looks up on its own is
+  left out (the list is below), and so are OpenScreenTime's own lookups.
 
 You see the same picture of your own day on your own page — except that on a
 computer you share, the site list is left off, so you don't see someone
@@ -63,7 +64,27 @@ Everything the agent sends the server, and nothing else:
   apps and aren't sent. This is sent for everyone, adults included; the
   server only shows it as the table above allows.
 - **Sites**: how many times the computer looked up each site, per hour, for
-  the whole computer.
+  the whole computer. Not counted, because no person asked for them:
+  - the computer's own update checks and mirrors — `deb.debian.org`,
+    `security.debian.org`, `ftp.debian.org` and `ftp.<country>.debian.org`,
+    Ubuntu's `archive`, `security`, `ports`, `changelogs`, `motd` and `esm`
+    `.ubuntu.com`, `packages.linuxmint.com`, `fedoraproject.org`;
+  - app stores' own traffic — `flathub.org`, `snapcraft.io`,
+    `snapcraftcontent.com`, GNOME Software's ratings (`odrs.gnome.org`);
+  - "am I online?" checks — `nmcheck.gnome.org`, `networkcheck.kde.org`,
+    `connectivity-check.ubuntu.com`, `detectportal.firefox.com`;
+  - Firefox in the background — `services.mozilla.com`,
+    `telemetry.mozilla.org`, `aus5.mozilla.org`, `ads.mozilla.org`,
+    `cdn.mozilla.net`, `safebrowsing.googleapis.com`,
+    `use-application-dns.net`;
+  - the clock — `pool.ntp.org`, `ntp.ubuntu.com`;
+  - OpenScreenTime itself — its server, and the name it checks its own
+    block with (`selftest.openscreentime.internal`).
+
+  Each entry covers the names under it too. A site someone opens is still
+  counted: `www.debian.org`, `www.mozilla.org` and `extensions.gnome.org`
+  are not on the list. (The list lives in `client/src/attrib.rs`,
+  `OS_LOOKUPS`.)
 - **Events**: the things listed above (paused, time's up, codes, blocked apps,
   tampering, sign-ins).
 - **Your requests** for more time, and the reason if you gave one.

@@ -131,6 +131,76 @@ async fn only_the_household_can_retire_its_computer() {
     env.drop_db().await;
 }
 
+/// Acceptance round 5: "Tmp" added through Add a person (which sets up their
+/// computer next), then removed — and "Tmp's computer" stayed behind on
+/// Computers, waiting for an install line that would link it to nobody.
+/// Removing a person takes the computers set up for them that never joined;
+/// one that joined stays, under the computer's own removal rules; nobody
+/// else's is touched.
+#[tokio::test]
+async fn removing_a_person_takes_their_unfinished_computer_along() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, admin) = env.household("Philip").await;
+    let tmp = env.member(tenant, "Tmp").await;
+    let leo = env.member(tenant, "Leo").await;
+    let set_up = |name: &str, account_id: Option<Uuid>| {
+        let (st, who) = (env.st.clone(), owner(tenant, admin));
+        let req = crate::devices::CreateDeviceReq {
+            name: name.into(),
+            account_id,
+        };
+        async move {
+            let out = crate::devices::create_device(
+                State(st),
+                who,
+                axum_extra::extract::cookie::CookieJar::new(),
+                axum::Json(req),
+            )
+            .await
+            .unwrap()
+            .0;
+            Uuid::parse_str(out["device"]["id"].as_str().unwrap()).unwrap()
+        }
+    };
+    // Through the console, as "Add a person" does: waiting for its install.
+    let tmps = set_up("Tmp's computer", Some(tmp)).await;
+    let leos = set_up("Leo's computer", Some(leo)).await;
+    let nobodys = set_up("Spare laptop", None).await;
+    // …and one of Tmp's that joined: an agent holds its token.
+    let joined = env.computer(tenant, Some(tmp), &["tmp"], None, None).await;
+    sqlx::query("UPDATE devices SET device_token = $2, enroll_token = NULL WHERE id = $1")
+        .bind(joined)
+        .bind(crate::auth::hash_token("tok-tmp"))
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+
+    let removed =
+        crate::members::delete_member(State(env.st.clone()), owner(tenant, admin), Path(tmp))
+            .await
+            .unwrap();
+    assert_eq!(removed.0["ok"], true);
+
+    let left: Vec<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT id, owner_account_id FROM devices WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_all(&env.st.db)
+            .await
+            .unwrap();
+    let has = |d: Uuid| left.iter().any(|(id, _)| *id == d);
+    assert!(!has(tmps), "Tmp's unfinished computer went with Tmp");
+    assert!(has(leos) && has(nobodys), "nobody else's is touched");
+    assert!(has(joined), "a computer that joined stays");
+    assert_eq!(
+        left.iter().find(|(id, _)| *id == joined).unwrap().1,
+        None,
+        "…nobody's now"
+    );
+    // It's still an agent's computer: its token works, not "retired".
+    assert!(agent_auth(&env, "tok-tmp").await.is_ok());
+    env.drop_db().await;
+}
+
 #[tokio::test]
 async fn a_computer_that_never_enrolled_leaves_no_tombstone() {
     let Some(env) = Env::new().await else { return };

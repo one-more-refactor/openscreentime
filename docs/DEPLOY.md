@@ -140,7 +140,7 @@ name and a code on their own computer, or a passkey — see docs/AUTH.md.
 computer next) gives a one-liner like:
 
 ```sh
-(wget -qO- https://ost.example.com/install.sh 2>/dev/null || curl -fsSL https://ost.example.com/install.sh || echo exit 1) |
+(wget -qO- https://ost.example.com/install.sh || curl -fsSL https://ost.example.com/install.sh || echo "echo \"Couldn't download the installer from https://ost.example.com — is the address right and the server up?\" >&2; exit 1") 2>/dev/null |
   sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://ost.example.com
 ```
 
