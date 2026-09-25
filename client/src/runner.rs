@@ -2121,6 +2121,31 @@ impl Agent {
         admin || self.offline_hard_lockdown || self.tamper_lockdown
     }
 
+    /// Time was just given to `user` (a grant): if the rules let them back
+    /// now, thaw them at once — the caller's `reconcile_lock` takes the lock
+    /// down — instead of at the next tick, and end a save-your-work countdown
+    /// the time made moot. Nothing while a pause or another whole-device
+    /// stop still holds everyone. Returns whether they were thawed.
+    fn release_if_allowed(&mut self, user: &str) -> bool {
+        if self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown {
+            return false;
+        }
+        let policy = self.policies.get(user).cloned().unwrap_or_default();
+        if self.rules_now(user, &policy).is_some() {
+            return false;
+        }
+        self.pending_freeze.remove(user);
+        if !self.frozen.remove(user) {
+            return false;
+        }
+        self.lock.host().freeze(user, false, false);
+        tracing::info!("{user} unlocked (time was given)");
+        if !self.exec.dry_run() {
+            self.persist_freeze_state();
+        }
+        true
+    }
+
     /// Stop `user` now. If they are the one on screen, the lock goes up in
     /// front of them first — switching away while their compositor is still
     /// alive — and only then is their whole slice frozen. Someone who isn't
@@ -2360,11 +2385,13 @@ impl Agent {
         let stop = self.stop_of(user, &policy);
         let (look, title, detail) = match &stop {
             Some(s) => lock::stop_words(s, self_set),
-            // Frozen, and the rules allow again: the thaw is a moment away.
+            // Frozen, and the rules allow again: the thaw is a moment away
+            // (a grant thaws at once; anything else by the next tick). Say
+            // that — never a reasonless "stopped" right after time came back.
             None => (
                 Look::Wall,
-                "This computer is stopped for now".into(),
-                String::new(),
+                "Your screen is coming back".into(),
+                "Your time is back — this takes a moment.".into(),
             ),
         };
         let own_rules = matches!(
@@ -3234,11 +3261,21 @@ impl Agent {
                 // cache so a later same-day ask sends a fresh request instead
                 // of showing a stale "waiting for a parent".
                 self.requested_earn.retain(|(u, _), _| u != &os_username);
+                // The time is theirs now, not at the next tick: the lock
+                // used to stay up ~9 s after "Give 15", saying "stopped".
                 // Tell them — an approval used to be silent. Someone stopped
-                // hears "You're back" when the thaw actually happens (the
-                // next tick, if the time is enough), never before: the lock
-                // must never say they're back while they aren't.
-                if !self.frozen.contains(&os_username) {
+                // hears "You're back" when the thaw actually happens, never
+                // before: the lock must never say they're back while they
+                // aren't (a pause still holds them).
+                if self.release_if_allowed(&os_username) {
+                    let policy = self.policies.get(&os_username).cloned().unwrap_or_default();
+                    let v = self.stop_verdict(&os_username, &policy);
+                    let body = format!(
+                        "A parent gave you {minutes} more minutes. {}",
+                        back_words(&v)
+                    );
+                    self.notify_user(Some(&os_username), "You're back", &body, false);
+                } else if !self.frozen.contains(&os_username) {
                     self.notify_user(
                         Some(&os_username),
                         &format!("{minutes} more minutes"),
@@ -4719,6 +4756,65 @@ mod tests {
             false,
             "answered: the window offers Ask again"
         );
+    }
+
+    /// Acceptance round 2, step 6: "Give 15" answered at 04:08:02, the lock
+    /// closed at 04:08:11 — the next tick — showing "This computer is
+    /// stopped for now" meanwhile. The grant thaws her on the command, the
+    /// lock comes down with it, and "You're back" says why and until when.
+    #[tokio::test]
+    async fn a_grant_takes_the_lock_down_on_the_command_not_the_next_tick() {
+        let (mut a, fake) = agent_with_mia(); // 61 of her 60 minutes
+        a.kinds.insert("mia".into(), "kid".into());
+        stop_mia(&mut a).await;
+        assert_eq!(a.lock.subject(), Some("mia"));
+        fake.w().log.clear();
+        let grant = |id: &str| Command {
+            id: id.into(),
+            cmd_type: CMD_CREDIT_TIME.into(),
+            payload: json!({ "os_username": "mia", "minutes": 15 }),
+        };
+        let (ack, _) = a.handle_command(grant("g1")).await;
+        assert_eq!(ack.result["credited"], true);
+        assert!(!a.frozen.contains("mia"), "thawed by the command itself");
+        a.reconcile_lock().await; // what the network loop does after every command
+        assert!(a.lock.shown().is_none());
+        let log = fake.w().log.clone();
+        assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"), "{log:?}");
+        let n = a.notifications.back().expect("she hears it");
+        assert_eq!(n.title, "You're back");
+        assert!(
+            n.body
+                .starts_with("A parent gave you 15 more minutes. You have 15 min, until "),
+            "{}",
+            n.body
+        );
+
+        // Paused: a grant is time for later, not a way past the pause.
+        let (mut b, _fake) = agent_with_mia();
+        let _ = b.handle_command(cmd_lock()).await;
+        assert!(b.frozen.contains("mia"));
+        let _ = b.handle_command(grant("g2")).await;
+        b.reconcile_lock().await;
+        assert!(b.frozen.contains("mia"));
+        assert_eq!(b.face_for("mia").title, "Paused by a parent");
+
+        // Frozen with the rules allowing (a moment before the next tick
+        // thaws): the lock says the screen is coming back, not "stopped".
+        let (mut c, _fake) = agent_with_mia();
+        stop_mia(&mut c).await;
+        c.tracker.add_earned("mia", 30);
+        let face = c.face_for("mia");
+        assert_eq!(face.title, "Your screen is coming back");
+        assert!(!face.detail.is_empty());
+    }
+
+    fn cmd_lock() -> Command {
+        Command {
+            id: "p1".into(),
+            cmd_type: CMD_LOCK.into(),
+            payload: json!({}),
+        }
     }
 
     #[test]
