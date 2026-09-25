@@ -1317,17 +1317,25 @@ impl Agent {
         }
         let answers_changed = before.targets != self.safe_search.targets;
         let gap_news = !complete && !before.attempted();
-        if complete {
+        let failed = || {
+            self.safe_search
+                .failed
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if complete && self.safe_search.failed.is_empty() {
             tracing::debug!("safe-search front ends looked up via {upstream}");
+        } else if complete {
+            tracing::info!(
+                "safe search: no answer for {} via {upstream} — keeping the last known addresses",
+                failed()
+            );
         } else {
             tracing::warn!(
-                "safe search: could not look up {} via {upstream} — those engines pass through",
-                self.safe_search
-                    .failed
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "safe search: could not look up {} via {upstream} — those without addresses pass through",
+                failed()
             );
         }
         if (answers_changed || gap_news) && !self.exec.dry_run() {
