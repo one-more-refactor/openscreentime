@@ -26,6 +26,7 @@ import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
 import { ago, duration } from "../lib/format";
+import { degradedSummary } from "../lib/degraded";
 
 const BRACKET_LABEL: Record<FamilyChild["age_bracket"], string> = {
   little: "Little",
@@ -287,6 +288,23 @@ function Trouble({ devices }: { devices: Device[] }) {
   );
 }
 
+/** A computer that's online but can't apply all of its rules — no website
+ *  filter on a desktop without dnsmasq, say. Screen time still works; the
+ *  parent needs to know the rest doesn't. */
+function Degraded({ devices }: { devices: Device[] }) {
+  const line = degradedSummary(devices);
+  if (!line) return null;
+  return (
+    <div className="banner banner-warn fam-trouble" role="status">
+      <Icon name="warning" size={20} />
+      <p className="banner-main">{line}</p>
+      <Link to="/computers" className="btn btn-quiet btn-sm">
+        See computers
+      </Link>
+    </div>
+  );
+}
+
 /**
  * Logins nobody has said who they are yet. Calm — nothing is wrong, and until
  * a parent sorts them their rules enforce nothing on a parent's computer —
@@ -474,6 +492,7 @@ export function Family() {
       )}
 
       {devices && <Trouble devices={devices} />}
+      {devices && <Degraded devices={devices} />}
       {devices && <Unsorted devices={devices} />}
 
       {loading && !hasData ? (

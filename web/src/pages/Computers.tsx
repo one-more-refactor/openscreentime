@@ -24,6 +24,7 @@ import { Modal } from "../components/Modal";
 import { TextInput, Select } from "../components/TextInput";
 import { PageHead } from "../layout/PageHead";
 import { ago } from "../lib/format";
+import { degradedDevices, degradedSentence } from "../lib/degraded";
 
 function offlineAllowed(d: Device): boolean {
   return !!d.offline_allowed_until && new Date(d.offline_allowed_until).getTime() > Date.now();
@@ -282,6 +283,11 @@ function ComputerCard({
             {away && d.offline_allowed_until && <> · may be away for {leftUntil(d.offline_allowed_until)} more</>}
             {(d.pending_commands?.length ?? 0) > 0 && " · changes on their way"}
           </p>
+          {degradedDevices([d]).length > 0 && (
+            <p className="hint cmp-degraded" data-error="true" role="status">
+              <Icon name="warning" size={16} /> {degradedSentence(d)}
+            </p>
+          )}
 
           <div className="cmp-actions">
             {d.locked ? (
@@ -420,7 +426,9 @@ function ComputerCard({
       >
         <p className="dialog-lede">
           OpenScreenTime stops looking after it: no more limits there, and its unlock code stops. The
-          logins on it stay as they are. To manage it again, set it up again.
+          next time it's online it takes OpenScreenTime off itself — anyone paused or out of time there
+          gets their screen back. The logins on it stay as they are. To manage it again, set it up
+          again.
         </p>
       </Modal>
     </li>
@@ -624,6 +632,7 @@ export function Computers() {
   const list = devices ?? [];
   const paused = list.filter((d) => d.locked);
   const dark = list.filter((d) => d.status === "offline" && !offlineAllowed(d));
+  const degraded = degradedDevices(list);
   const verdict = !devices
     ? " "
     : list.length === 0
@@ -636,7 +645,11 @@ export function Computers() {
           ? dark.length === 1
             ? `${dark[0].name} hasn't been online for a while.`
             : `${dark.length} computers haven't been online for a while.`
-          : "Every computer is doing what it should.";
+          : degraded.length > 0
+            ? degraded.length === 1
+              ? `${degraded[0].name} can't apply all of its rules.`
+              : `${degraded.length} computers can't apply all of their rules.`
+            : "Every computer is doing what it should.";
   const haveMine = list.some((d) => !!d.owner_account_id && d.owner_account_id === me?.account?.id);
 
   return (

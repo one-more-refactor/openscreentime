@@ -8,6 +8,7 @@
 // ============================================================================
 import type { Event } from "../types";
 import { ago } from "../lib/format";
+import { gapPhrase, isNotAnAttempt } from "../lib/degraded";
 
 /** The types a parent should ever see as a moment; everything else is
  * machinery. */
@@ -26,7 +27,15 @@ function detail(p: Record<string, unknown>): string | null {
   return typeof v === "string" && v ? v : null;
 }
 
-function sentence(e: Event): string {
+/** A standing gap the agent reports (client/src/enforce): something this
+ * computer can't do, not something anyone did. */
+function isGapKind(kind: string): boolean {
+  return (
+    /^(dns|firewall|vpn)_/.test(kind) || kind === "screen_time_no_freezer" || kind === "network_apply_failed"
+  );
+}
+
+export function sentence(e: Event): string {
   const p = e.payload ?? {};
   const d = detail(p);
   switch (e.type) {
@@ -42,8 +51,11 @@ function sentence(e: Event): string {
       return d ? `Something tried to get around the rules: ${d}` : "Something tried to get around the rules";
     case "evasion":
       return d ? `The clock was changed: ${d}` : "The clock was changed";
-    case "enforcement_degraded":
+    case "enforcement_degraded": {
+      const kind = typeof p.kind === "string" ? p.kind : "";
+      if (isGapKind(kind)) return `The computer ${gapPhrase(kind)}`;
       return d ? `A rule couldn't be enforced: ${d}` : "A rule couldn't be enforced";
+    }
     default:
       return String(e.type).replace(/_/g, " ");
   }
@@ -58,11 +70,27 @@ function tone(e: Event): "ok" | "warn" | "crit" {
 /** The story of the last two days — older moments are history, not news. */
 const RECENT_MS = 48 * 3600_000;
 
-export function Moments({ events, max = 5 }: { events: Event[]; max?: number }) {
-  const since = Date.now() - RECENT_MS;
-  const moments = events
+/** The moments worth telling, newest first: recent, never machinery dressed
+ * up as an attempt, and one line per kind of trouble — a check that failed
+ * a hundred times is one moment, not a hundred. */
+export function momentsOf(events: Event[], max = 5, now = Date.now()): Event[] {
+  const since = now - RECENT_MS;
+  const seen = new Set<string>();
+  return events
     .filter((e) => MOMENT_TYPES.has(e.type) && new Date(e.created_at).getTime() >= since)
+    .filter((e) => !isNotAnAttempt(e))
+    .filter((e) => {
+      if (e.type !== "tamper" && e.type !== "enforcement_degraded") return true;
+      const key = `${e.type}:${String(e.payload?.kind ?? "")}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, max);
+}
+
+export function Moments({ events, max = 5 }: { events: Event[]; max?: number }) {
+  const moments = momentsOf(events, max);
   if (moments.length === 0) return null;
   return (
     <div className="card card-pad moments-card">
