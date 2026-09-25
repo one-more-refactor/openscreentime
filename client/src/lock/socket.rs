@@ -10,7 +10,7 @@
 //! verdict used to come *from* the drawing process, running as root) and the
 //! `unlock_pin.<user>` drop nothing ever wrote.
 
-use super::{current_face, mark_seen, Face, LockEvent, LockTx, SharedRef};
+use super::{current_face, mark_gui_seen, Face, LockEvent, LockTx, SharedRef};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -37,6 +37,8 @@ pub enum Request {
     /// "Give me 15 more minutes" — only for someone who set their own limits;
     /// the agent checks that, the wait and today's count, not the lock.
     Snooze,
+    /// "Switch user": someone else wants the computer.
+    SwitchUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,7 +136,11 @@ async fn handle(stream: UnixStream, shared: SharedRef, tx: LockTx) -> std::io::R
     if !matches!(read, Ok(Ok(n)) if n > 0) {
         return Ok(());
     }
-    mark_seen(&shared);
+    if mark_gui_seen(&shared) {
+        // The text lock is standing in for this one: wake the runner to
+        // move the lock here.
+        let _ = tx.try_send(LockEvent::GuiUp);
+    }
     let reply = match serde_json::from_str::<Request>(line.trim()) {
         Ok(Request::Face) => Reply {
             face: current_face(&shared),

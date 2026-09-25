@@ -127,6 +127,12 @@ impl Ui {
                         self.draw();
                         self.message = self.ask_runner(Request::Snooze);
                     }
+                    b's' | b'S' if face.switch_user => {
+                        self.typed.clear();
+                        self.message = Some(Outcome::yes("Opening the login screen..."));
+                        self.draw();
+                        self.message = self.ask_runner(Request::SwitchUser);
+                    }
                     0x1b => {
                         // An escape sequence (arrows, F-keys): skip the rest of this read.
                         break;
@@ -320,6 +326,10 @@ pub fn render(
     }
     lines.push((String::new(), ""));
     lines.push((ascii(&face.help), "\x1b[2m"));
+    if face.switch_user {
+        lines.push((String::new(), ""));
+        lines.push(("Someone else? Press S to switch user.".into(), "\x1b[2m"));
+    }
 
     let top = rows.saturating_sub(lines.len()) / 2;
     let mut out = String::from("\x1b[0m\x1b[?25l\x1b[2J");
@@ -362,12 +372,21 @@ mod tests {
             snooze: Snooze::Hidden,
             help: super::super::HELP.into(),
             code_hint: super::super::CODE_HINT.into(),
+            switch_user: false,
         };
         let s = render(&face, "1234", None, 80, 25);
         assert!(s.contains("Bedtime until 07:00"));
         assert!(s.contains("Unlock code:  123 4_"));
         assert!(s.contains("4 tries left"));
         assert!(s.contains("Press A to ask"));
+        assert!(!s.contains("switch user"), "a computer with one login");
+        // A shared computer: whoever else wants it can still sign in.
+        let shared = Face {
+            switch_user: true,
+            ..face.clone()
+        };
+        let s = render(&shared, "", None, 80, 25);
+        assert!(s.contains("Someone else? Press S to switch user."));
         assert!(s.contains("min left"), "the ring says what's left");
         assert!(s.is_ascii(), "console fonts only get ASCII");
         // The same words as the graphical lock, for the self-set snooze too.
