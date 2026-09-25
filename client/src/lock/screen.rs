@@ -455,6 +455,10 @@ impl LockWindow {
             let _ = self.tx.send(Request::Code { code });
         }
         uic.add_space(6.0);
+        // A "not yet" isn't said here: the snooze's own countdown, below,
+        // is the one live number (a second one, frozen at the press, stood
+        // next to it — acceptance round 5).
+        let message = message.as_ref().filter(|m| !m.too_soon);
         let (line, color) = match (busy, message) {
             (true, _) => ("Checking…".to_string(), ui::INK_3),
             (false, Some(m)) if !m.ok => {

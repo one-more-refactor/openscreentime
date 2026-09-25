@@ -2907,7 +2907,7 @@ impl Agent {
             return Outcome::no(match why {
                 SnoozeRefusal::NotSelfSet => "Only a parent can add time here.",
                 SnoozeRefusal::NotTheirStop => "This stop isn't yours to skip.",
-                SnoozeRefusal::TooSoon { secs } => return Outcome::no(&lock::too_soon_words(secs)),
+                SnoozeRefusal::TooSoon { secs } => return Outcome::too_soon(secs),
                 SnoozeRefusal::UsedUp => "That's today's extra time.",
             });
         }
@@ -4943,6 +4943,8 @@ mod tests {
             "{}",
             reply.message
         );
+        // …marked, so a lock says it with the live count (round 5).
+        assert!(reply.too_soon);
         assert!(b.frozen.contains("mia"));
     }
 

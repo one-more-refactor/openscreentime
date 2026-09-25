@@ -312,6 +312,23 @@ pub fn too_soon_words(secs: u64) -> String {
     format!("Not yet — in {secs} s you can give yourself {SNOOZE_MINUTES} more minutes.")
 }
 
+/// The reply a lock shows now, with `live_wait` the snooze's wait as it
+/// stands (seconds; `None` when it isn't a wait). A "not yet"
+/// ([`socket::Outcome::too_soon`]) is said with the live count — its own
+/// number was the wait at the press, and it stood frozen next to the live
+/// countdown ("Not yet — in 49 s" beside "In 46 s", acceptance round 5) —
+/// and goes once the wait is over. Any other reply is shown as given.
+pub fn shown_message(
+    message: Option<&socket::Outcome>,
+    live_wait: Option<u64>,
+) -> Option<socket::Outcome> {
+    match (message, live_wait) {
+        (Some(m), Some(secs)) if m.too_soon && secs > 0 => Some(socket::Outcome::too_soon(secs)),
+        (Some(m), _) if m.too_soon => None,
+        (m, _) => m.cloned(),
+    }
+}
+
 /// May `user` give themselves more time now? `waited`: seconds the lock has
 /// been up; `used`: snoozes already taken today.
 pub fn snooze_check(
