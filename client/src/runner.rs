@@ -90,24 +90,83 @@ fn vpn_report_event(report: Option<enforce::vpn::VpnReport>) -> Option<Event> {
     })
 }
 
-/// The gaps standing now → the `enforcement_degraded` events worth sending:
-/// one when a gap appears, none while it stays (the `state` frame carries the
-/// standing ones for the console), a fresh one if it comes back after going.
-fn new_gap_events(standing: &[String], now: &[(String, String)]) -> Vec<Event> {
-    now.iter()
-        .filter(|(kind, _)| !standing.contains(kind))
-        .map(|(kind, detail)| {
-            Event::new(
-                EV_ENFORCEMENT_DEGRADED,
-                SEV_CRITICAL,
-                json!({ "kind": kind, "detail": detail }),
-            )
-        })
-        .collect()
+/// The part of the computer a gap is about — `dns`, `firewall`, `vpn`, or
+/// the kind itself — which is what the console says in one sentence ("can't
+/// filter websites"). One area with a gap standing is one incident.
+fn gap_area(kind: &str) -> &str {
+    ["dns_", "firewall_", "vpn_"]
+        .iter()
+        .find(|p| kind.starts_with(*p))
+        .map(|p| p.trim_end_matches('_'))
+        .unwrap_or(kind)
 }
 
-/// The standing gap for a network apply that failed outright.
-const GAP_NETWORK_APPLY_FAILED: &str = "network_apply_failed";
+/// The gaps standing now → the `enforcement_degraded` events worth sending,
+/// and the areas with an incident open. One event when an area's first gap
+/// appears (listing every gap it has), none while it stays — the `state`
+/// frame carries the standing ones for the console — and a fresh one only
+/// if it comes back after it had gone. `reported` is what is open already,
+/// carried across restarts: a restart is not an incident.
+///
+/// `warn`, not `critical`: a missing package or a resolver that won't start
+/// is a setup to fix, said once, not an emergency paged to a phone (every
+/// start used to send two critical events for the same missing dnsmasq).
+fn gap_incidents(reported: &[String], now: &[(String, String)]) -> (Vec<Event>, Vec<String>) {
+    let mut open: Vec<String> = Vec::new();
+    let mut events = Vec::new();
+    for (kind, _) in now {
+        let area = gap_area(kind);
+        if open.iter().any(|a| a == area) {
+            continue;
+        }
+        open.push(area.to_string());
+        if reported.iter().any(|a| a == area) {
+            continue;
+        }
+        let (kinds, details): (Vec<&str>, Vec<&str>) = now
+            .iter()
+            .filter(|(k, _)| gap_area(k) == area)
+            .map(|(k, d)| (k.as_str(), d.as_str()))
+            .unzip();
+        events.push(Event::new(
+            EV_ENFORCEMENT_DEGRADED,
+            SEV_WARN,
+            json!({ "kind": kind, "kinds": kinds, "detail": details.join(" ") }),
+        ));
+    }
+    open.sort();
+    (events, open)
+}
+
+/// What was already reported about this computer's degraded state, kept
+/// across restarts (`degraded.json` in the state directory).
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Reported {
+    /// The gap areas with an incident open, already reported.
+    #[serde(default)]
+    areas: Vec<String>,
+    /// Enforcement-probe findings, and the day each was last reported.
+    #[serde(default)]
+    probes: HashMap<String, chrono::NaiveDate>,
+}
+
+impl Reported {
+    fn load(path: &std::path::Path) -> Reported {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        let Ok(json) = serde_json::to_string(self) else {
+            return;
+        };
+        if let Err(e) = std::fs::write(path, json) {
+            tracing::warn!("could not keep what was reported ({}): {e}", path.display());
+        }
+    }
+}
 
 /// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
 /// tampering with it requires root, at which point the game is over anyway).
@@ -318,6 +377,13 @@ pub struct Agent {
     app_reported: HashMap<(String, String), chrono::NaiveDate>,
     /// Standing enforcement gap kinds from the last network apply.
     standing_gaps: Vec<String>,
+    /// Gap areas whose incident is open and was reported (see
+    /// `gap_incidents`) — carried across restarts in `reported_path`.
+    reported_areas: Vec<String>,
+    /// Where `reported_areas` and `probe_reported` are kept, and whether
+    /// they are (not under --dry-run, which writes nothing).
+    reported_path: std::path::PathBuf,
+    persist_reported: bool,
     /// Reports each tamper / degraded observation of the tick once per
     /// incident, not every ten seconds.
     incidents: tamper::Incidents,
@@ -587,6 +653,15 @@ impl Agent {
             .iter()
             .map(|u| (u.clone(), Instant::now()))
             .collect();
+        // What this computer already said about its degraded state: a
+        // restart with the same gaps is not news.
+        let reported_path = crate::paths::state("degraded.json");
+        let persist_reported = !ctx.dry_run;
+        let reported = if ctx.dry_run {
+            Reported::default()
+        } else {
+            Reported::load(&reported_path)
+        };
         let (lock_tx, lock_rx) = mpsc::channel(32);
         let lock_shared = lock::shared();
         let host = lock::SystemHost::new(exec.clone(), lock_shared.clone(), lock_tx.clone());
@@ -605,6 +680,9 @@ impl Agent {
             parent_recovery: Vec::new(),
             app_reported: HashMap::new(),
             standing_gaps: Vec::new(),
+            reported_areas: reported.areas,
+            persist_reported,
+            reported_path,
             incidents: tamper::Incidents::default(),
             retired: false,
             active_users: Vec::new(),
@@ -657,7 +735,7 @@ impl Agent {
             login_codes: Vec::new(),
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
-            probe_reported: HashMap::new(),
+            probe_reported: reported.probes,
             dns_relaxed: false,
             dns_unreach_ticks: 0,
             focus_applied: Some(Vec::new()),
@@ -1144,49 +1222,58 @@ impl Agent {
     }
 
     /// Apply the network side of the effective policy (DNS, firewall, VPN).
-    /// Never aborts the caller: an apply that fails outright is a standing
-    /// gap like any other. Updates the standing gaps and returns the events
-    /// worth sending (a gap when it appears, the VPN verdict), and whether
-    /// the apply ran through.
+    /// Never aborts the caller, and no stage skips another: whatever can't
+    /// be applied is a standing gap. Updates the standing gaps and returns
+    /// the events worth sending (an incident when it opens, the VPN verdict),
+    /// and whether the website rules were written (a focus-hours change
+    /// retries when they weren't).
     fn apply_network(&mut self) -> (Vec<Event>, bool) {
+        use enforce::{dns::DnsGap, Gap};
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
         let mut events = Vec::new();
-        let (gaps, ok): (Vec<(String, String)>, bool) = match enforce::apply_network_policy(
+        let (gaps, report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
             &effective,
             &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-        ) {
-            Ok((gaps, report)) => {
-                events.extend(vpn_report_event(report));
-                let gaps = gaps
-                    .iter()
-                    .map(|g| (g.kind().to_string(), g.explain().to_string()))
-                    .collect();
-                (gaps, true)
-            }
-            Err(e) => {
-                tracing::error!("network policy not applied: {e:#}");
-                let detail = format!(
-                    "this computer's network rules could not be applied ({e:#}); \
-                     screen time is still enforced"
-                );
-                (vec![(GAP_NETWORK_APPLY_FAILED.to_string(), detail)], false)
-            }
-        };
-        events.extend(new_gap_events(&self.standing_gaps, &gaps));
+        );
+        events.extend(vpn_report_event(report));
+        let ok = !gaps.contains(&Gap::Dns(DnsGap::RulesNotWritten));
+        let gaps: Vec<(String, String)> = gaps
+            .iter()
+            .map(|g| (g.kind().to_string(), g.explain().to_string()))
+            .collect();
+        let (opened, open) = gap_incidents(&self.reported_areas, &gaps);
+        events.extend(opened);
+        if open != self.reported_areas {
+            self.reported_areas = open;
+            self.save_reported();
+        }
         self.standing_gaps = gaps.into_iter().map(|(kind, _)| kind).collect();
         (events, ok)
     }
 
-    /// Our nft table was loaded by the last apply (no firewall gap stands).
+    /// Keep what was reported about the degraded state (see `Reported`).
+    fn save_reported(&self) {
+        if !self.persist_reported {
+            return;
+        }
+        Reported {
+            areas: self.reported_areas.clone(),
+            probes: self.probe_reported.clone(),
+        }
+        .save(&self.reported_path);
+    }
+
+    /// Our nft table was loaded by the last apply (no firewall gap stands;
+    /// a table loaded without its lockdown rules is still our table).
     fn firewall_loaded(&self) -> bool {
         !self
             .standing_gaps
             .iter()
-            .any(|g| g.starts_with("firewall_") || g == GAP_NETWORK_APPLY_FAILED)
+            .any(|g| g.starts_with("firewall_") && g != "firewall_lockdown_not_applied")
     }
 
     /// Move to the tamper level the server asked for, within this computer's
@@ -1892,7 +1979,10 @@ impl Agent {
                     })
                 })
         });
-        if let Some(domain) = probe_domain.filter(|d| !d.is_empty()) {
+        //    With a DNS gap standing this is already known and said (the
+        //    filter isn't running): not a second incident.
+        let dns_gap = self.standing_gaps.iter().any(|g| g.starts_with("dns_"));
+        if let Some(domain) = probe_domain.filter(|d| !d.is_empty() && !dns_gap) {
             if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
                 let answered_routable = out.lines().any(|l| {
                     let addr = l.split_whitespace().next().unwrap_or("");
@@ -1920,6 +2010,10 @@ impl Agent {
                     }
                 }
             }
+        }
+        // Once a day each, restarts included.
+        if !events.is_empty() {
+            self.save_reported();
         }
         events
     }
@@ -4195,6 +4289,8 @@ mod tests {
             "a missing table is the known gap, not a flush"
         );
 
+        // The website rules can't be written: that is DNS's gap alone — the
+        // firewall still goes on (it used to be skipped with it).
         a.policies.clear();
         a.exec = Exec::simulated(&[], &running)
             .failing(&["write:/etc/openscreentime/dnsmasq.d/openscreentime.conf"]);
@@ -4202,10 +4298,91 @@ mod tests {
             .apply_bundle(mia_bundle())
             .expect("never aborts on the network");
         assert!(a.policies.contains_key("mia"));
-        assert_eq!(a.standing_gaps, [GAP_NETWORK_APPLY_FAILED]);
-        assert!(evs.iter().any(
-            |e| e.ev_type == EV_ENFORCEMENT_DEGRADED && kind_of(e) == GAP_NETWORK_APPLY_FAILED
+        assert_eq!(a.standing_gaps, ["dns_rules_not_written"]);
+        assert!(a.firewall_loaded());
+        assert!(a.exec.log().iter().any(|l| l == "run nft -f -"));
+        assert!(
+            evs.iter()
+                .any(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED
+                    && kind_of(e) == "dns_rules_not_written")
+        );
+    }
+
+    /// Acceptance round 2: every agent start sent the same two critical
+    /// events ("can't filter websites" twice — one per gap kind of the one
+    /// missing resolver). A degraded area is one incident: said once, as a
+    /// warning, and a restart with it still standing says nothing.
+    #[tokio::test]
+    async fn a_restart_is_not_an_incident_and_an_area_is_one_event() {
+        if crate::config::is_root() {
+            return; // apply_bundle writes its caches under /etc
+        }
+        let path = std::env::temp_dir().join(format!(
+            "ost-degraded-{}-{}.json",
+            std::process::id(),
+            rand::random::<u32>()
         ));
+        let broken = || {
+            Exec::simulated(&["nft"], &[("systemctl is-active dnsmasq", "failed\n")])
+                .failing(&["write:/etc/openscreentime/dnsmasq.d/openscreentime.conf"])
+        };
+        let degraded = |evs: &[Event]| -> Vec<Event> {
+            evs.iter()
+                .filter(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED)
+                .cloned()
+                .collect()
+        };
+        let start = |reported: Reported| {
+            let (mut a, _fake) = agent_with_mia();
+            a.policies.clear();
+            a.persist_reported = true;
+            a.reported_path = path.clone();
+            a.reported_areas = reported.areas;
+            a
+        };
+
+        let mut a = start(Reported::default());
+        a.exec = broken();
+        let evs = degraded(&a.apply_bundle(mia_bundle()).unwrap());
+        // Two DNS gaps, one sentence: one event for them, one for the firewall.
+        assert_eq!(
+            a.standing_gaps,
+            [
+                "dns_rules_not_written",
+                "dns_no_local_resolver",
+                "firewall_not_installed"
+            ]
+        );
+        assert_eq!(evs.len(), 2, "{evs:?}");
+        assert_eq!(kind_of(&evs[0]), "dns_rules_not_written");
+        assert_eq!(
+            evs[0].payload["kinds"],
+            json!(["dns_rules_not_written", "dns_no_local_resolver"])
+        );
+        assert_eq!(kind_of(&evs[1]), "firewall_not_installed");
+        assert!(
+            evs.iter().all(|e| e.severity == SEV_WARN),
+            "a setup, not an alarm"
+        );
+
+        // The agent restarts (a reboot, an update): same gaps, nothing new.
+        let mut b = start(Reported::load(&path));
+        b.exec = broken();
+        assert!(degraded(&b.apply_bundle(mia_bundle()).unwrap()).is_empty());
+        assert_eq!(
+            b.device_state().gaps.len(),
+            3,
+            "still standing for the console"
+        );
+
+        // Fixed, then broken again: that is a new incident.
+        b.exec = Exec::simulated(&[], &[("systemctl is-active dnsmasq", "active\n")]);
+        assert!(degraded(&b.apply_bundle(mia_bundle()).unwrap()).is_empty());
+        assert!(Reported::load(&path).areas.is_empty());
+        let mut c = start(Reported::load(&path));
+        c.exec = broken();
+        assert_eq!(degraded(&c.apply_bundle(mia_bundle()).unwrap()).len(), 2);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Removed from its household: the person the rules stopped is thawed,
