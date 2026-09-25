@@ -31,6 +31,7 @@ import type {
   Policy,
   Profile,
   Tenant,
+  WhereData,
 } from "./types";
 import { defaultThemeFor } from "./types";
 
@@ -66,7 +67,6 @@ const kidsPolicy: Policy = {
     block_tor: true,
     block_vpn: true,
   },
-  parent_pin_hash: "$argon2id$v=19$m=19456,t=2,p=1$mockmockmockmock$mockmockmockmockmockmockmockmock",
   blocks: {
     apps: ["tiktok", "snapchat", "instagram", "discord", "twitch", "omegle"],
     categories: ["social", "adult", "gambling", "dating", "proxies"],
@@ -538,7 +538,6 @@ export const MOCK_CODE = "123456";
 export const mockEarnRequests: EarnRequest[] = [
   {
     id: "er-1",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-mia",
     os_username: "mia",
@@ -553,7 +552,6 @@ export const mockEarnRequests: EarnRequest[] = [
   },
   {
     id: "er-2",
-    tenant_id: TENANT_ID,
     device_id: "d-studio",
     device_user_id: "u-noah",
     os_username: "noah",
@@ -568,7 +566,6 @@ export const mockEarnRequests: EarnRequest[] = [
   },
   {
     id: "er-3",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-leo",
     os_username: "leo",
@@ -583,7 +580,6 @@ export const mockEarnRequests: EarnRequest[] = [
   },
   {
     id: "er-4",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-mia",
     os_username: "mia",
@@ -857,7 +853,9 @@ export function mockFamily(): FamilyResponse {
   }
   return {
     children: [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)),
-    devices: mockVisibleDevices(),
+    // The family's computers come without their logins (the server's
+    // /api/family has none; Computers reads them from /api/devices).
+    devices: mockVisibleDevices().map(({ users: _users, ...d }) => d),
     profiles: mockProfiles.filter((p) => !ownRules.has(p.id)),
     requests: solo ? [] : mockEarnRequests.filter((r) => r.status === "pending"),
     server_time: new Date().toISOString(),
@@ -1169,3 +1167,28 @@ export const mockCatalog: Catalog = {
     { id: "shein", name: "Shein", category: "shopping", has_native_client: false },
   ],
 };
+
+/** Mock for GET /api/usage/where and /api/me/where — a believable day. */
+export function mockWhere(): WhereData {
+  return {
+    apps: [
+      { key: "discord", seconds: 52 * 60 },
+      { key: "minecraft", seconds: 40 * 60 },
+      { key: "spotify", seconds: 35 * 60 },
+      { key: "steam", seconds: 12 * 60 },
+    ],
+    sites: [
+      { key: "youtube.com", hits: 420 },
+      { key: "wikipedia.org", hits: 160 },
+      { key: "discord.com", hits: 120 },
+      { key: "github.com", hits: 60 },
+    ],
+    hours: [15, 16, 17, 19, 20].map((h) => {
+      const d = new Date();
+      d.setHours(h, 0, 0, 0);
+      return { hour: d.toISOString(), amount: h === 17 ? 300 : 120 };
+    }),
+    sites_hidden_shared: false,
+    sites_hidden_age: false,
+  };
+}

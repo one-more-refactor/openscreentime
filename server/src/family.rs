@@ -282,6 +282,11 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
                 .unwrap_or_default();
             let mut v = members::account_json(&c.account);
             v["key"] = json!(c.account.0);
+            // The id every per-person call addresses (edit, remove, where the
+            // time went). The console declares it; without it those calls
+            // went to `/api/members/undefined`, and "where the time went"
+            // fell back to the parent's own day (acceptance round 4).
+            v["account_id"] = json!(c.account.0);
             v["name"] = json!(c.account.2);
             v["used_minutes"] = json!(c.used_minutes);
             v["earned_minutes"] = json!(c.earned_minutes);
