@@ -220,7 +220,10 @@ function Computers({ devices, name, events }: { devices: PersonDevice[]; name: s
           </ul>
         )}
       </div>
-      <Moments events={events} />
+      <Moments
+        events={events}
+        computers={devices.length > 1 ? Object.fromEntries(devices.map((d) => [d.id, d.name])) : undefined}
+      />
     </section>
   );
 }

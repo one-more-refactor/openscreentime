@@ -3,7 +3,15 @@
 // never "something tried to get around the rules" for a missing package.
 import { describe, expect, test } from "bun:test";
 import type { Device, Event } from "../types";
-import { degradedDevices, degradedSentence, degradedSummary, gapPhrase, isNotAnAttempt } from "./degraded";
+import {
+  cantFilter,
+  degradedDevices,
+  degradedSentence,
+  degradedSummary,
+  gapPhrase,
+  isNotAnAttempt,
+  notBlockedSentence,
+} from "./degraded";
 
 function device(name: string, gaps: string[], status: Device["status"] = "online"): Device {
   return {
@@ -89,5 +97,45 @@ describe("what is not an attempt to get around the rules", () => {
       expect(isNotAnAttempt(event("tamper", kind))).toBe(false);
     }
     expect(isNotAnAttempt(event("enforcement_degraded", "nft_probe_failed"))).toBe(false);
+  });
+});
+
+// Acceptance round 2: Mia's rules said "what's here is really blocked, on
+// every computer they use" and Philip's own page "Focus hours until 05:00 —
+// the sites below open again then", on a computer that filtered nothing. A
+// rule that blocks websites now says where it can't, right at the rule.
+describe("a block promised only where it holds", () => {
+  test("one computer that can't filter websites", () => {
+    const studio = device("Studio laptop", ["dns_no_local_resolver", "dns_policy_not_loaded"]);
+    expect(cantFilter([studio])).toEqual([studio]);
+    expect(notBlockedSentence([studio])).toBe(
+      "Not blocked on Studio laptop yet — it can't filter websites. Screen time still works.",
+    );
+  });
+
+  test("several, by name — and only the ones that can't", () => {
+    const a = device("Studio laptop", ["dns_resolver_missing"]);
+    const b = device("Desk", ["dns_policy_not_loaded", "firewall_not_installed"]);
+    const fine = device("Mia's computer", ["firewall_not_installed"]);
+    expect(notBlockedSentence([a, fine, b])).toBe(
+      "Not blocked on Studio laptop or Desk yet — they can't filter websites. Screen time still works.",
+    );
+  });
+
+  test("every computer filtering, or offline, promises nothing false", () => {
+    expect(notBlockedSentence([device("Fine", [])])).toBeNull();
+    expect(notBlockedSentence([device("Off", ["dns_resolver_missing"], "offline")])).toBeNull();
+    expect(notBlockedSentence([])).toBeNull();
+  });
+
+  test("screen time is only promised where it works", () => {
+    const s = notBlockedSentence([device("Old laptop", ["dns_resolver_missing", "screen_time_no_freezer"])]);
+    expect(s).toBe("Not blocked on Old laptop yet — it can't filter websites.");
+  });
+
+  test("the own page's computers carry their gaps flat", () => {
+    expect(notBlockedSentence([{ name: "Philip's computer", status: "online", gaps: ["dns_policy_not_loaded"] }])).toBe(
+      "Not blocked on Philip's computer yet — it can't filter websites. Screen time still works.",
+    );
   });
 });

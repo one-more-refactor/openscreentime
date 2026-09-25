@@ -237,6 +237,12 @@ pub struct EnrollReq {
     /// agent asked ("which login is Mia's?").
     #[serde(default)]
     pub owner_login: Option<String>,
+    /// Which machine this is: an HMAC-SHA256 of its `/etc/machine-id` keyed
+    /// with the household's `machine_salt` (from the preview) — never the id
+    /// itself. A household's second record of the same machine is folded
+    /// into this one (`crate::machine`).
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -278,6 +284,9 @@ pub async fn enroll_preview(
     Ok(Json(json!({
         "owner": owner.as_ref().map(|o| &o.0),
         "owner_is_parent": owner.as_ref().is_some_and(|o| o.1 != "member"),
+        // The key the agent hashes its machine-id with: per household, so
+        // its identity matches nothing anywhere else.
+        "machine_salt": crate::machine::salt(&st.db, tenant_id).await?,
     })))
 }
 
@@ -342,6 +351,11 @@ pub async fn enroll(
         chosen.as_deref(),
     )
     .await?;
+    // The same machine enrolled again: its logins stay who they were.
+    let machine = crate::machine::clean_hash(req.machine_id.as_deref());
+    if let Some(hash) = &machine {
+        crate::machine::carry_links(&st.db, tenant_id, device_id, hash).await?;
+    }
     upsert_os_users(&st.db, tenant_id, device_id, &req.os_users).await?;
     // Who each login turned out to be, for the installer to print — so the
     // person at the keyboard sees straight away if a login landed on the
@@ -374,7 +388,8 @@ pub async fn enroll(
         "UPDATE devices SET device_token = $1, enroll_token = NULL,
              enroll_token_expires_at = NULL, enroll_token_used = $6,
              enrolled_at = now(), status = 'online',
-             hostname = $2, os = $3, agent_version = $4, last_seen = now()
+             hostname = $2, os = $3, agent_version = $4, last_seen = now(),
+             machine_hash = COALESCE($7, machine_hash)
          WHERE id = $5
            AND ((enroll_token = $6
                  AND (enroll_token_expires_at IS NULL OR enroll_token_expires_at > now()))
@@ -389,6 +404,7 @@ pub async fn enroll(
     .bind(&req.agent_version)
     .bind(device_id)
     .bind(&enroll_hash)
+    .bind(&machine)
     .execute(&st.db)
     .await?
     .rows_affected();
@@ -397,6 +413,19 @@ pub async fn enroll(
             "invalid, used or expired enroll token".into(),
         ));
     }
+
+    // A machine this household already has a record of: fold that record in,
+    // so each person's day is counted once. Best-effort like the audit line —
+    // the credentials are spent, and the agent must get them.
+    let took_over = match &machine {
+        Some(hash) => crate::machine::take_over(&st, tenant_id, device_id, hash)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(%device_id, error = %e, "could not fold the same machine's older record in");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
 
     // The audit line is best-effort: failing it must not turn a completed
     // enrollment into an error whose credentials the agent never sees.
@@ -412,6 +441,8 @@ pub async fn enroll(
             "os": req.os,
             "users": req.os_users.len(),
             "retry": is_retry,
+            // The same machine's older records, folded into this one.
+            "took_over": took_over,
         }),
     )
     .await

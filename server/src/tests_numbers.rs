@@ -399,3 +399,62 @@ async fn where_the_time_went_is_the_computers_day() {
     assert_eq!(w["hours"].as_array().unwrap().len(), 1);
     env.drop_db().await;
 }
+
+/// Acceptance round 2: Philip's own page promised "Focus hours until 05:00 —
+/// the sites below open again then" on a computer that filtered nothing. His
+/// day says what each computer of his can't do right now, so the page can
+/// say it at the rule; a child's page doesn't advertise the gap.
+#[tokio::test]
+async fn my_day_says_which_computer_cant_filter() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    let mia = env.member(tenant, "Mia").await;
+    let desk = env
+        .computer(
+            tenant,
+            Some(philip),
+            &["philip", "mia"],
+            Some("philip"),
+            Some("philip"),
+        )
+        .await;
+    sqlx::query("UPDATE devices SET last_state = $2 WHERE id = $1")
+        .bind(desk)
+        .bind(json!({ "locked": false,
+                      "gaps": ["dns_no_local_resolver", "dns_policy_not_loaded"] }))
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+
+    let (_, me) = session_for(&env, philip, tenant).await;
+    let day = crate::members::today(State(env.st.clone()), me)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        day["devices"][0]["gaps"],
+        json!(["dns_no_local_resolver", "dns_policy_not_loaded"]),
+        "{day}"
+    );
+
+    let (_, her) = session_for(&env, mia, tenant).await;
+    let day = crate::members::today(State(env.st.clone()), her)
+        .await
+        .unwrap()
+        .0;
+    assert!(day["devices"][0].get("gaps").is_none(), "{day}");
+
+    // Offline, it says nothing: what it said last is "offline".
+    sqlx::query("UPDATE devices SET status = 'offline' WHERE id = $1")
+        .bind(desk)
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    let (_, me) = session_for(&env, philip, tenant).await;
+    let day = crate::members::today(State(env.st.clone()), me)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(day["devices"][0]["gaps"], json!([]));
+    env.drop_db().await;
+}
