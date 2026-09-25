@@ -29,6 +29,11 @@ pub struct EnrollRequest {
     /// The login the person at the keyboard picked as the owner's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_login: Option<String>,
+    /// Which machine this is, for this household only (`enroll::machine_hash`):
+    /// enrolling it again folds its older record in, so a day isn't counted
+    /// twice. Never the raw machine-id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +62,9 @@ pub struct EnrollPreview {
     pub owner: Option<String>,
     #[serde(default)]
     pub owner_is_parent: bool,
+    /// The household's key for the machine identity (servers from 0.7).
+    #[serde(default)]
+    pub machine_salt: Option<String>,
 }
 
 fn default_poll() -> u64 {

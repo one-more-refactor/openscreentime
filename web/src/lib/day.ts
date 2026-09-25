@@ -101,6 +101,19 @@ export function unlockedUntil(r: RulesVerdict | null | undefined, now = new Date
   return Math.abs(stop - ov) < 60_000 ? whenLabel(r.override_until, now) : null;
 }
 
+/** How close a stop has to be for a page to follow each minute closely. */
+export const NEAR_STOP_MS = 5 * 60_000;
+
+/** A stop lands within five minutes (or just landed): the page showing it
+ * should refresh often, so "1 min left" becomes "Time's up" when the
+ * computer's does, not half a minute later. */
+export function stopIsNear(r: RulesVerdict | null | undefined, now = Date.now()): boolean {
+  if (!r?.allowed || !r.stop_at) return false;
+  const at = Date.parse(r.stop_at);
+  if (Number.isNaN(at)) return false;
+  return at - now <= NEAR_STOP_MS && now - at <= 60_000;
+}
+
 type Who = "they" | "you";
 
 /** One sentence about what stops the screen next, or null when nothing does. */

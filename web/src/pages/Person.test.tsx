@@ -314,6 +314,40 @@ describe("rules", () => {
     ]);
   });
 
+  test("a computer that can't filter websites is named right at the blocklist", async () => {
+    // Acceptance round 2: "what's here is really blocked, on every computer
+    // they use" — on a computer that filtered nothing.
+    const f = family();
+    f.devices = f.devices.map((d) =>
+      d.id === "mia-laptop"
+        ? {
+            ...d,
+            last_state: {
+              locked: false,
+              frozen_users: [],
+              enforcing: false,
+              gaps: ["dns_no_local_resolver", "dns_policy_not_loaded"],
+            },
+          }
+        : d,
+    );
+    apiImpl.getFamily = () => Promise.resolve(f);
+    setup("/child/mia/rules");
+    const note = await screen.findByText(
+      "Not blocked on Mia's laptop yet — it can't filter websites. Screen time still works.",
+    );
+    // At the rule: inside the Blocked section, above the list.
+    const section = screen.getByRole("heading", { name: "Blocked" }).closest("section") as HTMLElement;
+    expect(section.contains(note)).toBe(true);
+    expect(document.body.textContent ?? "").not.toMatch(/really blocked/);
+  });
+
+  test("with every computer filtering, the promise stands", async () => {
+    setup("/child/mia/rules");
+    expect(await screen.findByText(/really blocked, on every computer they use/)).toBeTruthy();
+    expect(screen.queryByText(/Not blocked on/)).toBeNull();
+  });
+
   test("an adult sets their own rules — no editor for anyone else", async () => {
     setup("/child/jo/rules");
     expect(await screen.findByRole("heading", { name: "Jo sets their own rules" })).toBeTruthy();

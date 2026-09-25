@@ -69,7 +69,7 @@ for 2 minutes so in-flight requests and second tabs survive.
 | Method | Path | Notes |
 |--------|------|-------|
 | POST   | `/agent/voucher`            | mint a one-time (2 min) voucher for a local surface on that machine to exchange at `/api/auth/voucher` |
-| POST   | `/agent/enroll/preview`     | `{ enroll_token }` → `{ owner, owner_is_parent }` without using the token (so `ost enroll` can ask which login is the owner's) |
+| POST   | `/agent/enroll/preview`     | `{ enroll_token }` → `{ owner, owner_is_parent, machine_salt }` without using the token (so `ost enroll` can ask which login is the owner's, and key its machine identity for this household) |
 
 `POST /agent/enroll` also takes `installer` (the login the install ran from)
 and `owner_login` (the one the installer picked), and answers with `users:
@@ -157,7 +157,7 @@ Self-update).
 | GET    | `/api/devices/:id`            | detail incl. device users and recent events                  |
 | POST   | `/api/devices`                | `{ name, account_id? }` → a `pending` device + a 24 h one-time enroll token → `{ device, enroll_token }`. `account_id` = "this is that person's computer". For a parent's own computer `428` unless the confirm window is open |
 | PATCH  | `/api/devices/:id`            | `{ name?, tamper_level? }` — `tamper_level` is 1 or 3        |
-| DELETE | `/api/devices/:id`            | remove it. Its device token is kept as a tombstone (`retired_devices`), so the agent hears `410 device_retired` and takes itself off the computer (see Agent API → Retirement) |
+| DELETE | `/api/devices/:id`            | remove it. Its device token is kept as a tombstone (`retired_devices`), so the agent hears `410 device_retired` and takes itself off the computer (see Agent API → Retirement). Each person's usage on it is kept (`retired_usage`): today stays true |
 | POST   | `/api/devices/:id/enroll-token` | a fresh one-time token (24 h) → `{ device, enroll_token }`; 409 unless `pending`. Confirm-gated |
 | POST   | `/api/devices/:id/lock`       | Pause: enqueue `lock` → `{ command_id, queued: true, delivered: bool }` |
 | POST   | `/api/devices/:id/unlock`     | Resume: enqueue `unlock` (payload `{}`) → same shape         |
@@ -314,7 +314,7 @@ Auth: `Authorization: Bearer <device_token>` unless noted.
 ```
 POST /agent/enroll
 Body: { enroll_token, hostname, os, agent_version, os_users: [{ username, display_name }],
-        installer?, owner_login? }
+        installer?, owner_login?, machine_id? }
 → 200 { device_id, device_token, poll_interval_secs, users: [{ os_username, person, parent }] }
 ```
 The `enroll_token` is spent once and expires 24 h after issue; an expired or
@@ -323,6 +323,24 @@ spent token is a 401. A retry with the same token from the same host within
 install). Each reported login is linked to a person — see docs/AUTH.md "Whose
 login is whose"; an unsorted login gets Kid rules on a child's computer and
 rules that enforce nothing on a parent's own.
+
+**The same machine, enrolled again.** `machine_id` says which machine this
+is: HMAC-SHA256 keyed with `/etc/machine-id`, over `openscreentime-machine:`
+and the household's `machine_salt` from the preview — never the id itself,
+and nothing another household can match (64 lower-case hex; anything else is
+ignored). When the household already has a record of that machine (the
+one-liner run again with a new token — "Add my computer" on what was "Mia's
+computer"), the older record is **folded into the new one** instead of
+standing beside it: each login keeps its person (a login sorted by hand
+stays sorted; the new owner's login goes to the new owner), each login's
+ledger days move over (the larger count wins — the agent's own ledger has the
+same minutes), and so do where the time went, the moments and any ask still
+waiting. The older record goes; its token becomes a tombstone that points at
+the new record, so the agent still running with it until the installer
+restarts it is heard as the new record — never `410` (see below), which would
+make it take itself off the computer it was just enrolled on. The `enrolled`
+event lists what it replaced (`took_over: [name]`). A person's day is counted
+once. An agent that sends no `machine_id` (older than 0.7) enrolls as before.
 
 ### Retirement (a removed computer)
 
@@ -340,7 +358,14 @@ back), its dnsmasq include, the polkit rule, the unlock-code sudo and its
 cached secrets, then disables and removes its units (`ost __retire`, outside
 the sandbox) and forgets its enrollment. A 401, a network error, or a 410
 without `"retired": true` never does this — the agent keeps its last rules.
-Enrolling again (the install one-liner) clears the retirement.
+Enrolling again (the install one-liner) clears the retirement. The token of a
+record that was folded into a newer one (above) answers as that newer record
+until it is removed; then it too is `410`.
+
+Removing a computer doesn't take anyone's day with it: its ledger is kept
+under each person (`retired_usage`) and still counts on the console, in their
+week and as time used elsewhere on their other computers. Enrolling the same
+machine again takes those minutes back onto its logins.
 
 ### Heartbeat (poll model, fallback for WS)
 ```
@@ -510,9 +535,13 @@ with `#[serde(default)]` on optional sub-objects.
   `{ reason: "paused_by_parent", grace_secs: 120 }`. Unblock doesn't resume the
   computers. The console only offers "Lift the block" for an old block.
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
-  left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
+  left_minutes|null, rules, locked, devices:[{id,name,status,locked,gaps?}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name, utc_offset_secs }`. "Today" is each device's own
+  windows, display_name, utc_offset_secs }`. `gaps` (only for someone who
+  sets their own rules): what an online computer says it can't do right now
+  (`last_state.gaps`), so their page never promises a block a computer can't
+  keep. The day includes computers that were removed (`retired_usage`).
+  "Today" is each device's own
   local day (the day its agent enforces); `utc_offset_secs` is that
   computer's clock, for everything the console says about its day (focus
   hours, the week, the hours strip). `left_minutes` is **time left**, the

@@ -372,18 +372,28 @@ impl FromRequestParts<AppState> for AgentAuth {
 
         let Some((device_id, tenant_id)) = row else {
             // A removed computer still calling in: say so distinctly, so it
-            // takes itself off the machine instead of enforcing forever.
-            let retired: Option<Uuid> =
-                sqlx::query_scalar("SELECT device_id FROM retired_devices WHERE token_hash = $1")
-                    .bind(&hash)
-                    .fetch_optional(&state.db)
-                    .await?;
-            return Err(match retired {
-                Some(_) => {
-                    AppError::DeviceRetired("this computer was removed from its household".into())
-                }
-                None => AppError::Unauthorized("invalid device token".into()),
-            });
+            // takes itself off the machine instead of enforcing forever. A
+            // record folded into the same machine's newer one (`machine.rs`)
+            // is that record: the agent still running with the old token
+            // until the installer restarts it must never hear "removed".
+            let retired: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+                "SELECT d.id, d.tenant_id FROM retired_devices r
+                   LEFT JOIN devices d ON d.id = r.merged_into AND d.tenant_id = r.tenant_id
+                  WHERE r.token_hash = $1",
+            )
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
+            return match retired {
+                Some((Some(device_id), Some(tenant_id))) => Ok(AgentAuth {
+                    device_id,
+                    tenant_id,
+                }),
+                Some(_) => Err(AppError::DeviceRetired(
+                    "this computer was removed from its household".into(),
+                )),
+                None => Err(AppError::Unauthorized("invalid device token".into())),
+            };
         };
         Ok(AgentAuth {
             device_id,

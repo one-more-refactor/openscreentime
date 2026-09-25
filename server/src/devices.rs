@@ -543,7 +543,17 @@ pub async fn delete_device(
     // Removing a computer frees it: its token is kept as a tombstone, so the
     // agent hears `410 device_retired` (not a 401 it would retry forever
     // with the old rules still in force) and takes itself off the machine.
+    // The day of everyone who used it stays theirs: its ledger is filed
+    // under each person first (`machine::keep_usage`), or "17 min left of
+    // 17" is what a child who used 37 would show.
     let mut tx = st.db.begin().await?;
+    sqlx::query("SELECT 1 FROM devices WHERE id = $1 AND tenant_id = $2 FOR UPDATE")
+        .bind(id)
+        .bind(admin.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound("device not found".into()))?;
+    crate::machine::keep_usage(&mut tx, id, None).await?;
     sqlx::query(
         "INSERT INTO retired_devices (token_hash, device_id, tenant_id)
          SELECT device_token, id, tenant_id FROM devices

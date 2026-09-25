@@ -32,6 +32,11 @@ use crate::events;
 pub const DEVICE_TODAY_SQL: &str = "((now() AT TIME ZONE 'UTC') \
      + make_interval(secs => COALESCE(d.utc_offset_secs, 0)))::date";
 
+/// [`DEVICE_TODAY_SQL`] for a removed computer's kept usage (`retired_usage`
+/// aliased `r`): today on the clock that computer had.
+pub const RETIRED_TODAY_SQL: &str = "((now() AT TIME ZONE 'UTC') \
+     + make_interval(secs => COALESCE(r.utc_offset_secs, 0)))::date";
+
 /// SQL for the moment the device's own today began (its local midnight, as a
 /// `timestamptz`). Needs the `devices` row aliased `d`. For "today" in the
 /// hour-by-hour slices: the computer's day, not the server's.
@@ -214,7 +219,9 @@ pub async fn upsert_usage(
     Ok(answer)
 }
 
-/// The person's use and grants on `day` on every login except `except`.
+/// The person's use and grants on `day` on every login except `except` —
+/// computers that were removed included (`crate::machine`): the minutes
+/// were spent all the same.
 pub async fn elsewhere(
     db: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -223,11 +230,16 @@ pub async fn elsewhere(
     day: NaiveDate,
 ) -> Result<(i64, i64), sqlx::Error> {
     sqlx::query_as(
-        "SELECT COALESCE(SUM(l.used_seconds), 0)::bigint, COALESCE(SUM(l.earned_seconds), 0)::bigint
-           FROM device_users du
-           JOIN devices d ON d.id = du.device_id AND d.tenant_id = $1
-           JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = $4
-          WHERE du.account_id = $2 AND du.id <> $3",
+        "SELECT COALESCE(SUM(used), 0)::bigint, COALESCE(SUM(earned), 0)::bigint
+           FROM (SELECT l.used_seconds AS used, l.earned_seconds AS earned
+                   FROM device_users du
+                   JOIN devices d ON d.id = du.device_id AND d.tenant_id = $1
+                   JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = $4
+                  WHERE du.account_id = $2 AND du.id <> $3
+                 UNION ALL
+                 SELECT r.used_seconds, r.earned_seconds
+                   FROM retired_usage r
+                  WHERE r.tenant_id = $1 AND r.account_id = $2 AND r.day = $4) t",
     )
     .bind(tenant_id)
     .bind(account_id)
@@ -235,6 +247,47 @@ pub async fn elsewhere(
     .bind(day)
     .fetch_one(db)
     .await
+}
+
+/// A person's use and grants today on computers that were removed, and the
+/// clock those computers had (for "today" when no computer of theirs is
+/// left).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KeptDay {
+    pub used_secs: i64,
+    pub earned_secs: i64,
+    pub utc_offset_secs: Option<i32>,
+}
+
+/// [`KeptDay`] per person in a household (or for one person).
+pub async fn kept_today(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    account_id: Option<Uuid>,
+) -> Result<std::collections::HashMap<Uuid, KeptDay>, sqlx::Error> {
+    let rows: Vec<(Uuid, i64, i64, Option<i32>)> = sqlx::query_as(&format!(
+        "SELECT r.account_id, SUM(r.used_seconds)::bigint, SUM(r.earned_seconds)::bigint,
+                max(r.utc_offset_secs)
+           FROM retired_usage r
+          WHERE r.tenant_id = $1 AND ($2::uuid IS NULL OR r.account_id = $2)
+            AND r.day = {RETIRED_TODAY_SQL}
+          GROUP BY r.account_id"
+    ))
+    .bind(tenant_id)
+    .bind(account_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(account, used, earned, offset)| {
+            let day = KeptDay {
+                used_secs: used,
+                earned_secs: earned,
+                utc_offset_secs: offset,
+            };
+            (account, day)
+        })
+        .collect())
 }
 
 /// One usage-regression event per device user per day, not one per heartbeat.

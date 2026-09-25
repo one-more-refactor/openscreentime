@@ -13,7 +13,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { takeFromFragment } from "../lib/fragment";
+import { takeToken } from "../lib/fragment";
 import { ApiError, getAuthConfig, usingMock } from "../api";
 import type { AuthConfig } from "../types";
 import { Wordmark } from "../components/Wordmark";
@@ -25,10 +25,11 @@ import { sentence } from "../lib/format";
 
 const SETUP_KEY = "ost-setup";
 
-/** The setup code from the installer's link — kept for this tab only, so a
- * reload mid-setup doesn't lose it. */
+/** The setup code from the installer's link — taken from the address bar
+ * before the redirect to /login (lib/fragment.ts), then kept for this tab
+ * only, so a reload mid-setup doesn't lose it. */
 function takeSetupToken(): string {
-  const fromLink = takeFromFragment("setup");
+  const fromLink = takeToken("setup");
   try {
     if (fromLink) sessionStorage.setItem(SETUP_KEY, fromLink);
     return fromLink ?? sessionStorage.getItem(SETUP_KEY) ?? "";
