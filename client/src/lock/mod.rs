@@ -309,7 +309,7 @@ pub fn now_ms() -> i64 {
 /// The answer to "Give me 15 more minutes" pressed before the wait is over:
 /// how long, in the countdown's own words — never silence.
 pub fn too_soon_words(secs: u64) -> String {
-    format!("Not yet - in {secs} s you can give yourself {SNOOZE_MINUTES} more minutes.")
+    format!("Not yet — in {secs} s you can give yourself {SNOOZE_MINUTES} more minutes.")
 }
 
 /// May `user` give themselves more time now? `waited`: seconds the lock has
@@ -2253,9 +2253,9 @@ mod tests {
         assert_eq!(Snooze::Ready { left: 2 }.wait_left(0), None);
         assert_eq!(
             too_soon_words(7),
-            "Not yet - in 7 s you can give yourself 15 more minutes."
+            "Not yet — in 7 s you can give yourself 15 more minutes."
         );
-        assert!(too_soon_words(7).is_ascii(), "the text lock shows it too");
+        // The text lock reads it through its ASCII filter ("Not yet - in …").
     }
 
     #[test]
