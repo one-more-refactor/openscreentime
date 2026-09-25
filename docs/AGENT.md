@@ -15,19 +15,23 @@ The agent is a single binary in two builds the server ships: **headless**
 ### One-liner (x86_64 — what the server serves)
 
 ```sh
-(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 ```
 
 or with the token on the command line (`--token xxx` instead of the env
 var — see the warning below):
 
 ```sh
-(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo sh -s -- --server https://HOST --token xxx
+(wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo sh -s -- --server https://HOST --token xxx
 ```
 
 The line downloads with wget where there is one (stock Debian and Ubuntu
-have wget and no curl), else curl; with neither it hands `sh` an `exit 1`
-and fails, never a quiet exit 0 with nothing installed. The script itself
+have wget and no curl), else curl, both quietly. When neither download
+works — no downloader, the server down, a typo in the address — it hands
+`sh` one sentence naming the server ("Couldn't download the installer from
+… — is the address right and the server up?") and an `exit 1`: never a
+quiet exit 0 with nothing installed, never a bare "curl: command not
+found". The script itself
 runs only from `main "$@"` on its last line, so a download cut short runs
 nothing. `sh -s -- --help` prints its options.
 

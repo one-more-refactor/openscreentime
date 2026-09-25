@@ -134,7 +134,7 @@ Install one-liner (shown in the web enroll modal; the `OST_TOKEN` env form keeps
 token out of argv/shell history):
 
 ```
-(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh || curl -fsSL https://HOST/install.sh || echo "echo \"Couldn't download the installer from https://HOST — is the address right and the server up?\" >&2; exit 1") 2>/dev/null | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
 A console served over plain `http://` (trying it out at home) shows the same
