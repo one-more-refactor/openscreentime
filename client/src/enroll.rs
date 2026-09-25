@@ -194,6 +194,9 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         auto_update: true,
     };
     cfg.save()?;
+    // A computer that was removed and is now enrolled again is no longer
+    // retired: its agent enforces again.
+    crate::retire::clear_marker();
     tracing::info!("wrote {} (0600)", crate::config::CONFIG_PATH);
     println!("Enrolled. Config written to {}", crate::config::CONFIG_PATH);
     // Nothing to write down: the keys to this computer live in the console.

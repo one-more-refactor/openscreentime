@@ -187,12 +187,16 @@ fn install_desktop_entry(exec: &Exec) {
 }
 
 /// Remove the app-grid launcher and icon (called by `uninstall`).
-fn remove_desktop_entry() {
-    let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
-    let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
-    let _ = std::fs::remove_file(DESKTOP_ICON_SYMBOLIC_PATH);
-    let _ = std::fs::remove_file(RETIRED_APP_AUTOSTART_PATH);
-    let _ = std::fs::remove_file(COMPANION_AUTOSTART_PATH);
+fn remove_desktop_entry(exec: &Exec) {
+    for path in [
+        DESKTOP_ENTRY_PATH,
+        DESKTOP_ICON_PATH,
+        DESKTOP_ICON_SYMBOLIC_PATH,
+        RETIRED_APP_AUTOSTART_PATH,
+        COMPANION_AUTOSTART_PATH,
+    ] {
+        let _ = exec.remove_file(path);
+    }
 }
 
 /// The graphical lock: its unprivileged user, its unit, its PAM session and
@@ -726,6 +730,40 @@ fn install_service_with(exec: &Exec) -> Result<()> {
     Ok(())
 }
 
+/// What `install-service` put on this computer besides the binary: the
+/// units (the companion stopped for whoever is signed in), the lock's unit,
+/// user and PAM session, the launcher and autostart, the unlock-code sudo.
+/// The agent's own units are stopped by the caller first.
+pub fn remove_installed(exec: &Exec) {
+    for user in graphical_users(exec) {
+        let _ = exec.run(
+            "systemctl",
+            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
+        );
+    }
+    let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
+    let _ = exec.run(
+        "systemctl",
+        &["stop", &crate::lock::unit_name(crate::lock::LOCK_VT)],
+    );
+    for p in [
+        UNIT_PATH,
+        WATCHDOG_SVC_PATH,
+        WATCHDOG_TIMER_PATH,
+        TRAY_UNIT_PATH,
+        crate::lock::UNIT_TEMPLATE_PATH,
+        crate::lock::PAM_PATH,
+    ] {
+        let _ = exec.remove_file(p);
+    }
+    remove_desktop_entry(exec);
+    if users::get_user_by_name(crate::lock::LOCK_USER).is_some() {
+        let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
+    }
+    remove_parent_sudo(exec);
+    let _ = exec.run("systemctl", &["daemon-reload"]);
+}
+
 /// `ost uninstall`: stop and remove the units, the sudo/PAM hook and the group.
 /// The enrollment config and state are left alone (re-running `install-service`
 /// picks them right back up); the binary is left in place too.
@@ -734,29 +772,7 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
     let exec = Exec::new(ctx);
     let _ = exec.run("systemctl", &["disable", "--now", WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["disable", "--now", AGENT_UNIT]);
-    let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
-    let _ = exec.run(
-        "systemctl",
-        &["stop", &crate::lock::unit_name(crate::lock::LOCK_VT)],
-    );
-    if !exec.dry_run() {
-        for p in [
-            UNIT_PATH,
-            WATCHDOG_SVC_PATH,
-            WATCHDOG_TIMER_PATH,
-            TRAY_UNIT_PATH,
-            crate::lock::UNIT_TEMPLATE_PATH,
-            crate::lock::PAM_PATH,
-        ] {
-            let _ = std::fs::remove_file(p);
-        }
-        remove_desktop_entry();
-    }
-    if users::get_user_by_name(crate::lock::LOCK_USER).is_some() {
-        let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
-    }
-    remove_parent_sudo(&exec);
-    let _ = exec.run("systemctl", &["daemon-reload"]);
+    remove_installed(&exec);
     println!("Removed the OpenScreenTime units and the parent-code sudo hook.");
     println!(
         "Enrollment config ({}) and state were kept.",
