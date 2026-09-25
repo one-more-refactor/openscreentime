@@ -120,6 +120,30 @@ for just themselves; and the server looks after itself.
   headless and the `gui,tray` build; the web runs `bun test`.
 - **Pause everything says "Press and hold to pause."** It said "for a
   second"; the hold is 600 ms.
+- **Website rules work on a stock Debian or Ubuntu desktop.** Its
+  NetworkManager carries the dnsmasq *program*, so the installer installed
+  nothing and nothing was filtered. It now installs the dnsmasq service,
+  set up to run next to systemd-resolved, and makes `/etc/resolv.conf` a file
+  the filter owns where it was resolved's link (the link comes back when
+  OpenScreenTime leaves) — before, the first network change turned the filter
+  off, and with a block in force left the computer with no DNS at all.
+  Installed computers set it up on their next update.
+- **One thing that can't be applied never takes the rest with it.** DNS, the
+  firewall, its lockdown rules and the VPN are applied one by one; a failing
+  one is reported on its own and the others still apply.
+- **"Can't filter websites" is said once.** A computer that can't apply
+  part of its rules sends one moment per part (as a warning, not a critical
+  alert), not one per start — a restart or a reboot with the same gap is
+  not news.
+- **Time given takes the lock down at once**, instead of up to 10 seconds
+  later with "This computer is stopped for now" on screen.
+- **The stop time the warnings announce holds still.** In the last minute it
+  could move by a second and change "ends at 03:24" to "ends at 03:23".
+- **A removed computer keeps nothing of OpenScreenTime**: the binary, its
+  state, its config and the companions still running are gone too (packages
+  it installed stay, with their own config back), and an old sign-in code no
+  longer pops up again.
+- **No kernel messages over the text lock.**
 
 ### Upgrading
 

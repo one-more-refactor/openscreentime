@@ -89,7 +89,7 @@ Subcommands:
 |---|---|---|
 | `enroll` | `--server <URL>`, the token in `OST_TOKEN` (or `--token -` to read it from stdin; `--token <TOKEN>` works but shows in `ps`) | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
-| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, installs what the network rules need where it's missing (`dnsmasq` and `nftables`, via apt/dnf/pacman/zypper — dnsmasq's first start pre-seeded to listen on 127.0.0.1 only, next to systemd-resolved), writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload`, enables and **restarts** `openscreentime-agent.service` (so re-running the one-liner reaches a running agent with its new token) and enables `openscreentime-watchdog.timer`. On a tray build it also starts the companion for whoever is signed in to a desktop right now (`systemctl --user -M <user>@ start`, else in their session via `runuser`). Requires root. |
+| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, installs what the network rules need where it's missing (the `dnsmasq` *service* — NetworkManager's `dnsmasq-base` is only the program — and `nftables`, via apt/dnf/pacman/zypper; dnsmasq's first start pre-seeded to listen on 127.0.0.1 only with `bind-interfaces`, next to systemd-resolved's 127.0.0.53; on a distro whose dnsmasq reads no config directory, Arch, two marked lines in `/etc/dnsmasq.conf` name ours), makes `/etc/resolv.conf` a file where it is systemd-resolved's or resolvconf's link (keeping the link to put back when OpenScreenTime leaves — the sandboxed agent can't, and resolved replaces its file on every network change), writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload`, enables and **restarts** `openscreentime-agent.service` (so re-running the one-liner reaches a running agent with its new token) and enables `openscreentime-watchdog.timer`. On a tray build it also starts the companion for whoever is signed in to a desktop right now (`systemctl --user -M <user>@ start`, else in their session via `runuser`). Requires root. |
 | `status` | `--json` | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active openscreentime-agent.service`. Safe non-root. |
 | `time` | `--json` | How much screen time the calling user has left today. Reads the per-user status snapshot the agent writes each tick. Safe non-root, no display needed. |
 | `ask` | `--json` | Sends a time request to a parent, from the keyboard. Writes a marker inside the caller's own `/run/user/<uid>/openscreentime/` — which is what proves the request came from them. Safe non-root. |
@@ -309,7 +309,16 @@ it takes its own pin off and puts back what the computer used before (kept in
 `/var/lib/openscreentime/resolv.conf.pre-pin`; else NetworkManager's or
 systemd-resolved's file; else the family resolvers). A computer that can't
 filter stays online and says so (`dns_resolver_missing`,
-`dns_no_local_resolver`).
+`dns_no_local_resolver`). dnsmasq reads the ruleset through a one-line
+`conf-dir=` stub in the directory it really reads (Debian/Ubuntu's
+`CONFIG_DIR` in `/etc/default/dnsmasq`, a `conf-dir=` in `dnsmasq.conf` on
+Fedora), or through `dnsmasq.conf` itself where it reads none (Arch).
+
+DNS, the firewall, its lockdown rules and the VPN are applied as separate
+stages: one that fails is its own gap and never skips the others (a
+resolv.conf that can't be written leaves the firewall loaded; lockdown rules
+the kernel refuses leave the base firewall loaded, `firewall_lockdown_not_applied`).
+Forced DNS is held back whenever nothing would answer it.
 
 ### Firewall
 
@@ -494,7 +503,11 @@ session on its own VT (13):
   up or is slow, the agent draws a plain text lock itself (the same
   sentences, the ring with its tick) on **VT 14** — its own VT, because the
   lock unit resets, hangs up and deallocates VT 13 on every cage start and
-  stop — and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). A cage that
+  stop — and locks VT switching (`VT_LOCKSWITCH`, as `vlock -a`). While it
+  holds the screen the kernel's console log level is 1 (emergencies only),
+  so no kernel line is drawn over it; the level from before is kept in
+  `/var/lib/openscreentime/printk-console-level` and put back when it lets
+  go. A cage that
   gives up (its unit in `auto-restart` or `failed`) is noticed at once, so
   the text lock is on screen within about a second; a cage that is only
   slow gets 2.5 s, then the text lock shows while it keeps starting, and the
@@ -714,29 +727,33 @@ black out all traffic):
   service is down, nothing is enforced (fail-open is possible only while
   the process itself is dead — this is what the watchdog timer exists to
   prevent).
-- **`enforcement_degraded` events (critical)**: the policy was written but the
-  host can't enforce all of it. The payload `kind` says which:
+- **`enforcement_degraded` events (warn)**: the policy was written but the
+  host can't enforce all of it. The payload `kind` says which (and `kinds`
+  lists every gap of that area):
   | `kind` | Meaning | Fix |
   |---|---|---|
-  | `dns_resolver_missing` | dnsmasq isn't installed: websites aren't filtered (the computer keeps its own DNS; screen time works) | re-run the install one-liner (it installs dnsmasq + nftables), or install dnsmasq |
+  | `dns_resolver_missing` | the dnsmasq service isn't installed (NetworkManager's `dnsmasq-base` is only the program): websites aren't filtered (the computer keeps its own DNS; screen time works) | re-run the install one-liner (it installs dnsmasq + nftables), or install the dnsmasq package |
   | `dns_no_local_resolver` | dnsmasq is installed but won't start, so the allowlist filters nothing | `systemctl status dnsmasq` |
+  | `dns_policy_not_loaded` | dnsmasq reads no directory our ruleset is in | re-run the install one-liner |
+  | `dns_rules_not_written` | the ruleset couldn't be written; dnsmasq serves what it had | the agent's journal says why |
+  | `dns_resolv_conf_not_pinned` | `/etc/resolv.conf` couldn't be pointed at 127.0.0.1: nothing filtered, still online | the agent's journal says why |
+  | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` is systemd-resolved's/resolvconf's link, which the sandboxed agent can't replace | re-run the install one-liner (it makes it a file, and puts the link back on removal) |
+  | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
   | `firewall_not_installed` | `nft` isn't installed: no firewall rules (screen time works) | re-run the install one-liner, or install nftables |
   | `firewall_not_applied` | `nft` refused the ruleset | the agent's journal says why |
-  | `network_apply_failed` | the network rules couldn't be applied at all | the agent's journal says why |
+  | `firewall_lockdown_not_applied` | the firewall is loaded without its anti-bypass rules, which `nft` refused | the agent's journal says why |
+  | `vpn_not_applied` | the VPN profile couldn't be written | the agent's journal says why |
 
-  Each is sent once, when it appears — not on every re-apply — and stands in
-  the `state` frame's `gaps` while it lasts, which is what the console's
-  Family and Computers pages show. None of them is a `tamper` event: a missing
-  package is a setup to fix, not someone getting around the rules. The tamper
-  loop's own findings (`resolv_conf_drift`, `nft_flush`, `nm_disconnect`, …)
-  are likewise reported once per incident, not every 10 s.
-  | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` was a symlink owned by `systemd-resolved`/`resolvconf`; the agent replaced it with a real file | `systemctl disable --now systemd-resolved`, or it fights the pin on every network change |
-  | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
-
-  These are the reason a distro whose `/etc/resolv.conf` is a
-  systemd-resolved symlink (Ubuntu, Mint, Fedora) needs resolved disabled
-  and dnsmasq installed *before* enrollment. On Debian and Arch, where
-  NetworkManager writes a real file, none of them fire.
+  One area (dns, firewall, vpn — one sentence in the console) is one
+  incident: one event when its first gap appears, none while it stands — the
+  `state` frame's `gaps` carries it, which is what the console's Family and
+  Computers pages show — and a new one only after it went away and came
+  back. What was reported is kept in `/var/lib/openscreentime/degraded.json`,
+  so a restart or a reboot with the same gaps sends nothing. `warn`, not
+  `critical`: a missing package is a setup to fix, not an alarm for a phone,
+  and never a `tamper` event. The tamper loop's own findings
+  (`resolv_conf_drift`, `nft_flush`, `nm_disconnect`, …) are likewise
+  reported once per incident, not every 10 s.
 - **Locked out and no server reachable**: `sudo ost unlock --minutes 60`
   (it asks for the unlock code — read it off the console, or use a recovery code)
   works fully offline against the cached bundle, as long as the agent has
