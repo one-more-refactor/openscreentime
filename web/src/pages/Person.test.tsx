@@ -259,6 +259,27 @@ describe("today", () => {
     expect(screen.queryByText("Time's up for the day")).toBeNull();
   });
 
+  // Acceptance round 3: 37 minutes of Firefox and Text Editor were "Nothing
+  // yet today". The computer now names desktop apps; the page shows the name.
+  test("where the time went names a desktop app as the computer does", async () => {
+    apiImpl.getWhere = () =>
+      Promise.resolve({
+        apps: [
+          { key: "Firefox ESR", seconds: 25 * 60 },
+          { key: "Text Editor", seconds: 12 * 60 },
+        ],
+        sites: [],
+        hours: [],
+        sites_hidden_shared: false,
+        sites_hidden_age: false,
+      });
+    setup("/child/mia");
+    expect((await screen.findAllByText("Firefox ESR")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Text Editor").length).toBeGreaterThan(0);
+    expect(screen.getByText("25 min")).toBeTruthy();
+    expect(screen.queryByText("Nothing yet today.")).toBeNull();
+  });
+
   test("a child's moments still show", async () => {
     apiImpl.listEvents = (id) => Promise.resolve(id === "mia-laptop" ? [timesUp("du-mia")] : []);
     setup("/child/mia");
