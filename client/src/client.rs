@@ -119,6 +119,30 @@ pub struct HeartbeatResponse {
 
 pub use crate::protocol::UsageReport;
 
+/// The server said this computer was removed from its household: `410
+/// device_retired` with `"retired": true`, from the configured server. The
+/// one answer on which the agent takes itself off the computer — never a
+/// plain 401, a network error, or an answer from anywhere else.
+#[derive(Debug, thiserror::Error)]
+#[error("this computer was removed from its household")]
+pub struct Retired;
+
+/// Is this error the server retiring this computer?
+pub fn is_retired(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<Retired>().is_some())
+}
+
+/// The retirement answer, exactly: status 410, from the configured server's
+/// origin, with the flag set in a JSON body.
+fn retirement_answer(status: u16, same_origin: bool, body: &[u8]) -> bool {
+    status == 410
+        && same_origin
+        && serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("retired").and_then(Value::as_bool))
+            == Some(true)
+}
+
 /// `POST /agent/earn-request` response (CONTRACT-PROD.md §4).
 #[derive(Debug, Deserialize)]
 pub struct EarnRequestResponse {
@@ -138,6 +162,24 @@ pub struct ServerClient {
     http: reqwest::Client,
     base: String,
     token: String,
+}
+
+impl ServerClient {
+    /// `error_for_status`, except that the retirement answer becomes
+    /// [`Retired`]. Only an answer whose final URL (after any redirect) is
+    /// on the configured server counts.
+    async fn checked(&self, resp: reqwest::Response) -> Result<reqwest::Response> {
+        if resp.status() == reqwest::StatusCode::GONE {
+            let same_origin = reqwest::Url::parse(&self.base)
+                .is_ok_and(|base| base.origin() == resp.url().origin());
+            let body = resp.bytes().await.unwrap_or_default();
+            if retirement_answer(410, same_origin, &body) {
+                return Err(Retired.into());
+            }
+            anyhow::bail!("server answered 410 Gone");
+        }
+        Ok(resp.error_for_status()?)
+    }
 }
 
 impl ServerClient {
@@ -185,8 +227,8 @@ impl ServerClient {
             .json(&body)
             .send()
             .await
-            .context("POST /agent/heartbeat")?
-            .error_for_status()?;
+            .context("POST /agent/heartbeat")?;
+        let resp = self.checked(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -219,14 +261,15 @@ impl ServerClient {
 
     /// POST /agent/usage — where-the-time-goes slices (CONTRACT-0.6 §3).
     pub async fn post_usage_slices(&self, slices: &[serde_json::Value]) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .post(format!("{}/agent/usage", self.base))
             .header("Authorization", self.bearer())
             .json(&json!({ "slices": slices }))
             .send()
             .await
-            .context("POST /agent/usage")?
-            .error_for_status()?;
+            .context("POST /agent/usage")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
@@ -238,8 +281,8 @@ impl ServerClient {
             .header("Authorization", self.bearer())
             .send()
             .await
-            .context("GET /agent/policy")?
-            .error_for_status()?;
+            .context("GET /agent/policy")?;
+        let resp = self.checked(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -283,20 +326,22 @@ impl ServerClient {
         if events.is_empty() {
             return Ok(());
         }
-        self.http
+        let resp = self
+            .http
             .post(format!("{}/agent/events", self.base))
             .header("Authorization", self.bearer())
             .json(&json!({ "events": events }))
             .send()
             .await
-            .context("POST /agent/events")?
-            .error_for_status()?;
+            .context("POST /agent/events")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
     /// POST /agent/commands/:id/ack
     pub async fn ack_command(&self, ack: &CommandAck) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .post(format!(
                 "{}/agent/commands/{}/ack",
                 self.base, ack.command_id
@@ -305,8 +350,8 @@ impl ServerClient {
             .json(&json!({ "status": ack.status, "result": ack.result }))
             .send()
             .await
-            .context("POST command ack")?
-            .error_for_status()?;
+            .context("POST command ack")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
@@ -323,14 +368,27 @@ impl ServerClient {
             .insert("Authorization", self.bearer().parse()?);
         // Bounded like every HTTP call: a blackholed server must not park the
         // reconnect loop forever.
-        let (stream, _resp) = tokio::time::timeout(
+        let connected = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             tokio_tungstenite::connect_async(request),
         )
         .await
-        .context("ws connect timed out")?
-        .context("ws connect")?;
-        Ok(stream)
+        .context("ws connect timed out")?;
+        match connected {
+            Ok((stream, _resp)) => Ok(stream),
+            // The upgrade is refused with the same answer as any other call;
+            // the handshake goes to the configured URL itself (no redirects).
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+                if retirement_answer(
+                    resp.status().as_u16(),
+                    true,
+                    resp.body().as_deref().unwrap_or_default(),
+                ) =>
+            {
+                Err(Retired.into())
+            }
+            Err(e) => Err(anyhow::Error::from(e).context("ws connect")),
+        }
     }
 }
 
@@ -343,5 +401,35 @@ pub fn server_host(base_url: &str) -> Option<String> {
         None
     } else {
         Some(host.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the exact retirement answer from the configured server retires
+    /// the computer: not a 401 (a hiccup, a proxy, a bad token), not a 410
+    /// without the flag, not a 410 from somewhere a redirect led.
+    #[test]
+    fn only_the_servers_retirement_answer_counts() {
+        let retired = br#"{"error":{"code":"device_retired","message":"x"},"retired":true}"#;
+        assert!(retirement_answer(410, true, retired));
+        assert!(!retirement_answer(410, false, retired), "another origin");
+        assert!(
+            !retirement_answer(401, true, retired),
+            "a 401 never retires"
+        );
+        assert!(!retirement_answer(
+            410,
+            true,
+            br#"{"error":{"code":"code_expired"}}"#
+        ));
+        assert!(!retirement_answer(410, true, br#"{"retired":"yes"}"#));
+        assert!(!retirement_answer(410, true, b"<html>Gone</html>"));
+        assert!(is_retired(
+            &anyhow::Error::from(Retired).context("GET /agent/policy")
+        ));
+        assert!(!is_retired(&anyhow::anyhow!("401 Unauthorized")));
     }
 }

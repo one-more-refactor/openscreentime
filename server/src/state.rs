@@ -370,8 +370,21 @@ impl FromRequestParts<AppState> for AgentAuth {
                 .fetch_optional(&state.db)
                 .await?;
 
-        let (device_id, tenant_id) =
-            row.ok_or_else(|| AppError::Unauthorized("invalid device token".into()))?;
+        let Some((device_id, tenant_id)) = row else {
+            // A removed computer still calling in: say so distinctly, so it
+            // takes itself off the machine instead of enforcing forever.
+            let retired: Option<Uuid> =
+                sqlx::query_scalar("SELECT device_id FROM retired_devices WHERE token_hash = $1")
+                    .bind(&hash)
+                    .fetch_optional(&state.db)
+                    .await?;
+            return Err(match retired {
+                Some(_) => {
+                    AppError::DeviceRetired("this computer was removed from its household".into())
+                }
+                None => AppError::Unauthorized("invalid device token".into()),
+            });
+        };
         Ok(AgentAuth {
             device_id,
             tenant_id,
