@@ -784,6 +784,11 @@ impl Agent {
             self.notifications.pop_front();
         }
         tracing::info!("notify {}: {title} — {body}", user.unwrap_or("everyone"));
+        // Published now, not at the next tick: the companion watches the file,
+        // so "You're back" arrives as the desktop does (it came ~5 s late).
+        if !self.exec.dry_run() {
+            self.write_status_file();
+        }
         if let Some(u) = user {
             let sessions = self.lock.host().sessions();
             if !lock::has_graphical_session(&sessions, u) {
