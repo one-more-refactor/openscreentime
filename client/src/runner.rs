@@ -55,6 +55,13 @@ const BACKOFF_MAX_SECS: u64 = 60;
 /// A stop counts as announced when its last-minute warning was published this
 /// recently.
 const ANNOUNCED_WITHIN: Duration = Duration::from_secs(180);
+/// Safe search's front ends (`enforce::safesearch`): looked up again this
+/// often, this soon after a lookup that came back incomplete, the network
+/// checked for a change this often, and each lookup given this long.
+const SAFESEARCH_REFRESH: Duration = Duration::from_secs(3600);
+const SAFESEARCH_RETRY: Duration = Duration::from_secs(60);
+const SAFESEARCH_POLL: Duration = Duration::from_secs(10);
+const SAFESEARCH_LOOKUP: Duration = Duration::from_secs(3);
 
 /// Default fail-closed offline grace period: how long the agent tolerates no
 /// server contact (WS message or successful poll/heartbeat) before treating
@@ -527,6 +534,12 @@ pub struct Agent {
     /// was last applied; a change re-applies it. `None` = that re-apply failed,
     /// try again.
     focus_applied: Option<Vec<String>>,
+    /// The safe-search front ends' addresses (`enforce::safesearch`), kept on
+    /// disk; refreshed by `safesearch_loop`.
+    safe_search: enforce::safesearch::SafeSearch,
+    /// The upstream to look them up through while the network policy wants
+    /// safe search (set by every network apply); `None`: not wanted.
+    safe_search_upstream: Option<std::net::IpAddr>,
 }
 
 /// Upper bound on buffered undelivered events (oldest dropped beyond this) —
@@ -667,6 +680,12 @@ impl Agent {
         let host = lock::SystemHost::new(exec.clone(), lock_shared.clone(), lock_tx.clone());
         // A lock this boot's previous run left on screen is adopted, not forgotten.
         let lock = LockScreen::new(Box::new(host), lock_shared.clone(), carried.lock.clone());
+        // Last looked up before the restart: a reboot redirects at once.
+        let safe_search = if ctx.dry_run {
+            enforce::safesearch::SafeSearch::default()
+        } else {
+            enforce::safesearch::SafeSearch::load()
+        };
         Ok(Agent {
             tamper_level: start_level.applied,
             tamper_cap_reported: start_level.capped().then_some(start_level.requested),
@@ -743,6 +762,8 @@ impl Agent {
             dns_relaxed: false,
             dns_unreach_ticks: 0,
             focus_applied: Some(Vec::new()),
+            safe_search,
+            safe_search_upstream: None,
         })
     }
 
@@ -1245,12 +1266,17 @@ impl Agent {
         let effective = self.effective_network_policy();
         let server_host = crate::client::server_host(&self.cfg.server_url);
         let mut events = Vec::new();
+        self.safe_search_upstream = effective
+            .dns
+            .safe_search
+            .then(|| enforce::dns::upstream_ip(&effective.dns));
         let (gaps, report) = enforce::apply_network_policy(
             self.ctx.clone(),
             &self.exec,
             server_host.as_deref(),
             &effective,
             &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
+            &self.safe_search,
         );
         events.extend(vpn_report_event(report));
         let ok = !gaps.contains(&Gap::Dns(DnsGap::RulesNotWritten));
@@ -1266,6 +1292,45 @@ impl Agent {
         }
         self.standing_gaps = gaps.into_iter().map(|(kind, _)| kind).collect();
         (events, ok)
+    }
+
+    /// Fold a safe-search lookup in (`safesearch_loop`): kept on disk, and
+    /// the network rules re-applied when what the resolver answers changes —
+    /// new addresses, or a first lookup that found an engine unresolvable
+    /// (its gap). Returns whether every engine has addresses now.
+    fn adopt_safe_search(
+        &mut self,
+        upstream: std::net::IpAddr,
+        round: &enforce::safesearch::Round,
+    ) -> bool {
+        let before = self.safe_search.clone();
+        self.safe_search
+            .merge(&upstream.to_string(), round, chrono::Utc::now().timestamp());
+        let complete = self.safe_search.complete();
+        if !self.exec.dry_run() {
+            self.safe_search.save();
+        }
+        let answers_changed = before.targets != self.safe_search.targets;
+        let gap_news = !complete && !before.attempted();
+        if complete {
+            tracing::debug!("safe-search front ends looked up via {upstream}");
+        } else {
+            tracing::warn!(
+                "safe search: could not look up {} via {upstream} — those engines pass through",
+                self.safe_search
+                    .failed
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if (answers_changed || gap_news) && !self.exec.dry_run() {
+            tracing::info!("safe-search addresses changed; re-applying the website rules");
+            let (evs, _) = self.apply_network();
+            self.queue_events(evs);
+        }
+        complete
     }
 
     /// Keep what was reported about the degraded state (see `Reported`).
@@ -1995,7 +2060,11 @@ impl Agent {
         });
         //    With a DNS gap standing this is already known and said (the
         //    filter isn't running): not a second incident.
-        let dns_gap = self.standing_gaps.iter().any(|g| g.starts_with("dns_"));
+        //    (Safe search passed through is not a filter that isn't running.)
+        let dns_gap = self
+            .standing_gaps
+            .iter()
+            .any(|g| g.starts_with("dns_") && g != "dns_safesearch_unavailable");
         if let Some(domain) = probe_domain.filter(|d| !d.is_empty() && !dns_gap) {
             if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
                 let answered_routable = out.lines().any(|l| {
@@ -3598,6 +3667,9 @@ pub async fn run(ctx: Arc<AgentCtx>, cfg: AgentConfig) -> Result<()> {
     let client = agent.client.clone();
     let agent: Shared = Arc::new(tokio::sync::Mutex::new(agent));
     let tick = tokio::spawn(tick_loop(agent.clone()));
+    if !ctx.dry_run {
+        tokio::spawn(safesearch_loop(agent.clone()));
+    }
     // A code typed at the lock, or a switch to a stopped session, is answered
     // between ticks and whatever the network is doing.
     tokio::spawn(lock_loop(agent.clone(), lock_rx));
@@ -3673,6 +3745,40 @@ async fn retirement_confirmed(client: &ServerClient, first: &anyhow::Error) -> b
 async fn lock_loop(agent: Shared, mut rx: mpsc::Receiver<LockEvent>) {
     while let Some(ev) = rx.recv().await {
         agent.lock().await.on_lock_event(ev).await;
+    }
+}
+
+/// Keep the safe-search front ends' addresses current: looked up at start,
+/// hourly, a minute after a lookup that came back incomplete, and at once
+/// when the network (its default routes) or the upstream changes. The
+/// lookups run without holding the agent; one that changes what the
+/// resolver answers re-applies the network rules.
+async fn safesearch_loop(agent: Shared) {
+    let mut net: Option<String> = None;
+    let mut asked: Option<std::net::IpAddr> = None;
+    let mut due = Instant::now();
+    loop {
+        let upstream = agent.lock().await.safe_search_upstream;
+        let now_net = enforce::safesearch::network_fingerprint();
+        let net_changed = net.as_ref().is_some_and(|n| *n != now_net);
+        if net_changed {
+            tracing::info!("the network changed; looking the safe-search front ends up again");
+        }
+        net = Some(now_net);
+        if let Some(up) = upstream {
+            if net_changed || asked != Some(up) || Instant::now() >= due {
+                let round = enforce::safesearch::resolve(up, SAFESEARCH_LOOKUP).await;
+                let complete = agent.lock().await.adopt_safe_search(up, &round);
+                asked = Some(up);
+                due = Instant::now()
+                    + if complete {
+                        SAFESEARCH_REFRESH
+                    } else {
+                        SAFESEARCH_RETRY
+                    };
+            }
+        }
+        tokio::time::sleep(SAFESEARCH_POLL).await;
     }
 }
 
