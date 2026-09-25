@@ -21,8 +21,17 @@ import { AvatarRing } from "../components/AvatarRing";
 import { Button, buttonClass } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Mark } from "../components/Wordmark";
-import { useFamily, familyChanged, minutesLeft, minutesTotal, ringTarget, type FamilyChild } from "../lib/family";
-import { unlockedUntil } from "../lib/day";
+import {
+  useFamily,
+  familyChanged,
+  minutesLeft,
+  minutesTotal,
+  ringTarget,
+  stoppedBy,
+  type FamilyChild,
+  type StopKind,
+} from "../lib/family";
+import { unlockedUntil, whenLabel } from "../lib/day";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
@@ -53,6 +62,34 @@ function keepsOwnTime(c: FamilyChild): boolean {
   return c.self_managed === true || c.managed === false || c.age_bracket === "adult";
 }
 
+/** The card's headline for a stop: "Bedtime until 07:00", "Outside allowed
+ * hours until 15:00", "Time's up for today", "Paused" — on the computer's
+ * clock. */
+export function stopHeadline(c: FamilyChild, now = new Date()): string | null {
+  const kind = stoppedBy(c);
+  const until = c.rules?.resume_at ? whenLabel(c.rules.resume_at, now) : "";
+  switch (kind) {
+    case "limit":
+      return "Time's up for today";
+    case "bedtime":
+      return until ? `Bedtime until ${until}` : "Bedtime";
+    case "outside_hours":
+      return until ? `Outside allowed hours until ${until}` : "Outside allowed hours";
+    case "paused":
+      return "Paused";
+    default:
+      return null;
+  }
+}
+
+/** The chip beside the name for a stop. */
+const STOP_TAG: Record<StopKind, string> = {
+  limit: "Time's up",
+  bedtime: "Bedtime",
+  outside_hours: "Outside hours",
+  paused: "Paused",
+};
+
 /** Today's time, in one sentence. The number counts to its value. */
 function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
   const total = minutesTotal(child);
@@ -67,17 +104,21 @@ function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
       </p>
     );
   }
+  const stop = stopHeadline(child);
+  if (stop) {
+    // The reason they're stopped, then the time they really used — never the
+    // limit printed as "used". Before "no limit": bedtime stops a child who
+    // has no daily limit just the same.
+    return (
+      <p className="pc-time" data-tone="stop">
+        <b>{stop}</b> · {duration(child.used_minutes)} used
+      </p>
+    );
+  }
   if (total === null || left === null) {
     return (
       <p className="pc-time">
         <b className="num">{duration(shown)}</b> today · no limit set
-      </p>
-    );
-  }
-  if (left === 0) {
-    return (
-      <p className="pc-time" data-tone="stop">
-        <b>Time's up</b> for today · {duration(total)} used
       </p>
     );
   }
@@ -185,6 +226,7 @@ function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnReq
   // their limit is theirs.
   const left = minutesLeft(child);
   const target = keepsOwnTime(child) ? null : ringTarget(child.used_minutes, left);
+  const stop = keepsOwnTime(child) ? null : stoppedBy(child);
 
   return (
     <li className="pc card" data-paused={paused}>
@@ -208,8 +250,8 @@ function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnReq
           <span className="tag tag-warn">{pendingDev.locked ? "Resuming…" : "Pausing…"}</span>
         ) : paused ? (
           <span className="tag">Paused</span>
-        ) : left === 0 ? (
-          <span className="tag tag-stop">Time's up</span>
+        ) : stop ? (
+          <span className="tag tag-stop">{STOP_TAG[stop]}</span>
         ) : null}
       </div>
       <TimeLine child={child} paused={paused} />
@@ -402,6 +444,34 @@ function JustYou({ haveMine }: { haveMine: boolean }) {
   );
 }
 
+/** The three-second answer to "is everyone OK?" — each stop by its real
+ * reason: out of time, bedtime, outside their hours, paused. */
+export function familyVerdict(children: FamilyChild[]): string {
+  if (children.length === 0) return "It's just you here so far.";
+  const asking = children.filter((c) => c.pending_requests > 0);
+  const paused = children.filter((c) => (c.locked && c.devices.length > 0) || (!c.locked && stoppedBy(c) === "paused"));
+  const by = (kind: StopKind) =>
+    children.filter((c) => !c.locked && !keepsOwnTime(c) && stoppedBy(c) === kind);
+  const spent = by("limit");
+  const bedtime = by("bedtime");
+  const hours = by("outside_hours");
+  const parts: string[] = [];
+  if (paused.length) parts.push(paused.length === 1 ? `${paused[0].name} is paused.` : `${paused.length} people are paused.`);
+  if (spent.length) parts.push(spent.length === 1 ? `${spent[0].name} is out of time.` : `${spent.length} people are out of time.`);
+  if (bedtime.length)
+    parts.push(bedtime.length === 1 ? `It's bedtime for ${bedtime[0].name}.` : `It's bedtime for ${bedtime.length} people.`);
+  if (hours.length)
+    parts.push(
+      hours.length === 1
+        ? `${hours[0].name} is outside their allowed hours.`
+        : `${hours.length} people are outside their allowed hours.`,
+    );
+  if (!paused.length && !spent.length && !bedtime.length && !hours.length) parts.push("Everyone is within their time.");
+  if (asking.length)
+    parts.push(asking.length === 1 ? `${asking[0].name} asked for more.` : `${asking.length} people asked for more.`);
+  return parts.join(" ");
+}
+
 /** Waiting: the real layout drawn in outline, so nothing jumps when it lands. */
 function FamilyWaiting() {
   return (
@@ -451,19 +521,7 @@ export function Family() {
   const sorted = [...children].sort((a, b) => needsScore(a) - needsScore(b));
 
   // The three-second answer to "is everyone OK?".
-  const verdict = (): string => {
-    if (children.length === 0) return "It's just you here so far.";
-    const asking = children.filter((c) => c.pending_requests > 0);
-    const paused = children.filter((c) => c.locked && c.devices.length > 0);
-    const spent = children.filter((c) => !c.locked && minutesLeft(c) === 0);
-    const parts: string[] = [];
-    if (paused.length) parts.push(paused.length === 1 ? `${paused[0].name} is paused.` : `${paused.length} people are paused.`);
-    if (spent.length) parts.push(spent.length === 1 ? `${spent[0].name} is out of time.` : `${spent.length} people are out of time.`);
-    if (!paused.length && !spent.length) parts.push("Everyone is within their time.");
-    if (asking.length)
-      parts.push(asking.length === 1 ? `${asking[0].name} asked for more.` : `${asking.length} people asked for more.`);
-    return parts.join(" ");
-  };
+  const verdict = (): string => familyVerdict(children);
 
   const hasData = devices !== null;
 

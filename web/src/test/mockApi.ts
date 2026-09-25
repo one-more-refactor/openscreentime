@@ -51,6 +51,7 @@ export const apiCalls = {
   verify: [] as string[],
   codeStart: [] as string[],
   codeVerify: [] as string[],
+  link: [] as string[],
   register: [] as [string, string | undefined][],
   passkey: 0,
   unlockCode: [] as string[],
@@ -141,6 +142,7 @@ export function resetApiMock() {
   apiCalls.verify.length = 0;
   apiCalls.codeStart.length = 0;
   apiCalls.codeVerify.length = 0;
+  apiCalls.link.length = 0;
   apiCalls.register.length = 0;
   apiCalls.passkey = 0;
   apiCalls.unlockCode.length = 0;
@@ -154,6 +156,8 @@ export function resetApiMock() {
   apiCalls.events.length = 0;
   Object.assign(apiImpl, defaults);
 }
+
+const notInTests = () => Promise.reject(new ApiError("not_in_tests", "not mocked in tests", 501));
 
 mock.module("../api", () => ({
   ApiError,
@@ -187,7 +191,10 @@ mock.module("../api", () => ({
   auth: {
     logout: () => Promise.resolve(),
     voucher: () => Promise.resolve(),
-    link: () => Promise.resolve(),
+    link: (token: string) => {
+      apiCalls.link.push(token);
+      return Promise.resolve();
+    },
     register: (name: string, setupToken?: string) => {
       apiCalls.register.push([name, setupToken]);
       return Promise.resolve();
@@ -246,6 +253,19 @@ mock.module("../api", () => ({
   unblockMember: () => Promise.resolve(),
   approveEarnRequest: (id: string) => Promise.resolve({ id }),
   denyEarnRequest: (id: string) => Promise.resolve({ id }),
+  // Named imports of pages no test drives (the whole App is rendered in
+  // App.test.tsx, so each must exist); they answer that they're not here.
+  getOidcSetup: notInTests,
+  finishOidcSetup: notInTests,
+  addPasskey: notInTests,
+  deletePasskey: notInTests,
+  getTelegram: notInTests,
+  listDevices: notInTests,
+  listParentTokens: notInTests,
+  listPasskeys: notInTests,
+  pairTelegram: notInTests,
+  revokeParentToken: notInTests,
+  unpairTelegram: notInTests,
   // The person's own page.
   getMeToday: () => apiImpl.getMeToday(),
   getMeHistory: () => apiImpl.getMeHistory(),
@@ -266,6 +286,7 @@ export function resetUiMocks() {
 }
 
 mock.module("../lib/toast", () => ({
+  ToastProvider: ({ children }: { children: unknown }) => children,
   useToast: () => ({
     toast: (msg: string, tone?: string) => toasts.push({ msg, tone }),
   }),

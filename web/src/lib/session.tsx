@@ -12,7 +12,7 @@ import { useNavigate } from "react-router-dom";
 import type { Me } from "../types";
 import { auth, getMe, pkcePair, usingMock } from "../api";
 import { resetFamily } from "./family";
-import { takeFromFragment } from "./fragment";
+import { captureFragmentTokens, takeToken } from "./fragment";
 
 interface SessionState {
   me: Me | null;
@@ -35,6 +35,10 @@ interface SessionState {
 const Ctx = createContext<SessionState | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
+  // The first thing the app renders: one-time tokens leave the address bar
+  // here, before any route below can redirect and take the fragment with it
+  // (`/#setup=…` with no session is sent on to /login).
+  useState(captureFragmentTokens);
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
   const [mock, setMock] = useState(false);
@@ -42,6 +46,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // The code request in flight: its id, and the PKCE verifier that only this
   // tab holds. In memory only — a code typed into any other browser is useless.
   const pending = useRef<{ id: string; verifier: string } | null>(null);
+  // The one-time link's redemption, started once (below): was it a recovery?
+  const redemption = useRef<Promise<boolean> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -58,24 +64,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // One-time tokens in the fragment are redeemed BEFORE the first /api/me,
     // or the console flashes the sign-in page on a visit entitled to skip it.
-    // A stale or spent one simply fails, and the sign-in page appears.
-    void (async () => {
-      const voucher = takeFromFragment("v");
-      const link = takeFromFragment("signin");
-      let recovered = false;
-      try {
-        if (voucher) await auth.voucher(voucher);
-        if (link) {
-          await auth.link(link);
-          recovered = true;
+    // A stale or spent one simply fails, and the sign-in page appears. Once
+    // per page load: a later run of this effect (React's development
+    // double-run, a navigation) waits for that redemption instead of racing
+    // a token-less /api/me against it.
+    const first = redemption.current === null;
+    if (first) {
+      redemption.current = (async () => {
+        const voucher = takeToken("v");
+        const link = takeToken("signin");
+        try {
+          if (voucher) await auth.voucher(voucher);
+          if (link) {
+            await auth.link(link);
+            return true;
+          }
+        } catch {
+          /* sign in the ordinary way */
         }
-      } catch {
-        /* sign in the ordinary way */
-      }
+        return false;
+      })();
+    }
+    void redemption.current?.then(async (recovered) => {
       await refresh();
       // A recovery link's whole point: add a new passkey, now.
-      if (recovered) navigate("/settings", { replace: true, state: { recovered: true } });
-    })();
+      if (first && recovered) navigate("/settings", { replace: true, state: { recovered: true } });
+    });
   }, [refresh, navigate]);
 
   const createHousehold = useCallback(

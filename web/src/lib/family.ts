@@ -13,14 +13,17 @@
 // fetch, one truth, no matter how many components are watching.
 //
 // While anyone is watching, it refreshes itself quietly — every 20 seconds,
-// every 4 while a pause is still on its way to a computer — so a new request
-// for time appears and "Pausing…" becomes "Paused" without navigating. A
+// every 4 while a pause is still on its way to a computer, every 5 while
+// someone's screen stops within five minutes — so a new request for time
+// appears, "Pausing…" becomes "Paused" and "1 min left" becomes "Time's up"
+// without navigating (the computer reports its minutes every 30 s). A
 // hidden tab doesn't poll; coming back to it refreshes at once. A failed
 // refresh keeps the last good snapshot on screen.
 // ============================================================================
 import { useEffect, useState } from "react";
 import * as api from "../api";
 import type { Device, EarnRequest, FamilyChild, Profile } from "../types";
+import { stopIsNear } from "./day";
 
 export type { FamilyChild } from "../types";
 
@@ -31,6 +34,19 @@ export function minutesLeft(c: FamilyChild): number | null {
   if (c.limit_minutes === null) return null;
   if (typeof c.left_minutes === "number") return Math.max(0, c.left_minutes);
   return Math.max(0, c.limit_minutes + c.earned_minutes - c.used_minutes);
+}
+
+/** Why someone's screen is stopped right now. */
+export type StopKind = "limit" | "bedtime" | "outside_hours" | "paused";
+
+/** The verdict's own reason for a stop — so a bedtime never reads as "Time's
+ * up" — or null while they may use the screen. */
+export function stoppedBy(c: FamilyChild): StopKind | null {
+  const r = c.rules;
+  if (r && !r.allowed) return r.reason ?? "limit";
+  // An older server without a verdict: out of minutes is all it can say.
+  if (!r && minutesLeft(c) === 0) return "limit";
+  return null;
 }
 
 /** Total minutes available today: the limit plus anything earned on top. */
@@ -79,6 +95,17 @@ let inflight: Promise<void> | null = null;
 const POLL_MS = 20_000;
 /** While a pause or resume is still on its way to a computer. */
 const PENDING_POLL_MS = 4_000;
+/** While someone's screen stops within five minutes: each minute the computer
+ * reports shows here within seconds, not up to twenty. */
+const NEAR_STOP_POLL_MS = 5_000;
+
+/** How long until the next quiet refresh of what's on screen. */
+export function pollDelay(s: Pick<FamilyState, "devices" | "children">, now = Date.now()): number {
+  if (s.devices?.some((d) => d.lock_pending)) return PENDING_POLL_MS;
+  if (s.children.some((c) => !c.locked && stopIsNear(c.rules, now))) return NEAR_STOP_POLL_MS;
+  return POLL_MS;
+}
+
 let timer: ReturnType<typeof setTimeout> | null = null;
 
 function emit(next: Partial<FamilyState>) {
@@ -128,15 +155,11 @@ function schedule() {
   if (timer) clearTimeout(timer);
   timer = null;
   if (listeners.size === 0) return;
-  const pending = state.devices?.some((d) => d.lock_pending) ?? false;
-  timer = setTimeout(
-    () => {
-      timer = null;
-      if (hidden()) return; // picked up again on visibilitychange
-      void load(true);
-    },
-    pending ? PENDING_POLL_MS : POLL_MS,
-  );
+  timer = setTimeout(() => {
+    timer = null;
+    if (hidden()) return; // picked up again on visibilitychange
+    void load(true);
+  }, pollDelay(state));
 }
 
 if (typeof document !== "undefined") {

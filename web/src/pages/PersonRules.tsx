@@ -20,6 +20,7 @@ import { EMPTY_BLOCKS, type AppBlocks, type Catalog, type Policy, type TimeWindo
 import { useAsync } from "../lib/useAsync";
 import { bedtimeProblem, describeWindow, windowProblem } from "../lib/schedule";
 import { normalizeSite } from "../lib/myRules";
+import { notBlockedSentence } from "../lib/degraded";
 import { duration } from "../lib/format";
 import { FluentSlider } from "../components/FluentSlider";
 import { AppGlyph } from "../components/AppGlyph";
@@ -266,8 +267,20 @@ function Hours({ pol, busy, save }: { pol: Policy; busy: boolean; save: (p: Poli
   );
 }
 
-/** One blocklist: categories, apps, sites by name. Everything else works. */
-function Blocked({ pol, busy, save }: { pol: Policy; busy: boolean; save: (p: Policy, done: string) => void }) {
+/** One blocklist: categories, apps, sites by name. Everything else works.
+ * `notBlocked`: a computer of theirs can't filter websites, said right here
+ * instead of promising a block it can't keep. */
+function Blocked({
+  pol,
+  busy,
+  save,
+  notBlocked,
+}: {
+  pol: Policy;
+  busy: boolean;
+  save: (p: Policy, done: string) => void;
+  notBlocked: string | null;
+}) {
   const catalog = useAsync<Catalog>(api.getCatalog, []);
   const blocks: AppBlocks = pol.blocks ?? EMPTY_BLOCKS;
   const [showAll, setShowAll] = useState(false);
@@ -313,8 +326,21 @@ function Blocked({ pol, busy, save }: { pol: Policy; busy: boolean; save: (p: Po
   const visible = showAll ? sorted : sorted.slice(0, FOLD);
 
   return (
-    <Section title="Blocked" sub="Everything works unless it's here — and what's here is really blocked, on every computer they use.">
+    <Section
+      title="Blocked"
+      sub={
+        notBlocked
+          ? "Everything works unless it's here."
+          : "Everything works unless it's here — and what's here is really blocked, on every computer they use."
+      }
+    >
       <div className="card card-pad pp-blocked">
+        {notBlocked && (
+          <p className="banner banner-warn pp-noblock" role="status">
+            <Icon name="warning" size={18} />
+            <span className="banner-main">{notBlocked}</span>
+          </p>
+        )}
         {catalog.error && <p className="hint" data-error="true">Couldn't load the list of apps: {catalog.error}</p>}
 
         {cats.length > 0 && (
@@ -651,12 +677,16 @@ export function PersonRules({ ctx }: { ctx: PersonCtx }) {
   const pol = profile.policy;
   const save = (next: Policy, done: string) =>
     void change(`${done} It reaches their computer within a minute.`, () => api.updateProfile(profile.id, next));
+  // What their computers really report, not what the rules ask for.
+  const notBlocked = notBlockedSentence(
+    ctx.devices.map((d) => ({ name: d.name, status: d.full?.status ?? d.status, last_state: d.full?.last_state })),
+  );
 
   return (
     <>
       <DailyLimit pol={pol} busy={busy} save={save} />
       <Hours pol={pol} busy={busy} save={save} />
-      <Blocked pol={pol} busy={busy} save={save} />
+      <Blocked pol={pol} busy={busy} save={save} notBlocked={notBlocked} />
       <Earning pol={pol} busy={busy} save={save} />
       <Remove ctx={ctx} />
     </>
