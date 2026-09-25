@@ -73,7 +73,13 @@ describe("a computer that can't apply all of its rules", () => {
 
 describe("what is not an attempt to get around the rules", () => {
   test("machinery an older agent sent as tamper", () => {
-    for (const kind of ["nft_probe_failed", "nm_disconnect", "resolv_conf_reassert_failed", "dns_no_local_resolver"]) {
+    for (const kind of [
+      "nft_probe_failed",
+      "nm_disconnect",
+      "resolv_conf_reassert_failed",
+      "dns_no_local_resolver",
+      "agent_updated",
+    ]) {
       expect(isNotAnAttempt(event("tamper", kind))).toBe(true);
     }
   });
