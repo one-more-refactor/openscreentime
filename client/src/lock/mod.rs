@@ -1080,6 +1080,9 @@ impl Host for SystemHost {
                         Err(e) => tracing::warn!("could not unlock session {id}: {e}"),
                     }
                     unlocked += 1;
+                    // The desktop takes a moment to lower its hint.
+                    std::thread::sleep(Duration::from_millis(1500));
+                    continue;
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
