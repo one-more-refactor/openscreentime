@@ -358,6 +358,89 @@ fn local_resolver_running(exec: &Exec) -> bool {
     exec.probe("systemctl", &["is-active", "dnsmasq"]).trim() == "active"
 }
 
+/// The name the agent's block self-check resolves (`runner::probe_enforcement`).
+/// Every ruleset answers it with the block address, so resolving it through
+/// the system resolver proves this computer's rules are what answers —
+/// without ever looking up a real blocked site (that lookup once read as the
+/// child's browsing: "123movies.to is blocked on this computer" to someone
+/// who never went there, "123movies.to 37×" to their parent). Attribution
+/// and the blocked-site notice never count it.
+///
+/// `.internal` (reserved for private use, never delegated), not `.invalid`:
+/// systemd-resolved answers `.invalid` itself and never asks dnsmasq, so a
+/// computer whose resolved forwards to the rules would fail its own test.
+pub const SELFTEST_NAME: &str = "selftest.openscreentime.internal";
+
+/// Is `name` the self-check's name (see [`SELFTEST_NAME`])?
+pub fn is_selftest(name: &str) -> bool {
+    name.trim_end_matches('.')
+        .eq_ignore_ascii_case(SELFTEST_NAME)
+}
+
+/// A domain safe to interpolate into a resolver directive: rejects anything
+/// with a control char, slash, whitespace or a config-directive shape.
+/// Wildcard and leading-dot forms (`*.example.org`, `.example.org`) mean the
+/// domain and everything under it — what dnsmasq's `address=/d/` does anyway.
+fn clean_domain(raw: &str) -> Option<String> {
+    let d = raw
+        .trim_start_matches("*.")
+        .trim_start_matches('*')
+        .trim_start_matches('.')
+        .trim();
+    if d.is_empty()
+        || !d
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+    {
+        return None;
+    }
+    Some(d.to_string())
+}
+
+/// The domains this computer's own rules answer as blocked — the policy's
+/// blocklist, the app / category / focus-hours sinkhole, Tor's when Tor is
+/// blocked: what [`render_rules`] writes as `address=/d/0.0.0.0`. Each one
+/// blocks itself and every name under it. What the family resolver upstream
+/// happens to filter is not in here: that isn't this computer's rule, and
+/// it isn't ours to name ("mozilla.org is blocked" was Firefox's background
+/// `ads.mozilla.org`, filtered upstream — mozilla.org itself worked).
+pub fn block_rules(
+    dns: &DnsPolicy,
+    lockdown: &NetworkLockdown,
+    sinkhole: &[String],
+) -> Vec<String> {
+    let mut rules: Vec<String> = dns
+        .blocklist
+        .iter()
+        .chain(sinkhole)
+        .filter_map(|d| clean_domain(d))
+        .map(|d| d.to_ascii_lowercase())
+        .collect();
+    if lockdown.block_tor {
+        rules.push("torproject.org".to_string());
+    }
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
+/// The rule in `rules` ([`block_rules`]) that blocks `name` — the most
+/// specific one: `www.example.org` under the rule `example.org` is
+/// `example.org`. A name no rule covers is `None`.
+pub fn blocking_rule<'a>(name: &str, rules: &'a [String]) -> Option<&'a str> {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    rules
+        .iter()
+        .filter(|r| {
+            name == **r
+                || name
+                    .strip_suffix(r.as_str())
+                    .is_some_and(|head| head.ends_with('.'))
+        })
+        .max_by_key(|r| r.len())
+        .map(String::as_str)
+}
+
 /// The family resolver a malformed upstream falls back to (malware + adult).
 const FALLBACK_UPSTREAM: &str = "1.1.1.3";
 
@@ -421,25 +504,8 @@ fn render_rules(
         );
         FALLBACK_UPSTREAM
     };
-    // A domain safe to interpolate into a resolver directive — same discipline
-    // as the catalog sinkhole. Rejects anything with a control char, slash,
-    // whitespace or a config-directive shape.
-    let clean_domain = |raw: &str| -> Option<String> {
-        let d = raw
-            .trim_start_matches("*.")
-            .trim_start_matches('*')
-            .trim_start_matches('.')
-            .trim();
-        if d.is_empty()
-            || !d
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
-        {
-            return None;
-        }
-        Some(d.to_string())
-    };
-
+    // Every domain interpolated below goes through `clean_domain` — the same
+    // discipline as the catalog sinkhole.
     if dns.is_default_deny() && !dns.allows_everything() {
         // Zero-trust: forward ONLY allowlisted domains to the filtered upstream.
         // dnsmasq with no-resolv and no matching server returns NXDOMAIN/REFUSED
@@ -479,6 +545,13 @@ fn render_rules(
             }
         }
     }
+
+    // The block self-check's own name ([`SELFTEST_NAME`]): answered as
+    // blocked by every ruleset, default-deny's catch-all included.
+    out.push_str("# the agent's own block self-check (no one visits this name)\n");
+    out.push_str(&format!(
+        "address=/{SELFTEST_NAME}/0.0.0.0\naddress=/{SELFTEST_NAME}/::\n"
+    ));
 
     if !sinkhole.is_empty() {
         out.push_str("# app & category blocks (catalog)\n");
@@ -1115,6 +1188,97 @@ mod tests {
         let conf = render_dnsmasq(&dns, &lockdown, None, &[], &SafeSearch::default());
         assert!(conf.contains("address=/onion/0.0.0.0"));
         assert!(conf.contains("address=/torproject.org/0.0.0.0"));
+    }
+
+    /// Acceptance round 5: the block self-check resolved the first blocked
+    /// catalog domain every minute, so a child was told "123movies.to is
+    /// blocked on this computer" and her parent saw "123movies.to 37×". The
+    /// check has a name of its own now, answered as blocked by every ruleset
+    /// (default-deny's catch-all included) — with or without any block.
+    #[test]
+    fn every_ruleset_answers_the_self_check_name_as_blocked() {
+        let open = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: false,
+            upstream: "1.1.1.3".into(),
+        };
+        let deny = DnsPolicy {
+            mode: "default_deny".into(),
+            allowlist: vec!["wikipedia.org".into()],
+            ..open.clone()
+        };
+        for dns in [&open, &deny] {
+            let conf = render_dnsmasq(
+                dns,
+                &NetworkLockdown::default(),
+                None,
+                &[],
+                &SafeSearch::default(),
+            );
+            assert!(
+                conf.contains(&format!(
+                    "address=/{SELFTEST_NAME}/0.0.0.0\naddress=/{SELFTEST_NAME}/::\n"
+                )),
+                "{conf}"
+            );
+        }
+        assert!(is_selftest("selftest.openscreentime.internal."));
+        assert!(is_selftest("SELFTEST.openscreentime.internal"));
+        assert!(!is_selftest("openscreentime.internal"));
+        // …and it is never one of this computer's block rules (the notice
+        // names only those).
+        let rules = block_rules(&open, &NetworkLockdown::default(), &[]);
+        assert!(blocking_rule(SELFTEST_NAME, &rules).is_none());
+    }
+
+    /// What "blocked on this computer" may name: this computer's own rules
+    /// (blocklist, catalog sinkhole, Tor), matched to the rule itself — not a
+    /// name the family resolver filters, not the registrable domain around a
+    /// blocked subdomain.
+    #[test]
+    fn block_rules_name_the_rule_that_blocks() {
+        let dns = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec!["*.Example.org".into(), "ads.news.test".into()],
+            safe_search: false,
+            upstream: "1.1.1.3".into(),
+        };
+        let lockdown = NetworkLockdown {
+            block_tor: true,
+            ..Default::default()
+        };
+        let sinkhole = vec!["bet365.com".to_string(), "evil.com\nserver=1".to_string()];
+        let rules = block_rules(&dns, &lockdown, &sinkhole);
+        assert_eq!(
+            rules,
+            vec![
+                "ads.news.test",
+                "bet365.com",
+                "example.org",
+                "torproject.org"
+            ]
+        );
+        assert_eq!(blocking_rule("www.bet365.com", &rules), Some("bet365.com"));
+        assert_eq!(blocking_rule("bet365.com.", &rules), Some("bet365.com"));
+        assert_eq!(
+            blocking_rule("WWW.EXAMPLE.ORG", &rules),
+            Some("example.org")
+        );
+        assert_eq!(
+            blocking_rule("x.ads.news.test", &rules),
+            Some("ads.news.test")
+        );
+        // The rest of news.test isn't blocked; neither is a look-alike.
+        assert_eq!(blocking_rule("news.test", &rules), None);
+        assert_eq!(blocking_rule("notbet365.com", &rules), None);
+        // Filtered upstream (Firefox's ads.mozilla.org), not a rule here.
+        assert_eq!(blocking_rule("ads.mozilla.org", &rules), None);
+        // Tor only while Tor is blocked.
+        let rules = block_rules(&dns, &NetworkLockdown::default(), &[]);
+        assert_eq!(blocking_rule("www.torproject.org", &rules), None);
     }
 
     /// The `kind` strings land in stored event payloads and in whatever the
