@@ -122,7 +122,12 @@ impl Ui {
                         self.draw();
                         self.message = self.ask_runner(Request::Ask);
                     }
-                    b'g' | b'G' if matches!(face.snooze, Snooze::Ready { .. }) => {
+                    // During the wait too: the agent decides, and an early
+                    // press hears how long is left — never nothing
+                    // (acceptance round 4: a G at "In 1 s" went nowhere).
+                    b'g' | b'G'
+                        if matches!(face.snooze, Snooze::Ready { .. } | Snooze::Wait { .. }) =>
+                    {
                         self.message = Some(Outcome::yes("One moment..."));
                         self.draw();
                         self.message = self.ask_runner(Request::Snooze);
@@ -165,6 +170,7 @@ impl Ui {
 
     fn draw(&mut self) {
         let face = current_face(&self.shared).unwrap_or_else(Face::waiting);
+        let face = counted(face, super::now_ms());
         let (cols, rows) = size(&self.tty);
         let screen = render(&face, &self.typed, self.message.as_ref(), cols, rows);
         if screen == self.drawn {
@@ -200,6 +206,21 @@ fn size(f: &std::fs::File) -> (usize, usize) {
     } else {
         (80, 25)
     }
+}
+
+/// The face as it stands at `now_ms`: the snooze's wait counts down on
+/// screen between the agent's faces (they come every tick, not every
+/// second), and says "Press G" the moment the agent agrees.
+fn counted(mut face: Face, now_ms: i64) -> Face {
+    face.snooze = match face.snooze.wait_left(now_ms) {
+        Some(0) => Snooze::Ready { left: 0 },
+        Some(secs) => Snooze::Wait {
+            secs,
+            opens_at_ms: None,
+        },
+        None => face.snooze,
+    };
+    face
 }
 
 /// Console fonts are not to be trusted beyond ASCII.
@@ -309,7 +330,7 @@ pub fn render(
     }
     match &face.snooze {
         Snooze::Hidden => {}
-        Snooze::Wait { secs } => lines.push((
+        Snooze::Wait { secs, .. } => lines.push((
             format!("In {secs} s you can give yourself 15 more minutes."),
             "\x1b[2m",
         )),
@@ -392,12 +413,27 @@ mod tests {
         // The same words as the graphical lock, for the self-set snooze too.
         let adult = Face {
             ask: AskState::Hidden,
-            snooze: Snooze::Wait { secs: 42 },
+            snooze: Snooze::Wait {
+                secs: 42,
+                opens_at_ms: Some(1_042_000),
+            },
             ..face.clone()
         };
         let s = render(&adult, "", None, 80, 25);
         assert!(s.contains("In 42 s you can give yourself 15 more minutes."));
         assert!(!s.contains("Press A"));
+        // Acceptance round 4: "In 1 s" stood still until the next face. The
+        // wait counts down on screen between faces, and at 0 offers G.
+        let s = render(&counted(adult.clone(), 1_040_000), "", None, 80, 25);
+        assert!(s.contains("In 2 s you can give yourself 15 more minutes."));
+        let s = render(&counted(adult.clone(), 1_041_500), "", None, 80, 25);
+        assert!(s.contains("In 1 s you can"), "never ready early");
+        let s = render(&counted(adult.clone(), 1_042_000), "", None, 80, 25);
+        assert!(s.contains("Press G to give yourself 15 more minutes."));
+        // An early G hears how long, in the same words.
+        let early = Outcome::no(&super::super::too_soon_words(2));
+        let s = render(&counted(adult.clone(), 1_040_000), "", Some(&early), 80, 25);
+        assert!(s.contains("Not yet - in 2 s you can give yourself 15 more minutes."));
         let none = Face {
             code: CodeState::Unavailable,
             help: super::super::HELP_NO_CODE.into(),
