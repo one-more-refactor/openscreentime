@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { useFamily, minutesLeft, minutesTotal } from "../lib/family";
+import { useFamily, minutesLeft, ringTarget } from "../lib/family";
 import type { FamilyChild } from "../types";
 import { Wordmark } from "../components/Wordmark";
 import { Icon, type IconName } from "../components/Icon";
@@ -34,7 +34,8 @@ const NAV: NavEntry[] = [
 /** One person in the jump list: their ring, their name, their time left. */
 function TodayRow({ child, onNavigate }: { child: FamilyChild; onNavigate?: () => void }) {
   const left = minutesLeft(child);
-  const total = minutesTotal(child);
+  // The ring fills toward used + left — the same number, an unlock's time included.
+  const total = ringTarget(child.used_minutes, left);
   const paused = child.locked && child.devices.length > 0;
   // An adult keeping their own time: their limit is theirs, not the rail's.
   const own = child.self_managed === true || child.managed === false || child.age_bracket === "adult";

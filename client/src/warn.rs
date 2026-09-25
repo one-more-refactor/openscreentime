@@ -31,9 +31,30 @@ pub fn parse_reason(id: &str) -> Option<StopReason> {
 pub struct WarnState {
     reason: Option<StopReason>,
     fired: Vec<u32>,
+    /// When the stop last announced lands (unix seconds).
+    announced_at: Option<i64>,
 }
 
 impl WarnState {
+    /// [`observe`](Self::observe) a stop landing at `at` (unix seconds). A
+    /// warning says *when* ("ends at 23:37"): if the stop has since moved to
+    /// another minute (an idle spell isn't billed, so a limit slides later;
+    /// a changed rule moves any stop), what was said is no longer true, and
+    /// the warning due now is said again with the real time.
+    pub fn observe_stop(&mut self, reason: StopReason, secs_left: i64, at: i64) -> Option<u32> {
+        if let Some(prev) = self.announced_at {
+            let moved = at.div_euclid(60) != prev.div_euclid(60) && (at - prev).abs() >= 30;
+            if moved && self.reason == Some(reason) {
+                self.fired.clear();
+            }
+        }
+        let due = self.observe(reason, secs_left);
+        if due.is_some() {
+            self.announced_at = Some(at);
+        }
+        due
+    }
+
     /// Feed the seconds left before the stop; returns the threshold to
     /// announce now, if one is due. One notice per crossing: someone who logs
     /// in with 4 minutes left hears about it once, not "15" then "5".
@@ -68,6 +89,7 @@ impl WarnState {
     pub fn clear(&mut self) {
         self.reason = None;
         self.fired.clear();
+        self.announced_at = None;
     }
 }
 
@@ -189,6 +211,32 @@ mod tests {
         assert_eq!(st.observe(StopReason::Limit, 15 * 60), Some(15));
         // A different stop coming up starts fresh.
         assert_eq!(st.observe(StopReason::Bedtime, 14 * 60), Some(15));
+    }
+
+    /// Acceptance, step 4: "5 minutes left — ends at 23:37", then the stop
+    /// came at 23:38:51. A stop that moved to another minute is announced
+    /// again, with the time it will really land; a few seconds of jitter
+    /// is not a move.
+    #[test]
+    fn a_stop_that_moved_is_announced_again_with_its_real_time() {
+        let t0 = at(23, 37).timestamp();
+        let mut st = WarnState::default();
+        assert_eq!(st.observe_stop(StopReason::Limit, 290, t0), Some(5));
+        // Still the same moment, ticking down: nothing new to say.
+        assert_eq!(st.observe_stop(StopReason::Limit, 250, t0 + 2), None);
+        // Nobody used it for a minute and a half: the stop is now 23:38:30.
+        let moved = t0 + 90;
+        let w = words(StopReason::Limit, 250, Some(at(23, 38)));
+        assert_eq!(st.observe_stop(StopReason::Limit, 250, moved), Some(5));
+        assert!(w.body.contains("23:38"));
+        // …and then counts down to it, once per threshold, as before.
+        assert_eq!(st.observe_stop(StopReason::Limit, 200, moved), None);
+        assert_eq!(st.observe_stop(StopReason::Limit, 55, moved + 1), Some(1));
+        // Jitter across a minute boundary within seconds is not a move.
+        let mut st = WarnState::default();
+        let edge = at(21, 0).timestamp() - 2; // 20:59:58
+        assert_eq!(st.observe_stop(StopReason::Bedtime, 280, edge), Some(5));
+        assert_eq!(st.observe_stop(StopReason::Bedtime, 270, edge + 4), None);
     }
 
     #[test]

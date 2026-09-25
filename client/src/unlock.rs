@@ -111,17 +111,12 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     // legacy table goes too: an agent upgraded from the Sentinel name can have
     // left one loaded, and half a teardown is worse than none — the user would
     // still be firewalled by rules nothing on the box admits to owning.
-    for table in [
-        enforce::firewall::NFT_TABLE,
-        enforce::firewall::LEGACY_NFT_TABLE,
-    ] {
-        if let Err(e) = exec.run("nft", &["delete", "table", "inet", table]) {
-            tracing::debug!("nft table {table} delete (probably already absent): {e}");
-        }
-    }
+    enforce::firewall::teardown(exec);
 
-    // 2) Un-pin resolv.conf so the host can use whatever resolver it likes.
-    let _ = exec.run("chattr", &["-i", "/etc/resolv.conf"]);
+    // 2) Un-pin resolv.conf and give the computer its own DNS back — BEFORE
+    // stopping the resolver: a pin left pointing at a stopped dnsmasq is a
+    // computer with no DNS at all for the whole unlock window.
+    enforce::dns::unpin_resolv_conf(exec);
     let _ = exec.run("systemctl", &["stop", "dnsmasq"]);
 
     // 3) Un-freeze every login user (cgroup freezer), regardless of which users

@@ -24,8 +24,9 @@ import type { Device, EarnRequest, FamilyChild, Profile } from "../types";
 
 export type { FamilyChild } from "../types";
 
-/** The day's budget left — the server's number when it sends one (computed
- *  exactly as the device does, in seconds), else limit + earned − used. */
+/** Time left — the server's number: minutes until their screen stops, the
+ *  same verdict their computer shows (an unlock code's or a grant's time
+ *  included). Without one (an old server), limit + earned − used. */
 export function minutesLeft(c: FamilyChild): number | null {
   if (c.limit_minutes === null) return null;
   if (typeof c.left_minutes === "number") return Math.max(0, c.left_minutes);
@@ -36,6 +37,13 @@ export function minutesLeft(c: FamilyChild): number | null {
 export function minutesTotal(c: FamilyChild): number | null {
   if (c.limit_minutes === null) return null;
   return c.limit_minutes + c.earned_minutes;
+}
+
+/** What the ring fills toward: time used plus time left — so the ring and the
+ *  number agree, and an override running past the limit is time, not a full
+ *  red ring. Null = no limit (the empty track). */
+export function ringTarget(used: number, left: number | null): number | null {
+  return left === null ? null : used + left;
 }
 
 export interface FamilyState {

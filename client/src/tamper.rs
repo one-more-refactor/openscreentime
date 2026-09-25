@@ -10,7 +10,7 @@
 
 use crate::config::HEARTBEAT_FILE;
 use crate::enforce::{dns, firewall};
-use crate::protocol::{Event, EV_TAMPER, SEV_CRITICAL, SEV_WARN};
+use crate::protocol::{Event, EV_ENFORCEMENT_DEGRADED, EV_TAMPER, SEV_CRITICAL, SEV_WARN};
 use crate::util::Exec;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -172,34 +172,55 @@ pub fn apply_level3_tty_lockdown(exec: &Exec) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Re-assert network enforcement if it drifted. Returns any tamper events to emit.
-pub fn reassert_all(exec: &Exec) -> Vec<Event> {
+/// Re-assert network enforcement if it drifted. Returns what it saw this
+/// tick — every tick, undeduplicated: the caller reports each incident once
+/// ([`Incidents`]) and feeds the raw kinds to the [`TamperMonitor`].
+///
+/// Only what someone did is `tamper`. What this computer can't do — a tool
+/// that isn't installed, a resolver that isn't running, a check that could
+/// not run — is `enforcement_degraded`: a setup to fix, never an accusation.
+///
+/// `firewall_loaded`: the last network apply loaded our nft table. When it
+/// could not (nftables missing, ruleset refused), a missing table is that
+/// known gap, not a flush — and never a reason to lock the computer down.
+pub fn reassert_all(exec: &Exec, firewall_loaded: bool) -> Vec<Event> {
     let mut events = Vec::new();
     match dns::reassert(exec) {
-        Ok((drifted, gaps)) => {
-            if drifted {
-                events.push(tamper_event(
-                    "resolv_conf_drift",
-                    SEV_WARN,
-                    "resolv.conf was changed; re-pinned to local resolver",
-                ));
-            }
+        Ok(dns::Reassert::InForce) => {}
+        Ok(dns::Reassert::Repinned(gaps)) => {
+            events.push(tamper_event(
+                "resolv_conf_drift",
+                SEV_WARN,
+                "resolv.conf was changed; re-pinned to local resolver",
+            ));
             // A re-pin that could not be locked down is not a recovery — the
-            // next edit sticks just as easily. Say so, every time.
+            // next edit sticks just as easily.
             for gap in gaps {
-                events.push(tamper_event(gap.kind(), SEV_CRITICAL, gap.explain()));
+                events.push(degraded_event(gap.kind(), SEV_CRITICAL, gap.explain()));
             }
         }
+        // Never pinned to a resolver that isn't running: the computer keeps
+        // its own DNS. Taking an earlier pin off is worth saying once.
+        Ok(dns::Reassert::NoResolver { unpinned: true }) => events.push(degraded_event(
+            KIND_RESOLVER_STOPPED,
+            SEV_CRITICAL,
+            "the local resolver stopped, so resolv.conf was un-pinned and this \
+             computer uses its own DNS: websites are not filtered until dnsmasq \
+             runs again",
+        )),
+        Ok(dns::Reassert::NoResolver { unpinned: false }) => {}
         Err(e) => {
             tracing::error!("resolv reassert failed: {e}");
-            events.push(tamper_event(
+            events.push(degraded_event(
                 "resolv_conf_reassert_failed",
                 SEV_CRITICAL,
                 "could not re-pin resolv.conf; DNS enforcement may be off",
             ));
         }
     }
-    if !exec.dry_run() {
+    // No nft here is the `firewall_not_installed` gap the apply already
+    // reported — a missing package, not a flushed table.
+    if exec.observes() && exec.has("nft") && firewall_loaded {
         match firewall::table_missing(exec) {
             Some(true) => events.push(tamper_event(
                 "nft_flush",
@@ -211,7 +232,7 @@ pub fn reassert_all(exec: &Exec) -> Vec<Event> {
             // monitor escalates to a device lockdown, so it must only ever be
             // fed a verified observation — a spawn failure gets its own,
             // never-escalating kind and is retried next tick.
-            None => events.push(tamper_event(
+            None => events.push(degraded_event(
                 "nft_probe_failed",
                 SEV_WARN,
                 "could not run nft to verify the firewall table; will retry",
@@ -219,6 +240,67 @@ pub fn reassert_all(exec: &Exec) -> Vec<Event> {
         }
     }
     events
+}
+
+/// The local resolver stopped under our pin, which was taken off.
+pub const KIND_RESOLVER_STOPPED: &str = "dns_resolver_stopped";
+
+fn degraded_event(kind: &str, severity: &str, message: &str) -> Event {
+    Event::new(
+        EV_ENFORCEMENT_DEGRADED,
+        severity,
+        json!({ "kind": kind, "message": message }),
+    )
+}
+
+/// How long a signal that went away and came back stays quiet.
+const REPEAT_AFTER: Duration = Duration::from_secs(3600);
+
+/// Reports each incident once. A signal seen on consecutive ticks is one
+/// incident, reported when it starts; it ends on the first tick without it.
+/// One that comes back within [`REPEAT_AFTER`] of its last report stays quiet
+/// too, so a flapping check is not a message every other tick. Keyed on
+/// (event type, kind). What a tick saw still reaches the [`TamperMonitor`]
+/// raw — this only decides what the console and the phone are told.
+#[derive(Debug, Default)]
+pub struct Incidents {
+    open: HashSet<(String, String)>,
+    reported: HashMap<(String, String), Instant>,
+}
+
+impl Incidents {
+    /// Of one tick's observations, the ones worth reporting.
+    pub fn report(&mut self, observed: Vec<Event>) -> Vec<Event> {
+        self.report_at(observed, Instant::now())
+    }
+
+    fn report_at(&mut self, observed: Vec<Event>, now: Instant) -> Vec<Event> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for ev in observed {
+            let kind = ev
+                .payload
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let key = (ev.ev_type.clone(), kind);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let quiet = self.open.contains(&key)
+                || self
+                    .reported
+                    .get(&key)
+                    .is_some_and(|t| now.duration_since(*t) < REPEAT_AFTER);
+            if !quiet {
+                self.reported.insert(key, now);
+                out.push(ev);
+            }
+        }
+        self.open = seen;
+        out
+    }
 }
 
 /// Guard against NetworkManager disconnect of a managed connection. Skeleton:
@@ -238,8 +320,15 @@ pub fn local_network_up(exec: &Exec) -> bool {
 }
 
 pub fn nm_guard_probe(exec: &Exec) -> Option<Event> {
+    if !exec.has("nmcli") {
+        return None;
+    }
     let state = exec.probe("nmcli", &["-t", "-f", "STATE", "general"]);
-    if state.trim() == "disconnected" {
+    // NetworkManager says "disconnected" whenever it has no connected device
+    // of its own — also on a computer whose network it doesn't run at all
+    // (systemd-networkd, ifupdown, a cloud image). A default route means this
+    // computer is online anyway: nothing was disconnected.
+    if state.trim() == "disconnected" && !local_network_up(exec) {
         // Re-assert connectivity best-effort.
         let _ = exec.run("nmcli", &["networking", "on"]);
         return Some(tamper_event(
@@ -514,6 +603,109 @@ mod tests {
         let mut m = TamperMonitor::new();
         assert!(m.observe(&["nft_flush"]).is_empty());
         assert!(m.observe(&["nft_flush"]).is_empty());
+    }
+
+    fn kinds(evs: &[Event]) -> Vec<(String, String)> {
+        evs.iter()
+            .map(|e| {
+                (
+                    e.ev_type.clone(),
+                    e.payload["kind"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// A stock Debian desktop: no dnsmasq, no nftables. That is a setup to
+    /// report once (the network apply does, as `enforcement_degraded`) —
+    /// never a tamper event, and never one every ten seconds.
+    #[test]
+    fn missing_tools_are_never_tamper() {
+        let exec = crate::util::Exec::simulated(
+            &["nft", "dnsmasq"],
+            &[("systemctl is-active dnsmasq", "inactive\n")],
+        );
+        for _ in 0..60 {
+            let evs = reassert_all(&exec, false);
+            assert!(evs.is_empty(), "{:?}", kinds(&evs));
+        }
+        // …and resolv.conf was never pinned to a resolver that isn't there.
+        assert!(
+            !exec
+                .log()
+                .iter()
+                .any(|l| l.starts_with("write /etc/resolv.conf")
+                    || l == "run chattr +i /etc/resolv.conf"),
+            "{:?}",
+            exec.log()
+        );
+    }
+
+    /// nftables installed but the ruleset never loaded (refused): the missing
+    /// table is the known gap, not a flush the monitor would lock down on.
+    #[test]
+    fn a_table_that_never_loaded_is_not_a_flush() {
+        let exec = crate::util::Exec::simulated(
+            &[],
+            &[
+                ("systemctl is-active dnsmasq", "active\n"),
+                (
+                    "read /etc/resolv.conf",
+                    &crate::enforce::dns::render_resolv_conf(),
+                ),
+            ],
+        );
+        assert!(reassert_all(&exec, false).is_empty());
+        // Loaded before and gone now: that *is* a flush.
+        let evs = reassert_all(&exec, true);
+        assert_eq!(kinds(&evs), vec![("tamper".into(), "nft_flush".into())]);
+    }
+
+    /// NetworkManager "disconnected" on a computer that is online through
+    /// something else (systemd-networkd) is not a disconnect.
+    #[test]
+    fn nm_disconnected_with_a_default_route_is_not_tamper() {
+        let online = crate::util::Exec::simulated(
+            &[],
+            &[
+                ("nmcli -t -f STATE general", "disconnected\n"),
+                ("ip route show default", "default via 10.0.2.2 dev ens3\n"),
+            ],
+        );
+        assert!(nm_guard_probe(&online).is_none());
+        let offline =
+            crate::util::Exec::simulated(&[], &[("nmcli -t -f STATE general", "disconnected\n")]);
+        assert_eq!(
+            nm_guard_probe(&offline).unwrap().payload["kind"],
+            "nm_disconnect"
+        );
+        assert!(nm_guard_probe(&crate::util::Exec::simulated(&["nmcli"], &[])).is_none());
+    }
+
+    #[test]
+    fn an_incident_is_reported_once() {
+        let mut inc = Incidents::default();
+        let t0 = Instant::now();
+        let drift = || tamper_event("resolv_conf_drift", SEV_WARN, "x");
+        // Starts: reported. Persists for an hour of ticks: quiet.
+        assert_eq!(inc.report_at(vec![drift()], t0).len(), 1);
+        for i in 1..360 {
+            let now = t0 + Duration::from_secs(10 * i);
+            assert!(inc.report_at(vec![drift(), drift()], now).is_empty());
+        }
+        // Ends, comes back soon after (flapping): still quiet.
+        let later = t0 + Duration::from_secs(3610);
+        assert!(inc.report_at(vec![], later).is_empty());
+        assert!(inc
+            .report_at(vec![drift()], later - Duration::from_secs(3000))
+            .is_empty());
+        // Ends, and comes back after the quiet hour: a new incident.
+        assert!(inc.report_at(vec![], later).is_empty());
+        let much_later = t0 + Duration::from_secs(7300);
+        assert_eq!(inc.report_at(vec![drift()], much_later).len(), 1);
+        // Different kinds are different incidents.
+        let flush = tamper_event("nft_flush", SEV_CRITICAL, "y");
+        assert_eq!(inc.report_at(vec![drift(), flush], much_later).len(), 1);
     }
 
     #[test]

@@ -89,7 +89,7 @@ Subcommands:
 |---|---|---|
 | `enroll` | `--server <URL>`, the token in `OST_TOKEN` (or `--token -` to read it from stdin; `--token <TOKEN>` works but shows in `ps`) | Reports hostname, OS users, and agent version to the server; receives `device_id` + `device_token`; writes `/etc/openscreentime/agent.toml` (root-owned `0600`). |
 | `run` | — | The main loop: connects the WS command bus (falls back to heartbeat polling), pulls and enforces policy, dispatches server commands, streams events. Requires root unless `--dry-run`. Requires a prior `enroll`. |
-| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload` + enables/starts `openscreentime-agent.service` and `openscreentime-watchdog.timer`. Requires root. |
+| `install-service` | — | Copies the running binary to `/usr/local/bin/openscreentime`, installs what the network rules need where it's missing (`dnsmasq` and `nftables`, via apt/dnf/pacman/zypper — dnsmasq's first start pre-seeded to listen on 127.0.0.1 only, next to systemd-resolved), writes the hardened systemd unit + watchdog timer + polkit rule, writes the (best-effort) tray user unit, then `daemon-reload`, enables and **restarts** `openscreentime-agent.service` (so re-running the one-liner reaches a running agent with its new token) and enables `openscreentime-watchdog.timer`. On a tray build it also starts the companion for whoever is signed in to a desktop right now (`systemctl --user -M <user>@ start`, else in their session via `runuser`). Requires root. |
 | `status` | `--json` | Prints enrollment state (server, device ID, tamper level, poll interval), whether the process is root, and `systemctl is-active openscreentime-agent.service`. Safe non-root. |
 | `time` | `--json` | How much screen time the calling user has left today. Reads the per-user status snapshot the agent writes each tick. Safe non-root, no display needed. |
 | `ask` | `--json` | Sends a time request to a parent, from the keyboard. Writes a marker inside the caller's own `/run/user/<uid>/openscreentime/` — which is what proves the request came from them. Safe non-root. |
@@ -126,7 +126,8 @@ $ ost time --json
 {
   "limited": true,          // false = no limit configured for this user
   "used_minutes": 32,
-  "left_minutes": 28,       // null when "limited" is false
+  "left_minutes": 28,       // null when "limited" is false; minutes until the screen stops
+  "unlocked_until": null,   // a parent's override keeps it on until then (RFC 3339)
   "frozen": false,          // the screen is paused right now
   "freeze_in_secs": null    // set during the save-your-work countdown
 }
@@ -302,8 +303,13 @@ allowlist) gets allowlist mode: allowlisted domains forward, a trailing
 `address=/#/` NXDOMAINs the rest. `block_tor` NXDOMAINs
 `.onion` and `torproject.org`; `safe_search` rewrites the big search/video
 providers via `cname=` redirects. `/etc/resolv.conf` is pinned to
-`127.0.0.1` and set immutable (`chattr +i`); re-pinned every tick if it
-drifts off the local resolver.
+`127.0.0.1` and set immutable (`chattr +i`) — **only while dnsmasq is
+running**: the tick re-pins on drift only then, and when the resolver is gone
+it takes its own pin off and puts back what the computer used before (kept in
+`/var/lib/openscreentime/resolv.conf.pre-pin`; else NetworkManager's or
+systemd-resolved's file; else the family resolvers). A computer that can't
+filter stays online and says so (`dns_resolver_missing`,
+`dns_no_local_resolver`).
 
 ### Firewall
 
@@ -402,7 +408,7 @@ Written by every parent action:
 | `credit_time` (approved request, console "+N min") | N minutes on today's budget **and** an override for N minutes — "N more minutes, now, whatever the rule". Idempotent by command id (a redelivery after a lost ack is acked as `duplicate`, never credited twice); a grant filed for an earlier day is acked `stale_day` and not credited. |
 | Code at the lock screen | 30 minutes (plus every device-level lock cleared). |
 | `ost unlock --minutes N` | N minutes for everyone on the machine (plus locks cleared). |
-| Console Resume (`unlock`) | Clears the pause. `minutes` or `until: "end_of_day"` in the payload override for that long (optionally one `os_username`); a plain Resume gives 30 minutes to whoever a rule is stopping right now, and everyone else carries on under their normal rules. |
+| Console Resume (`unlock`) | Clears the pause — and gives nobody time: whoever their own rules stop (time's up, bedtime) stays stopped, and the lock says why. An explicit grant in the payload (`os_username` with `minutes` or `until: "end_of_day"`) overrides that person for that long. |
 
 A **pause beats an override** (a parent who gives "+30" and then pauses
 means the pause); every source that should lift a pause clears it directly.
@@ -438,15 +444,16 @@ file carries `users: [ {…} ]` with exactly one entry:
 | `name` | string | The OS login. |
 | `used_minutes` | int | Minutes the **person** used today, on every computer (this one + what the server reported for the others). Floored. |
 | `used_here_minutes` | int | Of which on this computer. |
-| `remaining_minutes` | int \| null | The day's **budget** left: limit + earned − used, rounded up, may be ≤ 0. `null` = no daily limit. The ring's number. It does *not* know about bedtime — use `minutes_left` for "when do screens stop". |
+| `remaining_minutes` | int \| null | The day's **budget** left: limit + earned − used, rounded up, may be ≤ 0. `null` = no daily limit. Only for readers of an older agent: it knows nothing of bedtime, the hours or an override (after an unlock code it is ≤ 0 while the person has 30 minutes). Time left is `minutes_left`. |
 | `allowed` | bool | May they use the screen right now? |
 | `reason` | `"limit"` \| `"bedtime"` \| `"outside_hours"` \| `"paused"` \| null | Why they are stopped now (`allowed: false`), or why the **next** stop will come (`allowed: true`). `null` = no stop ahead. |
-| `minutes_left` | int \| null | Minutes until `stop_at`, **rounded up**, honouring the budget (assuming continuous use), bedtime, the end of the allowed window, the end of an override and a pending pause — whichever comes first. `0` when stopped; `null` when nothing stops them in the next 48 h. |
+| `minutes_left` | int \| null | **Time left** — the one number every surface shows (the app window, the companion, `ost time`, and the console, which computes it with the same rules function and inputs): minutes until `stop_at`, **rounded up**, honouring the budget (assuming continuous use), bedtime, the end of the allowed window, the end of an override and a pending pause — whichever comes first. During a save-your-work countdown it is the countdown (and `allowed` is still true). `0` when stopped; `null` when nothing stops them in the next 48 h. Readers count down live to `stop_at` (`glance::Clock::left`), except for an idle person's limit stop, which slides later every tick. |
 | `stop_at` | RFC 3339 local \| null | When that stop lands. Equals "now" when stopped. A budget stop moves later while they're idle (idle time isn't billed). |
 | `resume_at` | RFC 3339 local \| null | When stopped: when the screen comes back on its own (bedtime ends, the window opens, midnight's fresh budget). `null` when allowed or paused. |
 | `next_warning_at` | RFC 3339 local \| null | The next heads-up: 15, 5, then 1 minute before `stop_at` — when the companion announces it. `null` when none is ahead (under a minute left, or no stop). |
-| `override_until` | RFC 3339 local \| null | A parent override is running until then. |
+| `override_until` | RFC 3339 local \| null | A parent override is running until then. When `stop_at` is that moment, the override is what keeps the screen on, and the surfaces say "Unlocked until 00:27" instead of a red zero. |
 | `counting` | bool | This minute is being billed (at the seat, with recent input or sound, not frozen). |
+| `ask_pending` | bool | An "Ask for more time" is waiting on a parent today. A grant or a "not now" clears it; the app window offers Ask again. |
 | `measured` | bool | Input activity could be read for every present seat (`false` = presence fallback). |
 | `day` | `YYYY-MM-DD` \| null | The accounting day (trusted local date). |
 | `frozen` | bool | The agent has frozen this user. |
@@ -541,6 +548,14 @@ from `stop_at`/`reason`/`pause_at`/`freeze_in_secs` in the status snapshot;
 the last minute is one critical notification updated in place. Actions: "Ask
 for more time", "Open OpenScreenTime". It works without a tray host (GNOME).
 Someone with no desktop hears the same words on their own terminals only.
+The time a warning names ("ends at 23:38") is the time the lock comes, to the
+minute: a limit stop is announced only while the minutes are really being
+used (an idle person's stop slides later every tick, so at login, before any
+input, there is no true time to say yet); a stop that moves to another
+minute afterwards is announced again with its real time; and the agent runs
+a tick of its own at a stop due before the next regular one, so the lock
+isn't up to 10 s late. Billing carries the fraction of a second a tick
+doesn't bill.
 
 ### Unlock code
 
@@ -601,7 +616,9 @@ whenever it changes, and at least every 60 s: `locked` (a device lock is
 intended **and** the kernel freezer confirms every present managed user is
 frozen — read back from `cgroup.freeze`, never the agent's intention),
 `lock_intent`, `frozen_users`, `enforcing` (policy applied with no standing
-gaps), `gaps` (kinds), `agent_version`, `active_users`. The usage
+gaps), `gaps` (kinds), `agent_version`, `active_users`, and `overrides`
+(`{ login: end (UTC) }`, the parent overrides running now — the console
+counts time left from the same inputs the computer does). The usage
 `heartbeat` frame goes every 30 s. Reconnects use jittered exponential
 backoff (1 → 60 s); while the WS is down the agent polls `/agent/heartbeat`
 every 30 s for one-minute rounds, then tries the bus again. Usage is written
@@ -701,7 +718,18 @@ black out all traffic):
   host can't enforce all of it. The payload `kind` says which:
   | `kind` | Meaning | Fix |
   |---|---|---|
-  | `dns_no_local_resolver` | dnsmasq isn't installed or won't start, so the allowlist filters nothing | `apt install dnsmasq` (or the distro equivalent) and check `systemctl status dnsmasq` |
+  | `dns_resolver_missing` | dnsmasq isn't installed: websites aren't filtered (the computer keeps its own DNS; screen time works) | re-run the install one-liner (it installs dnsmasq + nftables), or install dnsmasq |
+  | `dns_no_local_resolver` | dnsmasq is installed but won't start, so the allowlist filters nothing | `systemctl status dnsmasq` |
+  | `firewall_not_installed` | `nft` isn't installed: no firewall rules (screen time works) | re-run the install one-liner, or install nftables |
+  | `firewall_not_applied` | `nft` refused the ruleset | the agent's journal says why |
+  | `network_apply_failed` | the network rules couldn't be applied at all | the agent's journal says why |
+
+  Each is sent once, when it appears — not on every re-apply — and stands in
+  the `state` frame's `gaps` while it lasts, which is what the console's
+  Family and Computers pages show. None of them is a `tamper` event: a missing
+  package is a setup to fix, not someone getting around the rules. The tamper
+  loop's own findings (`resolv_conf_drift`, `nft_flush`, `nm_disconnect`, …)
+  are likewise reported once per incident, not every 10 s.
   | `dns_resolv_conf_not_a_file` | `/etc/resolv.conf` was a symlink owned by `systemd-resolved`/`resolvconf`; the agent replaced it with a real file | `systemctl disable --now systemd-resolved`, or it fights the pin on every network change |
   | `dns_resolv_conf_not_locked` | `chattr +i` isn't supported on that filesystem, so the pin is only re-asserted every 10s | use a filesystem that supports immutability for `/etc` |
 

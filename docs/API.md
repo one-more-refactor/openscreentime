@@ -137,6 +137,10 @@ token out of argv/shell history):
 curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
+A console served over plain `http://` (trying it out at home) shows the same
+command with `--insecure-http` on the end, and says why — `install.sh` refuses
+plain http without it.
+
 The script picks the desktop build when the machine has a graphical session
 (`--headless` / `--desktop` force it), verifies the manifest's sha256, installs
 to `/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The
@@ -153,7 +157,7 @@ Self-update).
 | GET    | `/api/devices/:id`            | detail incl. device users and recent events                  |
 | POST   | `/api/devices`                | `{ name, account_id? }` → a `pending` device + a 24 h one-time enroll token → `{ device, enroll_token }`. `account_id` = "this is that person's computer". For a parent's own computer `428` unless the confirm window is open |
 | PATCH  | `/api/devices/:id`            | `{ name?, tamper_level? }` — `tamper_level` is 1 or 3        |
-| DELETE | `/api/devices/:id`            | remove it                                                    |
+| DELETE | `/api/devices/:id`            | remove it. Its device token is kept as a tombstone (`retired_devices`), so the agent hears `410 device_retired` and takes itself off the computer (see Agent API → Retirement) |
 | POST   | `/api/devices/:id/enroll-token` | a fresh one-time token (24 h) → `{ device, enroll_token }`; 409 unless `pending`. Confirm-gated |
 | POST   | `/api/devices/:id/lock`       | Pause: enqueue `lock` → `{ command_id, queued: true, delivered: bool }` |
 | POST   | `/api/devices/:id/unlock`     | Resume: enqueue `unlock` (payload `{}`) → same shape         |
@@ -189,8 +193,8 @@ frame does, so the console shows "Pausing…" until the computer confirms.
 |--------|----------------------------------------------|------------------------------------|
 | GET    | `/api/devices/:id/users`                     | → `{ users: [{ id, device_id, os_username, display_name, profile_id, profile_name, profile_kind, used_minutes_today, earned_minutes_today }] }` (today's minutes joined from `screen_time_ledger`) |
 | POST   | `/api/device-users/:id/assign-profile`       | `{ profile_id }` → `{ ok: true }`  |
-| POST   | `/api/device-users/:id/assign-account`       | `{ account_id }` — Who's who: move this OS login to another person (their rules follow). Confirm-gated. Pointing it at the computer's owner makes it the owner's login (`devices.owner_os_username`) |
-| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes }`; Give time: credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id: null, day }`; audited as an `earn_request` event, `action: "granted"` |
+| POST   | `/api/device-users/:id/assign-account`       | `{ account_id }` → `{ ok, removed_person }` — Who's who: move this OS login to another person; it takes that person's own rules (a parent or adult with none yet gets theirs now, from their bracket — an adult's enforce nothing). Confirm-gated. Pointing it at the computer's owner makes it the owner's login (`devices.owner_os_username`). The person the login was before, if now left with no login and no computer, is removed when the server made them up for an unsorted login and nobody has touched them since (`removed_person: true`); anyone else is kept, with no computer |
+| POST   | `/api/device-users/:id/credit-time`          | `{ minutes: 1..=240 }` → `{ ok: true, minutes, answered: [request ids] }`; Give time: credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id: null, day }`; audited as an `earn_request` event, `action: "granted"`. Giving time answers the person's asks: every request of theirs still pending (on any of their logins) becomes `approved` — without crediting it again — and is listed in `answered` |
 | GET    | `/api/device-users/:id/usage`                | `?days=` (default 30, max 90) → per-day `{ day, used_minutes, earned_minutes }` for that login, plus a computed `streak` (the console doesn't show it) |
 
 ## Earn-time requests
@@ -204,7 +208,7 @@ existing pending row). Requests and decisions are audited with `earn_request` ev
 | Method | Path                              | Notes                                             |
 |--------|-----------------------------------|---------------------------------------------------|
 | GET    | `/api/earn-requests`              | `?status=pending` → `{ requests: [...] }` (joined with device name + user display name) |
-| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id, day }` |
+| POST   | `/api/earn-requests/:id/approve`  | → `{ request }`; credits `screen_time_ledger.earned_seconds` and enqueues `credit_time` `{ os_username, minutes, request_id, day }`; the person's other pending requests are answered with it (approved, not credited again) |
 | POST   | `/api/earn-requests/:id/deny`     | → `{ request }`; enqueues `deny_earn` `{ os_username, task_id, request_id }` so the agent clears its once-per-day dedupe and says "not this time" instead of "waiting" |
 
 A request: `{ id, device_id, device_name, device_user_id, os_username, user_display_name, task_id,
@@ -320,6 +324,24 @@ install). Each reported login is linked to a person — see docs/AUTH.md "Whose
 login is whose"; an unsorted login gets Kid rules on a child's computer and
 rules that enforce nothing on a parent's own.
 
+### Retirement (a removed computer)
+
+Every `/agent/*` call — and the `/agent/ws` upgrade — with the token of a
+computer that was removed (`DELETE /api/devices/:id`) is answered
+
+```
+410 { "error": { "code": "device_retired", "message": "…" }, "retired": true }
+```
+
+and never with a plain 401. On that answer, from its configured server and
+confirmed by a second request, the agent thaws everyone, takes the lock down,
+removes its nft table, the resolv.conf pin (the computer's previous DNS comes
+back), its dnsmasq include, the polkit rule, the unlock-code sudo and its
+cached secrets, then disables and removes its units (`ost __retire`, outside
+the sandbox) and forgets its enrollment. A 401, a network error, or a 410
+without `"retired": true` never does this — the agent keeps its last rules.
+Enrolling again (the install one-liner) clears the retirement.
+
 ### Heartbeat (poll model, fallback for WS)
 ```
 POST /agent/heartbeat
@@ -345,9 +367,10 @@ Agent acks commands via `POST /agent/commands/:id/ack { status, result }`.
 day the grant was filed under). The agent applies a grant once per command id (a redelivery is
 acked `{ credited: true, duplicate: true }`), ignores one for an earlier day
 (`{ credited: false, stale_day }`), and turns it into N minutes on today's budget plus an override
-for N minutes. The agent's `unlock` also understands `{ minutes }` or `{ until: "end_of_day" }`
-(and `os_username`), but the console's Resume always sends `{}`: whoever a rule is stopping gets
-30 minutes.
+for N minutes. The agent's `unlock` also understands an explicit grant, `{ os_username, minutes }`
+or `{ os_username, until: "end_of_day" }`, but the console's Resume always sends `{}`: it ends the
+pause and gives nobody time — someone whose own rules stop them (time's up, bedtime) stays stopped.
+Time is given with `credit_time`.
 
 **Commands** (`commands.type`): `lock` (`{}`, or `{ reason, grace_secs }`
 when an account is suspended), `unlock`, `apply_policy`, `set_tamper_level
@@ -360,7 +383,9 @@ Body: { os_username, task_id, task_label, minutes }   // 1 <= minutes <= 240
 → 200 { request: { id, status: "pending", ... } }
 ```
 Deduped per (user, task, day): a repeat while today's request is still pending returns the
-existing row.
+existing row. "Ask for more time" (the lock, the app, the companion, `ost ask`) files a plain
+ask — `task_id: "ask"`, `task_label: "Asked for more time"`, 15 minutes — the same words as
+`/api/me/ask`, never an earn task the person didn't pick.
 
 ### Policy pull
 ```
@@ -487,18 +512,26 @@ with `#[serde(default)]` on optional sub-objects.
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
   left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name }`. "Today" is each device's own local day (the day
-  its agent enforces); `left_minutes` is the person's budget left computed
-  like the device does (seconds, rounded up). `rules` = `{ allowed, reason:
-  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at }`
-  from the agent's own rules function — when screens stop, whichever of the
-  budget, bedtime or the window end comes first; plus `goal_minutes`, and
+  windows, display_name, utc_offset_secs }`. "Today" is each device's own
+  local day (the day its agent enforces); `utc_offset_secs` is that
+  computer's clock, for everything the console says about its day (focus
+  hours, the week, the hours strip). `left_minutes` is **time left**, the
+  number the computer shows: the agent's own rules function with the same
+  inputs — the day's use and grants and the override the computer reports in
+  its `state` frame — so minutes until the screen stops (the budget,
+  bedtime, the end of the hours or of an override, whichever first); `0` =
+  stopped, `null` = no limit. `rules` = `{ allowed, reason:
+  "limit"|"bedtime"|"outside_hours"|null, minutes_left, stop_at, resume_at,
+  override_until, utc_offset_secs }` is the same verdict, times in the
+  computer's offset; when `stop_at` is `override_until`, an unlock code or a
+  grant is what keeps them going ("Unlocked until 00:27"); plus `goal_minutes`, and
   for a self-managed person `self_managed` and `focus: { hours, sites }`.
   `parent_sees: { apps, sites }` is what a parent sees of this person's day
   besides the minutes — the same rule `/api/usage/where` enforces
   (`usage.rs` `hub_exposure`); both false = minutes only. The page's "What
   can a parent see?" is said from it.
-  `GET /api/family` children carry the same `left_minutes` and `rules`.
+  `GET /api/family` children carry the same `left_minutes`, `rules` and
+  `utc_offset_secs`.
 - `GET /api/me/history` → the last 14 days `{ days: [{ day, used_minutes,
   earned_minutes }], today_by_device: [{ name, used_minutes }], goal_minutes,
   goal_streak }` (the console shows neither goal nor streak).
