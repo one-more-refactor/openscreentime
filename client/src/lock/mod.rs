@@ -826,6 +826,64 @@ pub trait Host: Send + Sync {
     fn login_screen(&self) -> bool;
     /// Take the desktop's own screen lock off a session (logind `Unlock`).
     fn unlock_session(&self, id: &str);
+    /// `user`'s desktop is back on screen on `vt`: see that its compositor
+    /// took its keyboard and mouse back, and give it one more VT switch if
+    /// it didn't (see [`input_back`]).
+    fn wake_input(&self, user: &str, vt: u32);
+}
+
+/// After the lock hands the screen back: how long a compositor gets to take
+/// its keyboard and mouse again before it is given another switch.
+const INPUT_BACK: Duration = Duration::from_secs(3);
+
+/// Does a person's compositor hold its keyboard and mouse? From the device
+/// files their processes have open: `None` if none of them holds a GPU (no
+/// compositor of theirs to judge — a root X server, a text login),
+/// `Some(false)` for the GPU without a single input device.
+///
+/// GNOME 43's mutter, when its session loses the screen while it is still
+/// starting (someone logs in to a stop, and the lock goes up at once), takes
+/// the GPU back when the session returns but never its input devices: a
+/// desktop that draws and can't be used. A second switch away and back
+/// makes it take them.
+pub fn input_back<'a>(open: impl IntoIterator<Item = &'a str>) -> Option<bool> {
+    let (mut gpu, mut input) = (false, false);
+    for path in open {
+        gpu |= path.starts_with("/dev/dri/card");
+        input |= path.starts_with("/dev/input/event");
+    }
+    gpu.then_some(input)
+}
+
+/// The device files `uid`'s processes have open (`/proc/<pid>/fd`).
+fn open_devices(uid: u32) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for p in procs.filter_map(|e| e.ok()) {
+        let path = p.path();
+        let is_pid = p
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()));
+        if !is_pid || std::fs::metadata(&path).map(|m| m.uid()).ok() != Some(uid) {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(path.join("fd")) else {
+            continue;
+        };
+        for fd in fds.filter_map(|e| e.ok()) {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                let t = target.to_string_lossy();
+                if t.starts_with("/dev/dri/") || t.starts_with("/dev/input/") {
+                    out.push(t.into_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The real machine.
@@ -1124,6 +1182,48 @@ impl Host for SystemHost {
                     continue;
                 }
                 std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+    fn wake_input(&self, user: &str, vt: u32) {
+        if self.exec.dry_run() {
+            tracing::info!(target: "dry_run", "WOULD CHECK {user}'s desktop took its input back");
+            return;
+        }
+        let Some(uid) = crate::sysusers::uid_of(user) else {
+            return;
+        };
+        let user = user.to_string();
+        std::thread::spawn(move || {
+            let settled = |limit: Duration| {
+                let until = Instant::now() + limit;
+                loop {
+                    let state = input_back(open_devices(uid).iter().map(String::as_str));
+                    if state != Some(false) || Instant::now() >= until {
+                        return state;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            };
+            if settled(INPUT_BACK) != Some(false) {
+                return;
+            }
+            // Only while their desktop still has the screen, and only once.
+            if vt::active() != Some(vt) {
+                return;
+            }
+            tracing::warn!(
+                "{user}'s desktop came back without its keyboard and mouse; \
+                 switching away and back once so it takes them"
+            );
+            vt::switch_to(TEXT_VT, Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(300));
+            vt::switch_to(vt, Duration::from_secs(2));
+            match settled(INPUT_BACK) {
+                Some(false) => {
+                    tracing::error!("{user}'s desktop still has no keyboard and mouse")
+                }
+                _ => tracing::info!("{user}'s desktop has its keyboard and mouse again"),
             }
         });
     }
@@ -1640,10 +1740,15 @@ impl LockScreen {
         let active = self.host.active_vt();
         if active == Some(LOCK_VT) || active == Some(TEXT_VT) {
             let sessions = self.host.sessions();
+            let desktop = desktop_session(&sessions, &s.subject).filter(|d| d.graphical);
             let back = session_vt(&sessions, &s.subject).or(s.return_vt);
             if let Some(v) = back {
                 if !self.host.switch_to(v) {
                     tracing::warn!("could not switch back to VT {v}");
+                } else if desktop.is_some_and(|d| d.vt == Some(v)) {
+                    // A desktop that lost the screen while it was still
+                    // starting comes back without its keyboard and mouse.
+                    self.host.wake_input(&s.subject, v);
                 }
             }
             // Their desktop saw its screen go away and may have locked
@@ -1881,6 +1986,9 @@ pub mod testing {
             w.follow_vt();
             true
         }
+        fn wake_input(&self, user: &str, vt: u32) {
+            self.w().log.push(format!("wake input {user} {vt}"));
+        }
         fn unlock_session(&self, id: &str) {
             let mut w = self.w();
             w.log.push(format!("unlock session {id}"));
@@ -2068,6 +2176,9 @@ mod tests {
                 "switchlock false".into(),
                 "switch 13".into(),
                 "switch 2".into(),
+                // Her desktop is back: it is seen to take its keyboard and
+                // mouse again.
+                "wake input mia 2".into(),
                 // Her desktop was open when the lock went up: if it locked
                 // itself meanwhile, it is opened again.
                 "unlock session 2".into(),
@@ -2075,6 +2186,24 @@ mod tests {
             ]
         );
         assert!(current_face(&sh).is_none());
+    }
+
+    #[test]
+    fn a_desktop_without_its_input_devices_is_told_apart() {
+        // mutter back on screen with the GPU and its keyboard and mouse.
+        assert_eq!(
+            input_back(["/dev/dri/card0", "/dev/input/event3", "/dev/input/event4"]),
+            Some(true)
+        );
+        // The GPU, and not one input device: the desktop that can't be used.
+        assert_eq!(
+            input_back(["/dev/dri/card0", "/dev/dri/renderD128"]),
+            Some(false)
+        );
+        // No compositor of theirs (a root X server, a text login): not ours
+        // to judge.
+        assert_eq!(input_back(["/dev/input/event3"]), None);
+        assert_eq!(input_back([]), None);
     }
 
     #[tokio::test]

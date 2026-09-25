@@ -22,9 +22,10 @@
 //!   frozen one by one, skipping that session plumbing ([`is_plumbing`]); a
 //!   slice below it with no plumbing in it (a terminal's) is frozen whole;
 //! * apps D-Bus started inside `session.slice` (on a session bus without
-//!   dbus-broker, Videos, Files and Text Editor run as children of the bus
-//!   itself): they are first filed into an app scope of their own — the same
-//!   call GNOME Shell makes for every app it launches — and frozen there;
+//!   dbus-broker — Debian 12 — Videos, Files and Text Editor run inside the
+//!   bus's own `dbus.service`): they are first filed into an app scope of
+//!   their own — the same call GNOME Shell makes for every app it launches —
+//!   and frozen there;
 //! * their text-console and SSH logins (their `session-N.scope`), whole;
 //! * never their graphical login's `session-N.scope` (GDM's worker, the
 //!   session launcher, Xorg).
@@ -62,6 +63,8 @@ const MAX_PROCS: usize = 4096;
 pub struct Proc {
     pub pid: u32,
     pub ppid: u32,
+    /// When it started (clock ticks since boot).
+    pub start: u64,
     /// `/proc/<pid>/comm` (at most 15 bytes).
     pub comm: String,
     pub argv: Vec<String>,
@@ -346,17 +349,22 @@ fn runs(p: &Proc, app: &AppExec) -> bool {
 
 /// Apps D-Bus started inside `session.slice`: in each of its units, a process
 /// that runs a desktop application's D-Bus command line — never the unit's own
-/// main process — with everything it started that is still beside it.
+/// main process (the one that started first: the bus daemon hands what it
+/// starts to the service manager, so parentage can't tell) — with everything
+/// it started that is still beside it.
 fn strays(session_slice: &Cgroup, apps: &[AppExec]) -> Vec<Stray> {
     let mut out = Vec::new();
     let mut stack: Vec<&Cgroup> = vec![session_slice];
     while let Some(c) = stack.pop() {
         stack.extend(c.children.iter());
-        let pids: std::collections::HashSet<u32> = c.procs.iter().map(|p| p.pid).collect();
+        let main = c
+            .procs
+            .iter()
+            .min_by_key(|p| (p.start, p.pid))
+            .map(|p| p.pid);
         let mut taken: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for p in &c.procs {
-            // The unit's own process(es): their parent lives elsewhere.
-            if !pids.contains(&p.ppid) || taken.contains(&p.pid) {
+            if Some(p.pid) == main || taken.contains(&p.pid) {
                 continue;
             }
             let Some(app) = apps.iter().find(|a| runs(p, a)) else {
@@ -490,12 +498,10 @@ fn read_proc(pid: u32) -> Option<Proc> {
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;
     let comm = stat.get(open + 1..close)?.to_string();
-    let ppid = stat
-        .get(close + 1..)?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()?;
+    // After the comm: state (field 3), ppid (4), … starttime (22).
+    let rest: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
+    let ppid = rest.get(1)?.parse().ok()?;
+    let start = rest.get(19).and_then(|s| s.parse().ok()).unwrap_or(0);
     let argv = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| {
             b.split(|c| *c == 0)
@@ -507,6 +513,7 @@ fn read_proc(pid: u32) -> Option<Proc> {
     Some(Proc {
         pid,
         ppid,
+        start,
         comm,
         argv,
     })
@@ -622,14 +629,15 @@ mod tests {
     /// A fixture tree from lines of `path: proc proc …` (colon and space:
     /// unit names may hold a colon), paths relative to
     /// the user slice. A proc is `comm`, or `pid<ppid=argv…` with `+` for
-    /// spaces in argv (`614<1=/usr/bin/dbus-daemon`). A path ending in `*`
-    /// is frozen.
+    /// spaces in argv (`614<1=/usr/bin/dbus-daemon`); processes started in
+    /// the order they are listed. A path ending in `*` is frozen.
     fn tree(lines: &[&str]) -> Cgroup {
         let mut root = Cgroup {
             name: "user-1000.slice".into(),
             ..Default::default()
         };
         let mut next_pid = 5000;
+        let mut started = 0;
         for line in lines {
             let (path, procs) = line.split_once(": ").unwrap_or((line, ""));
             let path = path.trim();
@@ -658,6 +666,7 @@ mod tests {
                 c.frozen |= frozen;
             }
             for p in procs.split_whitespace() {
+                started += 1;
                 c.procs.push(match p.split_once('=') {
                     Some((ids, argv)) => {
                         let (pid, ppid) = ids.split_once('<').unwrap();
@@ -672,6 +681,7 @@ mod tests {
                         Proc {
                             pid: pid.parse().unwrap(),
                             ppid: ppid.parse().unwrap(),
+                            start: started,
                             comm,
                             argv,
                         }
@@ -681,6 +691,7 @@ mod tests {
                         Proc {
                             pid: next_pid,
                             ppid: 1,
+                            start: started,
                             comm: p.into(),
                             argv: vec![p.into()],
                         }
@@ -724,7 +735,7 @@ mod tests {
             "user@1000.service/session.slice/org.gnome.Shell@wayland.service: gnome-shell",
             "user@1000.service/session.slice/pipewire.service: pipewire",
             "user@1000.service/session.slice/org.gnome.SettingsDaemon.Power.service: gsd-power",
-            "user@1000.service/session.slice/dbus.service: 614<590=/usr/bin/dbus-daemon+--session 842<614=/usr/bin/gjs+/usr/share/gnome-shell/org.gnome.Shell.Notifications 4069<614=/usr/bin/totem+--gapplication-service 4100<4069=/usr/lib/totem/helper",
+            "user@1000.service/session.slice/dbus.service: 614<590=/usr/bin/dbus-daemon+--session 842<590=/usr/bin/gjs+/usr/share/gnome-shell/org.gnome.Shell.Notifications 4069<590=/usr/bin/totem+--gapplication-service 4100<4069=/usr/lib/totem/helper",
             "user@1000.service/background.slice/tracker-miner-fs-3.service: tracker-miner-f",
             "user@1000.service/app.slice/gnome-keyring-daemon.service: gnome-keyring-d",
             "user@1000.service/app.slice/app-gnome\\x2dsession\\x2dmanager.slice/gnome-session-manager@gnome.service: gnome-session-b dbus-daemon at-spi2-registr",
@@ -944,7 +955,7 @@ mod tests {
         let t = tree(&[
             // A script run through its interpreter matches its Exec; the
             // shell's own gjs services and the bus itself never do.
-            "user@1000.service/session.slice/dbus.service: 614<590=/usr/bin/dbus-daemon 700<614=/usr/bin/gjs+/usr/bin/gnome-weather+--gapplication-service 701<700=/usr/bin/curl 842<614=/usr/bin/gjs+/usr/share/gnome-shell/org.gnome.Shell.Notifications",
+            "user@1000.service/session.slice/dbus.service: 614<590=/usr/bin/dbus-daemon 700<590=/usr/bin/gjs+/usr/bin/gnome-weather+--gapplication-service 701<700=/usr/bin/curl 842<590=/usr/bin/gjs+/usr/share/gnome-shell/org.gnome.Shell.Notifications",
             // A unit's own main process is never a stray, whatever it runs.
             "user@1000.service/session.slice/odd.service: 900<590=/usr/bin/totem+--gapplication-service",
         ]);
