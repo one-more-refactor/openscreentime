@@ -535,9 +535,13 @@ with `#[serde(default)]` on optional sub-objects.
   `{ reason: "paused_by_parent", grace_secs: 120 }`. Unblock doesn't resume the
   computers. The console only offers "Lift the block" for an old block.
 - `GET /api/me/today` → `{ used_minutes, earned_minutes, limit_minutes|null,
-  left_minutes|null, rules, locked, devices:[{id,name,status,locked}], blocks,
+  left_minutes|null, rules, locked, devices:[{id,name,status,locked,gaps?}], blocks,
   blocked_apps:[app id], bracket, theme, can_ask, pending_request, bedtime,
-  windows, display_name, utc_offset_secs }`. "Today" is each device's own
+  windows, display_name, utc_offset_secs }`. `gaps` (only for someone who
+  sets their own rules): what an online computer says it can't do right now
+  (`last_state.gaps`), so their page never promises a block a computer can't
+  keep. The day includes computers that were removed (`retired_usage`).
+  "Today" is each device's own
   local day (the day its agent enforces); `utc_offset_secs` is that
   computer's clock, for everything the console says about its day (focus
   hours, the week, the hours strip). `left_minutes` is **time left**, the

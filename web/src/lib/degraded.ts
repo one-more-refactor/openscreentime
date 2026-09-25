@@ -59,6 +59,48 @@ export function degradedSummary(devices: Device[]): string | null {
   return `${bad.length} computers can't apply all of their rules. Computers says what each one is missing.`;
 }
 
+/** A computer as the pages that promise a block know it: its name, whether
+ * it's online, and what it says it can't do (`gaps`, or a full device row's
+ * `last_state.gaps`). */
+export interface FilteringComputer {
+  name: string;
+  status: string;
+  gaps?: string[] | null;
+  last_state?: { gaps?: string[] } | null;
+}
+
+function gapsOf(d: FilteringComputer): string[] {
+  if (d.status !== "online") return [];
+  return d.gaps ?? d.last_state?.gaps ?? [];
+}
+
+/** The computers that can't filter websites right now — online, with a
+ * standing DNS gap. What's "blocked" there is a list, not a block. */
+export function cantFilter<T extends FilteringComputer>(devices: T[]): T[] {
+  return devices.filter((d) => gapsOf(d).some((g) => g.startsWith("dns_")));
+}
+
+/** "A", "A or B", "A, B or C". */
+function namesOr(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+
+/**
+ * Said right at a rule that blocks websites, when a computer of the person's
+ * can't: "Not blocked on Studio laptop yet — it can't filter websites. Screen
+ * time still works." Null when every computer of theirs filters (or none has
+ * said otherwise). Screen time is only promised where it really works.
+ */
+export function notBlockedSentence(devices: FilteringComputer[]): string | null {
+  const bad = cantFilter(devices);
+  if (bad.length === 0) return null;
+  const they = bad.length === 1 ? "it can't" : "they can't";
+  let s = `Not blocked on ${namesOr(bad.map((d) => d.name))} yet — ${they} filter websites.`;
+  if (!bad.some((d) => gapsOf(d).includes("screen_time_no_freezer"))) s += " Screen time still works.";
+  return s;
+}
+
 /** Tamper kinds that are machinery — a check that couldn't run, a network
  * that dropped, a level that was capped — not someone trying anything.
  * Older agents sent these as `tamper`; they never read as an accusation. */

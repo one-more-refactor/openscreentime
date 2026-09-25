@@ -1051,11 +1051,20 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     .await?;
 
     // Dedupe devices (one person can have two logins on one machine).
+    // Someone who sets their own rules also hears what a computer of theirs
+    // can't do right now (`last_state.gaps`: no website filter on a desktop
+    // without a resolver) — their page must not promise a block it can't
+    // keep. A child's page doesn't advertise the gap.
+    let own_rules = manages_self(&acct);
     let mut devices = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for r in &rows {
         if seen.insert(r.1) {
-            devices.push(json!({ "id": r.1, "name": r.2, "status": r.3, "locked": r.4 }));
+            let mut d = json!({ "id": r.1, "name": r.2, "status": r.3, "locked": r.4 });
+            if own_rules {
+                d["gaps"] = json!(standing_gaps(&r.3, r.9.as_ref()));
+            }
+            devices.push(d);
         }
     }
 
@@ -1130,6 +1139,26 @@ pub async fn set_goal(
 /// parent's.
 pub fn manages_self(acct: &AccountRow) -> bool {
     sets_own_rules(&acct.4, bracket_of(acct), acct.8)
+}
+
+/// What an online computer says it can't do right now (the `gaps` of its
+/// last `state` frame). An offline one says nothing: what it said last is
+/// "offline", shown elsewhere.
+pub fn standing_gaps(status: &str, last_state: Option<&Value>) -> Vec<String> {
+    if status != "online" {
+        return Vec::new();
+    }
+    last_state
+        .and_then(|s| s.get("gaps"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// [`manages_self`] from the account's parts — the one rule, shared with
