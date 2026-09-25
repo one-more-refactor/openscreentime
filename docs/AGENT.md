@@ -430,9 +430,46 @@ teens) that the companion counts down as a notification. An **admin lock**
 (`lock` command, or offline hard-lockdown) is immediate. Someone who isn't
 logged in is never frozen; they meet the lock when they log in.
 
-The freeze writes `1`/`0` to
-`/sys/fs/cgroup/user.slice/user-<uid>.slice/cgroup.freeze`. If that write
-fails: a `hard` freeze (admin lock) falls back to `loginctl
+**The freeze stops the person's apps, never their session**
+(`enforce/screentime/freeze.rs`). The lock has its own VT, so their session
+gets no input and shows nothing while it holds; the freeze only has to stop
+what their apps do (sound, video, a game, a download). It writes
+`cgroup.freeze` under `/sys/fs/cgroup/user.slice/user-<uid>.slice/`, on:
+
+- every slice and unit their user manager (`user@<uid>.service`) runs
+  **except `session.slice`** (compositor, session manager, settings
+  daemons, the session bus, the sound server, portals) and `init.scope`
+  (the manager itself) — `background.slice` whole, and whatever a
+  `systemd-run --user --slice=…` put anywhere else;
+- **`app.slice` unit by unit, never as one piece**: GNOME 43 (Debian 12)
+  starts its session manager, the keyring, the accessibility bus and the
+  portals there. Those, by unit name, are left running (the keyring is what
+  GDM re-authenticates through); a sub-slice without any of them (a
+  terminal's) is frozen whole;
+- apps **D-Bus started inside `session.slice`**: on a session bus without
+  dbus-broker (Debian 12) Videos, Files and Text Editor run inside the bus's
+  own `dbus.service`. A process there running a `DBusActivatable` desktop
+  application's D-Bus command line (and what it started) is first filed into
+  a scope of its own in `app.slice` — `StartTransientUnit` with its PIDs on
+  their own service manager, the call GNOME Shell makes for every app it
+  launches — and frozen there;
+- their **text-console and SSH logins** (`session-N.scope`) whole — never
+  their graphical login's scope (GDM's worker, the session launcher, Xorg).
+
+**Fallback**: a desktop that doesn't live under the user manager's
+standard slices — no `session.slice`, or a graphical login scope holding
+more than the launchers of a systemd-managed session (a legacy X session,
+where the window manager and every app run in `session-N.scope`) — gets the
+old whole-`user-<uid>.slice` freeze. **A session still starting is left
+alone**: until a graphical login is a minute old nothing of its desktop is
+frozen (the lock is on screen already), so GNOME finishes starting behind
+the lock. Every tick re-applies a stop quietly: an app that started since (a
+timer's; a new app in `app.slice` is caught within a tick, while one in
+`background.slice` or another frozen slice is frozen at birth) and anything
+thawed is frozen again, without taking the screen from whoever has it. A
+thaw writes `0` to every cgroup of theirs that reads frozen.
+
+If a write fails: a `hard` freeze (admin lock) falls back to `loginctl
 terminate-user`; a screen-time freeze (`hard=false`) never escalates to
 terminating the session — unsaved work must never be destroyed over a time
 limit, so it just logs and stays best-effort.
@@ -473,9 +510,10 @@ as `STATUS <user>: {…}`.
 
 ### The lock
 
-`client/src/lock/`. The freeze suspends the whole user slice, compositor
-included, so the lock never lives inside the session it stops. It is its own
-session on its own VT (13):
+`client/src/lock/`. The lock never lives inside the session it stops: it is
+its own session on its own VT (13), so that session — left running, its
+apps frozen (see [Screen time](#screen-time)) — gets no
+input and shows nothing while the lock holds the screen:
 
 - **Graphical**: `openscreentime-lock@13.service` runs `cage` (without `-s`,
   so the keyboard can't switch VTs) as the unprivileged system user
@@ -521,31 +559,38 @@ session on its own VT (13):
   `VT_LOCKSWITCH` and brings up the login screen: a running greeter session
   is activated, else GDM's `CreateTransientDisplay`, else the freedesktop
   `DisplayManager` seat's `SwitchToGreeter` (LightDM, SDDM). The stopped
-  person stays frozen behind it (an inactive session counts no time). The
+  person stays stopped behind it (an inactive session counts no time). The
   lock stands in front of stopped people only: someone else's session keeps
   the screen for as long as they like; a login screen keeps it for 90 s,
   then the stopped person's lock (with its "Switch user") comes back; and a
-  stopped session coming on screen — switched to, or logged in to — meets
-  the lock first (the VT watch wakes on the kernel's `POLLPRI` on
-  `/sys/class/tty/tty0/active`). GDM can't take anyone *back into* a frozen
-  session from its login screen: it re-authenticates through the session's
-  own worker and keyring, which are frozen too, and gives up after 25 s —
-  the way back to a stopped session is its lock (or switching to its VT).
+  stopped session coming on screen — switched to, logged in to, or picked
+  at the login screen (GDM re-authenticates through the session's own worker
+  and keyring, which the freeze leaves running) — meets the lock first,
+  within about a second (the VT watch wakes on the kernel's `POLLPRI` on
+  `/sys/class/tty/tty0/active`).
+- **Logging in to a stop**: the lock is in front within about a second,
+  while the desktop is still starting; it finishes starting behind the lock
+  and nothing of it is frozen until it is a minute old.
 - **The way back**: the lock records whether the person's own desktop lock
   was up when it went up (logind `LockedHint`). If it was open, for a few
   seconds after switching back the agent takes a desktop lock that appears
   off again (`loginctl unlock-session`) — a code or a parent's time doesn't
   end at a second password prompt. A desktop its owner had locked stays
-  locked.
+  locked. And GNOME 43's mutter, when its session lost the screen while it
+  was still starting, comes back with the GPU but not one input device: a
+  desktop that draws and can't be used. So for 3 s after switching back the
+  agent watches the person's processes; if they hold the GPU and no input
+  device, it switches away and back once more, which makes the compositor
+  take them (logged: "…came back without its keyboard and mouse").
 
 Codes are checked by the agent (root), never by the lock: the graphical lock
 sends them over `/run/openscreentime/lock.sock`, which answers only uid
 `ost-lock` (`SO_PEERCRED`); the text lock hands them over in-process. Both go
 through `parentcode`, `via: lock_screen`.
 
-Order of operations: **lock** = start the lock → switch to its VT while the
-person's compositor is still alive → freeze. **Unlock** = thaw → switch back
-to their session → stop the lock. The agent reconciles the lock after every
+Order of operations: **lock** = start the lock → switch to its VT → freeze
+their apps. **Unlock** = thaw → switch back to their session (and see it
+took its keyboard and mouse back) → stop the lock. The agent reconciles the lock after every
 tick, command, lock request and VT change, so every thaw path (a code, a
 console Resume / grant, midnight, bedtime's end, a window opening,
 `ost unlock`) takes it down, and switching or logging in to a stopped
@@ -626,8 +671,9 @@ comm, user }`) per user/app/day.
 
 On the WS bus the agent sends `{"type":"state","state":{…}}` on connect,
 whenever it changes, and at least every 60 s: `locked` (a device lock is
-intended **and** the kernel freezer confirms every present managed user is
-frozen — read back from `cgroup.freeze`, never the agent's intention),
+intended **and** the kernel freezer confirms every present managed user's
+stop holds — everything their stop freezes reads back frozen from
+`cgroup.freeze`, never the agent's intention),
 `lock_intent`, `frozen_users`, `enforcing` (policy applied with no standing
 gaps), `gaps` (kinds), `agent_version`, `active_users`, and `overrides`
 (`{ login: end (UTC) }`, the parent overrides running now — the console
