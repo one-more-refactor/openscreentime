@@ -10,7 +10,9 @@
 //!   it is *running* for a user who is *active on a seat* and not frozen —
 //!   "open", not "focused"; root has no portable way to know compositor
 //!   focus. (Acceptance round 3: with only the catalog, 37 minutes of Firefox
-//!   and Text Editor were "Nothing yet today".)
+//!   and Text Editor were "Nothing yet today".) What the session bus starts
+//!   on its own — GNOME's search providers, background services — counts
+//!   only once it has stayed a minute ([`SERVICE_GRACE_SECS`]).
 //! - **sites**: dnsmasq writes an extra-format query log (`dns.rs` enables
 //!   it); we tail it, reduce each queried name to its registrable domain, and
 //!   count queries per hour, device-wide — resolver traffic has no user.
@@ -56,6 +58,13 @@ const DBUS_DIRS: &[&str] = &[
 const AUTOSTART_DIRS: &[&str] = &["/etc/xdg/autostart"];
 /// How long a read of the desktop entries is trusted (apps get installed).
 const INDEX_TTL: Duration = Duration::from_secs(600);
+/// How long an app the session bus started on its own (see [`bus_started`])
+/// must stay before it counts — then from its start. GNOME wakes Files,
+/// Characters and Disks as search providers while someone types in the
+/// overview, with no window, and they leave again after 20–30 s (acceptance
+/// round 4: "Files 1 min" for a person who never opened it). Someone who
+/// really opens one keeps it longer than that.
+const SERVICE_GRACE_SECS: i64 = 60;
 
 /// Programs that run other programs — a shell, an interpreter, a sandbox, a
 /// launcher — and OpenScreenTime itself. A desktop entry that runs one of
@@ -377,6 +386,33 @@ pub fn app_of(
     None
 }
 
+/// Did the session bus start this process on its own, rather than a person
+/// through a launcher? A GApplication started as a service
+/// (`--gapplication-service`) outside a launcher's scope, or anything in the
+/// bus's own unit (`dbus.service`, dbus-broker's `dbus-:…` units, the XDG
+/// `app-dbus-…` scopes). That is how GNOME's search providers and background
+/// services run: no window of their own. A launcher's scope
+/// (`app-gnome-…`, `app-flatpak-…`) or a service of its own
+/// (`gnome-terminal-server.service`) is someone opening an app.
+pub fn bus_started(p: &ProcApp) -> bool {
+    let unit = p.unit.as_str();
+    unit == "dbus.service"
+        || unit == "dbus-broker.service"
+        || unit.starts_with("dbus-:")
+        || unit.starts_with("app-dbus-")
+        || (!unit.starts_with("app-") && p.argv.iter().any(|a| a == "--gapplication-service"))
+}
+
+/// An app seen under a person that the bus started on its own, until it has
+/// stayed long enough to be one they use (or has gone, never counted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// Seconds it has been running so far, not counted yet.
+    Holding(i64),
+    /// Counts, tick by tick.
+    Counting,
+}
+
 fn read_proc_app(pid: u32, status: &str) -> Option<ProcApp> {
     let uid = status
         .lines()
@@ -431,6 +467,9 @@ pub struct Attrib {
     desktop: DesktopIndex,
     desktop_read: Option<Instant>,
     log_offset: u64,
+    /// (user, app) seen at the last walk: counting, or a bus-started one
+    /// still being held (see [`SERVICE_GRACE_SECS`]).
+    seen: HashMap<(String, String), Seen>,
 }
 
 fn hour_now() -> String {
@@ -474,6 +513,7 @@ impl Attrib {
             desktop: DesktopIndex::default(),
             desktop_read: None,
             log_offset: 0,
+            seen: HashMap::new(),
         }
     }
 
@@ -526,7 +566,10 @@ impl Attrib {
     }
 
     /// The pure half of [`Attrib::sample_apps`]: which apps these processes
-    /// are, counted once per (user, app).
+    /// are, counted once per (user, app). An app only the session bus started
+    /// (a search provider, a background service — [`bus_started`]) counts
+    /// once it has stayed [`SERVICE_GRACE_SECS`], from its start; one that
+    /// leaves sooner never counts.
     fn count_apps(
         &mut self,
         procs: &[ProcApp],
@@ -534,7 +577,8 @@ impl Attrib {
         tick_secs: i64,
     ) {
         let by_uid: HashMap<u32, &String> = active_uids.iter().map(|(u, id)| (*id, u)).collect();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
+        // (user, app) → whether any of its processes is someone opening it.
+        let mut now: HashMap<(String, String), bool> = HashMap::new();
         for p in procs {
             let Some(user) = by_uid.get(&p.uid) else {
                 continue;
@@ -542,9 +586,33 @@ impl Attrib {
             let Some(app) = app_of(p, &self.comm_index, &self.desktop) else {
                 continue;
             };
-            if seen.insert(((*user).clone(), app.clone())) {
-                self.bump(user, "app", app, tick_secs);
-            }
+            *now.entry(((*user).clone(), app)).or_insert(false) |= !bus_started(p);
+        }
+        // Whoever was walked this time and no longer runs an app: it's gone
+        // (a search provider that never counted is forgotten with it).
+        let walked: HashSet<&String> = active_uids.keys().collect();
+        self.seen
+            .retain(|k, _| !walked.contains(&k.0) || now.contains_key(k));
+        let mut keys: Vec<_> = now.into_iter().collect();
+        keys.sort();
+        for (key, opened) in keys {
+            let amount = match self.seen.get(&key).copied() {
+                Some(Seen::Counting) => tick_secs,
+                held => {
+                    let so_far = match held {
+                        Some(Seen::Holding(s)) => s,
+                        _ => 0,
+                    } + tick_secs;
+                    if opened || so_far > SERVICE_GRACE_SECS {
+                        so_far
+                    } else {
+                        self.seen.insert(key, Seen::Holding(so_far));
+                        continue;
+                    }
+                }
+            };
+            self.seen.insert(key.clone(), Seen::Counting);
+            self.bump(&key.0, "app", key.1, amount);
         }
     }
 
@@ -883,26 +951,21 @@ mod tests {
             ),
         ];
         let users: HashMap<String, u32> = [("mia".to_string(), mia)].into();
-        a.count_apps(&procs, &users, 10);
-        let mut got: Vec<(String, i64)> = a
-            .drain(100)
-            .into_iter()
-            .map(|s| {
-                assert_eq!(s["os_username"], "mia");
-                assert_eq!(s["kind"], "app");
-                (
-                    s["key"].as_str().unwrap().to_string(),
-                    s["amount"].as_i64().unwrap(),
-                )
-            })
-            .collect();
-        got.sort();
+        // Seventy seconds of it. Text Editor was started by the bus (as
+        // GNOME's search providers are): it counts once it has stayed a
+        // minute — and then from its start.
+        for _ in 0..7 {
+            a.count_apps(&procs, &users, 10);
+        }
+        let got = totals(&mut a);
+        assert!(got.keys().all(|(u, _)| u == "mia"));
+        let got: Vec<(String, i64)> = got.into_iter().map(|((_, k), v)| (k, v)).collect();
         assert_eq!(
             got,
             vec![
-                ("Firefox ESR".into(), 10),
-                ("Text Editor".into(), 10),
-                ("steam".into(), 10)
+                ("Firefox ESR".into(), 70),
+                ("Text Editor".into(), 70),
+                ("steam".into(), 70)
             ]
         );
 
@@ -915,6 +978,155 @@ mod tests {
             .map(|s| s["key"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(got, vec!["Terminal"]);
+    }
+
+    /// Drain everything into (user, app) → seconds (slices of one hour).
+    fn totals(a: &mut Attrib) -> std::collections::BTreeMap<(String, String), i64> {
+        let mut out = std::collections::BTreeMap::new();
+        for s in a.drain(1000) {
+            assert_eq!(s["kind"], "app");
+            let k = (
+                s["os_username"].as_str().unwrap().to_string(),
+                s["key"].as_str().unwrap().to_string(),
+            );
+            *out.entry(k).or_insert(0) += s["amount"].as_i64().unwrap();
+        }
+        out
+    }
+
+    /// Acceptance round 4: "Where the time went" showed Files, Characters and
+    /// Disks (21–31 s each) for Mia and Philip, who never opened them — GNOME
+    /// starts their search providers when you type in the overview. On the
+    /// Debian 12 fixture: what the bus starts and lets go within a minute
+    /// never counts; the app she typed her way to does; an app opened from
+    /// the dash counts at once; a search provider she then opens a window
+    /// of (the same process, staying) counts from its start.
+    #[test]
+    fn search_providers_that_come_and_go_are_not_apps_she_used() {
+        let mut a = Attrib::new();
+        let mut idx = debian_gnome();
+        let more = DesktopIndex::build(
+            &[
+                (
+                    "org.gnome.Nautilus".to_string(),
+                    desktop("Files", "nautilus --new-window %U", "DBusActivatable=true"),
+                ),
+                (
+                    "org.gnome.Characters".to_string(),
+                    desktop("Characters", "gnome-characters", "DBusActivatable=true"),
+                ),
+                (
+                    "org.gnome.DiskUtility".to_string(),
+                    desktop("Disks", "gnome-disks", "DBusActivatable=true"),
+                ),
+            ],
+            &[
+                (
+                    "org.gnome.Nautilus".to_string(),
+                    "[D-BUS Service]\nName=org.gnome.Nautilus\nExec=/usr/bin/nautilus --gapplication-service\n".to_string(),
+                ),
+                (
+                    "org.gnome.DiskUtility".to_string(),
+                    "[D-BUS Service]\nName=org.gnome.DiskUtility\nExec=/usr/bin/gnome-disks --gapplication-service\n".to_string(),
+                ),
+            ]
+            .into(),
+            &[],
+        );
+        idx.by_program.extend(more.by_program);
+        idx.by_id.extend(more.by_id);
+        a.desktop = idx;
+        let mia = 1000;
+        let users: HashMap<String, u32> = [("mia".to_string(), mia)].into();
+        let files = proc(
+            mia,
+            "nautilus",
+            "/usr/bin/nautilus",
+            &["/usr/bin/nautilus", "--gapplication-service"],
+            "dbus.service",
+        );
+        let characters = proc(
+            mia,
+            "gjs",
+            "/usr/bin/gjs-console",
+            &[
+                "/usr/bin/gjs",
+                "/usr/bin/gnome-characters",
+                "--gapplication-service",
+            ],
+            "dbus.service",
+        );
+        let disks = proc(
+            mia,
+            "gnome-disks",
+            "/usr/bin/gnome-disks",
+            &["/usr/bin/gnome-disks", "--gapplication-service"],
+            "dbus.service",
+        );
+        let editor = proc(
+            mia,
+            "gnome-text-edit",
+            "/usr/bin/gnome-text-editor",
+            &["/usr/bin/gnome-text-editor", "--gapplication-service"],
+            "dbus.service",
+        );
+        for p in [&files, &characters, &disks] {
+            assert!(
+                app_of(p, &a.comm_index, &a.desktop).is_some(),
+                "the fixture names them: {p:?}"
+            );
+            assert!(bus_started(p));
+        }
+        // She types "text" in the overview: every search provider wakes, she
+        // picks Text Editor. 30 s later the providers have left.
+        let typing = vec![
+            files.clone(),
+            characters.clone(),
+            disks.clone(),
+            editor.clone(),
+        ];
+        for _ in 0..3 {
+            a.count_apps(&typing, &users, 10);
+        }
+        assert!(totals(&mut a).is_empty(), "nothing yet: a minute first");
+        for _ in 0..9 {
+            a.count_apps(std::slice::from_ref(&editor), &users, 10);
+        }
+        let got = totals(&mut a);
+        assert_eq!(
+            got.into_iter()
+                .map(|((_, k), v)| (k, v))
+                .collect::<Vec<_>>(),
+            vec![("Text Editor".to_string(), 120)],
+            "the providers never count; the editor from its start"
+        );
+
+        // Files opened from the dash: a launcher's scope, counted at once.
+        let opened = proc(
+            mia,
+            "nautilus",
+            "/usr/bin/nautilus",
+            &["/usr/bin/nautilus", "--new-window"],
+            "app-gnome-org.gnome.Nautilus-4242.scope",
+        );
+        assert!(!bus_started(&opened));
+        a.count_apps(&[opened], &users, 10);
+        assert_eq!(
+            totals(&mut a).get(&("mia".into(), "Files".into())),
+            Some(&10)
+        );
+
+        // The provider that became a window (she clicked a result): it stays,
+        // and counts from when it started.
+        let mut a2 = Attrib::new();
+        a2.desktop = std::mem::take(&mut a.desktop);
+        for _ in 0..8 {
+            a2.count_apps(std::slice::from_ref(&files), &users, 10);
+        }
+        assert_eq!(
+            totals(&mut a2).get(&("mia".into(), "Files".into())),
+            Some(&80)
+        );
     }
 
     /// The real `/proc` walk, on this test's own processes: a child running a
