@@ -223,6 +223,10 @@ for just themselves; and the server looks after itself.
   own** — update checks ("debian.org 3097×"), "am I online?" checks,
   Firefox's background services, the clock. The short list is in
   `docs/TRANSPARENCY.md`; a site someone opens still counts.
+- **A restart or reboot doesn't count the day again.** The agent read its
+  whole query log from the top on every start, so each site's count doubled
+  after a reboot and a child with no browser open was told again that
+  bet365.com is blocked. It now counts from when it starts.
 - **Reloading a console page works.** F5 on Computers or a bookmarked
   person's page was a blank page (the server answered the browser's "is my
   copy still good?" with an empty 404); every console page now reloads, and
