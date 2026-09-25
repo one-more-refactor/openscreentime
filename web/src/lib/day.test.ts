@@ -2,7 +2,7 @@
 // clock (a parent in Berlin looking at a laptop on UTC must not see its
 // bedtime move), and to what the computer says about an override.
 import { describe, expect, test } from "bun:test";
-import { daysBefore, deviceNow, isoOffsetSecs, stopSentence, unlockedUntil, whenLabel } from "./day";
+import { daysBefore, deviceNow, isoOffsetSecs, stopIsNear, stopSentence, unlockedUntil, whenLabel } from "./day";
 import type { RulesVerdict } from "../types";
 
 // Friday 2026-09-25, 23:30 UTC — already Saturday 01:30 in Berlin.
@@ -69,5 +69,28 @@ describe("an override, said plainly", () => {
     expect(unlockedUntil({ ...unlocked, override_until: "2026-09-25T23:00:00+00:00" }, now)).toBeNull();
     expect(unlockedUntil({ ...unlocked, allowed: false }, now)).toBeNull();
     expect(unlockedUntil({ ...unlocked, override_until: null }, now)).toBeNull();
+  });
+});
+
+describe("a stop close enough to follow closely", () => {
+  const at = (iso: string | null, allowed = true): RulesVerdict => ({
+    allowed,
+    reason: "limit",
+    minutes_left: 1,
+    stop_at: iso,
+    resume_at: null,
+  });
+  const t = now.getTime();
+  test("within five minutes, or just landed", () => {
+    expect(stopIsNear(at("2026-09-25T23:34:00+00:00"), t)).toBe(true);
+    expect(stopIsNear(at("2026-09-25T23:35:00+00:00"), t)).toBe(true);
+    expect(stopIsNear(at("2026-09-25T23:29:30+00:00"), t)).toBe(true);
+  });
+  test("far off, long gone, stopped already, or none", () => {
+    expect(stopIsNear(at("2026-09-25T23:40:00+00:00"), t)).toBe(false);
+    expect(stopIsNear(at("2026-09-25T23:20:00+00:00"), t)).toBe(false);
+    expect(stopIsNear(at("2026-09-25T23:31:00+00:00", false), t)).toBe(false);
+    expect(stopIsNear(at(null), t)).toBe(false);
+    expect(stopIsNear(null, t)).toBe(false);
   });
 });

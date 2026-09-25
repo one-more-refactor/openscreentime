@@ -306,12 +306,6 @@ fn install_packages(exec: &Exec, pkgs: &[&str]) -> Option<bool> {
     Some(run(&args) || (tool == "apt-get" && run(&["update"]) && run(&args)))
 }
 
-/// What the network rules shell out to, as (program, package): dnsmasq
-/// serves the website rules, nft loads the firewall. A stock desktop (Debian
-/// GNOME) has neither — without them a computer is screen-time-only, which
-/// it reports as degraded rather than pretending.
-const ENFORCEMENT_DEPS: [(&str, &str); 2] = [("dnsmasq", "dnsmasq"), ("nft", "nftables")];
-
 fn installed_marker() -> String {
     crate::paths::state("installed-packages")
         .to_string_lossy()
@@ -330,13 +324,50 @@ pub fn installed_by_us(exec: &Exec) -> Vec<String> {
         .collect()
 }
 
-/// The enforcement packages this computer lacks.
+/// The enforcement packages this computer lacks. The dnsmasq *service*
+/// serves the website rules — not merely the program, which a Debian or
+/// Ubuntu desktop carries in NetworkManager's `dnsmasq-base` with no service
+/// (so the installer used to install nothing there, and nothing filtered);
+/// nft loads the firewall. A stock desktop has neither — without them a
+/// computer is screen-time-only, which it reports as degraded rather than
+/// pretending. The package names are the same for apt (Debian, Ubuntu),
+/// dnf (Fedora), pacman (Arch) and zypper (openSUSE).
 fn missing_enforcement_deps(exec: &Exec) -> Vec<&'static str> {
-    ENFORCEMENT_DEPS
-        .into_iter()
-        .filter(|(program, _)| !exec.has(program))
-        .map(|(_, package)| package)
-        .collect()
+    let mut missing = Vec::new();
+    if !crate::enforce::dns::resolver_installed(exec) {
+        missing.push("dnsmasq");
+    }
+    if !exec.has("nft") {
+        missing.push("nftables");
+    }
+    missing
+}
+
+/// Make the dnsmasq that is here read the agent's rules: on a distro whose
+/// dnsmasq reads no config directory (Arch), name ours in dnsmasq.conf. The
+/// agent's sandbox can't; this runs as root outside it.
+fn wire_resolver(exec: &Exec) {
+    if !crate::enforce::dns::resolver_installed(exec) {
+        return;
+    }
+    if let Err(e) = crate::enforce::dns::wire_main_conf(exec) {
+        tracing::warn!("could not make dnsmasq read the website rules: {e}");
+    }
+}
+
+/// Where dnsmasq is here to serve the website rules, /etc/resolv.conf has to
+/// be a file the agent can pin — not systemd-resolved's link, which the
+/// agent can't replace from inside its sandbox and whose file resolved swaps
+/// out on every network change (see `dns::own_resolv_conf`). Returns whether
+/// it changed anything.
+fn own_resolv_conf(exec: &Exec) -> bool {
+    if !crate::enforce::dns::resolver_installed(exec) {
+        return false;
+    }
+    crate::enforce::dns::own_resolv_conf(exec).unwrap_or_else(|e| {
+        tracing::warn!("could not make /etc/resolv.conf a file the filter can pin: {e:#}");
+        false
+    })
 }
 
 /// Install what the network rules need. Returns whether anything was
@@ -344,6 +375,7 @@ fn missing_enforcement_deps(exec: &Exec) -> Vec<&'static str> {
 fn ensure_enforcement_deps(exec: &Exec) -> bool {
     let missing = missing_enforcement_deps(exec);
     if missing.is_empty() {
+        wire_resolver(exec);
         return false;
     }
     if missing.contains(&"dnsmasq") {
@@ -356,10 +388,12 @@ fn ensure_enforcement_deps(exec: &Exec) -> bool {
     let list = missing.join(" and ");
     match install_packages(exec, &missing) {
         Some(true) => {
-            // dnf and pacman leave a new service disabled.
+            // dnf and pacman leave a new service disabled (and Arch's
+            // dnsmasq reads no directory until told to).
             if missing.contains(&"dnsmasq") {
                 let _ = exec.run("systemctl", &["enable", "dnsmasq"]);
             }
+            wire_resolver(exec);
             // Remembered, so a retired computer switches off what only we
             // brought (crate::retire) instead of leaving a resolver running.
             let mut ours = installed_by_us(exec);
@@ -388,6 +422,12 @@ fn ensure_enforcement_deps(exec: &Exec) -> bool {
 
 /// Logins with a desktop open right now (people, not the greeter).
 fn graphical_users(exec: &Exec) -> Vec<String> {
+    session_users(exec, true)
+}
+
+/// People signed in right now (uid 1000 and up, not the greeter) — with a
+/// desktop only, or in any session.
+fn session_users(exec: &Exec, graphical_only: bool) -> Vec<String> {
     let mut users = Vec::new();
     for line in exec
         .probe("loginctl", &["list-sessions", "--no-legend"])
@@ -401,12 +441,33 @@ fn graphical_users(exec: &Exec) -> Vec<String> {
         if !person || users.iter().any(|u| u == user) {
             continue;
         }
-        let kind = exec.probe("loginctl", &["show-session", id, "-p", "Type", "--value"]);
-        if matches!(kind.trim(), "wayland" | "x11") {
+        let kind = || exec.probe("loginctl", &["show-session", id, "-p", "Type", "--value"]);
+        if !graphical_only || matches!(kind().trim(), "wayland" | "x11") {
             users.push(user.to_string());
         }
     }
     users
+}
+
+/// What the companion (and the app window) run as, on a command line:
+/// the installed binary or its `ost` alias, then `tray` or `app`. Matched
+/// against the whole command line (`pkill -f`).
+const COMPANION_COMMAND: &str = "^(/usr/local/bin/)?(openscreentime|ost) (tray|app)( |$)";
+
+/// Stop the companion and any app window for everyone signed in: their user
+/// unit where a systemd user manager runs it, and whatever else started one
+/// — a desktop's autostart (GNOME runs it outside that unit), the agent's
+/// start in a running session, a window someone opened. One left running
+/// after its files are gone keeps showing what it last showed.
+fn stop_companions(exec: &Exec) {
+    for user in session_users(exec, false) {
+        let _ = exec.run(
+            "systemctl",
+            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
+        );
+    }
+    // No match is pkill's exit 1: nothing to stop.
+    let _ = exec.run("pkill", &["-TERM", "-f", COMPANION_COMMAND]);
 }
 
 /// Start the companion (warnings, "You're back") for everyone already signed
@@ -601,8 +662,11 @@ pub fn refresh_units() -> Result<()> {
     // package manager that "succeeds" without providing the program must
     // not become a restart loop.
     let missing_before = missing_enforcement_deps(&exec).len();
-    let deps =
-        ensure_enforcement_deps(&exec) && missing_enforcement_deps(&exec).len() < missing_before;
+    let unwired_before = crate::enforce::dns::needs_wiring(&exec);
+    let installed = ensure_enforcement_deps(&exec);
+    let deps = (installed && missing_enforcement_deps(&exec).len() < missing_before)
+        || (unwired_before && !crate::enforce::dns::needs_wiring(&exec));
+    let deps = own_resolv_conf(&exec) || deps;
     let companion_new = cfg!(feature = "tray")
         && std::fs::read_to_string(COMPANION_AUTOSTART_PATH)
             .ok()
@@ -654,7 +718,9 @@ pub fn refresh_units_if_stale(exec: &Exec) {
         || !crate::config::is_root()
         || (stale_units().is_empty()
             && !desktop_setup_missing()
-            && missing_enforcement_deps(exec).is_empty())
+            && missing_enforcement_deps(exec).is_empty()
+            && !crate::enforce::dns::needs_wiring(exec)
+            && !crate::enforce::dns::resolv_conf_is_a_link(exec))
     {
         return;
     }
@@ -700,8 +766,10 @@ fn install_service_with(exec: &Exec) -> Result<()> {
     link_aliases(&exec);
 
     // What the website and firewall rules need, before the agent (re)starts:
-    // its sandbox sees /etc/dnsmasq.d only if it exists at start.
+    // its sandbox sees /etc/dnsmasq.d only if it exists at start, and can
+    // pin /etc/resolv.conf only if it is a file.
     ensure_enforcement_deps(&exec);
+    own_resolv_conf(&exec);
 
     exec.write_file(UNIT_PATH, UNIT)?;
     exec.write_file(WATCHDOG_SVC_PATH, WATCHDOG_SERVICE)?;
@@ -767,12 +835,7 @@ fn install_service_with(exec: &Exec) -> Result<()> {
 /// user and PAM session, the launcher and autostart, the unlock-code sudo.
 /// The agent's own units are stopped by the caller first.
 pub fn remove_installed(exec: &Exec) {
-    for user in graphical_users(exec) {
-        let _ = exec.run(
-            "systemctl",
-            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
-        );
-    }
+    stop_companions(exec);
     let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
     let _ = exec.run(
         "systemctl",
@@ -976,6 +1039,43 @@ mod tests {
             !ensure_enforcement_deps(&bare),
             "no package manager: nothing installed"
         );
+    }
+
+    /// Acceptance round 2: Debian 12 GNOME has /usr/sbin/dnsmasq from
+    /// `dnsmasq-base` (a NetworkManager dependency) and no dnsmasq service.
+    /// The installer saw the program and installed nothing — no website
+    /// rules, no focus hours, and re-running it didn't help. It installs
+    /// the service's package, after preparing a config that starts next to
+    /// systemd-resolved, and enables it.
+    #[test]
+    fn nm_s_dnsmasq_base_is_not_the_resolver_the_rules_need() {
+        let exec = Exec::simulated(
+            &["dnf", "pacman", "zypper"],
+            &[(
+                "systemctl show -p LoadState --value dnsmasq.service",
+                "not-found\n",
+            )],
+        );
+        assert_eq!(missing_enforcement_deps(&exec), vec!["dnsmasq"]);
+        assert!(ensure_enforcement_deps(&exec));
+        let log = exec.log();
+        let apt = pos(
+            &log,
+            "run apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends dnsmasq",
+        );
+        assert!(pos(&log, "write /etc/dnsmasq.d/00-openscreentime.conf") < apt);
+        assert!(apt < pos(&log, "run systemctl enable dnsmasq"));
+        // Arch's dnsmasq reads no directory: dnsmasq.conf names ours.
+        let arch = Exec::simulated(
+            &[],
+            &[(
+                "read /etc/dnsmasq.conf",
+                "# Configuration file for dnsmasq.\n#conf-dir=/etc/dnsmasq.d/,*.conf\n",
+            )],
+        );
+        assert!(crate::enforce::dns::needs_wiring(&arch));
+        assert!(!ensure_enforcement_deps(&arch), "nothing to install");
+        assert_eq!(arch.log(), ["write /etc/dnsmasq.conf"]);
     }
 
     #[test]

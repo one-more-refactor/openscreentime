@@ -43,8 +43,8 @@ use std::time::Duration;
 
 /// Where install.sh / install-service put the managed binary.
 const INSTALL_PATH: &str = "/usr/local/bin/openscreentime";
-const STAGING_PATH: &str = "/usr/local/bin/.openscreentime.new";
-const BACKUP_PATH: &str = "/usr/local/bin/openscreentime.bak";
+pub const STAGING_PATH: &str = "/usr/local/bin/.openscreentime.new";
+pub const BACKUP_PATH: &str = "/usr/local/bin/openscreentime.bak";
 /// Written just before restarting into a new build; removed by that build once
 /// it has proven itself. The watchdog unit reads it (keep the paths in step
 /// with systemd/openscreentime-watchdog.service).

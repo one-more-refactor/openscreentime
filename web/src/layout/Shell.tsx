@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { useFamily, minutesLeft, ringTarget } from "../lib/family";
+import { useFamily, minutesLeft, ringTarget, stoppedBy, type StopKind } from "../lib/family";
 import type { FamilyChild } from "../types";
 import { Wordmark } from "../components/Wordmark";
 import { Icon, type IconName } from "../components/Icon";
@@ -31,6 +31,14 @@ const NAV: NavEntry[] = [
   { to: "/me", label: "Me", icon: "person" },
 ];
 
+/** A stop in the jump list, by its reason. */
+const STOPPED: Record<StopKind, string> = {
+  limit: "time's up",
+  bedtime: "bedtime",
+  outside_hours: "outside hours",
+  paused: "paused",
+};
+
 /** One person in the jump list: their ring, their name, their time left. */
 function TodayRow({ child, onNavigate }: { child: FamilyChild; onNavigate?: () => void }) {
   const left = minutesLeft(child);
@@ -40,18 +48,19 @@ function TodayRow({ child, onNavigate }: { child: FamilyChild; onNavigate?: () =
   // An adult keeping their own time: their limit is theirs, not the rail's.
   const own = child.self_managed === true || child.managed === false || child.age_bracket === "adult";
   const used = own ? null : total && total > 0 ? child.used_minutes / total : total === 0 ? 1 : null;
-  const tone = own ? undefined : left === 0 ? "stop" : left != null && left <= 15 ? "warn" : undefined;
+  const stop = own ? null : stoppedBy(child);
+  const tone = own ? undefined : stop || left === 0 ? "stop" : left != null && left <= 15 ? "warn" : undefined;
   const meta = paused
     ? "paused"
     : own
       ? "own rules"
-      : left === null
-      ? "no limit"
-      : left === 0
-        ? "time's up"
-        : left < 60
-          ? `${left} min`
-          : durationShort(left);
+      : stop
+        ? STOPPED[stop]
+        : left === null
+          ? "no limit"
+          : left < 60
+            ? `${left} min`
+            : durationShort(left);
   return (
     <li>
       <NavLink

@@ -7,6 +7,12 @@
 //
 // Each is read once and removed from the address bar before anything else
 // happens (replaceState, so there's no history entry to go Back to).
+//
+// "Before anything else" means before the first redirect, too: a visit with no
+// session to `/#setup=…` is sent on to `/login`, and that navigation replaces
+// the whole URL — fragment and all. So the app takes every one-time token at
+// its very first render (`captureFragmentTokens`) and hands each out once
+// from memory (`takeToken`), wherever the router ends up.
 
 const TOKEN = "[A-Za-z0-9_-]+";
 
@@ -32,4 +38,28 @@ export function takeFromFragment(name: string): string | null {
     window.location.pathname + window.location.search + stripFragmentParam(hash, name),
   );
   return token;
+}
+
+/** The one-time tokens a link can carry. */
+const ONE_TIME = ["v", "signin", "setup"] as const;
+
+/** Taken from the address bar at startup, waiting for whoever redeems them. */
+const captured = new Map<string, string>();
+
+/** Take every one-time token out of the address bar now, before any redirect
+ * can throw it away. Safe to call more than once. */
+export function captureFragmentTokens(): void {
+  for (const name of ONE_TIME) {
+    const token = takeFromFragment(name);
+    if (token !== null) captured.set(name, token);
+  }
+}
+
+/** A one-time token — still in the address bar, or captured at startup —
+ * handed out once. */
+export function takeToken(name: string): string | null {
+  const live = takeFromFragment(name);
+  const kept = captured.get(name) ?? null;
+  captured.delete(name);
+  return live ?? kept;
 }
