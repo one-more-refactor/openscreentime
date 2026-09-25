@@ -3,7 +3,8 @@
 //
 // Three answers, in the order a person asks them:
 //   when   — a 24-cell strip of the day, in local time;
-//   apps   — catalog apps open on their computers, in minutes ("open", not
+//   apps   — apps open on their computers (a catalog id or a desktop app's
+//            name, "Text Editor"), in minutes ("open", not
 //            "in front" — the agent says what it can actually know);
 //   sites  — the sites their computers looked up, as activity (a resolver
 //            counts lookups, not seconds — the label is honest about it).

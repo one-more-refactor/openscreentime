@@ -15,7 +15,7 @@ import { Ring, RingNumber } from "../components/Ring";
 import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { WhereTheTime } from "../components/WhereTheTime";
-import { Moments } from "../components/Moments";
+import { Moments, momentsFor, standingGaps, type StandingGaps } from "../components/Moments";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
 import { keepsOwnTime, type PersonCtx, type PersonDevice } from "./Person";
 
@@ -178,7 +178,17 @@ function Hero({ ctx, requests }: { ctx: PersonCtx; requests: EarnRequest[] }) {
 }
 
 /** Their computers: what each one really reports. */
-function Computers({ devices, name, events }: { devices: PersonDevice[]; name: string; events: Event[] }) {
+function Computers({
+  devices,
+  name,
+  events,
+  standing,
+}: {
+  devices: PersonDevice[];
+  name: string;
+  events: Event[];
+  standing: StandingGaps;
+}) {
   return (
     <section className="section">
       <div className="section-head">
@@ -222,6 +232,7 @@ function Computers({ devices, name, events }: { devices: PersonDevice[]; name: s
       </div>
       <Moments
         events={events}
+        standing={standing}
         computers={devices.length > 1 ? Object.fromEntries(devices.map((d) => [d.id, d.name])) : undefined}
       />
     </section>
@@ -261,10 +272,19 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
   const own = keepsOwnTime(child);
 
   // The moments that mattered on their computers. Events are per computer, so
-  // on a shared one they include a sibling's — keep this person's own and the
-  // computer-wide ones (a tamper has no login). Someone keeping their own time
-  // has no moments here: a parent sees their minutes, and that's all (the
-  // server leaves their events out too).
+  // on a shared one they include a sibling's (and a parent's own login's) —
+  // keep this person's own, and the computer's own (no login: a pause, a gap)
+  // only from a computer that is theirs: set up for them, or used by nobody
+  // else. Someone keeping their own time has no moments here: a parent sees
+  // their minutes, and that's all (the server leaves their events out too).
+  const theirs = (deviceId: string): boolean => {
+    const d = devices.find((x) => x.id === deviceId);
+    if (!d) return false;
+    const owner = d.full?.owner_account_id;
+    if (owner) return owner === child.account_id;
+    return !fam.children.some((c) => c.account_id !== child.account_id && c.devices.some((x) => x.id === deviceId));
+  };
+  const standing = standingGaps(devices.map((d) => d.full ?? { id: d.id, status: d.status }));
   const idsKey = devices
     .map((d) => d.id)
     .sort()
@@ -322,7 +342,8 @@ export function PersonToday({ ctx }: { ctx: PersonCtx }) {
       <Computers
         devices={devices}
         name={child.name}
-        events={own ? [] : events.filter((e) => e.device_user_id === null || duIds.has(e.device_user_id))}
+        standing={standing}
+        events={own ? [] : momentsFor(events, { logins: duIds, theirs })}
       />
       <Keys devices={devices} name={child.name} />
     </>
