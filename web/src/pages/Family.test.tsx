@@ -144,6 +144,19 @@ describe("a stop says its reason", () => {
     expect(familyVerdict([ada])).toBe("Everyone is within their time.");
   });
 
+  test("bedtime stops a child with no daily limit just the same", async () => {
+    const sam = kid("Sam", {
+      used_minutes: 5,
+      limit_minutes: null,
+      left_minutes: null,
+      rules: stopped("bedtime", at(7, 0, true)),
+    });
+    setup([sam]);
+    const s = await card("Sam");
+    expect(within(s).getByText("Bedtime until tomorrow at 07:00")).toBeTruthy();
+    expect(s.textContent).not.toMatch(/no limit set/);
+  });
+
   test("an older server without a verdict still says time's up at zero", () => {
     const old = kid("Old", { used_minutes: 30, limit_minutes: 30, left_minutes: 0, rules: null });
     expect(stopHeadline(old)).toBe("Time's up for today");
