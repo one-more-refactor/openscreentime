@@ -1,0 +1,54 @@
+{
+  "comment": "Time left, from the same inputs, on the computer and in the console. The agent (client/src/glance.rs tests: its verdict as the app window reads it) and the server (server/src/ledger.rs tests: console_day) must both give left_minutes; null = no limit and nothing counting down, 0 = stopped. now is on the computer's clock (UTC here); override_in_min is a parent's override running that many minutes from now.",
+  "now": "2026-09-25T20:40:00+00:00",
+  "cases": [
+    {
+      "name": "a normal day: the budget",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 60, "schedule": [], "bedtime": null },
+      "used_secs": 1800, "earned_secs": 0, "override_in_min": null,
+      "left_minutes": 30
+    },
+    {
+      "name": "bedtime comes before the budget runs out",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 60, "schedule": [], "bedtime": { "start": "21:00", "end": "07:00" } },
+      "used_secs": 1200, "earned_secs": 0, "override_in_min": null,
+      "left_minutes": 20
+    },
+    {
+      "name": "time's up",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 5, "schedule": [], "bedtime": null },
+      "used_secs": 300, "earned_secs": 0, "override_in_min": null,
+      "left_minutes": 0
+    },
+    {
+      "name": "acceptance step 5: the unlock code after time's up gives 30 minutes, not a red zero",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 5, "schedule": [], "bedtime": null },
+      "used_secs": 360, "earned_secs": 0, "override_in_min": 29,
+      "left_minutes": 29
+    },
+    {
+      "name": "acceptance step 6a: Give 15 on a day already over the limit is 15, not the budget's 10",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 5, "schedule": [], "bedtime": null },
+      "used_secs": 600, "earned_secs": 900, "override_in_min": 15,
+      "left_minutes": 15
+    },
+    {
+      "name": "a grant with budget to spare adds to it",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 60, "schedule": [], "bedtime": null },
+      "used_secs": 1200, "earned_secs": 900, "override_in_min": 15,
+      "left_minutes": 55
+    },
+    {
+      "name": "an override during bedtime runs to its end",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 0, "schedule": [], "bedtime": { "start": "20:00", "end": "07:00" } },
+      "used_secs": 0, "earned_secs": 0, "override_in_min": 30,
+      "left_minutes": 30
+    },
+    {
+      "name": "no limit",
+      "screen_time": { "enabled": true, "daily_limit_minutes": 0, "schedule": [], "bedtime": null },
+      "used_secs": 5000, "earned_secs": 0, "override_in_min": null,
+      "left_minutes": null
+    }
+  ]
+}
