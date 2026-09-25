@@ -21,7 +21,8 @@ import { AvatarRing } from "../components/AvatarRing";
 import { Button, buttonClass } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Mark } from "../components/Wordmark";
-import { useFamily, familyChanged, minutesLeft, minutesTotal, type FamilyChild } from "../lib/family";
+import { useFamily, familyChanged, minutesLeft, minutesTotal, ringTarget, type FamilyChild } from "../lib/family";
+import { unlockedUntil } from "../lib/day";
 import { PauseEverything } from "../components/PauseEverything";
 import { useCountUp } from "../lib/useCountUp";
 import { PageHead } from "../layout/PageHead";
@@ -76,6 +77,15 @@ function TimeLine({ child, paused }: { child: FamilyChild; paused: boolean }) {
     return (
       <p className="pc-time" data-tone="stop">
         <b>Time's up</b> for today · {duration(total)} used
+      </p>
+    );
+  }
+  const unlocked = unlockedUntil(child.rules);
+  if (unlocked) {
+    // An unlock code or a grant is what keeps them going: that time, plainly.
+    return (
+      <p className="pc-time" data-tone={left <= 15 ? "warn" : undefined}>
+        <b className="num">{duration(shown)}</b> left · unlocked until {unlocked}
       </p>
     );
   }
@@ -169,10 +179,11 @@ function PersonCard({ child, requests }: { child: FamilyChild; requests: EarnReq
   // exactly that, never as already done.
   const paused = child.locked && child.devices.length > 0;
   const pendingDev = child.devices.find((d) => d.lock_pending);
-  // The ring fills toward the limit; someone keeping their own time shows an
-  // empty track — their limit is theirs.
-  const target = keepsOwnTime(child) ? null : minutesTotal(child);
+  // The ring fills toward the time they have today (used + left, so it agrees
+  // with the number); someone keeping their own time shows an empty track —
+  // their limit is theirs.
   const left = minutesLeft(child);
+  const target = keepsOwnTime(child) ? null : ringTarget(child.used_minutes, left);
 
   return (
     <li className="pc card" data-paused={paused}>
@@ -227,8 +238,10 @@ function YouCard() {
     };
   }, []);
   const name = me?.account?.display_name ?? me?.admin.display_name ?? "You";
-  // Your own limit — the one you set on My computer.
-  const limit = today?.limit_minutes != null ? today.limit_minutes + today.earned_minutes : null;
+  // Your own limit — the one you set on My computer: the ring fills toward
+  // the time you have (used + left, a snooze included).
+  const limit =
+    today?.limit_minutes != null ? ringTarget(today.used_minutes, Math.max(0, today.left_minutes ?? 0)) : null;
   return (
     <li className="pc card pc-you">
       <div className="pc-hd">
