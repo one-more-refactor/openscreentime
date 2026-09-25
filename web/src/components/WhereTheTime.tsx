@@ -25,16 +25,19 @@ function minutes(secs: number): string {
   return m < 1 ? "<1 min" : duration(m);
 }
 
-export function WhereTheTime({
-  accountId,
-  who,
-  offsetSecs,
-}: {
-  accountId?: string;
-  who: "they" | "you";
-  /** the computer's clock (seconds east of UTC): the day's hours are its hours */
-  offsetSecs?: number | null;
-}) {
+export function WhereTheTime(
+  props: (
+    | { who: "you" }
+    // Someone else's day is always addressed by their id — never "no id,
+    // so yours" (acceptance round 4: Mia's page showed her father's apps).
+    | { who: "they"; accountId: string }
+  ) & {
+    /** the computer's clock (seconds east of UTC): the day's hours are its hours */
+    offsetSecs?: number | null;
+  },
+) {
+  const { who, offsetSecs } = props;
+  const accountId = props.who === "they" ? props.accountId : null;
   const [data, setData] = useState<WhereData | null>(null);
   const [failed, setFailed] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -42,8 +45,7 @@ export function WhereTheTime({
 
   useEffect(() => {
     let alive = true;
-    void api
-      .getWhere(accountId)
+    void (accountId === null ? api.getMyWhere() : api.getWhere(accountId))
       .then((d) => alive && setData(d))
       .catch(() => alive && setFailed(true));
     void api

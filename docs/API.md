@@ -602,7 +602,8 @@ linked to that OS login (`404 no_account` if none). `POST /api/auth/voucher
 
 **Family.** `GET /api/family` → `{ children, devices, profiles, requests,
 server_time }` — the whole home screen in one request. `children` are the
-**members** (`key` = account id) with the account fields plus `name, avatar,
+**members** (`key` = `account_id` = `id`, the account id every per-person call
+addresses) with the account fields plus `name, avatar,
 used_minutes, earned_minutes, limit_minutes, left_minutes, rules, goal_minutes,
 profile_name, devices:[{device_user_id,id,name,status,locked,lock_pending,
 os_username}], pending_requests, locked, blocked, blocks, blocked_apps,

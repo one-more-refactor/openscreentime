@@ -259,6 +259,37 @@ describe("today", () => {
     expect(screen.queryByText("Time's up for the day")).toBeNull();
   });
 
+  // Acceptance round 4: the real server sent no account_id, so her page showed
+  // her father's apps and Edit / Remove went to /api/members/undefined. Every
+  // per-person call addresses her by her account id (the card's shape is
+  // checked against the server's in test/shapes.test.ts).
+  test("where the time went, Edit and Remove all address her, by her id", async () => {
+    const f = family();
+    f.children[0] = { ...f.children[0], key: "acc-mia-1", account_id: "acc-mia-1" };
+    apiImpl.getFamily = () => Promise.resolve(f);
+    setup("/child/acc-mia-1");
+    await screen.findByRole("region", { name: "Today" });
+    await waitFor(() => expect(apiCalls.where).toEqual(["acc-mia-1"]));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Mia R" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(apiCalls.members).toEqual([["update", "acc-mia-1"]]));
+
+    cleanup();
+    setup("/child/acc-mia-1/rules");
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Mia" }));
+    fireEvent.change(await screen.findByLabelText("Type Mia to confirm"), { target: { value: "Mia" } });
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove Mia" }));
+    await waitFor(() =>
+      expect(apiCalls.members).toEqual([
+        ["update", "acc-mia-1"],
+        ["delete", "acc-mia-1"],
+      ]),
+    );
+  });
+
   // Acceptance round 3: 37 minutes of Firefox and Text Editor were "Nothing
   // yet today". The computer now names desktop apps; the page shows the name.
   test("where the time went names a desktop app as the computer does", async () => {
