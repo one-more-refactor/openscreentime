@@ -137,6 +137,10 @@ token out of argv/shell history):
 curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<ENROLL_TOKEN> sh -s -- --server https://HOST
 ```
 
+A console served over plain `http://` (trying it out at home) shows the same
+command with `--insecure-http` on the end, and says why — `install.sh` refuses
+plain http without it.
+
 The script picks the desktop build when the machine has a graphical session
 (`--headless` / `--desktop` force it), verifies the manifest's sha256, installs
 to `/usr/local/bin/openscreentime`, then runs `enroll` + `install-service`. The
@@ -153,7 +157,7 @@ Self-update).
 | GET    | `/api/devices/:id`            | detail incl. device users and recent events                  |
 | POST   | `/api/devices`                | `{ name, account_id? }` → a `pending` device + a 24 h one-time enroll token → `{ device, enroll_token }`. `account_id` = "this is that person's computer". For a parent's own computer `428` unless the confirm window is open |
 | PATCH  | `/api/devices/:id`            | `{ name?, tamper_level? }` — `tamper_level` is 1 or 3        |
-| DELETE | `/api/devices/:id`            | remove it                                                    |
+| DELETE | `/api/devices/:id`            | remove it. Its device token is kept as a tombstone (`retired_devices`), so the agent hears `410 device_retired` and takes itself off the computer (see Agent API → Retirement) |
 | POST   | `/api/devices/:id/enroll-token` | a fresh one-time token (24 h) → `{ device, enroll_token }`; 409 unless `pending`. Confirm-gated |
 | POST   | `/api/devices/:id/lock`       | Pause: enqueue `lock` → `{ command_id, queued: true, delivered: bool }` |
 | POST   | `/api/devices/:id/unlock`     | Resume: enqueue `unlock` (payload `{}`) → same shape         |
@@ -319,6 +323,24 @@ spent token is a 401. A retry with the same token from the same host within
 install). Each reported login is linked to a person — see docs/AUTH.md "Whose
 login is whose"; an unsorted login gets Kid rules on a child's computer and
 rules that enforce nothing on a parent's own.
+
+### Retirement (a removed computer)
+
+Every `/agent/*` call — and the `/agent/ws` upgrade — with the token of a
+computer that was removed (`DELETE /api/devices/:id`) is answered
+
+```
+410 { "error": { "code": "device_retired", "message": "…" }, "retired": true }
+```
+
+and never with a plain 401. On that answer, from its configured server and
+confirmed by a second request, the agent thaws everyone, takes the lock down,
+removes its nft table, the resolv.conf pin (the computer's previous DNS comes
+back), its dnsmasq include, the polkit rule, the unlock-code sudo and its
+cached secrets, then disables and removes its units (`ost __retire`, outside
+the sandbox) and forgets its enrollment. A 401, a network error, or a 410
+without `"retired": true` never does this — the agent keeps its last rules.
+Enrolling again (the install one-liner) clears the retirement.
 
 ### Heartbeat (poll model, fallback for WS)
 ```
