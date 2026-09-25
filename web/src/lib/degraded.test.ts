@@ -55,6 +55,15 @@ describe("a computer that can't apply all of its rules", () => {
     );
   });
 
+  test("a resolv.conf still owned by systemd-resolved is fixed by re-running the install", () => {
+    for (const kind of ["dns_policy_not_loaded", "dns_resolv_conf_not_a_file"]) {
+      expect(degradedSentence(device("Mia's computer", [kind]))).toBe(
+        "Mia's computer can't filter websites. Screen time still works there. " +
+          "Run the install command on it again to add what's missing.",
+      );
+    }
+  });
+
   test("a computer that can't freeze doesn't claim screen time works", () => {
     const s = degradedSentence(device("Old laptop", ["screen_time_no_freezer"]));
     expect(s).toBe("Old laptop can't stop the screen when time is up.");
