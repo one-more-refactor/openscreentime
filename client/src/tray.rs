@@ -79,6 +79,9 @@ struct TrayNotification {
     /// Target user, or `None`/absent = device-wide.
     #[serde(default)]
     user: Option<String>,
+    /// `"back"`: the welcome after a stop ("You're back — 15 more minutes").
+    #[serde(default)]
+    kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -701,6 +704,17 @@ fn deliver_notifications(username: &str, status: &Status, last_id: u64) -> u64 {
     high
 }
 
+/// Is a welcome back ("You're back — 15 more minutes") among the
+/// notifications this user is about to be shown? Then the warning the
+/// welcome already said stays quiet (`WarnState::heard_back`): a "15 minutes
+/// left" two seconds after it took its place on screen (acceptance round 4).
+fn welcomes_back(username: &str, notifs: &[TrayNotification], last_id: u64) -> bool {
+    select_notifications(username, notifs, last_id)
+        .0
+        .iter()
+        .any(|n| n.kind == "back")
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -897,6 +911,9 @@ pub fn run() -> Result<()> {
             }
         }
         if let Some(n) = &next {
+            if welcomes_back(&username, &n.notifications, last_notif_id) {
+                warner.state.heard_back(chrono::Utc::now().timestamp());
+            }
             // A stop that's gone (a thaw) closes its last-minute notice
             // before "You're back" arrives.
             let (frac, ask) = ring_of(n);
@@ -943,7 +960,35 @@ mod tests {
             body: "B".into(),
             urgency: "normal".into(),
             user: user.map(str::to_string),
+            kind: String::new(),
         }
+    }
+
+    /// Acceptance round 4, step 6: after "Give 15" the welcome went to the
+    /// tray and "15 minutes left" was the first thing on screen. The agent
+    /// marks the welcome; the companion sees it — only a new one, only its
+    /// own — and holds the warning it already said.
+    #[test]
+    fn a_new_welcome_back_quiets_the_warning_it_already_said() {
+        let s = status(
+            r#"{"notifications":[
+                {"id":7,"title":"You're back — 15 more minutes","body":"A parent gave you more time.","user":"mia","kind":"back"},
+                {"id":8,"title":"Not this time","body":"…","user":"mia"}
+            ]}"#,
+        );
+        assert!(welcomes_back("mia", &s.notifications, 6));
+        assert!(!welcomes_back("mia", &s.notifications, 7), "already shown");
+        assert!(!welcomes_back("dad", &s.notifications, 6), "not his");
+        // An agent from before the mark: no field, nothing held back.
+        let old = status(r#"{"notifications":[{"id":9,"title":"You're back","user":"mia"}]}"#);
+        assert!(!welcomes_back("mia", &old.notifications, 0));
+
+        // What the companion then does with the stop 15 minutes out.
+        let mut w = WarnState::default();
+        let now = chrono::Utc::now().timestamp();
+        w.heard_back(now);
+        assert_eq!(w.observe_stop(StopReason::Limit, 898, now + 898), None);
+        assert_eq!(w.observe_stop(StopReason::Limit, 299, now + 898), Some(5));
     }
 
     #[test]

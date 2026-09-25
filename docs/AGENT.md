@@ -15,21 +15,28 @@ The agent is a single binary in two builds the server ships: **headless**
 ### One-liner (x86_64 — what the server serves)
 
 ```sh
-curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
+(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=xxx sh -s -- --server https://HOST
 ```
 
 or with the token on the command line (`--token xxx` instead of the env
 var — see the warning below):
 
 ```sh
-curl -fsSL https://HOST/install.sh | sudo sh -s -- --server https://HOST --token xxx
+(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo sh -s -- --server https://HOST --token xxx
 ```
+
+The line downloads with wget where there is one (stock Debian and Ubuntu
+have wget and no curl), else curl; with neither it hands `sh` an `exit 1`
+and fails, never a quiet exit 0 with nothing installed. The script itself
+runs only from `main "$@"` on its last line, so a download cut short runs
+nothing. `sh -s -- --help` prints its options.
 
 `server/install.sh` (served at `GET /install.sh`) does, in order:
 
 1. Validates args: requires `--server https://HOST` and a token
    (`OST_TOKEN` env or `--token`); refuses plain `http://` unless
-   `--insecure-http` is passed (dev only); requires root and `x86_64`.
+   `--insecure-http` is passed (dev only); requires root and `x86_64`;
+   downloads with curl or wget, whichever is there (neither: it says so).
 2. `GET {server}/api/agent/latest`, parses out the artifact to install
    (sed, not jq — the target may not have jq): `"desktop"` where a graphical
    session exists, else `"headless"`; `--desktop` / `--headless` force it,
@@ -221,7 +228,7 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/var/lib/openscreentime/usage_ledger.json` | root : default | `run` (every tick, and on `credit_time` / `unlock` / `ost unlock`; atomic rename via `.tmp`) | The day's ledger: per-user used and earned seconds on this device, the person's use elsewhere as last reported by the server (tagged with its day), **parent overrides** (user → end, trusted UTC), applied grant command ids (idempotency), and the **trusted-clock anchor** (boot id, boottime, wall). Reloaded on startup so a restart resumes today's usage and keeps a parent's override. The day boundary is forward-only and follows the trusted clock (see [Screen time](#screen-time)). |
 | `/var/lib/openscreentime/local_recovery` | root : default | `ost unlock` / `ost recover` | `"<unix secs> <minutes>"` — a parent recovered the device at the machine. The live agent clears every device-level lock once per marker and, when `minutes > 0`, holds the screen-time rules off for everyone on the machine for that long. |
 | `~/.config/openscreentime/parent.toml` | the desktop user : `0600` | `pair` (writes) / `tray` (reads, parent mode) | A paired parent's server URL + scoped access token. Written by `ost pair`; read by the tray to enable parent mode. Not present unless the machine was paired. |
-| `~/.config/openscreentime/intro_seen` | the desktop user : default | `app` (writes, on Done/Skip) / `tray` + `app` (check) | The first-run cards (shown inside the app window) have been seen. Absent = the companion opens the window once. |
+| `~/.config/openscreentime/intro_seen` | the desktop user : default | `app` (writes, as the window opens with the cards) / `tray` + `app` (check) | The first-run cards (shown inside the app window) have been shown — skipping or closing counts. Absent = the companion opens the window once. |
 | `/run/user/<uid>/openscreentime/app.lock`, `app.sock` | the desktop user | `app` | One window per person: the first holds the lock; a second `ost app` rings the socket (the first comes forward) and exits. |
 | `/run/user/<uid>/openscreentime/earn_request` | the desktop user : `0700` dir | written by the `tray` or the `app` ("Ask for more time"); consumed by `run` every tick | An on-demand "request more time" marker. The unprivileged tray can only write inside its own `/run/user/<uid>`, which only that user and root can touch — so the root agent trusts it as an authentic request from that user (a spoof-proof privilege bridge). Single-use: read once, deleted, filed as an earn-request. |
 
@@ -544,7 +551,11 @@ input and shows nothing while the lock holds the screen:
   bundle marks `self_managed` — a self-managed member or a parent's own
   login) has nobody to ask: at their own limit, bedtime or hours the lock
   offers "Give me 15 more minutes" instead, usable once it has been up for
-  60 s, three times a day (counted in the usage ledger). The agent decides
+  60 s, three times a day (counted in the usage ledger). The 60 s run from
+  the first time the lock stood in front of them for this stop — a fresh
+  login or an agent restart keeps counting (`snooze_wait` in the freeze
+  state) — and both locks count down to that moment on their own; pressed
+  early, it says how long is left. The agent decides
   (`snooze` over the lock socket; a child's lock is refused), writes the
   15-minute override and files `screen_time_earned` with `via: "self"`.
 - **Software rendering**: a cage that exits within 6 s is run once more on
@@ -692,6 +703,15 @@ SIGKILLs processes whose `comm` is on a blocked app's process list *and*
 whose uid belongs to the user that blocks it — never root, never another
 user, exact `comm` matches only. One `app_blocked` event (info, `{ app,
 comm, user }`) per user/app/day.
+
+A blocked site is only the browser's "Unable to connect", so the agent says
+why: when the query log shows a site answered with the blocked address
+(`0.0.0.0` / `::` — this computer's rules, or the family resolver's filter)
+twice within 5 minutes, the person whose time is counting gets one
+notification, "example.org is blocked on this computer" — once per site per
+day, one a minute at most, never to someone stopped. Resolver traffic has no
+user, so it is said as a fact about the computer. There is no block page of
+our own: an HTTPS site can't be answered for without a certificate warning.
 
 ### Presence: the `state` frame
 

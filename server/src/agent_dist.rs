@@ -92,4 +92,45 @@ mod tests {
         assert!(super::INSTALL_SH.starts_with("#!/bin/sh"));
         assert!(super::INSTALL_SH.contains("set -eu"));
     }
+
+    /// Acceptance round 4: stock Debian has no curl. The installer takes
+    /// either downloader, fails out loud with neither, and runs nothing
+    /// until the whole file is in (a cut-off download is a syntax error, not
+    /// half an install).
+    #[test]
+    fn install_sh_takes_curl_or_wget_and_runs_only_when_whole() {
+        let sh = super::INSTALL_SH;
+        assert!(sh.contains("command -v curl") && sh.contains("command -v wget"));
+        assert!(sh.contains("wget -qO- \"$1\""));
+        assert!(sh.contains("fail \"curl or wget is required"));
+        let last = sh.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
+        assert_eq!(last, "main \"$@\"");
+        // Whole, it parses; cut anywhere inside `main`, it doesn't.
+        let parses = |text: &str| {
+            use std::io::Write;
+            let mut child = std::process::Command::new("sh")
+                .arg("-n")
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("sh");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+            child.wait().unwrap().success()
+        };
+        assert!(parses(sh));
+        let body = sh.find("\nmain() {").unwrap();
+        let end = sh.rfind("\n}\n").unwrap();
+        for cut in [body + 20, (body + end) / 2, end] {
+            let cut = (0..=cut).rev().find(|&i| sh.is_char_boundary(i)).unwrap();
+            assert!(
+                !parses(&sh[..cut]),
+                "a download cut at byte {cut} would run"
+            );
+        }
+    }
 }

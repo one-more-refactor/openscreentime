@@ -155,7 +155,8 @@ for just themselves; and the server looks after itself.
   pause, a gap, a lost connection — shows on Computers and on its owner's
   page. A gap the computer has fixed reads as fixed, not red.
 - **Signing in by name never just waits.** After 30 s the code page says what
-  a code needs (your computer on, your own login) or offers a passkey; when
+  a code needs (your computer on, and set up as yours — Add my computer, or
+  Who's who) or offers a passkey; when
   the code runs out it says so, with Send a new code and the passkey door —
   the same for every name, so it tells nobody who exists.
 - **/me with no computer** says your rules are saved for when one is added,
@@ -178,6 +179,38 @@ for just themselves; and the server looks after itself.
   press S: the login screen gets the screen within about a second, and they
   meet the lock at their next login.
 - **"You're back" arrives with the desktop**, not five seconds after it.
+- **A person's page works against a real server.** `/api/family` never sent
+  the `account_id` the console addresses a person by (only the console's
+  sample data had it), so a child's "Where the time went" showed the
+  parent's own apps, Edit and Remove failed with "400 Bad Request", and her
+  computer's pauses never reached her page. The server sends it now, "where
+  the time went" never falls back to your own day, and a test holds the
+  console's types and sample data to what the server really sends.
+- **The install line works on stock Debian and Ubuntu**, which have wget and
+  no curl: it downloads with wget, else curl, and with neither it fails out
+  loud instead of "finishing" with nothing installed. The installer runs only
+  once it has arrived whole, and has `--help`.
+- **"You're back" after Give 15 stays on screen.** The grant gave exactly 15
+  minutes, so the 15-minute warning followed two seconds later and pushed the
+  welcome into the notification list; right after a welcome, the warning it
+  already said now stays quiet (the last minute's always comes).
+- **Files, Characters and Disks no longer show up in "Where the time went"**
+  because GNOME's search woke them while you typed: an app the desktop starts
+  in the background counts only once it has stayed a minute.
+- **"Give me 15 more minutes" counts down live**, says how long when pressed
+  early ("Not yet — in 3 s") instead of ignoring the key, and no longer
+  starts its minute again after a fresh login or an agent restart; a new stop
+  waits again.
+- **"My week" shows today once.** In a browser in another time zone (Berlin)
+  a computer that hadn't said its clock put today's minutes on yesterday too;
+  the console now reads such a computer's day on UTC, as the server files it.
+- **The first-run cards show once**; closing or skipping them counts as seen.
+- **A blocked site says so.** A site that keeps being blocked is named in one
+  notification — "example.org is blocked on this computer" — instead of
+  leaving only the browser's "Unable to connect" (once per site a day, never
+  to someone whose time is up; no block page).
+- **Sign-in's "No code?"** says the real rule: the computer must be on and set
+  up as yours.
 
 ### Upgrading
 

@@ -126,10 +126,30 @@ pub fn intro_seen() -> bool {
 
 fn mark_intro_seen() {
     if let Some(path) = seen_marker() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        write_marker(&path);
+    }
+}
+
+fn write_marker(path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, b"1");
+}
+
+/// The first-run cards, once. The window that shows them marks them seen
+/// as it opens, so skipping, closing the window halfway or logging out all
+/// count (acceptance round 4: they came back at every login until "Done").
+/// `None`: already seen — the normal view.
+fn begin_intro(marker: Option<&Path>) -> Option<usize> {
+    match marker {
+        Some(m) if m.exists() => None,
+        Some(m) => {
+            write_marker(m);
+            Some(0)
         }
-        let _ = std::fs::write(&path, b"1");
+        // Nowhere to remember it (no home): show it; nothing else can be done.
+        None => Some(0),
     }
 }
 
@@ -884,7 +904,6 @@ pub fn run() -> anyhow::Result<()> {
         ..Default::default()
     };
     let initial = read_status(&username);
-    let intro = (!intro_seen()).then_some(0);
     let raise = Arc::new(AtomicBool::new(false));
     if let Err(e) = eframe::run_native(
         "openscreentime",
@@ -894,6 +913,8 @@ pub fn run() -> anyhow::Result<()> {
             let (l, _keep) = listener;
             listen(l, raise.clone(), cc.egui_ctx.clone());
             std::mem::forget(_keep); // held until the process exits
+                                     // The window exists now: the cards are being shown.
+            let intro = begin_intro(seen_marker().as_deref());
             Ok(Box::new(AppView {
                 username,
                 status: initial,
@@ -1072,6 +1093,29 @@ mod tests {
             assert_ne!(t, &t.to_uppercase(), "sentence case");
             assert!(!b.is_empty());
         }
+    }
+
+    /// Acceptance round 4: the first-run cards came back at every login
+    /// until someone clicked through to "Done". Shown once; the showing is
+    /// what counts, so Skip, closing the window or logging out are "seen".
+    #[test]
+    fn the_first_run_cards_show_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "ost-intro-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        let marker = dir.join("openscreentime").join("intro_seen");
+        assert_eq!(
+            begin_intro(Some(&marker)),
+            Some(0),
+            "the first window shows them"
+        );
+        assert!(marker.exists(), "…and marks them seen as it opens");
+        // The window was closed on the second card; the next login:
+        assert_eq!(begin_intro(Some(&marker)), None);
+        assert_eq!(begin_intro(Some(&marker)), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

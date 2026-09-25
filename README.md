@@ -33,7 +33,7 @@ that's your household. Then **Computers → Add a computer** gives you the line
 to paste on each Linux computer you look after:
 
 ```bash
-curl -fsSL https://ost.example.com/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://ost.example.com
+(wget -qO- https://ost.example.com/install.sh 2>/dev/null || curl -fsSL https://ost.example.com/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://ost.example.com
 ```
 
 It shows up online within a minute. From then on the server starts at boot,

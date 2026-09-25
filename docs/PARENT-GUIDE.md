@@ -112,7 +112,7 @@ them.
   and paste the line it gives you on that computer, as root:
 
   ```sh
-  curl -fsSL https://your-server/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://your-server
+  (wget -qO- https://your-server/install.sh 2>/dev/null || curl -fsSL https://your-server/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://your-server
   ```
 
   It works once, within 24 hours. Linux only for now. A computer with a
