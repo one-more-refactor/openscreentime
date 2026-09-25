@@ -92,17 +92,24 @@ fn vpn_report_event(report: Option<enforce::vpn::VpnReport>) -> Option<Event> {
     })
 }
 
-fn degraded_events(gaps: &[enforce::Gap]) -> Vec<Event> {
-    gaps.iter()
-        .map(|gap| {
+/// The gaps standing now → the `enforcement_degraded` events worth sending:
+/// one when a gap appears, none while it stays (the `state` frame carries the
+/// standing ones for the console), a fresh one if it comes back after going.
+fn new_gap_events(standing: &[String], now: &[(String, String)]) -> Vec<Event> {
+    now.iter()
+        .filter(|(kind, _)| !standing.contains(kind))
+        .map(|(kind, detail)| {
             Event::new(
                 EV_ENFORCEMENT_DEGRADED,
                 SEV_CRITICAL,
-                json!({ "kind": gap.kind(), "detail": gap.explain() }),
+                json!({ "kind": kind, "detail": detail }),
             )
         })
         .collect()
 }
+
+/// The standing gap for a network apply that failed outright.
+const GAP_NETWORK_APPLY_FAILED: &str = "network_apply_failed";
 
 /// Where the reboot-surviving last-contact wall-clock lives (root-only dir;
 /// tampering with it requires root, at which point the game is over anyway).
@@ -313,6 +320,9 @@ pub struct Agent {
     app_reported: HashMap<(String, String), chrono::NaiveDate>,
     /// Standing enforcement gap kinds from the last network apply.
     standing_gaps: Vec<String>,
+    /// Reports each tamper / degraded observation of the tick once per
+    /// incident, not every ten seconds.
+    incidents: tamper::Incidents,
     /// Active seat users as of the last tick.
     active_users: Vec<String>,
     /// The last `state` frame sent, and when — to send on change / at least
@@ -587,6 +597,7 @@ impl Agent {
             parent_recovery: Vec::new(),
             app_reported: HashMap::new(),
             standing_gaps: Vec::new(),
+            incidents: tamper::Incidents::default(),
             active_users: Vec::new(),
             last_state: None,
             last_state_sent: Instant::now(),
@@ -919,21 +930,7 @@ impl Agent {
             self.contact_state = ContactState::OfflineFailClosed;
             // Aggressively re-assert the last-known policy (dns + firewall +
             // resolv pin) so nothing drifts open while unreachable.
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
-                Err(e) => tracing::warn!("offline fail-closed policy re-assert failed: {e}"),
-            }
+            events.extend(self.apply_network().0);
         } else {
             if self.contact_state == ContactState::OfflineFailClosed {
                 events.push(tamper::tamper_event(
@@ -1043,31 +1040,27 @@ impl Agent {
             .map(|(u, k)| (u.clone(), k.clone()))
             .collect();
         crate::service::sync_managed_sudoers(&self.exec, &users_by_kind);
-        // DNS/nftables are host-global: apply the most restrictive effective policy.
+        // DNS/nftables are host-global: apply the most restrictive effective
+        // policy. A computer that can't filter the network (no dnsmasq, no
+        // nftables) still gets everything else: the rules are held, cached,
+        // and screen time is enforced — loudly degraded, never half-applied.
         let effective = self.effective_network_policy();
         self.focus_applied = Some(self.focus_now());
-        let server_host = crate::client::server_host(&self.cfg.server_url);
-        let (gaps, vpn_report) = enforce::apply_network_policy(
-            self.ctx.clone(),
-            &self.exec,
-            server_host.as_deref(),
-            &effective,
-            &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-        )?;
+        let (net_events, _) = self.apply_network();
         // Best-effort cache so `ost unlock` can work without a live
         // agent process or server connection (parent PIN + recovery teardown).
         crate::policy::save_cache(&effective);
         // …and the whole bundle, so a reboot while the server is unreachable
         // re-enforces the last known policy instead of coming up wide open.
-        // Cached only after a successful apply, and cached verbatim — rebuilding
-        // it from `self.policies` would silently drop `profile_kind`.
+        // Cached verbatim — rebuilding it from `self.policies` would silently
+        // drop `profile_kind`.
         crate::policy::save_bundle_cache(&cacheable);
         tracing::info!(
-            "policy v{} applied for {} user(s)",
+            "policy v{} applied for {} user(s), {} gap(s)",
             self.policy_version,
-            self.policies.len()
+            self.policies.len(),
+            self.standing_gaps.len()
         );
-        self.standing_gaps = gaps.iter().map(|g| g.kind().to_string()).collect();
         // "Applied" is reported alongside, not instead of, the gaps: the policy
         // really was written, it just isn't all being enforced.
         let mut events = vec![Event::new(
@@ -1076,13 +1069,58 @@ impl Agent {
             json!({
                 "policy_version": self.policy_version,
                 "users": self.policies.len(),
-                "dns_gaps": gaps.len(),
+                "dns_gaps": self.standing_gaps.len(),
             }),
         )];
-        events.extend(degraded_events(&gaps));
-        events.extend(vpn_report_event(vpn_report));
+        events.extend(net_events);
         events.extend(tamper_events);
         Ok(events)
+    }
+
+    /// Apply the network side of the effective policy (DNS, firewall, VPN).
+    /// Never aborts the caller: an apply that fails outright is a standing
+    /// gap like any other. Updates the standing gaps and returns the events
+    /// worth sending (a gap when it appears, the VPN verdict), and whether
+    /// the apply ran through.
+    fn apply_network(&mut self) -> (Vec<Event>, bool) {
+        let effective = self.effective_network_policy();
+        let server_host = crate::client::server_host(&self.cfg.server_url);
+        let mut events = Vec::new();
+        let (gaps, ok): (Vec<(String, String)>, bool) = match enforce::apply_network_policy(
+            self.ctx.clone(),
+            &self.exec,
+            server_host.as_deref(),
+            &effective,
+            &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
+        ) {
+            Ok((gaps, report)) => {
+                events.extend(vpn_report_event(report));
+                let gaps = gaps
+                    .iter()
+                    .map(|g| (g.kind().to_string(), g.explain().to_string()))
+                    .collect();
+                (gaps, true)
+            }
+            Err(e) => {
+                tracing::error!("network policy not applied: {e:#}");
+                let detail = format!(
+                    "this computer's network rules could not be applied ({e:#}); \
+                     screen time is still enforced"
+                );
+                (vec![(GAP_NETWORK_APPLY_FAILED.to_string(), detail)], false)
+            }
+        };
+        events.extend(new_gap_events(&self.standing_gaps, &gaps));
+        self.standing_gaps = gaps.into_iter().map(|(kind, _)| kind).collect();
+        (events, ok)
+    }
+
+    /// Our nft table was loaded by the last apply (no firewall gap stands).
+    fn firewall_loaded(&self) -> bool {
+        !self
+            .standing_gaps
+            .iter()
+            .any(|g| g.starts_with("firewall_") || g == GAP_NETWORK_APPLY_FAILED)
     }
 
     /// Move to the tamper level the server asked for, within this computer's
@@ -1431,52 +1469,50 @@ impl Agent {
         // Focus hours began or ended: someone's own blocked sites come or go.
         let focus_flipped = self.focus_flipped();
         if (dns_flipped || focus_flipped) && !self.exec.dry_run() {
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
+            let (evs, ok) = self.apply_network();
+            events.extend(evs);
+            if !ok && focus_flipped {
                 // Try the focus change again next tick.
-                Err(_) if focus_flipped => self.focus_applied = None,
-                Err(e) => tracing::warn!("network re-apply failed: {e}"),
+                self.focus_applied = None;
             }
         }
 
-        // Tamper re-assertion (resolv.conf / nft drift, NM disconnect).
-        events.extend(tamper::reassert_all(&self.exec));
+        // Tamper re-assertion (resolv.conf / nft drift, NM disconnect). What
+        // it sees goes to the monitor raw, every tick; what is *reported* is
+        // each incident once.
+        let mut observed = tamper::reassert_all(&self.exec, self.firewall_loaded());
+        if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
+            observed.push(ev);
+        }
+        let raw_tamper: Vec<String> = observed
+            .iter()
+            .filter(|e| e.ev_type == EV_TAMPER)
+            .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .map(str::to_string)
+            .collect();
+        let resolver_went = observed.iter().any(|e| {
+            e.ev_type == EV_ENFORCEMENT_DEGRADED
+                && e.payload.get("kind").and_then(|k| k.as_str())
+                    == Some(tamper::KIND_RESOLVER_STOPPED)
+        });
+        events.extend(self.incidents.report(observed));
 
         // reassert_all flags a missing nft table (critical event) but can't
         // rebuild it — it has no policy. Repair it here with the effective
         // policy so a flush/delete can't leave the device with NO firewall
-        // (fail-open) until the next full policy apply.
+        // (fail-open) until the next full policy apply. The same re-apply
+        // brings a resolver that stopped back up (it restarts dnsmasq) and
+        // records the gap if it can't.
         // `Some(true)` only — if the probe itself couldn't run (`None`),
         // applying a ruleset through the same broken spawn path won't work
         // either; the reassert above already reported it, retry next tick.
-        if enforce::firewall::table_missing(&self.exec) == Some(true) && !self.exec.dry_run() {
-            let effective = self.effective_network_policy();
-            let server_host = crate::client::server_host(&self.cfg.server_url);
-            match enforce::apply_network_policy(
-                self.ctx.clone(),
-                &self.exec,
-                server_host.as_deref(),
-                &effective,
-                &enforce::vpn::VpnState::Sync(self.vpn.as_ref()),
-            ) {
-                Ok((gaps, report)) => {
-                    tracing::info!("nft table was missing — re-applied firewall");
-                    events.extend(degraded_events(&gaps));
-                    events.extend(vpn_report_event(report));
-                }
-                Err(e) => tracing::warn!("firewall repair after drift failed: {e}"),
+        let flushed = raw_tamper.iter().any(|k| k == "nft_flush");
+        if (flushed || resolver_went) && !self.exec.dry_run() {
+            let (evs, ok) = self.apply_network();
+            if ok && flushed {
+                tracing::info!("nft table was missing — re-applied firewall");
             }
+            events.extend(evs);
         }
 
         // Fail-closed offline grace: alert + aggressively re-assert last-known
@@ -1499,18 +1535,17 @@ impl Agent {
             }
         }
         events.extend(self.offline_hard_lockdown_check());
-        if let Some(ev) = tamper::nm_guard_probe(&self.exec) {
-            events.push(ev);
-        }
 
         // Confirm sustained evasion (vs. a transient blip) and escalate to a
         // whole-device lockdown. We feed the monitor the tamper-signal kinds
-        // seen this tick; a kind that crosses its confirmation threshold is a
-        // real attempt (the "check it's real, not a packet drop" gate).
+        // seen this tick — raw, including the ones not re-reported; a kind
+        // that crosses its confirmation threshold is a real attempt (the
+        // "check it's real, not a packet drop" gate).
         let kinds: Vec<&str> = events
             .iter()
             .filter(|e| e.ev_type == EV_TAMPER)
             .filter_map(|e| e.payload.get("kind").and_then(|k| k.as_str()))
+            .chain(raw_tamper.iter().map(String::as_str))
             .collect();
         let confirmed = self.tamper_monitor.observe(&kinds);
         if !confirmed.is_empty() && !self.tamper_lockdown {
@@ -3825,6 +3860,117 @@ mod tests {
         a.lock_since = Some((
             "mia".into(),
             Instant::now() - Duration::from_secs(lock::SNOOZE_WAIT_SECS + 1),
+        ));
+    }
+
+    fn kind_of(e: &Event) -> &str {
+        e.payload
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or_default()
+    }
+
+    fn mia_bundle() -> crate::policy::PolicyBundle {
+        let mut p = Policy::default();
+        p.screen_time.enabled = true;
+        p.screen_time.daily_limit_minutes = 60;
+        crate::policy::PolicyBundle {
+            policy_version: "7".into(),
+            device_tamper_level: 1,
+            users: vec![crate::policy::UserPolicy {
+                os_username: "mia".into(),
+                profile_kind: "kid".into(),
+                policy: p,
+                self_managed: false,
+            }],
+            vpn: None,
+            parent_code: Some(crate::policy::ParentCode {
+                totp_secret: SECRET.into(),
+                recovery_codes: Vec::new(),
+            }),
+        }
+    }
+
+    /// A stock Debian desktop has neither dnsmasq nor nftables. The rules
+    /// still arrive whole — held, the unlock code set up, screen time
+    /// enforced — resolv.conf is never pinned to a resolver that isn't
+    /// there, and the computer says so: degraded, once, and the `state`
+    /// frame the console reads is no longer "doing what it should".
+    #[tokio::test]
+    async fn a_computer_without_dnsmasq_or_nftables_keeps_its_rules() {
+        if crate::config::is_root() {
+            return; // apply_bundle writes its caches under /etc
+        }
+        let (mut a, _fake) = agent_with_mia();
+        a.policies.clear();
+        a.exec = Exec::simulated(
+            &["nft", "dnsmasq"],
+            &[("systemctl is-active dnsmasq", "inactive\n")],
+        );
+        let evs = a
+            .apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert!(a.policies.contains_key("mia"));
+        assert_eq!(a.parent_totp_secret.as_deref(), Some(SECRET));
+        assert!(evs.iter().any(|e| e.ev_type == EV_POLICY_APPLIED));
+        let degraded: Vec<&str> = evs
+            .iter()
+            .filter(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED)
+            .map(kind_of)
+            .collect();
+        assert_eq!(degraded, ["dns_resolver_missing", "firewall_not_installed"]);
+        assert!(!evs.iter().any(|e| e.ev_type == EV_TAMPER));
+        let st = a.device_state();
+        assert!(!st.enforcing);
+        assert_eq!(st.gaps, ["dns_resolver_missing", "firewall_not_installed"]);
+        assert!(
+            !a.exec
+                .log()
+                .iter()
+                .any(|l| l == "write /etc/resolv.conf" || l == "run chattr +i /etc/resolv.conf"),
+            "{:?}",
+            a.exec.log()
+        );
+
+        // The next pull with the same gaps is not news.
+        let evs = a.apply_bundle(mia_bundle()).unwrap();
+        assert!(!evs.iter().any(|e| e.ev_type == EV_ENFORCEMENT_DEGRADED));
+
+        // Screen time still bites: she is over her 60 minutes.
+        stop_mia(&mut a).await;
+        assert!(a.frozen.contains("mia"));
+    }
+
+    /// nftables there but refusing the ruleset: a firewall gap. The whole
+    /// network apply failing (its ruleset can't even be written): a gap of
+    /// its own. Never an abort — the rules are held either way.
+    #[tokio::test]
+    async fn a_network_apply_that_fails_is_a_gap_not_an_abort() {
+        if crate::config::is_root() {
+            return;
+        }
+        let (mut a, _fake) = agent_with_mia();
+        a.policies.clear();
+        let running = [("systemctl is-active dnsmasq", "active\n")];
+        a.exec = Exec::simulated(&[], &running).failing(&["nft"]);
+        a.apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert_eq!(a.standing_gaps, ["firewall_not_applied"]);
+        assert!(
+            !a.firewall_loaded(),
+            "a missing table is the known gap, not a flush"
+        );
+
+        a.policies.clear();
+        a.exec = Exec::simulated(&[], &running)
+            .failing(&["write:/etc/openscreentime/dnsmasq.d/openscreentime.conf"]);
+        let evs = a
+            .apply_bundle(mia_bundle())
+            .expect("never aborts on the network");
+        assert!(a.policies.contains_key("mia"));
+        assert_eq!(a.standing_gaps, [GAP_NETWORK_APPLY_FAILED]);
+        assert!(evs.iter().any(
+            |e| e.ev_type == EV_ENFORCEMENT_DEGRADED && kind_of(e) == GAP_NETWORK_APPLY_FAILED
         ));
     }
 
