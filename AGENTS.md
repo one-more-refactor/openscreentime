@@ -86,7 +86,8 @@ podman exec openscreentime-server /app/openscreentime-server recover <name>   # 
 ```
 
 A computer joins with the line the console gives:
-`curl -fsSL https://HOST/install.sh | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`.
+`(wget -qO- https://HOST/install.sh 2>/dev/null || curl -fsSL https://HOST/install.sh || echo exit 1) | sudo OST_TOKEN=<token> sh -s -- --server https://HOST`
+(wget where there is one — stock Debian and Ubuntu have no curl — else curl).
 
 ### Settings that matter
 
