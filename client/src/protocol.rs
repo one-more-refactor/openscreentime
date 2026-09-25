@@ -219,4 +219,10 @@ pub struct DeviceState {
     /// [`FEATURES`].
     #[serde(default)]
     pub features: Vec<String>,
+    /// Parent overrides running now (a code at the lock, a grant, a snooze,
+    /// `ost unlock`): login → when it ends (UTC). The console counts "time
+    /// left" with the same rules function and these same inputs, so it says
+    /// what the computer says.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub overrides: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }

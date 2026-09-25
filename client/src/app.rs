@@ -54,11 +54,9 @@ struct UserStatus {
     name: String,
     #[serde(default)]
     used_minutes: u64,
-    /// `None` = no daily limit configured.
-    #[serde(default)]
-    remaining_minutes: Option<i64>,
-    #[serde(default)]
-    frozen: bool,
+    /// The verdict: time left, the stop, a parent's override.
+    #[serde(flatten)]
+    clock: glance::Clock,
     /// Countdown to an imminent stop, if one is running.
     #[serde(default)]
     freeze_in_secs: Option<u64>,
@@ -73,6 +71,10 @@ struct UserStatus {
     shared_sites: bool,
     #[serde(default)]
     today: Option<Today>,
+    /// A request for more time is waiting on a parent (`None`: an agent that
+    /// doesn't say — the window remembers its own click).
+    #[serde(default)]
+    ask_pending: Option<bool>,
 }
 
 fn yes() -> bool {
@@ -230,7 +232,14 @@ struct Hero {
 }
 
 /// The ring for the current state (the ring is time used today, nothing else).
-fn hero(status: Option<&Status>, me: Option<&UserStatus>) -> Hero {
+/// "Time left" is the verdict's — the same number the warnings, the tray and
+/// the console count down — so a parent's override shows as the time it
+/// gives, never as a red zero.
+fn hero(
+    status: Option<&Status>,
+    me: Option<&UserStatus>,
+    now: chrono::DateTime<chrono::Local>,
+) -> Hero {
     let blank = |label: &str, ring: RingState| Hero {
         ring,
         big: String::new(),
@@ -260,18 +269,15 @@ fn hero(status: Option<&Status>, me: Option<&UserStatus>) -> Hero {
     let Some(u) = me else {
         return blank("no limit here", RingState::Track);
     };
-    if u.frozen {
-        return spent();
-    }
-    match u.remaining_minutes {
-        None => Hero {
+    match u.clock.left(now) {
+        glance::Left::NoLimit => Hero {
             ring: RingState::Track,
             big: u.used_minutes.to_string(),
             label: "min today".into(),
             paused: false,
         },
-        Some(m) if m <= 0 => spent(),
-        Some(m) => {
+        glance::Left::Stopped => spent(),
+        glance::Left::Minutes { minutes: m, .. } => {
             let total = u.used_minutes as f32 + m as f32;
             let frac = if total > 0.0 {
                 u.used_minutes as f32 / total
@@ -367,7 +373,32 @@ impl AppView {
                 ui::WARN_TINT,
             ));
         }
+        if let Some(line) = self
+            .me()
+            .and_then(|u| unlocked_line(&u.clock, chrono::Local::now()))
+        {
+            return Some((line, ui::BRAND_INK, ui::BRAND_TINT));
+        }
         None
+    }
+
+    /// A request is waiting on a parent: this window's click until the agent
+    /// has picked it up, then the agent's word (a grant or a "not now" clears
+    /// it, and the button comes back).
+    fn asked(&self) -> bool {
+        self.asked || self.me().and_then(|u| u.ask_pending) == Some(true)
+    }
+}
+
+/// "Unlocked until 00:27." — when a parent's override (or their own snooze)
+/// is what keeps the screen on, said plainly.
+fn unlocked_line(c: &glance::Clock, now: chrono::DateTime<chrono::Local>) -> Option<String> {
+    match c.left(now) {
+        glance::Left::Minutes {
+            unlocked_until: Some(t),
+            ..
+        } => Some(format!("Unlocked until {}.", t.format("%H:%M"))),
+        _ => None,
     }
 }
 
@@ -389,6 +420,10 @@ impl eframe::App for AppView {
         {
             self.status = read_status(&self.username);
             self.read_at = Some(Instant::now());
+            // The agent has the ask now: from here on, its word counts.
+            if self.me().and_then(|u| u.ask_pending) == Some(true) {
+                self.asked = false;
+            }
         }
         if self.raise.swap(false, Ordering::SeqCst) {
             Self::come_forward(ctx);
@@ -455,7 +490,7 @@ impl AppView {
     /// Board 05c: the ring, today's rules, one verb, the honest footer.
     fn clock_view(&mut self, uic: &mut egui::Ui) {
         let me = self.me().cloned();
-        let h = hero(self.status.as_ref(), me.as_ref());
+        let h = hero(self.status.as_ref(), me.as_ref(), chrono::Local::now());
         uic.vertical_centered(|uic| {
             uic.add_space(24.0);
             let d = 168.0;
@@ -533,7 +568,7 @@ impl AppView {
         if let Some(u) = &me {
             if u.can_ask && !u.self_managed {
                 let w = uic.available_width();
-                if self.asked {
+                if self.asked() {
                     Button::new("Asked — waiting for a parent", Kind::Primary)
                         .icon(Icon::Check)
                         .width(w)
@@ -884,12 +919,26 @@ mod tests {
             ..Default::default()
         }
     }
+    fn now() -> chrono::DateTime<chrono::Local> {
+        chrono::Local::now()
+    }
+    /// A status as the agent writes it: `remaining` is the budget, the
+    /// verdict's stop is that far ahead (limit, counting).
     fn kid(remaining: Option<i64>, frozen: bool) -> UserStatus {
+        let n = now();
         UserStatus {
             name: "kid".into(),
             used_minutes: 48,
-            remaining_minutes: remaining,
-            frozen,
+            clock: glance::Clock {
+                remaining_minutes: remaining,
+                allowed: Some(!frozen && remaining.is_none_or(|m| m > 0)),
+                reason: remaining.map(|_| "limit".into()),
+                minutes_left: remaining.map(|m| m.max(0) as u32),
+                stop_at: remaining.map(|m| (n + chrono::Duration::minutes(m.max(0))).to_rfc3339()),
+                counting: true,
+                frozen,
+                ..Default::default()
+            },
             can_ask: true,
             ..Default::default()
         }
@@ -897,6 +946,7 @@ mod tests {
 
     #[test]
     fn the_ring_is_time_used_today() {
+        let hero = |s: Option<&Status>, u: Option<&UserStatus>| hero(s, u, now());
         // 48 used, 27 left: 64 % of the ring, green, "27 min left".
         let s = status(vec![kid(Some(27), false)]);
         let h = hero(Some(&s), s.users.first());
@@ -937,6 +987,68 @@ mod tests {
         // The agent isn't running: a calm track, no number.
         let h = hero(None, None);
         assert!(h.big.is_empty() && matches!(h.ring, RingState::Track));
+    }
+
+    /// Acceptance, step 5: after the unlock code Mia had 30 minutes, but the
+    /// window showed a red "0 min left" (it read the spent budget). The
+    /// window says what the rules say: 29 left, unlocked until then.
+    #[test]
+    fn an_unlock_code_shows_its_time_not_a_red_zero() {
+        let n = now();
+        let until = n + chrono::Duration::minutes(29);
+        let mia = UserStatus {
+            name: "mia".into(),
+            used_minutes: 6,
+            clock: glance::Clock {
+                remaining_minutes: Some(-1),
+                allowed: Some(true),
+                reason: Some("limit".into()),
+                minutes_left: Some(29),
+                stop_at: Some(until.to_rfc3339()),
+                override_until: Some(until.to_rfc3339()),
+                counting: true,
+                frozen: false,
+            },
+            ..Default::default()
+        };
+        let s = status(vec![mia]);
+        let h = hero(Some(&s), s.users.first(), n);
+        assert_eq!((h.big.as_str(), h.label.as_str()), ("29", "min left"));
+        assert!(
+            !matches!(h.ring, RingState::Full { color: ui::STOP }),
+            "never a red zero while unlocked"
+        );
+        let line = unlocked_line(&s.users[0].clock, n).expect("says it is unlocked");
+        assert_eq!(line, format!("Unlocked until {}.", until.format("%H:%M")));
+    }
+
+    /// Acceptance, step 6a: after "Give 15" on a day already over the limit
+    /// the window said 9 and hit 0 at 00:22 while the lock came at 00:27. It
+    /// counts down to the one stop the warnings announce.
+    #[test]
+    fn a_grant_counts_down_to_the_announced_stop() {
+        let n = now();
+        let stop = n + chrono::Duration::minutes(15);
+        let mia = UserStatus {
+            name: "mia".into(),
+            used_minutes: 10,
+            clock: glance::Clock {
+                remaining_minutes: Some(10), // limit 5 + earned 15 − used 10
+                allowed: Some(true),
+                reason: Some("limit".into()),
+                minutes_left: Some(15),
+                stop_at: Some(stop.to_rfc3339()),
+                override_until: Some(stop.to_rfc3339()),
+                counting: true,
+                frozen: false,
+            },
+            ..Default::default()
+        };
+        let s = status(vec![mia]);
+        assert_eq!(hero(Some(&s), s.users.first(), n).big, "15");
+        // Ten minutes on: 5 left, not 0 — the lock comes when the ring says.
+        let later = n + chrono::Duration::minutes(10);
+        assert_eq!(hero(Some(&s), s.users.first(), later).big, "5");
     }
 
     #[test]

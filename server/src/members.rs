@@ -738,6 +738,112 @@ pub async fn delete_member(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Who's who moved a login away from `account_id`. If that leaves a person the
+/// server made up for an unsorted login (the `auto_created` trail) with no
+/// login and no computer anywhere — and nobody has touched them since: same
+/// name, same bracket, their rules as created, no email, face, birthday,
+/// goal or theme, never signed in — they are removed: they were only ever a
+/// guess about who that login was ("philip", Kid, once the `philip` login
+/// turned out to be Philip). Anyone else is kept; Family shows them with no
+/// computer. Returns whether the person was removed.
+pub async fn drop_if_leftover(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    account_id: Uuid,
+) -> AppResult<bool> {
+    let still_here: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM device_users WHERE account_id = $1)
+             OR EXISTS (SELECT 1 FROM devices WHERE owner_account_id = $1)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if still_here {
+        return Ok(false);
+    }
+    let Ok(acct) = get_account(db, account_id, tenant_id).await else {
+        return Ok(false);
+    };
+    if acct.4 != "member" {
+        return Ok(false);
+    }
+    let trail: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM events
+          WHERE tenant_id = $1 AND type = 'member'
+            AND payload->>'action' = 'auto_created' AND payload->>'account_id' = $2
+          ORDER BY created_at LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(account_id.to_string())
+    .fetch_optional(db)
+    .await?;
+    let Some(trail) = trail else {
+        return Ok(false);
+    };
+    let as_made = trail["display_name"].as_str() == Some(acct.2.as_str())
+        && trail["age_bracket"].as_str() == Some(acct.5.as_str())
+        && acct.3.is_none()
+        && acct.6.is_none()
+        && acct.7.is_none()
+        && acct.11.is_none()
+        && acct.12.is_none();
+    if !as_made {
+        return Ok(false);
+    }
+    let rules_as_made: bool = match acct.9 {
+        None => true,
+        Some(pid) => sqlx::query_scalar(
+            "SELECT policy = $2::jsonb AND NOT EXISTS (
+                        SELECT 1 FROM admins WHERE profile_id = $1 AND id <> $3)
+               FROM profiles WHERE id = $1",
+        )
+        .bind(pid)
+        .bind(presets::policy_for(bracket_of(&acct)))
+        .bind(acct.0)
+        .fetch_optional(db)
+        .await?
+        .unwrap_or(false),
+    };
+    let signed_in: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM webauthn_credentials WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admin_sessions WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admins WHERE id = $1 AND blocked_at IS NOT NULL)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if !rules_as_made || signed_in {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
+        .bind(account_id)
+        .bind(tenant_id)
+        .execute(db)
+        .await?;
+    if let Some(pid) = acct.9 {
+        sqlx::query(
+            "DELETE FROM profiles WHERE id = $1 AND NOT is_preset
+               AND NOT EXISTS (SELECT 1 FROM device_users WHERE profile_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM admins WHERE profile_id = $1)",
+        )
+        .bind(pid)
+        .execute(db)
+        .await?;
+    }
+    events::insert(
+        db,
+        tenant_id,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "removed_leftover", "account_id": account_id,
+                "display_name": acct.2 }),
+    )
+    .await?;
+    Ok(true)
+}
+
 /// `POST /api/members/{id}/block` — members only. A parent Danger-Zone action:
 /// blocks the account (it can no longer authenticate; live sessions are cut) and
 /// locks every device the child uses so their screens stop right away.
@@ -876,7 +982,18 @@ async fn policy_for_account(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<P
         .unwrap_or_default())
 }
 
-type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32, Option<i32>);
+type TodayRow = (
+    Uuid,          // du.id
+    Uuid,          // d.id
+    String,        // d.name
+    String,        // d.status
+    bool,          // d.locked
+    i32,           // used_seconds today
+    i32,           // earned_seconds today
+    Option<i32>,   // d.utc_offset_secs
+    String,        // du.os_username
+    Option<Value>, // d.last_state (the overrides it runs)
+);
 
 /// `GET /api/me/today` — the person's own day, across every device they use.
 pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -887,7 +1004,8 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     // "Today" is each device's own local day — the day its agent enforces.
     let rows: Vec<TodayRow> = sqlx::query_as(&format!(
         "SELECT du.id, d.id, d.name, d.status, d.locked,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs,
+                du.os_username, d.last_state
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
            LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = {}
@@ -905,11 +1023,19 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     let used = used_secs / 60;
     let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    // The same budget the device enforces: limit + earned − used, per person,
-    // in seconds, rounded up to the minute like the device's ring.
-    let left = limit.map(|l| ((l * 60 + earned_secs - used_secs).max(0) + 59) / 60);
     let offset = rows.iter().find_map(|r| r.7);
-    let rules = crate::ledger::rules_json(&policy, used_secs, earned_secs, offset, Utc::now());
+    // Time left, the number their computer shows: the same rules function
+    // with the same inputs (their day, the override a computer of theirs
+    // reports), on the computer's clock.
+    let now = Utc::now();
+    let override_until = rows
+        .iter()
+        .filter_map(|r| crate::ledger::reported_override(r.9.as_ref(), &r.8, now))
+        .max();
+    let day =
+        crate::ledger::console_day(&policy, used_secs, earned_secs, offset, override_until, now);
+    let left = day.left_minutes;
+    let rules = day.rules;
     let locked = rows.iter().any(|r| r.4);
     let du_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let pending: Option<i32> = sqlx::query_scalar(
@@ -936,6 +1062,8 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         // When screens stop by the rules (limit, bedtime or window end,
         // whichever first) — the agent's own rules function.
         "rules": rules,
+        // The computer's clock: focus hours and the week are its day.
+        "utc_offset_secs": offset,
         "locked": locked,
         "devices": devices,
         "blocks": policy.blocks,
