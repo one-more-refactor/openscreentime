@@ -97,6 +97,9 @@ const LOGIN_SCREEN_GRACE: Duration = Duration::from_secs(90);
 /// After the lock hands the screen back: how long a desktop that locks
 /// itself on waking is unlocked again (it was open when the lock went up).
 const RETURN_WATCH: Duration = Duration::from_secs(6);
+/// When the stopped person's session is gone: how long the lock waits for the
+/// login screen to take the screen before it goes anyway.
+const LOGIN_HANDOFF: Duration = Duration::from_secs(5);
 
 pub fn unit_name(vt: u32) -> String {
     format!("openscreentime-lock@{vt}.service")
@@ -508,20 +511,47 @@ pub type LockTx = mpsc::Sender<LockEvent>;
 /// a frozen desktop for up to a tick. The kernel notifies a change of
 /// `/sys/class/tty/tty0/active` (`POLLPRI`, what logind itself waits on);
 /// the 300 ms timeout is only a fallback.
+///
+/// It wakes the runner the same way when a login session comes or goes
+/// (logind's session files, checked on the same 300 ms beat): a stopped
+/// person whose session ends leaves a lock in front of nobody, which gives
+/// the screen to the login screen at once rather than at the next tick.
 pub fn spawn_vt_watch(tx: LockTx) {
     std::thread::spawn(move || {
         let mut last = vt::active();
+        let mut last_sessions = sessions_stamp();
         loop {
             vt::wait_change(Duration::from_millis(300));
             let now = vt::active();
-            if now != last {
+            let sessions = sessions_stamp();
+            if now != last || sessions != last_sessions {
                 last = now;
+                last_sessions = sessions;
                 if tx.blocking_send(LockEvent::VtChanged).is_err() {
                     return;
                 }
             }
         }
     });
+}
+
+/// logind's session files (one per session, rewritten on every state change):
+/// names and modification times.
+fn sessions_stamp() -> Vec<(String, Option<std::time::SystemTime>)> {
+    let Ok(dir) = std::fs::read_dir("/run/systemd/sessions") else {
+        return Vec::new();
+    };
+    let mut v: Vec<(String, Option<std::time::SystemTime>)> = dir
+        .filter_map(Result::ok)
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
+            (name, mtime)
+        })
+        .filter(|(name, _)| !name.ends_with(".ref"))
+        .collect();
+    v.sort();
+    v
 }
 
 // ── Sessions (logind) ────────────────────────────────────────────────────────
@@ -1722,6 +1752,42 @@ impl LockScreen {
             self.set_switch_lock(true);
         }
         false
+    }
+
+    /// The person the lock stood in front of has no session left — they
+    /// logged out, or it ended: a lock for nobody is no lock. It lets go of
+    /// `VT_LOCKSWITCH` and hands the screen to the login screen (the VT that
+    /// was on screen before, where there is none), then stops. They stay
+    /// stopped: logging in again meets the lock. Nothing changes on screen
+    /// when the lock was waiting behind someone else.
+    pub async fn hand_to_login_screen(&mut self) {
+        let Some(s) = self.shown.take() else {
+            return;
+        };
+        self.upgrade = None;
+        self.aside = false;
+        self.grace_until = None;
+        self.login_screen_since = None;
+        self.wake_on_gui(false);
+        self.set_switch_lock(false);
+        let ours = |v: Option<u32>| v == Some(LOCK_VT) || v == Some(TEXT_VT);
+        if ours(self.host.active_vt()) {
+            if self.host.login_screen() {
+                // Stop the lock once the login screen has the screen, not
+                // before: never an empty VT in between.
+                let until = tokio::time::Instant::now() + LOGIN_HANDOFF;
+                while ours(self.host.active_vt()) && tokio::time::Instant::now() < until {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } else if let Some(v) = s.return_vt {
+                if !self.host.switch_to(v) {
+                    tracing::warn!("could not switch back to VT {v}");
+                }
+            }
+        }
+        self.host.stop_text();
+        self.host.stop_gui(LOCK_VT);
+        with_shared(&self.shared, |sh| sh.face = None);
     }
 
     /// Take the lock down. The caller has already thawed; this puts the
