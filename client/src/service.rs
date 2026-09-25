@@ -663,7 +663,9 @@ pub fn refresh_units_if_stale(exec: &Exec) {
             "__refresh-units",
         ],
     ) {
-        Ok(_) => tracing::info!("systemd units differ from this build's; refreshing them"),
+        Ok(_) => tracing::info!(
+            "setting up what this build needs (its units, the desktop pieces, dnsmasq/nftables)"
+        ),
         Err(e) => tracing::warn!("could not refresh the systemd units: {e}"),
     }
 }
