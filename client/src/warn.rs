@@ -26,6 +26,11 @@ pub fn parse_reason(id: &str) -> Option<StopReason> {
     })
 }
 
+/// How long after "You're back" a warning stays unsaid: the welcome already
+/// said how long and until when, and a "15 minutes left" two seconds later
+/// buried it (acceptance round 4: after "Give 15" she never saw the welcome).
+pub const BACK_QUIET_SECS: i64 = 90;
+
 /// Which thresholds have already been announced for the stop coming up.
 #[derive(Debug, Default, Clone)]
 pub struct WarnState {
@@ -33,9 +38,19 @@ pub struct WarnState {
     fired: Vec<u32>,
     /// When the stop last announced lands (unix seconds).
     announced_at: Option<i64>,
+    /// When "You're back" (or "15 more minutes") was last shown (unix seconds).
+    back_at: Option<i64>,
 }
 
 impl WarnState {
+    /// "You're back" was just shown at `now` (unix seconds). It says how long
+    /// there is and until when, so the warning that would follow it within
+    /// moments is already said: it counts as announced, and stays quiet. The
+    /// later ones — and the last minute, always — are said as usual.
+    pub fn heard_back(&mut self, now: i64) {
+        self.back_at = Some(now);
+    }
+
     /// [`observe`](Self::observe) a stop landing at `at` (unix seconds). A
     /// warning says *when* ("ends at 23:37"): if the stop has since moved to
     /// another minute (an idle spell isn't billed, so a limit slides later;
@@ -52,7 +67,15 @@ impl WarnState {
         if due.is_some() {
             self.announced_at = Some(at);
         }
-        due
+        // Right after "You're back", the welcome is the announcement.
+        let now = at - secs_left;
+        let welcomed = self
+            .back_at
+            .is_some_and(|b| (0..BACK_QUIET_SECS).contains(&(now - b)));
+        match due {
+            Some(t) if welcomed && t > 1 => None,
+            d => d,
+        }
     }
 
     /// Feed the seconds left before the stop; returns the threshold to
@@ -237,6 +260,51 @@ mod tests {
         let edge = at(21, 0).timestamp() - 2; // 20:59:58
         assert_eq!(st.observe_stop(StopReason::Bedtime, 280, edge), Some(5));
         assert_eq!(st.observe_stop(StopReason::Bedtime, 270, edge + 4), None);
+    }
+
+    /// Acceptance round 4, step 6: "Give 15" at the lock, "You're back — a
+    /// parent gave you 15 more minutes" sent, and two seconds later "15
+    /// minutes left" took the screen; the welcome went to the tray unseen.
+    /// Right after the welcome, the warning it already said stays quiet; the
+    /// 5 and the last minute come as usual.
+    #[test]
+    fn the_welcome_back_is_not_buried_by_its_own_warning() {
+        let t0 = at(9, 29).timestamp();
+        let stop = t0 + 15 * 60;
+        let mut st = WarnState::default();
+        st.heard_back(t0);
+        // The stop, seen a tick after the thaw: 14:58 left.
+        assert_eq!(
+            st.observe_stop(StopReason::Limit, stop - t0 - 2, stop),
+            None
+        );
+        assert_eq!(
+            st.observe_stop(StopReason::Limit, stop - t0 - 12, stop),
+            None
+        );
+        // …not later either: it counts as said.
+        assert_eq!(st.observe_stop(StopReason::Limit, 10 * 60, stop), None);
+        assert_eq!(st.observe_stop(StopReason::Limit, 5 * 60, stop), Some(5));
+        assert_eq!(st.observe_stop(StopReason::Limit, 50, stop), Some(1));
+
+        // Without a welcome the 15 is said at once, as before.
+        let mut st = WarnState::default();
+        assert_eq!(st.observe_stop(StopReason::Limit, 898, stop), Some(15));
+
+        // A minute given: the last minute's save-your-work notice is never
+        // held back, welcome or not.
+        let mut st = WarnState::default();
+        let stop = t0 + 60;
+        st.heard_back(t0);
+        assert_eq!(st.observe_stop(StopReason::Limit, 58, stop), Some(1));
+
+        // A welcome long ago quiets nothing.
+        let mut st = WarnState::default();
+        st.heard_back(t0 - 10 * 60);
+        assert_eq!(
+            st.observe_stop(StopReason::Limit, 14 * 60, t0 + 14 * 60),
+            Some(15)
+        );
     }
 
     #[test]

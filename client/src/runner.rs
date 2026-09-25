@@ -630,6 +630,10 @@ struct UserNotification {
     body: String,
     critical: bool,
     user: Option<String>,
+    /// "You're back" (or "15 more minutes"): says how long and until when,
+    /// so the companion lets it stand instead of following it with the
+    /// warning it already said (`warn::WarnState::heard_back`).
+    back: bool,
 }
 
 /// How many recent notifications the status snapshot carries. The tray polls
@@ -772,6 +776,24 @@ impl Agent {
     /// desktop at all hears it on their own terminals — never anyone else's
     /// (the old `wall` reached every terminal on the machine).
     fn notify_user(&mut self, user: Option<&str>, title: &str, body: &str, critical: bool) {
+        self.publish_notification(user, title, body, critical, false);
+    }
+
+    /// "You're back" after a stop — the welcome every way back uses (a code
+    /// at the lock, a parent's time, a Resume, the rules allowing again, a
+    /// snooze), so each is shown the same way and none is buried.
+    fn notify_back(&mut self, user: &str, title: &str, body: &str) {
+        self.publish_notification(Some(user), title, body, false, true);
+    }
+
+    fn publish_notification(
+        &mut self,
+        user: Option<&str>,
+        title: &str,
+        body: &str,
+        critical: bool,
+        back: bool,
+    ) {
         self.notif_seq += 1;
         self.notifications.push_back(UserNotification {
             id: self.notif_seq,
@@ -779,6 +801,7 @@ impl Agent {
             body: body.to_string(),
             critical,
             user: user.map(str::to_string),
+            back,
         });
         while self.notifications.len() > NOTIFY_QUEUE_CAP {
             self.notifications.pop_front();
@@ -1956,7 +1979,7 @@ impl Agent {
                     // already over the limit leaves short of it.
                     let v = self.stop_verdict(&user, &policy);
                     let body = back_words(&v);
-                    self.notify_user(Some(&user), "You're back", &body, false);
+                    self.notify_back(&user, "You're back", &body);
                 }
                 FreezeAction::None => {}
             }
@@ -2748,11 +2771,10 @@ impl Agent {
             )
             .for_user(user),
         );
-        self.notify_user(
-            Some(user),
+        self.notify_back(
+            user,
             &format!("You're back — {minutes} minutes"),
             "A parent unlocked this computer with the code.",
-            false,
         );
         Outcome::yes("Unlocked")
     }
@@ -2811,11 +2833,10 @@ impl Agent {
             )
             .for_user(user),
         );
-        self.notify_user(
-            Some(user),
+        self.notify_back(
+            user,
             &format!("{minutes} more minutes"),
             "You gave yourself a little more time.",
-            false,
         );
         Outcome::yes("15 more minutes")
     }
@@ -3028,6 +3049,7 @@ impl Agent {
                 "body": n.body,
                 "urgency": if n.critical { "critical" } else { "normal" },
                 "user": n.user,
+                "kind": if n.back { "back" } else { "" },
             })
         };
         // Device-wide notifications (no target user) are safe for everyone.
@@ -3273,12 +3295,7 @@ impl Agent {
                     }
                     self.frozen.remove(&user);
                     self.lock.host().freeze(&user, false, false);
-                    self.notify_user(
-                        Some(&user),
-                        "You're back",
-                        "A parent resumed this computer.",
-                        false,
-                    );
+                    self.notify_back(&user, "You're back", "A parent resumed this computer.");
                 }
                 if !self.exec.dry_run() {
                     self.persist_freeze_state();
@@ -3418,13 +3435,16 @@ impl Agent {
                 // before: the lock must never say they're back while they
                 // aren't (a pause still holds them).
                 if self.release_if_allowed(&os_username) {
+                    // Said the way a code at the lock says it: the minutes in
+                    // the title, how long and until when underneath.
                     let policy = self.policies.get(&os_username).cloned().unwrap_or_default();
                     let v = self.stop_verdict(&os_username, &policy);
-                    let body = format!(
-                        "A parent gave you {minutes} more minutes. {}",
-                        back_words(&v)
+                    let body = format!("A parent gave you more time. {}", back_words(&v));
+                    self.notify_back(
+                        &os_username,
+                        &format!("You're back — {minutes} more minutes"),
+                        &body,
                     );
-                    self.notify_user(Some(&os_username), "You're back", &body, false);
                 } else if !self.frozen.contains(&os_username) {
                     self.notify_user(
                         Some(&os_username),
@@ -5159,10 +5179,15 @@ mod tests {
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"), "{log:?}");
         let n = a.notifications.back().expect("she hears it");
-        assert_eq!(n.title, "You're back");
+        // Said the way a code at the lock says it (acceptance round 4: the
+        // welcome after "Give 15" was buried by the 15-minute warning): the
+        // minutes in the title, and marked as the welcome, which the
+        // companion lets stand.
+        assert_eq!(n.title, "You're back — 15 more minutes");
+        assert!(n.back, "the companion knows it for the welcome");
         assert!(
             n.body
-                .starts_with("A parent gave you 15 more minutes. You have 15 min, until "),
+                .starts_with("A parent gave you more time. You have 15 min, until "),
             "{}",
             n.body
         );
