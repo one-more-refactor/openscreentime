@@ -106,7 +106,7 @@ describe("sign in", () => {
       setSystemTime(new Date(start + NO_CODE_HINT_MS + 1000));
       const hint = await screen.findByText(/^No code\?/, {}, { timeout: 2500 });
       expect(hint.textContent).toBe(
-        "No code? Your computer must be on, and it must be your own login — or use a passkey.",
+        "No code? Your computer must be on and set up as yours (Computers → Add my computer, or Who's who) — or use a passkey.",
       );
       expect(screen.queryByText("That code has expired.")).toBeNull();
 
