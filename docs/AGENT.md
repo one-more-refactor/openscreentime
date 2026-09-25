@@ -574,7 +574,11 @@ input and shows nothing while the lock holds the screen:
   `VT_LOCKSWITCH` and brings up the login screen: a running greeter session
   is activated, else GDM's `CreateTransientDisplay`, else the freedesktop
   `DisplayManager` seat's `SwitchToGreeter` (LightDM, SDDM). The stopped
-  person stays stopped behind it (an inactive session counts no time). The
+  person stays stopped behind it (an inactive session counts no time). A
+  stop holds for a desktop behind someone else's too: when a person's time
+  runs out (an override ends, bedtime starts) while another person has the
+  screen, their apps are frozen at the next tick — no countdown, nothing on
+  screen changes — and their session meets the lock when it comes back. The
   lock stands in front of stopped people only: someone else's session keeps
   the screen for as long as they like; a login screen keeps it for 90 s,
   then the stopped person's lock (with its "Switch user") comes back; and a

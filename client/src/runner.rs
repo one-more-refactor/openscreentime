@@ -1842,9 +1842,14 @@ impl Agent {
         ));
         // Consider every user we have a policy for (so we can also UNfreeze).
         let users: Vec<String> = self.policies.keys().cloned().collect();
+        // Who has a desktop here, on screen or not. A stop holds for them
+        // either way: someone who switched away (or whose override ran out
+        // while a sibling had the screen) is stopped in the background — their
+        // apps frozen, the lock waiting for them — never left playing.
+        let sessions = self.lock.host().sessions();
         for user in users {
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
-            let is_active = active.contains(&user);
+            let is_active = active.contains(&user) || lock::has_graphical_session(&sessions, &user);
             let currently_frozen = self.frozen.contains(&user);
             // Frozen means frozen — every tick, quietly: an app that started
             // since (a timer, a re-login's desktop once it has settled), or
@@ -1876,9 +1881,10 @@ impl Agent {
             // looking lockout event. Bedtime and the daily limit are properties
             // of the clock and the ledger, not of who currently holds the seat.
             //
-            // Still gated on `is_active` for users who are NOT frozen, so an
-            // absent user is never newly frozen (and never shown an overlay)
-            // just for existing in the policy.
+            // Still gated on `is_active` (at the seat, or a desktop behind
+            // someone else's) for users who are NOT frozen, so an absent user
+            // is never newly frozen (and never shown a lock) just for existing
+            // in the policy.
             // Bedtime / allowed-window rules are about the clock, not the
             // seat: an SSH-only login (Remote=yes, never a "seat") used to
             // escape them entirely. Evaluate those for every policy user.
@@ -2141,7 +2147,13 @@ impl Agent {
         match self.pending_freeze.get(user).copied() {
             None => {
                 let bracket = self.bracket_of(user);
-                let grace = if self.stop_was_announced(user) || self.just_logged_in(user) {
+                // No work to save for someone who isn't on screen (their
+                // desktop is behind someone else's): stopped at once.
+                let sessions = self.lock.host().sessions();
+                let behind = lock::has_graphical_session(&sessions, user)
+                    && lock::on_screen_user(&sessions).as_deref() != Some(user);
+                let grace = if self.stop_was_announced(user) || self.just_logged_in(user) || behind
+                {
                     Duration::ZERO
                 } else {
                     FREEZE_GRACE.max(Duration::from_secs(u64::from(bracket.wind_down_secs())))
@@ -3489,8 +3501,9 @@ enum FreezeAction {
 /// "within policy" and unfreezes. Flipping to another session and back then
 /// re-armed the full [`FREEZE_GRACE`], handing out ~60 usable seconds per flip.
 ///
-/// A user who is neither active nor frozen is skipped, so nobody is newly
-/// frozen — or shown an overlay — merely for appearing in the policy.
+/// A user who is neither active (at the seat, or with a desktop behind
+/// someone else's) nor frozen is skipped, so nobody is newly frozen — or shown
+/// a lock — merely for appearing in the policy.
 fn should_evaluate_screen_time(
     in_grace: bool,
     is_active: bool,
@@ -4764,6 +4777,64 @@ mod tests {
         drop(w);
         assert!(a.lock.is_aside());
         assert_eq!(a.lock.subject(), Some("mia"));
+    }
+
+    /// Acceptance round 3: Mia's time ran out while sam had the screen, and
+    /// her tone kept playing behind his desktop. A stop holds whether her
+    /// session is on screen or not: her apps are frozen at once (no work to
+    /// save behind someone else's desktop), sam keeps the screen, and her
+    /// session meets the lock when it comes back.
+    #[tokio::test]
+    async fn a_stop_holds_behind_someone_elses_desktop() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        a.prev_active = Some(["sam".to_string()].into_iter().collect());
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("5", "sam", 3, false));
+            w.logged_in.insert("sam".into());
+        }
+        assert!(fake.user_switches_to(3));
+        assert!(!a.frozen.contains("mia"));
+        fake.w().log.clear();
+        let events = a.enforcement_tick().await;
+        {
+            let w = fake.w();
+            assert_eq!(w.frozen.get("mia"), Some(&true), "{:?}", w.log);
+            assert_eq!(w.vt, 3, "sam keeps the screen: {:?}", w.log);
+            assert!(
+                !w.log.iter().any(|l| l.starts_with("switch")),
+                "{:?}",
+                w.log
+            );
+        }
+        assert!(a.frozen.contains("mia"));
+        assert!(
+            a.pending_freeze.is_empty(),
+            "no countdown behind sam's back"
+        );
+        assert!(a.lock.shown().is_none(), "no lock in front of sam");
+        assert!(events.iter().any(
+            |e| e.ev_type == EV_SCREEN_TIME_EXCEEDED && e.device_user.as_deref() == Some("mia")
+        ));
+
+        // She switches back: the lock, not her desktop.
+        assert!(fake.user_switches_to(2));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        assert_eq!(a.lock.subject(), Some("mia"));
+        assert_eq!(fake.w().vt, 14);
+
+        // Someone with no desktop at all is still never stopped for merely
+        // being in the policy.
+        let (mut b, fake_b) = agent_with_mia();
+        {
+            let mut w = fake_b.w();
+            w.sessions.clear();
+            w.logged_in.clear();
+        }
+        b.enforcement_tick().await;
+        assert!(!b.frozen.contains("mia"));
+        assert!(b.pending_freeze.is_empty());
     }
 
     #[tokio::test]
