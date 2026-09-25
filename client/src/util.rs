@@ -277,6 +277,24 @@ impl Exec {
         }
     }
 
+    /// Remove a directory we own and everything in it, honoring dry-run.
+    /// `Ok(true)` if it was there; a missing one is `Ok(false)`.
+    pub fn remove_dir_all(&self, path: &str) -> Result<bool> {
+        if self.sim.is_some() {
+            self.record(format!("remove -r {path}"));
+            return Ok(true);
+        }
+        if !std::path::Path::new(path).exists() {
+            return Ok(false);
+        }
+        if self.ctx.dry_run {
+            tracing::info!(target: "dry_run", "WOULD REMOVE {path} and everything in it");
+            return Ok(true);
+        }
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {path}"))?;
+        Ok(true)
+    }
+
     pub fn dry_run(&self) -> bool {
         self.ctx.dry_run
     }

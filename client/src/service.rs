@@ -407,6 +407,12 @@ fn ensure_enforcement_deps(exec: &Exec) -> bool {
 
 /// Logins with a desktop open right now (people, not the greeter).
 fn graphical_users(exec: &Exec) -> Vec<String> {
+    session_users(exec, true)
+}
+
+/// People signed in right now (uid 1000 and up, not the greeter) — with a
+/// desktop only, or in any session.
+fn session_users(exec: &Exec, graphical_only: bool) -> Vec<String> {
     let mut users = Vec::new();
     for line in exec
         .probe("loginctl", &["list-sessions", "--no-legend"])
@@ -420,12 +426,33 @@ fn graphical_users(exec: &Exec) -> Vec<String> {
         if !person || users.iter().any(|u| u == user) {
             continue;
         }
-        let kind = exec.probe("loginctl", &["show-session", id, "-p", "Type", "--value"]);
-        if matches!(kind.trim(), "wayland" | "x11") {
+        let kind = || exec.probe("loginctl", &["show-session", id, "-p", "Type", "--value"]);
+        if !graphical_only || matches!(kind().trim(), "wayland" | "x11") {
             users.push(user.to_string());
         }
     }
     users
+}
+
+/// What the companion (and the app window) run as, on a command line:
+/// the installed binary or its `ost` alias, then `tray` or `app`. Matched
+/// against the whole command line (`pkill -f`).
+const COMPANION_COMMAND: &str = "^(/usr/local/bin/)?(openscreentime|ost) (tray|app)( |$)";
+
+/// Stop the companion and any app window for everyone signed in: their user
+/// unit where a systemd user manager runs it, and whatever else started one
+/// — a desktop's autostart (GNOME runs it outside that unit), the agent's
+/// start in a running session, a window someone opened. One left running
+/// after its files are gone keeps showing what it last showed.
+fn stop_companions(exec: &Exec) {
+    for user in session_users(exec, false) {
+        let _ = exec.run(
+            "systemctl",
+            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
+        );
+    }
+    // No match is pkill's exit 1: nothing to stop.
+    let _ = exec.run("pkill", &["-TERM", "-f", COMPANION_COMMAND]);
 }
 
 /// Start the companion (warnings, "You're back") for everyone already signed
@@ -789,12 +816,7 @@ fn install_service_with(exec: &Exec) -> Result<()> {
 /// user and PAM session, the launcher and autostart, the unlock-code sudo.
 /// The agent's own units are stopped by the caller first.
 pub fn remove_installed(exec: &Exec) {
-    for user in graphical_users(exec) {
-        let _ = exec.run(
-            "systemctl",
-            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
-        );
-    }
+    stop_companions(exec);
     let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
     let _ = exec.run(
         "systemctl",

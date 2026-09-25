@@ -731,7 +731,11 @@ impl Agent {
             prev_active: None,
             pending_events,
             notifications: VecDeque::new(),
-            notif_seq: 0,
+            // Ids go on rising across restarts (milliseconds since the
+            // epoch, then +1): a companion that outlives the agent shows a
+            // new "You're back" (ids from 1 again were below what it had
+            // already seen), and never one from before the restart.
+            notif_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
             login_codes: Vec::new(),
             attrib: crate::attrib::Attrib::new(),
             attrib_ticks: 0,
