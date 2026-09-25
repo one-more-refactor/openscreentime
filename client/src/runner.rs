@@ -2244,6 +2244,7 @@ impl Agent {
         Some(match v.reason.filter(|_| !v.allowed)? {
             StopReason::Limit => Stop::Limit {
                 minutes: policy.screen_time.daily_limit_minutes + self.tracker.earned_minutes(user),
+                used: self.tracker.used_minutes(user),
                 back: v.resume_at.map(|t| warn::back_words(t, now)),
             },
             StopReason::Bedtime => Stop::Bedtime { until },
@@ -2317,6 +2318,7 @@ impl Agent {
             snooze,
             help: help.to_string(),
             code_hint: code_hint.to_string(),
+            switch_user: self.can_switch_user(),
         }
     }
 
@@ -2352,11 +2354,28 @@ impl Agent {
     /// If a lock can't be shown, whoever it was for is thawed rather than left
     /// behind a blank screen.
     pub async fn reconcile_lock(&mut self) {
-        if let Some(subject) = self.lock.subject().map(str::to_string) {
+        if let Some(mut subject) = self.lock.subject().map(str::to_string) {
+            // On a shared computer the lock may be waiting while someone else
+            // has the screen; whoever stopped comes on screen gets it in front.
+            let sessions = self.lock.host().sessions();
+            if let Some(u) = lock::on_screen_user(&sessions) {
+                if u != subject && self.frozen.contains(&u) {
+                    self.lock.retarget(&u);
+                    subject = u;
+                }
+            }
             if self.frozen.contains(&subject) {
                 let face = self.face_for(&subject);
                 self.lock.publish(face);
-                if self.lock.reassert().await {
+                let frozen = self.frozen.clone();
+                if self.lock.reassert(&|u| frozen.contains(u)).await {
+                    self.note_lock_subject();
+                    if let Some(s) = self.lock.subject().map(str::to_string) {
+                        if s != subject {
+                            let face = self.face_for(&s);
+                            self.lock.publish(face);
+                        }
+                    }
                     if !self.exec.dry_run() {
                         self.persist_freeze_state();
                     }
@@ -2393,6 +2412,8 @@ impl Agent {
                 let _ = p.reply.send(reply);
             }
             LockEvent::VtChanged => self.on_seat_changed().await,
+            // The graphical lock came up behind the text lock: move to it.
+            LockEvent::GuiUp => self.reconcile_lock().await,
         }
     }
 
@@ -2407,8 +2428,11 @@ impl Agent {
         let result = match req {
             Request::Face => None,
             Request::Code { code } => Some(self.try_code(&subject, &code)),
-            Request::Ask => Some(self.ask_from_lock(&subject).await),
+            // Asked: the face says so ("Asked — a parent will see it"); a
+            // second line saying the same would be noise.
+            Request::Ask => self.ask_from_lock(&subject).await,
             Request::Snooze => Some(self.snooze_from_lock(&subject)),
+            Request::SwitchUser => self.switch_user_from_lock(&subject),
         };
         // A code that worked takes the lock down right here.
         self.reconcile_lock().await;
@@ -2526,13 +2550,42 @@ impl Agent {
     }
 
     /// "Ask for more time" at the lock: the same request `ost ask` files.
-    async fn ask_from_lock(&mut self, user: &str) -> lock::socket::Outcome {
+    /// `None` when it went (the face now says "Asked").
+    async fn ask_from_lock(&mut self, user: &str) -> Option<lock::socket::Outcome> {
         use lock::socket::Outcome;
         let offer = self.earn_offer_for(user);
         match self.auto_request_earn(user, &offer).await {
-            Some(_) => Outcome::yes("Asked — a parent will see it."),
-            None => Outcome::no("Couldn't reach a parent right now — try again in a moment."),
+            Some(_) => None,
+            None => Some(Outcome::no(
+                "Couldn't reach a parent right now — try again in a moment.",
+            )),
         }
+    }
+
+    /// "Switch user" at the lock: someone else wants the computer. The lock
+    /// steps aside for the login screen; `user` stays frozen behind it, and
+    /// meets the lock again, not their desktop, when their session comes
+    /// back on screen. `None` when the login screen is on its way.
+    fn switch_user_from_lock(&mut self, user: &str) -> Option<lock::socket::Outcome> {
+        use lock::socket::Outcome;
+        if !self.can_switch_user() {
+            return Some(Outcome::no("There's no login screen on this computer."));
+        }
+        if self.lock.switch_user() {
+            tracing::info!("switch user from {user}'s lock; {user} stays stopped");
+            None
+        } else {
+            Some(Outcome::no(
+                "Couldn't open the login screen — try again in a moment.",
+            ))
+        }
+    }
+
+    /// A shared computer's lock offers "Switch user" — unless the whole
+    /// computer is stopped (a pause stops everyone who signs in), or there's
+    /// no login screen to go to.
+    fn can_switch_user(&self) -> bool {
+        !self.device_lock_effective() && self.lock.host().can_switch_user()
     }
 
     /// The VT on screen changed: whoever is on screen now and stopped meets
@@ -3851,6 +3904,7 @@ mod tests {
             return_vt: Some(2),
             mode: lock::Mode::Gui,
             boot_id: "b".into(),
+            desktop_locked: Some(false),
         };
         let st = FreezeState {
             frozen: vec!["vali".to_string()],
@@ -3948,7 +4002,10 @@ mod tests {
         assert_eq!(a.lock.subject(), Some("mia"));
         let log = fake.w().log.clone();
         // On screen first (the desktop still alive), frozen after.
-        assert!(pos(&log, "switch 13") < pos(&log, "freeze mia"));
+        assert!(
+            pos(&log, "switch 14") < pos(&log, "freeze mia"),
+            "the text lock, on its own VT"
+        );
         assert_eq!(a.face_for("mia").title, "Time's up for today");
 
         // Any thaw path (here: time granted, then the tick's Unfreeze) takes
@@ -4272,7 +4329,53 @@ mod tests {
         assert!(a.frozen.contains("mia"));
         assert!(a.pending_freeze.is_empty(), "no grace: nothing to save yet");
         let log = fake.w().log.clone();
-        assert!(pos(&log, "switch 13") < pos(&log, "freeze mia"));
+        assert!(
+            pos(&log, "switch 14") < pos(&log, "freeze mia"),
+            "the text lock, on its own VT"
+        );
+    }
+
+    /// A shared family computer: mia's time is up; sam wants the computer.
+    #[tokio::test]
+    async fn switch_user_lets_someone_else_on_while_she_stays_stopped() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        // No display manager: no "Switch user".
+        stop_mia(&mut a).await;
+        assert!(!a.face_for("mia").switch_user);
+        fake.w().greeter_vt = Some(1);
+        assert!(a.face_for("mia").switch_user);
+        // A parent's pause stops everyone who signs in: nothing to switch to.
+        a.device_locked = true;
+        assert!(!a.face_for("mia").switch_user);
+        a.device_locked = false;
+
+        let reply = a.on_lock_request(Request::SwitchUser).await;
+        assert!(reply.result.is_none(), "{:?}", reply.result);
+        assert_eq!(fake.w().vt, 1, "the login screen is on screen");
+        assert!(a.frozen.contains("mia"), "she stays stopped");
+        assert!(reply.face.is_some(), "the lock waits, still up");
+        // sam signs in and uses the computer; ticks and VT changes leave him be.
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("5", "sam", 3, false));
+            w.logged_in.insert("sam".into());
+        }
+        assert!(fake.user_switches_to(3));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        a.reconcile_lock().await;
+        assert_eq!(fake.w().vt, 3);
+        assert!(!fake.w().frozen.get("sam").copied().unwrap_or(false));
+        assert_eq!(a.lock.subject(), Some("mia"));
+        // mia's session comes back on screen: the lock is there first, and
+        // she is still frozen behind it.
+        assert!(fake.user_switches_to(2));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        assert_eq!(fake.w().vt, lock::TEXT_VT);
+        assert!(fake.w().switch_locked);
+        assert!(a.frozen.contains("mia"));
+        assert_eq!(fake.w().frozen.get("mia"), Some(&true));
+        assert!(!fake.w().log.contains(&"thaw mia".to_string()));
     }
 
     #[tokio::test]

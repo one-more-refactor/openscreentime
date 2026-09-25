@@ -249,6 +249,18 @@ impl eframe::App for LockWindow {
                         "Waiting for OpenScreenTime to answer…"
                     };
                     ui::text(uic, help, 13.0, W::Regular, ui::INK_3);
+                    // A shared computer: someone else can still sign in.
+                    if face.switch_user && connected && !released {
+                        uic.add_space(8.0);
+                        if Button::new(super::SWITCH_USER, Kind::Quiet)
+                            .size(Size::Sm)
+                            .enabled(!busy)
+                            .show(uic)
+                            .clicked()
+                        {
+                            let _ = self.tx.send(Request::SwitchUser);
+                        }
+                    }
                 });
             });
 
