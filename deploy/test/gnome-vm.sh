@@ -29,16 +29,18 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-work="$here/.gnome"
+# Overridable, like vm.sh: a second copy of the box (or a short path — QEMU's
+# QMP socket path must stay under 108 bytes) lives wherever OST_GNOME_DIR says.
+work="${OST_GNOME_DIR:-$here/.gnome}"
 base="$work/debian12.qcow2"
 disk="$work/gnome-disk.qcow2"
 seed="$work/seed.iso"
 pidfile="$work/qemu.pid"
 sshkey="$work/id_ed25519"
 novnc_dir="$here/.vm/novnc"          # reuse the noVNC client cloned for the other harness
-ssh_port=28122
-ws_port=5702
-vnc_display=1                        # 127.0.0.1:5901
+ssh_port="${OST_GNOME_SSH_PORT:-28122}"
+ws_port="${OST_GNOME_WS_PORT:-5702}"
+vnc_display="${OST_GNOME_VNC:-1}"   # 127.0.0.1:5901
 novnc_port=6081
 mem=4096
 
