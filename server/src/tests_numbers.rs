@@ -205,3 +205,155 @@ async fn giving_time_answers_the_ask() {
     assert_eq!(grants, 2, "one more grant, not two");
     env.drop_db().await;
 }
+
+async fn policy_of_login(env: &Env, du: Uuid) -> Value {
+    sqlx::query_scalar(
+        "SELECT p.policy FROM device_users du JOIN profiles p ON p.id = du.profile_id
+          WHERE du.id = $1",
+    )
+    .bind(du)
+    .fetch_one(&env.st.db)
+    .await
+    .unwrap()
+}
+
+async fn exists(env: &Env, person: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM admins WHERE id = $1)")
+        .bind(person)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap()
+}
+
+/// Acceptance, Who's who: on Mia's computer the `philip` login was created
+/// as a person of its own ("philip", Kid, child rules). Pointing it at
+/// Philip kept the child rules — 60 minutes and a bedtime on the parent —
+/// and left the made-up "philip" on the Family page. The login now takes
+/// Philip's own rules (none: no limits), and the leftover goes.
+#[tokio::test]
+async fn whos_who_gives_a_parent_their_own_rules_and_drops_the_guess() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    let mia = env.member(tenant, "Mia").await;
+    let laptop = env
+        .computer(
+            tenant,
+            Some(mia),
+            &["mia", "philip"],
+            Some("mia"),
+            Some("mia"),
+        )
+        .await;
+    let du = du_of(&env, laptop, "philip").await;
+    let guess: Uuid = sqlx::query_scalar("SELECT account_id FROM device_users WHERE id = $1")
+        .bind(du)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    assert_ne!(guess, philip);
+    assert_eq!(
+        policy_of_login(&env, du).await["screen_time"]["daily_limit_minutes"],
+        60,
+        "an unsorted login on a child's computer starts on child rules"
+    );
+    let (_, hub) = session_for(&env, philip, tenant).await;
+    family_card(&env, &hub, "philip").await;
+
+    let r = crate::devices::assign_account(
+        State(env.st.clone()),
+        clone(&hub),
+        Path(du),
+        Json(crate::devices::AssignAccountReq { account_id: philip }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(r["removed_person"], true);
+
+    // Philip's own rules: an adult's, which enforce nothing.
+    let p = policy_of_login(&env, du).await;
+    let policy: openscreentime_policy::Policy = serde_json::from_value(p).unwrap();
+    assert!(crate::members::limit_minutes(&policy).is_none());
+    assert!(policy.screen_time.bedtime.is_none() || !policy.screen_time.enabled);
+    let own: Option<Uuid> = sqlx::query_scalar("SELECT profile_id FROM admins WHERE id = $1")
+        .bind(philip)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    let on: Uuid = sqlx::query_scalar("SELECT profile_id FROM device_users WHERE id = $1")
+        .bind(du)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    assert_eq!(own, Some(on), "the login is on Philip's own rules");
+    // His own page says so too.
+    let (_, me) = session_for(&env, philip, tenant).await;
+    let today = crate::members::today(State(env.st.clone()), me)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(today["limit_minutes"], Value::Null);
+
+    // The made-up "philip" is gone from the family.
+    assert!(!exists(&env, guess).await);
+    let f = crate::family::get_family(State(env.st.clone()), clone(&hub))
+        .await
+        .unwrap()
+        .0;
+    assert!(f["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["name"] != "philip"));
+    env.drop_db().await;
+}
+
+/// A leftover a parent already made their own (renamed, given a face, their
+/// rules changed) is a person, not a guess: kept, with no computer.
+#[tokio::test]
+async fn whos_who_keeps_a_person_someone_made_their_own() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    let mia = env.member(tenant, "Mia").await;
+    let laptop = env
+        .computer(tenant, Some(mia), &["mia", "sam"], Some("mia"), Some("mia"))
+        .await;
+    let du = du_of(&env, laptop, "sam").await;
+    let sam: Uuid = sqlx::query_scalar("SELECT account_id FROM device_users WHERE id = $1")
+        .bind(du)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET display_name = 'Sam' WHERE id = $1")
+        .bind(sam)
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    let (_, hub) = session_for(&env, philip, tenant).await;
+    let r = crate::devices::assign_account(
+        State(env.st.clone()),
+        clone(&hub),
+        Path(du),
+        Json(crate::devices::AssignAccountReq { account_id: mia }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(r["removed_person"], false);
+    assert!(exists(&env, sam).await);
+    let card = family_card(&env, &hub, "Sam").await;
+    assert_eq!(card["devices"], json!([]), "kept, with no computer");
+    // The login is on Mia's rules now.
+    let mias: Uuid = sqlx::query_scalar("SELECT profile_id FROM admins WHERE id = $1")
+        .bind(mia)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    let on: Uuid = sqlx::query_scalar("SELECT profile_id FROM device_users WHERE id = $1")
+        .bind(du)
+        .fetch_one(&env.st.db)
+        .await
+        .unwrap();
+    assert_eq!(on, mias);
+    env.drop_db().await;
+}
