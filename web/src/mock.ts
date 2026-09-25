@@ -668,12 +668,41 @@ function household(): "full" | "solo" | "empty" {
   return m === "solo" ? "solo" : m === "empty" ? "empty" : "full";
 }
 
+/** Design review scenarios on top of the household: `?mock=degraded` — the
+ * living-room PC and the parent's laptop are stock desktops with no resolver,
+ * so they can't filter websites; `?mock=stops` — Mia is out of time (21 of
+ * her 17 minutes) and Leo is stopped by bedtime. */
+function scenario(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("mock");
+}
+
+const NO_RESOLVER = ["dns_no_local_resolver", "dns_policy_not_loaded"];
+
 /** The computers design review shows (all of them, or the solo household's). */
 export function mockVisibleDevices(): Device[] {
   const h = household();
   if (h === "empty") return [];
-  if (h === "solo") return mockDevices.filter((d) => d.owner_account_id === mockAccount.id);
-  return mockDevices;
+  const all =
+    scenario() === "degraded"
+      ? mockDevices.map((d) =>
+          d.id === "d-livingroom" || d.id === "d-parent"
+            ? {
+                ...d,
+                last_state: {
+                  locked: false,
+                  frozen_users: [],
+                  enforcing: false,
+                  gaps: NO_RESOLVER,
+                  agent_version: d.agent_version,
+                  active_users: [],
+                },
+              }
+            : d,
+        )
+      : mockDevices;
+  if (h === "solo") return all.filter((d) => d.owner_account_id === mockAccount.id);
+  return all;
 }
 
 /** Everyone design review shows in the household. */
@@ -804,6 +833,28 @@ export function mockFamily(): FamilyResponse {
   const ownRules = new Set(
     mockHouseholdAccounts.filter((a) => a.role === "member" && selfManaged(a)).map((a) => a.profile_id),
   );
+  if (scenario() === "stops") {
+    const tomorrowAt7 = new Date();
+    tomorrowAt7.setUTCDate(tomorrowAt7.getUTCDate() + 1);
+    tomorrowAt7.setUTCHours(7, 0, 0, 0);
+    const stopped = (reason: "limit" | "bedtime", resume: Date | null) => ({
+      allowed: false,
+      reason,
+      minutes_left: 0,
+      stop_at: new Date().toISOString(),
+      resume_at: resume?.toISOString() ?? null,
+    });
+    for (const c of byKey.values()) {
+      if (c.name === "Mia") {
+        Object.assign(c, { used_minutes: 21, earned_minutes: 0, limit_minutes: 17, left_minutes: 0 });
+        c.rules = stopped("limit", null);
+      }
+      if (c.name === "Leo") {
+        c.left_minutes = 0;
+        c.rules = stopped("bedtime", tomorrowAt7);
+      }
+    }
+  }
   return {
     children: [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)),
     devices: mockVisibleDevices(),
@@ -1027,7 +1078,13 @@ export function mockMeToday(): MeToday {
       ? st.daily_limit_minutes
       : null;
   const left = limit === null ? null : Math.max(0, limit + earned - used);
-  const devices = rows.map(({ d }) => ({ name: d.name, status: d.status, locked: d.locked }));
+  // Someone who sets their own rules hears what a computer of theirs can't do.
+  const devices = rows.map(({ d }) => ({
+    name: d.name,
+    status: d.status,
+    locked: d.locked,
+    ...(own ? { gaps: d.status === "online" ? d.last_state?.gaps ?? [] : [] } : {}),
+  }));
   return {
     used_minutes: used,
     earned_minutes: earned,

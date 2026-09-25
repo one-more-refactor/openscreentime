@@ -12,7 +12,7 @@ import { apiCalls, apiImpl, resetApiMock, resetUiMocks } from "../test/mockApi";
 
 const { MemoryRouter } = await import("react-router-dom");
 const { SessionProvider } = await import("../lib/session");
-const { Me, lastSevenDays } = await import("./Me");
+const { Me, focusLine, lastSevenDays } = await import("./Me");
 const { arcPath, ringGeometry } = await import("../components/Ring");
 
 function today(p: Partial<MeToday> = {}): MeToday {
@@ -130,6 +130,16 @@ test("the week is the computer's week", () => {
   expect(days.filter((d) => d.used === 1)).toHaveLength(1);
 });
 
+test("focus hours are only hours where nothing can be blocked", () => {
+  const rules: MyRules = { ...mine, focus_hours: { days: [0, 1, 2, 3, 4, 5, 6], start: "03:00", end: "05:00" } };
+  const inside = { date: "2026-09-25", day: 5, minute: 4 * 60 + 43, hm: "04:43" };
+  expect(focusLine(rules, inside)).toBe("Focus hours until 05:00 — the sites below open again then.");
+  expect(focusLine(rules, inside, false)).toBe("Focus hours until 05:00.");
+  const before = { date: "2026-09-25", day: 5, minute: 60, hm: "01:00" };
+  expect(focusLine(rules, before, false)).toBe("Focus hours start at 03:00 today.");
+  expect(focusLine({ ...mine, focus_hours: null }, inside, false)).toBeNull();
+});
+
 describe("my computer (keeping my own time)", () => {
   beforeEach(() => {
     apiImpl.getMeToday = () =>
@@ -180,6 +190,34 @@ describe("my computer (keeping my own time)", () => {
       ...mine,
       focus_hours: { days: [6], start: "22:00", end: "00:00" },
     });
+  });
+
+  test("on a computer that can't filter websites, no block is promised", async () => {
+    // Acceptance round 2: "Focus hours until 05:00 — the sites below open
+    // again then" while example.org loaded fine inside the focus hours.
+    apiImpl.getMeToday = () =>
+      Promise.resolve(
+        today({
+          bracket: "adult",
+          self_managed: true,
+          limit_minutes: 180,
+          left_minutes: 150,
+          bedtime: null,
+          devices: [
+            { name: "Philip's computer", status: "online", locked: false, gaps: ["dns_no_local_resolver"] },
+          ],
+        }),
+      );
+    setup();
+    const card = (await screen.findByRole("heading", { name: "Sites I block for myself" })).closest(
+      ".me-mrule",
+    ) as HTMLElement;
+    expect(
+      within(card).getByText("Not blocked on Philip's computer yet — it can't filter websites. Screen time still works."),
+    ).toBeTruthy();
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/sites below are blocked/);
+    expect(text).not.toMatch(/open again then|Until then the sites below are open/);
   });
 
   test("a site is checked before it's saved, and saved the way the server stores it", async () => {

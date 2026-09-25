@@ -19,6 +19,7 @@ mod events;
 mod family;
 mod ledger;
 mod login_code;
+mod machine;
 mod members;
 mod ops;
 mod parent;
@@ -33,6 +34,8 @@ mod supervise;
 mod telegram;
 #[cfg(test)]
 mod tests_auth;
+#[cfg(test)]
+mod tests_machine;
 #[cfg(test)]
 mod tests_numbers;
 #[cfg(test)]
@@ -563,6 +566,12 @@ async fn prune(db: &sqlx::PgPool) {
         (
             "ops log",
             "DELETE FROM ops_log WHERE created_at < now() - interval '90 days'",
+        ),
+        (
+            // A removed computer's minutes, kept for the person's day and
+            // their week (the history looks back 14 days).
+            "kept usage",
+            "DELETE FROM retired_usage WHERE day < CURRENT_DATE - 21",
         ),
     ] {
         if let Err(e) = sqlx::query(q).execute(db).await {

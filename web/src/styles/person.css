@@ -106,6 +106,8 @@
 .pp-edit-note { flex-basis: 100%; }
 
 .pp-blocked { display: flex; flex-direction: column; gap: 22px; padding: 20px; }
+/* A computer of theirs can't filter websites: said at the top of the list. */
+.pp-noblock { margin: 0; }
 .pp-block-group { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .pp-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .pp-chips .chip .ic { color: var(--ink-3); }

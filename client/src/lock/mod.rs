@@ -1005,6 +1005,9 @@ impl Host for SystemHost {
                 if on { "lock" } else { "unlock" }
             );
         }
+        // The switch lock is held exactly while the text lock has the
+        // screen: no kernel lines drawn over it meanwhile.
+        crate::console::quiet(&self.exec, on);
     }
     fn gui_available(&self) -> bool {
         cfg!(feature = "gui")

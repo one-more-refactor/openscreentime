@@ -166,7 +166,11 @@ pub fn resume_after(secs: u64) -> Result<()> {
     let exec = Exec::new(ctx.clone());
     // This CLI path holds no server state — never tear down (or start) a VPN
     // profile from here; the running agent reconciles it on its next apply.
-    enforce::apply_network_policy(ctx, &exec, None, &policy, &enforce::vpn::VpnState::Keep)?;
+    let (gaps, _) =
+        enforce::apply_network_policy(ctx, &exec, None, &policy, &enforce::vpn::VpnState::Keep);
+    for gap in gaps {
+        tracing::warn!("not in force after the suspend window: {}", gap.kind());
+    }
     tracing::warn!("ADMIN RECOVERY: suspend window elapsed — enforcement re-applied");
     Ok(())
 }

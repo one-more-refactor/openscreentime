@@ -35,7 +35,9 @@ function isGapKind(kind: string): boolean {
   );
 }
 
-export function sentence(e: Event): string {
+/** One moment in words. `computer`: the computer's name, when the person has
+ * more than one and "The computer" wouldn't say which. */
+export function sayMoment(e: Event, computer?: string): string {
   const p = e.payload ?? {};
   const d = detail(p);
   switch (e.type) {
@@ -53,12 +55,17 @@ export function sentence(e: Event): string {
       return d ? `The clock was changed: ${d}` : "The clock was changed";
     case "enforcement_degraded": {
       const kind = typeof p.kind === "string" ? p.kind : "";
-      if (isGapKind(kind)) return `The computer ${gapPhrase(kind)}`;
+      if (isGapKind(kind)) return `${computer ?? "The computer"} ${gapPhrase(kind)}`;
       return d ? `A rule couldn't be enforced: ${d}` : "A rule couldn't be enforced";
     }
     default:
       return String(e.type).replace(/_/g, " ");
   }
+}
+
+/** A moment in words, the computer unnamed. */
+export function sentence(e: Event): string {
+  return sayMoment(e);
 }
 
 function tone(e: Event): "ok" | "warn" | "crit" {
@@ -70,26 +77,53 @@ function tone(e: Event): "ok" | "warn" | "crit" {
 /** The story of the last two days — older moments are history, not news. */
 const RECENT_MS = 48 * 3600_000;
 
+/** The same moment told twice within this long is one moment: the console's
+ * own "Resumed" and the computer's confirmation of it, or two "can't filter
+ * websites" gaps an agent reports at every start. */
+const SAME_MOMENT_MS = 10 * 60_000;
+
 /** The moments worth telling, newest first: recent, never machinery dressed
- * up as an attempt, and one line per kind of trouble — a check that failed
- * a hundred times is one moment, not a hundred. */
+ * up as an attempt, and each thing said once —
+ *
+ *  - trouble (a gap, an attempt) once per computer and sentence while it's
+ *    news: a check that failed a hundred times is one moment, and two gap
+ *    kinds that both mean "can't filter websites" are one line;
+ *  - anything else once per computer and sentence within a few minutes:
+ *    "Resumed" from the console and "Resumed" from the computer are one. */
 export function momentsOf(events: Event[], max = 5, now = Date.now()): Event[] {
   const since = now - RECENT_MS;
-  const seen = new Set<string>();
-  return events
-    .filter((e) => MOMENT_TYPES.has(e.type) && new Date(e.created_at).getTime() >= since)
-    .filter((e) => !isNotAnAttempt(e))
-    .filter((e) => {
-      if (e.type !== "tamper" && e.type !== "enforcement_degraded") return true;
-      const key = `${e.type}:${String(e.payload?.kind ?? "")}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .slice(0, max);
+  const told = new Set<string>();
+  const lastTold = new Map<string, number>();
+  const out: Event[] = [];
+  const newestFirst = [...events].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  for (const e of newestFirst) {
+    const t = Date.parse(e.created_at);
+    if (!MOMENT_TYPES.has(e.type) || !(t >= since) || isNotAnAttempt(e)) continue;
+    const key = `${e.device_id ?? ""}|${sentence(e)}`;
+    if (e.type === "tamper" || e.type === "enforcement_degraded") {
+      if (told.has(key)) continue;
+      told.add(key);
+    } else {
+      const last = lastTold.get(key);
+      if (last !== undefined && last - t <= SAME_MOMENT_MS) continue;
+      lastTold.set(key, t);
+    }
+    out.push(e);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
-export function Moments({ events, max = 5 }: { events: Event[]; max?: number }) {
+export function Moments({
+  events,
+  max = 5,
+  computers,
+}: {
+  events: Event[];
+  max?: number;
+  /** device id → name, when the person has more than one computer */
+  computers?: Record<string, string>;
+}) {
   const moments = momentsOf(events, max);
   if (moments.length === 0) return null;
   return (
@@ -99,7 +133,7 @@ export function Moments({ events, max = 5 }: { events: Event[]; max?: number }) 
         {moments.map((e) => (
           <li key={e.id} className="moment" data-tone={tone(e)}>
             <span className="moment-dot" aria-hidden="true" />
-            <span className="moment-text">{sentence(e)}</span>
+            <span className="moment-text">{sayMoment(e, e.device_id ? computers?.[e.device_id] : undefined)}</span>
             <span className="moment-when">{ago(e.created_at)}</span>
           </li>
         ))}

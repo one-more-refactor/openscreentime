@@ -230,6 +230,19 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }));
     }
 
+    // Today on computers that were removed: still their day.
+    for (account, kept) in crate::ledger::kept_today(&st.db, admin.tenant_id, None).await? {
+        let Some(&i) = index.get(&account) else {
+            continue;
+        };
+        let c = &mut children[i];
+        c.used_secs += kept.used_secs;
+        c.earned_secs += kept.earned_secs;
+        c.used_minutes = c.used_secs / 60;
+        c.earned_minutes = c.earned_secs / 60;
+        c.utc_offset_secs = c.utc_offset_secs.or(kept.utc_offset_secs);
+    }
+
     children.sort_by_key(|c| c.account.2.to_lowercase());
     // Blocked members (Danger-Zone action) — surfaced so the console shows the
     // state. Kept out of the shared ACCOUNT_COLS tuple to avoid churning arity.
