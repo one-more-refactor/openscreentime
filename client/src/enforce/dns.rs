@@ -142,6 +142,24 @@ fn include_stub_body() -> String {
     format!("# Managed by openscreentime — do not edit.\nconf-dir={OST_CONF_DIR}\n")
 }
 
+/// What dnsmasq serves before the agent's first policy: answer on 127.0.0.1
+/// only (never the wildcard, which collides with systemd-resolved's stub on
+/// 127.0.0.53 and makes the package's own start fail), forwarding to whatever
+/// this computer used before. The first policy apply replaces it.
+const BOOTSTRAP_CONF: &str = "# Managed by openscreentime — replaced by the first policy.\n\
+listen-address=127.0.0.1\nbind-interfaces\n";
+
+/// Before dnsmasq is installed: make the package's first start one that works
+/// and reads our directory. Idempotent; never overwrites a ruleset.
+pub fn preseed(exec: &Exec) -> Result<()> {
+    let dir = DISTRO_CONF_DIRS[0];
+    exec.write_file(&format!("{dir}/{INCLUDE_STUB}"), &include_stub_body())?;
+    if exec.read_file(DNSMASQ_CONF).is_none() {
+        exec.write_file(DNSMASQ_CONF, BOOTSTRAP_CONF)?;
+    }
+    Ok(())
+}
+
 /// Is a local resolver actually answering? A rendered allowlist that nothing
 /// serves is worse than no allowlist, because the console reports it as applied.
 fn local_resolver_running(exec: &Exec) -> bool {
