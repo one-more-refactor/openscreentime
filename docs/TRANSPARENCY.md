@@ -64,10 +64,14 @@ Everything the agent sends the server, and nothing else:
   apps and aren't sent. This is sent for everyone, adults included; the
   server only shows it as the table above allows.
 - **Sites**: how many times the computer looked up each site, per hour, for
-  the whole computer. Not counted, because no person asked for them:
+  the whole computer — counted once, from when the agent is running (a
+  restart doesn't count the day again). A browser also looks up some sites on
+  its own (the new-tab page's shortcuts), so a count is activity, not proof
+  of a visit. Not counted, because no person asked for them:
   - the computer's own update checks and mirrors — `deb.debian.org`,
     `security.debian.org`, `ftp.debian.org` and `ftp.<country>.debian.org`,
-    Ubuntu's `archive`, `security`, `ports`, `changelogs`, `motd` and `esm`
+    Debian's updater and app catalogue (`ftp-master.debian.org`,
+    `appstream.debian.org`), Ubuntu's `archive`, `security`, `ports`, `changelogs`, `motd` and `esm`
     `.ubuntu.com`, `packages.linuxmint.com`, `fedoraproject.org`;
   - app stores' own traffic — `flathub.org`, `snapcraft.io`,
     `snapcraftcontent.com`, GNOME Software's ratings (`odrs.gnome.org`);
@@ -77,6 +81,7 @@ Everything the agent sends the server, and nothing else:
     `telemetry.mozilla.org`, `aus5.mozilla.org`, `ads.mozilla.org`,
     `cdn.mozilla.net`, `safebrowsing.googleapis.com`,
     `use-application-dns.net`;
+  - the resolver library's own NAT64 check — `ipv4only.arpa`;
   - the clock — `pool.ntp.org`, `ntp.ubuntu.com`;
   - OpenScreenTime itself — its server, and the name it checks its own
     block with (`selftest.openscreentime.internal`).
