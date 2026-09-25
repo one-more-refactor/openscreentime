@@ -30,6 +30,8 @@ pub struct Sim {
     /// refusing one kind of rule).
     failing: HashSet<String>,
     probes: HashMap<String, String>,
+    /// What was written where, last write wins (see [`Exec::written`]).
+    files: Mutex<HashMap<String, String>>,
 }
 
 /// Where a service's `PATH` usually reaches; used when `PATH` itself is unset.
@@ -73,8 +75,17 @@ impl Exec {
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
+                files: Mutex::default(),
             })),
         }
+    }
+
+    /// What the simulated machine last had written to `path`. Tests only.
+    #[cfg(test)]
+    pub fn written(&self, path: &str) -> Option<String> {
+        self.sim
+            .as_ref()
+            .and_then(|s| s.files.lock().unwrap().get(path).cloned())
     }
 
     /// The same pretend machine, where these programs (or `write:<path>`
@@ -89,6 +100,7 @@ impl Exec {
                 missing: sim.missing.clone(),
                 failing: what.iter().map(|w| w.to_string()).collect(),
                 probes: sim.probes.clone(),
+                files: Mutex::default(),
             })),
         }
     }
@@ -237,6 +249,18 @@ impl Exec {
         std::fs::read_to_string(path).ok()
     }
 
+    /// Where `path` points, if it is a symlink (always read — it's safe under
+    /// --dry-run). On a simulated machine the answer is the probe
+    /// `readlink <path>`, absent = not a link.
+    pub fn read_link(&self, path: &str) -> Option<String> {
+        if let Some(sim) = &self.sim {
+            return sim.probes.get(&format!("readlink {path}")).cloned();
+        }
+        std::fs::read_link(path)
+            .ok()
+            .map(|t| t.to_string_lossy().into_owned())
+    }
+
     /// Write a file, honoring dry-run. Used for resolv.conf, dnsmasq confs, polkit rules.
     pub fn write_file(&self, path: &str, contents: &str) -> Result<()> {
         if self.ctx.dry_run {
@@ -244,6 +268,10 @@ impl Exec {
                 if sim.failing.contains(&format!("write:{path}")) {
                     anyhow::bail!("writing {path} failed (simulated)");
                 }
+                sim.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_string(), contents.to_string());
             }
             self.record(format!("write {path}"));
             tracing::info!(target: "dry_run", "WOULD WRITE {} ({} bytes):\n{}", path, contents.len(), contents);
@@ -263,7 +291,8 @@ impl Exec {
             self.record(format!("remove {path}"));
             return Ok(true);
         }
-        if !std::path::Path::new(path).exists() {
+        // The entry itself: a symlink whose target is gone is still ours to remove.
+        if std::fs::symlink_metadata(path).is_err() {
             return Ok(false);
         }
         if self.ctx.dry_run {
