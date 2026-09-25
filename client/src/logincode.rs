@@ -181,8 +181,30 @@ pub fn first_sighting(c: &LoginCode) -> bool {
         .is_ok()
 }
 
+/// The code notifications this process has on screen, by code id.
+#[cfg(feature = "tray")]
+static SHOWN: std::sync::Mutex<Vec<(String, notify_rust::NotificationHandle)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Take down the notification of every code that isn't `live` any more —
+/// used, run out, or gone with the agent. GNOME keeps a critical
+/// notification until someone dismisses it: a used code popped up again
+/// after the computer was removed and its screen came back.
+#[cfg(feature = "tray")]
+pub fn close_stale(live: &[LoginCode]) {
+    let mut shown = SHOWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (keep, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut *shown)
+        .into_iter()
+        .partition(|(id, _)| live.iter().any(|c| &c.id == id));
+    *shown = keep;
+    for (_, h) in stale {
+        h.close();
+    }
+}
+
 /// One desktop notification carrying the code, sent from the user's own
-/// session (in-process, so the code never touches a command line).
+/// session (in-process, so the code never touches a command line). Closed
+/// again by [`close_stale`] once the code isn't live.
 #[cfg(feature = "tray")]
 pub fn notify(c: &LoginCode) {
     let mut n = notify_rust::Notification::new();
@@ -195,8 +217,12 @@ pub fn notify(c: &LoginCode) {
         .timeout(notify_rust::Timeout::Milliseconds(
             (c.minutes_left(chrono::Utc::now()) * 60_000).clamp(10_000, 300_000) as u32,
         ));
-    if let Err(e) = n.show() {
-        tracing::debug!("could not show the sign-in code notification: {e}");
+    match n.show() {
+        Ok(h) => SHOWN
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((c.id.clone(), h)),
+        Err(e) => tracing::debug!("could not show the sign-in code notification: {e}"),
     }
 }
 

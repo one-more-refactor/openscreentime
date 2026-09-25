@@ -354,11 +354,15 @@ computer that was removed (`DELETE /api/devices/:id`) is answered
 and never with a plain 401. On that answer, from its configured server and
 confirmed by a second request, the agent thaws everyone, takes the lock down,
 removes its nft table, the resolv.conf pin (the computer's previous DNS comes
-back), its dnsmasq include, the polkit rule, the unlock-code sudo and its
-cached secrets, then disables and removes its units (`ost __retire`, outside
-the sandbox) and forgets its enrollment. A 401, a network error, or a 410
-without `"retired": true` never does this — the agent keeps its last rules.
-Enrolling again (the install one-liner) clears the retirement. The token of a
+back — systemd-resolved's link included), its dnsmasq include, the polkit
+rule, the unlock-code sudo and its cached secrets; then (`ost __retire`,
+outside the sandbox) it disables and removes its units, stops the companion
+and any app window for everyone signed in, and removes the rest of it: the
+config and enrollment, the state (ledger, unlock-code state), the runtime
+files and the binary. Packages it installed (dnsmasq, nftables, cage) stay,
+with their own config back; a dnsmasq it brought is left disabled. A 401, a
+network error, or a 410 without `"retired": true` never does this — the
+agent keeps its last rules. Installing again (the one-liner) starts afresh. The token of a
 record that was folded into a newer one (above) answers as that newer record
 until it is removed; then it too is `410`.
 

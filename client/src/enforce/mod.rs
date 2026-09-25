@@ -10,14 +10,14 @@ pub mod screentime;
 pub mod vpn;
 
 use crate::config::AgentCtx;
-use crate::policy::Policy;
+use crate::policy::{NetworkLockdown, Policy};
 use crate::util::Exec;
-use anyhow::Result;
 use std::sync::Arc;
 
 /// One reason any part of network enforcement is not actually in force on this
-/// host. Unifies [`dns::DnsGap`] and [`vpn::VpnGap`] so callers surface every
-/// gap the same way (as `enforcement_degraded` critical events).
+/// host. Unifies [`dns::DnsGap`], [`firewall::FirewallGap`] and
+/// [`vpn::VpnGap`] so callers surface every gap the same way (standing in the
+/// `state` frame, and one `enforcement_degraded` event per incident).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gap {
     Dns(dns::DnsGap),
@@ -63,55 +63,66 @@ impl Gap {
 /// ([`vpn::VpnState::Keep`]) — either way the firewall whitelists whatever
 /// tunnel is in force ahead of the lockdown drops.
 ///
+/// Four stages — DNS, the firewall, its anti-bypass lockdown rules, the VPN —
+/// each applied on its own: a stage that fails is a [`Gap`] of its own and
+/// never skips the ones after it. (A resolv.conf that couldn't be written
+/// once took the whole apply down with it, firewall included: a computer
+/// with nothing in force and one line in the journal.)
+///
 /// Returns the [`Gap`]s that prevent this host from actually enforcing the
 /// policy — an empty vec means enforcement is genuinely in force. Callers
-/// must surface a non-empty result rather than treating `Ok` as "applied".
+/// must surface a non-empty result rather than treating it as "applied".
 pub fn apply_network_policy(
     ctx: Arc<AgentCtx>,
     exec: &Exec,
     server_host: Option<&str>,
     policy: &Policy,
     vpn_state: &vpn::VpnState,
-) -> Result<(Vec<Gap>, Option<vpn::VpnReport>)> {
-    // App/category blocks → DNS sinkholes (the catalog is the single source;
-    // `policy.blocks` on the effective policy is the union over every user).
+) -> (Vec<Gap>, Option<vpn::VpnReport>) {
+    // 1. DNS. App/category blocks → DNS sinkholes (the catalog is the single
+    // source; `policy.blocks` on the effective policy is the union over every
+    // user).
     let sinkhole = openscreentime_policy::catalog::expand(&policy.blocks).domains;
-    let dns_gaps = dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole)?;
-    // If there is no local resolver, dns::apply deliberately did NOT pin
-    // resolv.conf (the box stays usable and loudly degraded). The firewall's
-    // `force_dns` drops would then sever ALL name resolution — for the child
-    // AND for the agent's own control channel, so no relaxing policy could
-    // ever arrive. Suppress force_dns exactly in that case; every other
-    // lockdown flag still applies. (The gap is already reported as critical.)
+    let dns_gaps = dns::apply(exec, &policy.dns, &policy.lockdown, server_host, &sinkhole);
+    // Nothing answering on 127.0.0.1, or resolv.conf not pointing there: the
+    // firewall's `force_dns` drops would then sever ALL name resolution — for
+    // the child AND for the agent's own control channel, so no relaxing
+    // policy could ever arrive. Suppress force_dns exactly in that case;
+    // every other lockdown flag still applies. (The gap is reported.)
     let mut fw_lockdown = policy.lockdown.clone();
-    if dns_gaps.contains(&dns::DnsGap::NoLocalResolver)
-        || dns_gaps.contains(&dns::DnsGap::ResolverMissing)
-    {
+    if dns_gaps.iter().any(|g| g.breaks_forced_dns()) {
         fw_lockdown.force_dns = false;
     }
     let mut gaps: Vec<Gap> = dns_gaps.into_iter().map(Gap::Dns).collect();
-    // Firewall first (with the tunnel's accepts in place), THEN the tunnel —
-    // bringing a wg/ovpn unit up before its endpoint accept exists would fail
-    // its handshake against our own default-deny.
-    //
-    // A firewall that can't be loaded is a gap, not an abort: the DNS above
-    // and the screen time the caller applies next must not depend on `nft`
-    // being installed (a stock Debian desktop has no nftables).
+
+    // 2 + 3. The firewall, then its lockdown rules. Firewall before the
+    // tunnel (with the tunnel's accepts in place) — bringing a wg/ovpn unit
+    // up before its endpoint accept exists would fail its handshake against
+    // our own default-deny.
     let plan = vpn::plan(vpn_state);
-    if !exec.has("nft") {
-        gaps.push(Gap::Firewall(firewall::FirewallGap::NotInstalled));
-    } else if let Err(e) = firewall::apply(
-        exec,
-        &policy.firewall,
-        &fw_lockdown,
-        &policy.dns.upstream,
-        server_host,
-        &plan,
-    ) {
-        tracing::error!("firewall not applied: {e:#}");
-        gaps.push(Gap::Firewall(firewall::FirewallGap::NotApplied));
-    }
-    let (vpn_gaps, vpn_report) = vpn::reconcile(exec, vpn_state)?;
+    gaps.extend(
+        apply_firewall(exec, policy, &fw_lockdown, server_host, &plan)
+            .into_iter()
+            .map(Gap::Firewall),
+    );
+
+    // 4. The VPN.
+    let (vpn_gaps, vpn_report) = match vpn::reconcile(exec, vpn_state) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("VPN profile not applied: {e:#}");
+            // A profile waiting for its test verdict hears it failed.
+            let report = match vpn_state {
+                vpn::VpnState::Sync(Some(p)) => p.id.clone().map(|profile_id| vpn::VpnReport {
+                    profile_id,
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                }),
+                _ => None,
+            };
+            (vec![vpn::VpnGap::NotApplied], report)
+        }
+    };
     gaps.extend(vpn_gaps.into_iter().map(Gap::Vpn));
     tracing::info!(
         dry_run = ctx.dry_run,
@@ -121,7 +132,52 @@ pub fn apply_network_policy(
         plan.iface.unwrap_or("none"),
         gaps.len()
     );
-    Ok((gaps, vpn_report))
+    (gaps, vpn_report)
+}
+
+/// The firewall stage and its lockdown stage. `nft` loads a ruleset
+/// all-or-nothing, so lockdown rules this kernel refuses would take the whole
+/// table with them: the base table is then loaded without them, and only
+/// the lockdown is the gap. Never an abort — DNS, the tunnel and screen time
+/// don't depend on `nft` (a stock Debian desktop has none).
+fn apply_firewall(
+    exec: &Exec,
+    policy: &Policy,
+    lockdown: &NetworkLockdown,
+    server_host: Option<&str>,
+    plan: &vpn::VpnPlan,
+) -> Vec<firewall::FirewallGap> {
+    use firewall::FirewallGap;
+    if !exec.has("nft") {
+        return vec![FirewallGap::NotInstalled];
+    }
+    let load = |lockdown: &NetworkLockdown| {
+        firewall::apply(
+            exec,
+            &policy.firewall,
+            lockdown,
+            &policy.dns.upstream,
+            server_host,
+            plan,
+        )
+    };
+    let Err(e) = load(lockdown) else {
+        return Vec::new();
+    };
+    tracing::error!("firewall not applied: {e:#}");
+    if !lockdown.any() {
+        return vec![FirewallGap::NotApplied];
+    }
+    match load(&NetworkLockdown::default()) {
+        Ok(()) => {
+            tracing::error!("firewall applied without its lockdown rules (those were refused)");
+            vec![FirewallGap::LockdownNotApplied]
+        }
+        Err(e) => {
+            tracing::error!("firewall not applied without its lockdown rules either: {e:#}");
+            vec![FirewallGap::NotApplied]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -136,20 +192,24 @@ mod tests {
     /// cannot ship with an empty or non-actionable explanation.
     #[test]
     fn every_gap_is_identified_and_actionable() {
-        use dns::DnsGap::*;
-        use firewall::FirewallGap::*;
-        use vpn::VpnGap::*;
+        use dns::DnsGap as D;
+        use firewall::FirewallGap as F;
+        use vpn::VpnGap as V;
 
         let all = [
-            Gap::Dns(ResolverMissing),
-            Gap::Dns(NoLocalResolver),
-            Gap::Dns(ResolvConfNotAFile),
-            Gap::Dns(ResolvConfNotLocked),
-            Gap::Dns(PolicyNotLoaded),
-            Gap::Firewall(NotInstalled),
-            Gap::Firewall(NotApplied),
-            Gap::Vpn(NotRunning),
-            Gap::Vpn(UnsupportedKind),
+            Gap::Dns(D::ResolverMissing),
+            Gap::Dns(D::NoLocalResolver),
+            Gap::Dns(D::ResolvConfNotAFile),
+            Gap::Dns(D::ResolvConfNotLocked),
+            Gap::Dns(D::PolicyNotLoaded),
+            Gap::Dns(D::RulesNotWritten),
+            Gap::Dns(D::ResolvConfNotPinned),
+            Gap::Firewall(F::NotInstalled),
+            Gap::Firewall(F::NotApplied),
+            Gap::Firewall(F::LockdownNotApplied),
+            Gap::Vpn(V::NotRunning),
+            Gap::Vpn(V::UnsupportedKind),
+            Gap::Vpn(V::NotApplied),
         ];
 
         let mut kinds = std::collections::HashSet::new();
@@ -167,5 +227,88 @@ mod tests {
                 "{kind}: an operator cannot act on a one-liner"
             );
         }
+    }
+
+    fn blocking() -> Policy {
+        let mut p = Policy::default();
+        p.blocks.custom_domains = vec!["example.org".into()];
+        p.lockdown.force_dns = true;
+        p.lockdown.block_doh = true;
+        p
+    }
+
+    fn apply(exec: &Exec, p: &Policy) -> Vec<&'static str> {
+        let (gaps, _) = apply_network_policy(
+            AgentCtx::new(true, false, 1),
+            exec,
+            None,
+            p,
+            &vpn::VpnState::Keep,
+        );
+        gaps.into_iter().map(Gap::kind).collect()
+    }
+
+    const RUNNING: (&str, &str) = ("systemctl is-active dnsmasq", "active\n");
+
+    /// Acceptance round 2: resolv.conf couldn't be written, the DNS step
+    /// returned an error, and the firewall was never loaded. Every stage
+    /// applies or reports its own gap; one failing never skips the others.
+    #[test]
+    fn a_failing_dns_step_never_skips_the_firewall() {
+        // resolv.conf can't be written: a DNS gap; the firewall still loads,
+        // without forced DNS (it would cut every lookup off).
+        let exec = Exec::simulated(&[], &[RUNNING]).failing(&["write:/etc/resolv.conf"]);
+        assert_eq!(apply(&exec, &blocking()), ["dns_resolv_conf_not_pinned"]);
+        assert!(
+            exec.log().iter().any(|l| l == "run nft -f -"),
+            "{:?}",
+            exec.log()
+        );
+
+        // The ruleset itself can't be written: its own gap, the rest applies.
+        let exec = Exec::simulated(&[], &[RUNNING])
+            .failing(&["write:/etc/openscreentime/dnsmasq.d/openscreentime.conf"]);
+        assert_eq!(apply(&exec, &blocking()), ["dns_rules_not_written"]);
+        let log = exec.log();
+        assert!(log.iter().any(|l| l == "run nft -f -"), "{log:?}");
+        assert!(log.iter().any(|l| l == "write /etc/resolv.conf"), "{log:?}");
+    }
+
+    /// nft refusing the ruleset is the firewall's gap; DNS was applied before
+    /// it and stays applied. Lockdown rules the kernel refuses don't take the
+    /// base firewall with them.
+    #[test]
+    fn a_failing_firewall_never_undoes_dns_and_lockdown_fails_alone() {
+        let exec = Exec::simulated(&[], &[RUNNING]).failing(&["nft"]);
+        assert_eq!(apply(&exec, &blocking()), ["firewall_not_applied"]);
+        let log = exec.log();
+        assert!(log.iter().any(|l| l == "write /etc/resolv.conf"), "{log:?}");
+        assert!(log.iter().any(|l| l == "run systemctl restart dnsmasq"));
+
+        // No nft at all: its own gap, nothing tried.
+        let exec = Exec::simulated(&["nft"], &[RUNNING]);
+        assert_eq!(apply(&exec, &blocking()), ["firewall_not_installed"]);
+    }
+
+    /// Lockdown rules this kernel's nft refuses (the whole table is one
+    /// transaction) don't take the base firewall down with them: it loads
+    /// without them, and only the lockdown is the gap — DNS and the rest
+    /// applied all the same.
+    #[test]
+    fn a_refused_lockdown_falls_back_to_the_base_firewall() {
+        let exec = Exec::simulated(&[], &[RUNNING]).failing(&["stdin:block_doh"]);
+        assert_eq!(apply(&exec, &blocking()), ["firewall_lockdown_not_applied"]);
+        let log = exec.log();
+        assert_eq!(log.iter().filter(|l| *l == "run nft -f -").count(), 1);
+        assert!(log.iter().any(|l| l == "write /etc/resolv.conf"), "{log:?}");
+
+        // A ruleset with no lockdown in it isn't retried: nothing to drop.
+        let exec = Exec::simulated(&[], &[]).failing(&["nft"]);
+        let open = Policy::default();
+        assert!(!open.lockdown.any());
+        assert_eq!(
+            apply_firewall(&exec, &open, &open.lockdown, None, &vpn::VpnPlan::default()),
+            [firewall::FirewallGap::NotApplied]
+        );
     }
 }
