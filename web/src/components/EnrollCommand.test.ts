@@ -16,6 +16,7 @@ const REAL = readFileSync(new URL("../../../server/install.sh", import.meta.url)
 const WGET = `wget -qO- ${HOST}/install.sh`;
 const CURL = `curl -fsSL ${HOST}/install.sh`;
 const RAN = `installer ran: OST_TOKEN=T args=--server ${HOST}\n`;
+const FAILED = `Couldn't download the installer from ${HOST} — is the address right and the server up?\n`;
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
 
@@ -55,7 +56,11 @@ function computer(tools: ("curl" | "wget")[], script: string | null = STUB) {
   return { bin, calls };
 }
 
-const shells = ["/bin/sh", Bun.which("bash")].filter((s): s is string => !!s);
+// sh (dash on Debian and Ubuntu, where it's installed), and bash — what a
+// parent's terminal runs the pasted line in.
+const shells = [...new Set(["/bin/sh", Bun.which("dash"), Bun.which("bash")])].filter(
+  (s): s is string => !!s,
+);
 
 function run(shell: string, bin: string, line = installCommand("T", HOST)) {
   const r = Bun.spawnSync([shell, "-c", line], { env: { PATH: bin }, stdout: "pipe", stderr: "pipe" });
@@ -65,7 +70,8 @@ function run(shell: string, bin: string, line = installCommand("T", HOST)) {
 describe("the install command", () => {
   test("says wget, else curl, else fail — then hands the token to sh as root", () => {
     expect(installCommand("T", HOST)).toBe(
-      `(${WGET} 2>/dev/null || ${CURL} || echo exit 1) | sudo OST_TOKEN=T sh -s -- --server ${HOST}`,
+      `(${WGET} || ${CURL} || echo "echo \\"${FAILED.trim()}\\" >&2; exit 1") 2>/dev/null | ` +
+        `sudo OST_TOKEN=T sh -s -- --server ${HOST}`,
     );
   });
 
@@ -101,20 +107,41 @@ describe("the install command", () => {
         expect(c.calls()).toEqual([WGET]);
       });
 
-      test("neither: fails out loud, never a quiet exit 0", () => {
-        const r = run(shell, computer([]).bin);
-        expect(r.code).not.toBe(0);
+      // Acceptance round 5: with wget there but the download failing (the
+      // server down, a typo), the only word was "curl: command not found".
+      // Every way the download can fail says one thing, names the server,
+      // and exits non-zero — never a quiet exit 0.
+      test("wget fails and there is no curl (stock Debian, server down): one clear message", () => {
+        const c = computer(["wget"], null);
+        const r = run(shell, c.bin);
+        expect(r.code).toBe(1);
         expect(r.out).toBe("");
-        expect(r.err).toMatch(/curl.*not found/);
+        expect(r.err).toBe(FAILED);
+        expect(c.calls()).toEqual([WGET]);
       });
 
-      test("a server that doesn't answer: fails, after trying both, with curl's reason", () => {
+      test("neither downloader: the same one message", () => {
+        const r = run(shell, computer([]).bin);
+        expect(r.code).toBe(1);
+        expect(r.out).toBe("");
+        expect(r.err).toBe(FAILED);
+      });
+
+      test("both, and the server doesn't answer: tries both, then the one message", () => {
         const c = computer(["curl", "wget"], null);
         const r = run(shell, c.bin);
-        expect(r.code).not.toBe(0);
+        expect(r.code).toBe(1);
         expect(r.out).toBe("");
-        expect(r.err).toContain("curl: the server said no");
+        expect(r.err).toBe(FAILED);
         expect(c.calls()).toEqual([WGET, CURL]);
+      });
+
+      test("curl alone, and the server doesn't answer: the one message", () => {
+        const c = computer(["curl"], null);
+        const r = run(shell, c.bin);
+        expect(r.code).toBe(1);
+        expect(r.err).toBe(FAILED);
+        expect(c.calls()).toEqual([CURL]);
       });
 
       test("the real installer, fetched with wget, starts and checks what it needs", () => {
