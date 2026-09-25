@@ -12,6 +12,7 @@ mod childcli;
 mod client;
 mod clock;
 mod config;
+mod console;
 mod earn;
 mod enforce;
 mod enroll;
