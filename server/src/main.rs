@@ -60,7 +60,7 @@ use axum::{
     extract::State,
     http::{header, HeaderValue, Method, StatusCode},
     middleware,
-    routing::{any, delete, get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -70,13 +70,6 @@ use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
 use crate::state::{AppState, Hub};
-
-async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": { "code": "not_found", "message": "no such route" } })),
-    )
-}
 
 /// Baseline browser hardening on every response. No CSP yet (the SPA inlines
 /// styles); these three are free and close framing/sniffing/referrer leaks.
@@ -479,27 +472,10 @@ async fn main() -> anyhow::Result<()> {
     // Serve the built web UI (see `web/`) as the fallback for any path that
     // didn't match an /api, /agent, or /health route above — this never
     // shadows those routes since fallbacks only run on unmatched requests.
-    // No-op (API-only) if OST_WEB_DIR isn't present, e.g. plain `cargo
-    // run` in dev without a web build.
-    // An unmatched /api or /agent path must be a real 404, not the SPA shell
-    // rewritten to 200 — otherwise a route that silently stops existing looks
-    // healthy to a monitor. Static routes win over these wildcards.
-    let app = app
-        .route("/api/{*rest}", any(api_not_found))
-        .route("/agent/{*rest}", any(api_not_found));
-    let app = match static_web::web_dir() {
-        Some(dir) => {
-            use tower_http::services::{ServeDir, ServeFile};
-            let index = dir.join("index.html");
-            // Serve real files; any miss falls back to index.html. The 404 that
-            // ServeDir carries through is flipped to 200 by the `spa_ok`
-            // map_response layer below, so client-side routes resolve cleanly.
-            let serve = ServeDir::new(&dir).not_found_service(ServeFile::new(index));
-            app.fallback_service(serve)
-                .layer(axum::middleware::map_response(static_web::spa_ok))
-        }
-        None => app,
-    };
+    // An unmatched /api or /agent path is a JSON 404, every other path the
+    // SPA shell (200, or 304 on a reload). API-only if OST_WEB_DIR isn't
+    // present, e.g. plain `cargo run` in dev without a web build.
+    let app = static_web::mount(app, static_web::web_dir().as_deref());
 
     let app = app
         .layer(middleware::map_response(security_headers))
