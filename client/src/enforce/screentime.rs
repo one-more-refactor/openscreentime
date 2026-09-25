@@ -12,8 +12,11 @@
 //!   computers. The server reports what they used elsewhere today; this device
 //!   adds its own. Offline, the last-known "elsewhere" still applies.
 //!
-//! Stopping someone (overlay, cgroup freeze) is the runner's business; the
-//! freeze primitives at the bottom of this file are shared with it.
+//! Stopping someone (the lock, the freeze) is the runner's business; the
+//! freeze primitives at the bottom of this file are shared with it, and what
+//! a stop freezes is decided in [`freeze`].
+
+pub mod freeze;
 
 use crate::clock::{Reading, TrustedClock};
 use crate::policy::Policy;
@@ -379,14 +382,202 @@ pub fn evaluate<Tz: TimeZone>(
     lock_reason(&v, tracker, user, policy)
 }
 
-/// What the kernel says about a user's freezer right now: `Some(true)` if
-/// `cgroup.freeze` reads back 1, `Some(false)` if 0, `None` if the slice does
-/// not exist (user not logged in) or cannot be read. This — never the agent's
-/// intention — is what gets reported as the device's lock state.
+/// What the kernel says about a user right now: `Some(true)` if anything of
+/// theirs is frozen (a stop, or what is left of one — their slice or any
+/// cgroup in it reads `cgroup.freeze` 1), `Some(false)` if nothing is, `None`
+/// if they have no slice (not logged in) or it can't be read. This — never
+/// the agent's intention — is the evidence a restarted agent adopts.
 pub fn is_frozen(username: &str) -> Option<bool> {
     let uid = sysusers::uid_of(username)?;
-    let path = format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/cgroup.freeze");
-    std::fs::read_to_string(path).ok().map(|s| s.trim() == "1")
+    freeze::read_tree(uid).map(|t| freeze::any_frozen(&t))
+}
+
+/// Is a stop of `username` holding — is everything it freezes (see
+/// [`freeze`]) frozen right now? `None` without a slice. What gets reported
+/// as the device's lock state for someone who is stopped.
+pub fn freeze_holds(exec: &Exec, username: &str) -> Option<bool> {
+    let uid = sysusers::uid_of(username)?;
+    let p = Planner::new(exec, username);
+    let tree = freeze::read_tree(uid)?;
+    Some(freeze::holds(&tree, &p.plan(&tree, uid)))
+}
+
+/// Keep a stop holding, quietly: freeze what appeared since it was applied
+/// (an app a timer started, a new login's apps once it has settled), file
+/// D-Bus-started apps into scopes, and move an older whole-slice freeze onto
+/// the apps. Never escalates. Returns whether the stop holds now.
+pub fn refreeze(exec: &Exec, username: &str) -> Option<bool> {
+    let uid = sysusers::uid_of(username)?;
+    let p = Planner::new(exec, username);
+    let tree = freeze::read_tree(uid)?;
+    let plan = p.plan(&tree, uid);
+    let moved_off_whole = tree.frozen && matches!(plan, freeze::Plan::Apps { .. });
+    if exec.dry_run() || (freeze::holds(&tree, &plan) && !moved_off_whole) {
+        return Some(freeze::holds(&tree, &plan));
+    }
+    match apply(exec, uid, username, &tree, &plan) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("{username}: froze {n} more of what they run"),
+        Err(e) => tracing::debug!("{username}: keeping the stop failed: {e}"),
+    }
+    let tree = freeze::read_tree(uid)?;
+    Some(freeze::holds(&tree, &p.plan(&tree, uid)))
+}
+
+/// What a plan needs besides the tree: the person's logins and the desktop
+/// apps D-Bus can start.
+struct Planner {
+    logins: Vec<freeze::Login>,
+    apps: Vec<freeze::AppExec>,
+}
+
+impl Planner {
+    fn new(exec: &Exec, username: &str) -> Self {
+        let logins = crate::lock::query_sessions(exec)
+            .into_iter()
+            .filter(|s| s.user == username && s.class.starts_with("user"))
+            .map(|s| freeze::Login {
+                age: s.age(),
+                graphical: s.graphical,
+                id: s.id,
+            })
+            .collect();
+        Planner {
+            logins,
+            apps: freeze::dbus_apps(),
+        }
+    }
+
+    fn plan(&self, tree: &freeze::Cgroup, uid: u32) -> freeze::Plan {
+        freeze::plan(tree, uid, &self.logins, &self.apps)
+    }
+}
+
+/// Write `cgroup.freeze` of the cgroup at `rel` (relative to the slice; `""`
+/// is the slice itself).
+fn write_freeze(uid: u32, rel: &str, on: bool) -> std::io::Result<()> {
+    let dir = freeze::slice_dir(uid);
+    let dir = if rel.is_empty() { dir } else { dir.join(rel) };
+    std::fs::write(dir.join("cgroup.freeze"), if on { "1" } else { "0" })
+}
+
+/// Freeze what `plan` says. Returns how many cgroups were newly frozen.
+fn apply(
+    exec: &Exec,
+    uid: u32,
+    username: &str,
+    tree: &freeze::Cgroup,
+    plan: &freeze::Plan,
+) -> std::io::Result<usize> {
+    let (targets, strays) = match plan {
+        freeze::Plan::Whole => {
+            if tree.frozen {
+                return Ok(0);
+            }
+            write_freeze(uid, "", true)?;
+            return Ok(1);
+        }
+        freeze::Plan::Apps { targets, strays } => (targets, strays),
+    };
+    let mut targets = targets.clone();
+    for s in strays {
+        if let Some(unit) = adopt(exec, uid, username, s) {
+            targets.push(format!("user@{uid}.service/app.slice/{unit}"));
+        }
+    }
+    let mut n = 0;
+    let mut failed = None;
+    for t in &targets {
+        if tree.at(t).is_some_and(|c| c.frozen) {
+            continue;
+        }
+        match write_freeze(uid, t, true) {
+            Ok(()) => n += 1,
+            // It ended in the meantime: nothing left to stop.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    // A whole-slice freeze (an older agent's, or a desktop that has since
+    // gone) comes off only once the apps are frozen: they never run between.
+    if tree.frozen {
+        write_freeze(uid, "", false)?;
+    }
+    Ok(n)
+}
+
+/// File an app D-Bus started inside `session.slice` into a scope of its own
+/// in `app.slice` — `StartTransientUnit` with its PIDs on the person's own
+/// service manager, the call GNOME Shell makes for every app it launches —
+/// so that it can be frozen without freezing the session bus. Returns the
+/// scope's name once its cgroup is there.
+fn adopt(exec: &Exec, uid: u32, username: &str, stray: &freeze::Stray) -> Option<String> {
+    let first = *stray.pids.first()?;
+    let id: String = stray
+        .app
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let unit = format!("app-dbus-{id}-{first}.scope");
+    let machine = format!("{username}@");
+    let count = stray.pids.len().to_string();
+    let pids: Vec<String> = stray.pids.iter().map(u32::to_string).collect();
+    let mut args = vec![
+        "--user",
+        "-M",
+        machine.as_str(),
+        "call",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager",
+        "StartTransientUnit",
+        "ssa(sv)a(sa(sv))",
+        unit.as_str(),
+        "fail",
+        "3",
+        "Description",
+        "s",
+        stray.app.as_str(),
+        "Slice",
+        "s",
+        "app.slice",
+        "PIDs",
+        "au",
+        count.as_str(),
+    ];
+    args.extend(pids.iter().map(String::as_str));
+    args.push("0");
+    if let Err(e) = exec.run("busctl", &args) {
+        tracing::warn!(
+            "could not move {} ({username}) into a scope to stop it: {e}",
+            stray.app
+        );
+        return None;
+    }
+    tracing::info!(
+        "{username}: {} ran inside the session bus; moved it into {unit} to stop it",
+        stray.app
+    );
+    // systemd makes the cgroup a moment after the call returns.
+    let dir = freeze::slice_dir(uid).join(format!("user@{uid}.service/app.slice/{unit}"));
+    for _ in 0..20 {
+        if dir.is_dir() {
+            return Some(unit);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Some(unit)
 }
 
 /// Whether this host can actually freeze a user — cgroup v2 unified with
@@ -402,7 +593,8 @@ pub fn freezer_usable() -> bool {
         && std::path::Path::new("/sys/fs/cgroup/user.slice").exists()
 }
 
-/// Freeze all processes of a user via the cgroup v2 freezer. Reversible.
+/// Stop a user's apps with the cgroup v2 freezer — what [`freeze`] decides,
+/// never their session — or thaw everything of theirs. Reversible.
 ///
 /// `hard` controls the fallback when the freezer is unavailable: an admin
 /// whole-device lock (`hard = true`) may terminate the session as a last
@@ -412,31 +604,70 @@ pub fn freeze_user(exec: &Exec, username: &str, frozen: bool, hard: bool) -> Res
     let Some(uid) = sysusers::uid_of(username) else {
         anyhow::bail!("unknown user {username}");
     };
-    let path = format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/cgroup.freeze");
-    let val = if frozen { "1" } else { "0" };
-    if exec.dry_run() {
-        tracing::info!(target: "dry_run", "WOULD WRITE {} <- {} (freeze user {})", path, val, username);
+    if !frozen {
+        thaw(exec, uid, username);
         return Ok(());
     }
-    match std::fs::write(&path, val) {
+    let p = Planner::new(exec, username);
+    let tree = freeze::read_tree(uid);
+    let plan = tree.as_ref().map(|t| p.plan(t, uid));
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD FREEZE {username}: {plan:?}");
+        return Ok(());
+    }
+    let applied = match (&tree, &plan) {
+        (Some(t), Some(pl)) => apply(exec, uid, username, t, pl),
+        _ => write_freeze(uid, "", true).map(|_| 1),
+    };
+    match applied {
         Ok(_) => {
-            tracing::info!("user {} freeze={}", username, frozen);
+            let what = match &plan {
+                Some(freeze::Plan::Apps { targets, strays })
+                    if targets.is_empty() && strays.is_empty() =>
+                {
+                    "nothing to freeze yet".to_string()
+                }
+                Some(freeze::Plan::Apps { targets, strays }) => {
+                    format!("their apps: {} unit(s)", targets.len() + strays.len())
+                }
+                _ => "the whole slice".to_string(),
+            };
+            tracing::info!("user {username} freeze=true ({what})");
             Ok(())
         }
-        Err(e) if frozen && hard => {
+        Err(e) if hard => {
             tracing::warn!("cgroup freeze unavailable ({e}); admin lock falls back to loginctl");
             exec.run("loginctl", &["terminate-user", username])
                 .map(|_| ())
         }
-        Err(e) if frozen => {
+        Err(e) => {
             tracing::warn!(
                 "cgroup freeze unavailable ({e}); screen-time lock NOT escalating to \
                  terminate-user (would destroy unsaved work)"
             );
             Ok(())
         }
-        Err(_) => Ok(()),
     }
+}
+
+/// Thaw everything of theirs: every cgroup in their slice that reads frozen,
+/// whatever froze it and whatever the plan says now, the slice itself last
+/// (so what a whole-slice freeze held resumes at once).
+fn thaw(exec: &Exec, uid: u32, username: &str) {
+    if exec.dry_run() {
+        tracing::info!(target: "dry_run", "WOULD THAW everything of {username}'s");
+        return;
+    }
+    let mut paths = freeze::read_tree(uid)
+        .map(|t| freeze::frozen_paths(&t))
+        .unwrap_or_default();
+    paths.retain(|p| !p.is_empty());
+    paths.reverse();
+    paths.push(String::new());
+    for p in &paths {
+        let _ = write_freeze(uid, p, false);
+    }
+    tracing::info!("user {username} freeze=false");
 }
 #[cfg(test)]
 mod tests {
