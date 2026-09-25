@@ -587,6 +587,13 @@ input and shows nothing while the lock holds the screen:
   and keyring, which the freeze leaves running) — meets the lock first,
   within about a second (the VT watch wakes on the kernel's `POLLPRI` on
   `/sys/class/tty/tty0/active`).
+- **A stopped session that ends** (a log-out, `loginctl terminate-user`, a
+  crash) leaves no lock behind for nobody: within about a second (the VT
+  watch also wakes when logind's session files in `/run/systemd/sessions`
+  change) the lock lets go of `VT_LOCKSWITCH`, hands the screen to the login
+  screen (the same ways "Switch user" does; the VT from before where there
+  is no display manager) and stops once the login screen has the screen.
+  The person stays stopped and meets the lock at their next login.
 - **Logging in to a stop**: the lock is in front within about a second,
   while the desktop is still starting; it finishes starting behind the lock
   and nothing of it is frozen until it is a minute old.

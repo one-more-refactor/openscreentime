@@ -2584,6 +2584,9 @@ impl Agent {
     ///   it died, hung or was switched away from) and keep its words current;
     /// * the lock's person thawed (by any path — the thaw already happened) →
     ///   switch back to their session and stop the lock;
+    /// * the lock's person has no session left (logged out, or it ended) →
+    ///   the lock goes and the login screen gets the screen (they stay
+    ///   stopped);
     /// * no lock, but whoever is on screen is stopped (they switched or logged
     ///   in to a frozen session) → put it up in front of them.
     ///
@@ -2600,7 +2603,17 @@ impl Agent {
                     subject = u;
                 }
             }
-            if self.frozen.contains(&subject) {
+            if !self.frozen.contains(&subject) {
+                self.lock.release();
+            } else if lock::desktop_session(&sessions, &subject).is_none() {
+                // Their session is gone (a log-out, a crash): nobody is
+                // behind the lock. The login screen gets the screen; they
+                // stay stopped and meet the lock when they log in again.
+                tracing::info!(
+                    "{subject}'s session ended; the lock gives the screen to the login screen"
+                );
+                self.lock.hand_to_login_screen().await;
+            } else {
                 let face = self.face_for(&subject);
                 self.lock.publish(face);
                 let frozen = self.frozen.clone();
@@ -2620,8 +2633,8 @@ impl Agent {
                 self.lock.host().freeze(&subject, false, false);
                 self.frozen.remove(&subject);
                 self.lock_unavailable(&subject);
+                self.lock.release();
             }
-            self.lock.release();
         }
         let sessions = self.lock.host().sessions();
         if let Some(u) = lock::on_screen_user(&sessions) {
@@ -4777,6 +4790,75 @@ mod tests {
         drop(w);
         assert!(a.lock.is_aside());
         assert_eq!(a.lock.subject(), Some("mia"));
+    }
+
+    /// Acceptance round 3: a stopped adult's session was ended while his lock
+    /// was up, and the lock stayed on screen — countdown and all — for a
+    /// person who wasn't there, until someone pressed S. A lock for nobody
+    /// goes: `VT_LOCKSWITCH` let go, the login screen gets the screen, and
+    /// the person stays stopped for their next login.
+    #[tokio::test]
+    async fn when_the_stopped_session_ends_the_login_screen_gets_the_screen() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        fake.w().greeter_vt = Some(1);
+        stop_mia(&mut a).await;
+        assert_eq!(fake.w().vt, 14);
+        assert!(fake.w().switch_locked);
+        // Her session ends (a log-out, `loginctl terminate-user`, a crash).
+        {
+            let mut w = fake.w();
+            w.sessions.retain(|s| s.user != "mia");
+            w.logged_in.remove("mia");
+            w.log.clear();
+        }
+        a.on_lock_event(LockEvent::VtChanged).await;
+        {
+            let w = fake.w();
+            assert_eq!(w.vt, 1, "the login screen: {:?}", w.log);
+            assert!(!w.switch_locked);
+            let released = pos(&w.log, "switchlock false");
+            let asked = pos(&w.log, "login screen 1");
+            let stopped = pos(&w.log, "stop text");
+            assert!(released < asked && asked < stopped, "{:?}", w.log);
+        }
+        assert!(a.lock.shown().is_none());
+        assert!(a.frozen.contains("mia"), "still stopped for her next login");
+        // A tick changes nothing: no lock comes back for nobody.
+        a.enforcement_tick().await;
+        assert!(a.lock.shown().is_none());
+        assert_eq!(fake.w().vt, 1);
+
+        // She logs in again: the lock, not her desktop.
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("7", "mia", 3, false));
+            w.logged_in.insert("mia".into());
+        }
+        assert!(fake.user_switches_to(3));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        assert_eq!(a.lock.subject(), Some("mia"));
+        assert_eq!(fake.w().vt, 14);
+    }
+
+    /// Without a display manager, the screen goes back to where it was.
+    #[tokio::test]
+    async fn a_lock_for_nobody_goes_back_to_the_console_without_a_login_screen() {
+        let (mut a, fake) = agent_with_mia();
+        stop_mia(&mut a).await;
+        assert_eq!(fake.w().vt, 14);
+        {
+            let mut w = fake.w();
+            w.sessions.clear();
+            w.logged_in.clear();
+        }
+        a.reconcile_lock().await;
+        let w = fake.w();
+        assert_eq!(w.vt, 2);
+        assert!(!w.switch_locked);
+        assert!(!w.text_running);
+        drop(w);
+        assert!(a.lock.shown().is_none());
     }
 
     /// Acceptance round 3: Mia's time ran out while sam had the screen, and
