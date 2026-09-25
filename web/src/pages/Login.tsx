@@ -287,7 +287,9 @@ export function Login() {
             )}
             {noCodeYet && (
               <p className="hint signin-nocode">
-                No code? Your computer must be on, and it must be your own login — or{" "}
+                {/* The rule the server keeps (login_code.rs): a code goes only to a
+                    computer set up as yours, to your login on it. */}
+                No code? Your computer must be on and set up as yours (Computers → Add my computer, or Who's who) — or{" "}
                 <button type="button" className="link" onClick={() => void passkey()}>
                   use a passkey
                 </button>
