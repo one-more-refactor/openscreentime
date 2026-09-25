@@ -716,12 +716,21 @@ impl Agent {
     /// kernel freezer, never from what we meant to do.
     fn device_state(&self) -> DeviceState {
         let lock_intent = self.device_locked || self.offline_hard_lockdown || self.tamper_lockdown;
+        // Someone stopped counts as frozen while their stop holds (their
+        // apps are frozen; a desktop still starting has none yet); anyone
+        // else only if something of theirs reads frozen.
         let mut frozen_users: Vec<String> = if self.exec.dry_run() {
             self.frozen.iter().cloned().collect()
         } else {
             self.policies
                 .keys()
-                .filter(|u| screentime::is_frozen(u) == Some(true))
+                .filter(|u| {
+                    if self.frozen.contains(*u) {
+                        screentime::freeze_holds(&self.exec, u) == Some(true)
+                    } else {
+                        screentime::is_frozen(u) == Some(true)
+                    }
+                })
                 .cloned()
                 .collect()
         };
@@ -1681,12 +1690,13 @@ impl Agent {
             let policy = self.policies.get(&user).cloned().unwrap_or_default();
             let is_active = active.contains(&user);
             let currently_frozen = self.frozen.contains(&user);
-            // Frozen means frozen — every tick. A slice that reads thawed (a
-            // re-login made a new one, or someone wrote 0) is stopped again —
-            // through the lock, so nobody meets a silent frozen desktop.
-            if currently_frozen && self.lock.host().is_frozen(&user) == Some(false) {
-                let hard = self.device_lock_effective();
-                self.stop_user(&user, hard).await;
+            // Frozen means frozen — every tick, quietly: an app that started
+            // since (a timer, a re-login's desktop once it has settled), or
+            // one someone thawed, is frozen too. Only apps are frozen, never
+            // the session, so this needs no lock in front of anyone; the lock
+            // follows the stopped person in `reconcile_lock` below.
+            if currently_frozen {
+                self.lock.host().refreeze(&user);
             }
 
             // An active parent override (a grant, a code at the lock screen,
@@ -1851,12 +1861,12 @@ impl Agent {
             }
         }
 
-        // 1. Frozen means frozen — and stays frozen. A recreated slice
-        // (re-login, linger toggle) or a manual `echo 0` is reported here; the
-        // per-user loop right after re-stops it, through the lock, so nobody
-        // meets a silent frozen desktop.
+        // 1. Frozen means frozen — and stays frozen. What appeared since the
+        // stop is frozen quietly on every tick; a stop that still doesn't
+        // hold once that is done (the freezer refusing a write, someone
+        // thawing their apps faster than a tick) is reported here.
         for user in self.frozen.clone() {
-            if screentime::is_frozen(&user) == Some(false) {
+            if self.lock.host().refreeze(&user) == Some(false) {
                 if let Some(ev) = report(
                     &mut self.probe_reported,
                     format!("freeze_ineffective:{user}"),
@@ -4376,6 +4386,40 @@ mod tests {
         assert!(a.frozen.contains("mia"));
         assert_eq!(fake.w().frozen.get("mia"), Some(&true));
         assert!(!fake.w().log.contains(&"thaw mia".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_tick_keeps_her_apps_frozen_without_taking_the_screen() {
+        let (mut a, fake) = agent_with_mia();
+        a.kinds.insert("mia".into(), "kid".into());
+        fake.w().greeter_vt = Some(1);
+        stop_mia(&mut a).await;
+        assert!(a
+            .on_lock_request(Request::SwitchUser)
+            .await
+            .result
+            .is_none());
+        {
+            let mut w = fake.w();
+            w.sessions.push(session("5", "sam", 3, false));
+            w.logged_in.insert("sam".into());
+        }
+        assert!(fake.user_switches_to(3));
+        a.on_lock_event(LockEvent::VtChanged).await;
+        // Something of hers starts behind sam's back (a timer's app, a
+        // re-login's desktop): the next tick freezes it — and sam keeps the
+        // screen; the lock stays waiting for her.
+        fake.w().frozen.insert("mia".into(), false);
+        fake.w().log.clear();
+        a.enforcement_tick().await;
+        let w = fake.w();
+        assert!(w.log.contains(&"refreeze mia".to_string()), "{:?}", w.log);
+        assert_eq!(w.frozen.get("mia"), Some(&true));
+        assert_eq!(w.vt, 3, "sam keeps the screen: {:?}", w.log);
+        assert!(!w.log.iter().any(|l| l.starts_with("switch")));
+        drop(w);
+        assert!(a.lock.is_aside());
+        assert_eq!(a.lock.subject(), Some("mia"));
     }
 
     #[tokio::test]

@@ -540,6 +540,24 @@ pub struct Session {
     pub state: String,
     /// The desktop's own screen lock is up (logind's `LockedHint`).
     pub locked: bool,
+    /// When it started, on `CLOCK_MONOTONIC` (logind's `TimestampMonotonic`).
+    pub since: Option<Duration>,
+}
+
+impl Session {
+    /// How long it has been up.
+    pub fn age(&self) -> Option<Duration> {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes into the timespec we own.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return None;
+        }
+        let now = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
+        now.checked_sub(self.since?)
+    }
 }
 
 /// Parse `loginctl show-session A B … -p …` (blank-line separated blocks).
@@ -563,6 +581,13 @@ pub fn parse_sessions(out: &str) -> Vec<Session> {
                     "Class" => s.class = v.into(),
                     "State" => s.state = v.into(),
                     "LockedHint" => s.locked = v == "yes",
+                    "TimestampMonotonic" => {
+                        s.since = v
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|us| *us > 0)
+                            .map(Duration::from_micros)
+                    }
                     _ => {}
                 }
             }
@@ -763,8 +788,15 @@ fn boot_id() -> String {
 /// The machine-facing operations of the lock and freeze, behind one seam so
 /// the lifecycle can be tested without a machine.
 pub trait Host: Send + Sync {
+    /// Freeze `user`'s apps (see `enforce::screentime::freeze`), or thaw
+    /// everything of theirs.
     fn freeze(&self, user: &str, on: bool, hard: bool);
+    /// Anything of theirs frozen right now (a stop, or what's left of one).
     fn is_frozen(&self, user: &str) -> Option<bool>;
+    /// Keep a stop holding, quietly: freeze what has appeared since (an app
+    /// a timer started, a login), never escalating. Returns whether the stop
+    /// holds now (`None`: no slice).
+    fn refreeze(&self, user: &str) -> Option<bool>;
     /// Has a login (a user slice) right now. Logged-out people are never frozen.
     fn logged_in(&self, user: &str) -> bool;
     /// Every human account on the machine.
@@ -819,6 +851,37 @@ impl SystemHost {
     }
 }
 
+/// Every logind session on the machine (`loginctl show-session`).
+pub fn query_sessions(exec: &crate::util::Exec) -> Vec<Session> {
+    let list = exec.probe("loginctl", &["list-sessions", "--no-legend"]);
+    let ids: Vec<&str> = list
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .take(64)
+        .collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let mut args = vec!["show-session"];
+    args.extend(ids.iter().copied());
+    for p in [
+        "Id",
+        "Name",
+        "Seat",
+        "VTNr",
+        "Active",
+        "Type",
+        "TTY",
+        "Class",
+        "State",
+        "LockedHint",
+        "TimestampMonotonic",
+    ] {
+        args.extend(["-p", p]);
+    }
+    parse_sessions(&exec.probe("loginctl", &args))
+}
+
 /// Is `bin` installed in one of the usual places?
 pub fn which(bin: &str) -> bool {
     ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin"]
@@ -835,6 +898,9 @@ impl Host for SystemHost {
     fn is_frozen(&self, user: &str) -> Option<bool> {
         crate::enforce::screentime::is_frozen(user)
     }
+    fn refreeze(&self, user: &str) -> Option<bool> {
+        crate::enforce::screentime::refreeze(&self.exec, user)
+    }
     fn logged_in(&self, user: &str) -> bool {
         // A login session, not merely a user slice: a lingering user's
         // manager keeps a slice around with nobody there.
@@ -849,34 +915,7 @@ impl Host for SystemHost {
             .collect()
     }
     fn sessions(&self) -> Vec<Session> {
-        let list = self
-            .exec
-            .probe("loginctl", &["list-sessions", "--no-legend"]);
-        let ids: Vec<&str> = list
-            .lines()
-            .filter_map(|l| l.split_whitespace().next())
-            .take(64)
-            .collect();
-        if ids.is_empty() {
-            return Vec::new();
-        }
-        let mut args = vec!["show-session"];
-        args.extend(ids.iter().copied());
-        for p in [
-            "Id",
-            "Name",
-            "Seat",
-            "VTNr",
-            "Active",
-            "Type",
-            "TTY",
-            "Class",
-            "State",
-            "LockedHint",
-        ] {
-            args.extend(["-p", p]);
-        }
-        parse_sessions(&self.exec.probe("loginctl", &args))
+        query_sessions(&self.exec)
     }
     fn active_vt(&self) -> Option<u32> {
         vt::active()
@@ -1723,6 +1762,18 @@ pub mod testing {
                 .contains(user)
                 .then(|| w.frozen.get(user).copied().unwrap_or(false))
         }
+        fn refreeze(&self, user: &str) -> Option<bool> {
+            let mut w = self.w();
+            if !w.logged_in.contains(user) {
+                return None;
+            }
+            // A slice that came back thawed (a re-login) is frozen again.
+            if w.frozen.get(user) != Some(&true) {
+                w.log.push(format!("refreeze {user}"));
+                w.frozen.insert(user.to_string(), true);
+            }
+            Some(true)
+        }
         fn logged_in(&self, user: &str) -> bool {
             self.w().logged_in.contains(user)
         }
@@ -1854,6 +1905,7 @@ pub mod testing {
             class: "user".into(),
             state: if active { "active" } else { "online" }.into(),
             locked: false,
+            since: None,
         }
     }
 }
