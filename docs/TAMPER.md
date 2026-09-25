@@ -120,9 +120,10 @@ Deterrence must never become a hostage situation. At every level:
   `ost unlock`, or at `sudo` on a managed computer (PAM). No secret configured means no unlock —
   it fails closed. See `AGENT.md` → Unlock code.
 - **The lock never takes the keyboard.** It runs in its own session on its own VT (cage as
-  `ost-lock`, or the agent's text lock), so the code can always be typed even though the whole
-  frozen session — compositor included — is suspended. Agent restarts don't take it down; if
-  no lock can be shown, nobody is frozen behind a blank screen. See `AGENT.md` → The lock.
+  `ost-lock`, or the agent's text lock), so the code can always be typed, and the stopped
+  person's session is never frozen — only their apps are — so it comes back working. Agent
+  restarts don't take it down; if no lock can be shown, nobody is frozen behind a blank
+  screen. See `AGENT.md` → The lock.
 - **`ost recover`** (as root): masks the agent, stops the watchdog and tears enforcement down in
   one go, for when you need the machine back now.
 - **`ost-admin`**: a local account by this name is exempt from the level-3 unit-stop rule — it
@@ -146,6 +147,19 @@ Claims you might expect from this category of product that we deliberately do no
   that's what the GRUB/BIOS password guidance is for.
 - **No remote shell and no network scanning.** Both existed once and were removed (0.4 and
   migration 0013); historical `ssh` events stay readable. The agent opens no listener.
+- **A stop freezes apps, not the whole session.** The lock's own VT is what keeps a stopped
+  person out: their session gets no keyboard, no mouse and no screen while it holds. The
+  freeze stops their apps (see `AGENT.md` → Screen time) and leaves the session's own
+  plumbing running — the compositor with its GNOME Shell extensions, the session manager,
+  the session bus, the sound server, the keyring, and anything placed in `session.slice`.
+  So a stopped person who *prepared* for it can keep something going: an extension, or a
+  unit they put in `session.slice` themselves, keeps running — it can play sound, or even
+  thaw their own app units (the user manager's cgroups are delegated to them). Every tick
+  freezes again what it finds running, and a stop that doesn't hold after that is reported
+  (`enforcement_degraded` `freeze_ineffective:<user>`, once a day); no minute counts while
+  they are stopped, and they still have no screen and no input. An app a timer starts in
+  `app.slice` runs until the next tick (≤ 10 s). This is the price of a session that comes
+  back working: freezing the whole session broke logging in and GDM's way back into it.
 - **Physical access + root wins eventually.** The design goal is that it can't win *silently*:
   the attempt costs real effort, generates tamper events on the way, and the end state is a
   loudly visible gone-dark device in the console — not a quietly green one.
@@ -176,6 +190,11 @@ Claims you might expect from this category of product that we deliberately do no
   name, never root, never another user).
 - **Screen time:** only the foreground seat session with input or sound in the last 5 minutes
   counts. Every stop is announced at 15, 5 and 1 minute; an unannounced stop gets a
-  save-your-work countdown; then the lock goes up on its own VT and the user's processes are
-  frozen with the cgroup v2 freezer. A screen-time freeze never falls back to killing the
-  session; only a pause may end a session, and only if the freezer isn't there.
+  save-your-work countdown; then the lock goes up on its own VT and the user's apps are
+  frozen with the cgroup v2 freezer — everything their user manager runs outside
+  `session.slice` (session plumbing GNOME 43 keeps in `app.slice` excepted), apps D-Bus
+  started inside the session bus (filed into scopes of their own first) and their text/SSH
+  logins; a legacy desktop living inside its login scope gets the whole user slice frozen.
+  A desktop still starting is left alone for its first minute. A screen-time freeze never
+  falls back to killing the session; only a pause may end a session, and only if the freezer
+  isn't there.

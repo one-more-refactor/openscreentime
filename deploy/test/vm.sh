@@ -33,7 +33,7 @@
 #   deploy/test/vm.sh seat [accel]       # give mia a GRAPHICAL Weston login + accel the agent (default 60)
 #   deploy/test/vm.sh view               # watch mia's SCREEN in your browser (noVNC)
 #   deploy/test/vm.sh unview             # stop the browser viewer server
-#   deploy/test/vm.sh watch              # poll mia's cgroup freeze state until it flips (text)
+#   deploy/test/vm.sh watch              # poll until something of mia's is frozen (text)
 #   deploy/test/vm.sh thaw               # rescue path: stop the agent + unfreeze mia
 #   deploy/test/vm.sh type <text>        # type at the VM's keyboard (QMP send-key): digits, a-z, space;
 #                                        #   "\n" is Enter — e.g. vm.sh type '123456\n' at the lock
@@ -250,17 +250,19 @@ cmd_seat() {
     echo "==> watch it in the browser:  deploy/test/vm.sh view"
 }
 
-# Poll mia's cgroup-v2 freezer until it flips (or ~2 min elapse).
+# Poll mia's cgroup-v2 freezer until something of hers is frozen (or ~2 min
+# elapse). A stop freezes her apps, not her whole slice: any cgroup.freeze
+# reading 1 under her user slice counts.
 cmd_watch() {
-    ssh_as rescue 'uid=$(id -u mia); f=/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.freeze
-        echo "watching $f (Ctrl-C to stop)"
+    ssh_as rescue 'uid=$(id -u mia); d=/sys/fs/cgroup/user.slice/user-$uid.slice
+        echo "watching $d (Ctrl-C to stop)"
         for i in $(seq 1 60); do
-            v=$(cat "$f" 2>/dev/null || echo "?")
-            printf "t=%3ds freeze=%s\n" "$((i*2))" "$v"
-            [ "$v" = "1" ] && { echo ">>> FROZEN — mia'"'"'s whole seat is suspended. Recover: vm.sh thaw"; exit 0; }
+            n=$(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null | wc -l)
+            printf "t=%3ds frozen cgroups=%s\n" "$((i*2))" "$n"
+            [ "$n" -gt 0 ] && { echo ">>> FROZEN — mia'"'"'s apps are stopped:"; sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + | sed "s|$d/||; s|/cgroup.freeze||"; echo "Recover: vm.sh thaw"; exit 0; }
             sleep 2
         done
-        echo "(still 0 — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny?)"'
+        echo "(nothing frozen — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny? a desktop in its first minute is not frozen yet)"'
 }
 
 # The guaranteed rescue. The agent is Restart=always AND has a watchdog timer
@@ -273,9 +275,11 @@ cmd_thaw() {
         sudo systemctl stop openscreentime-watchdog.timer 2>/dev/null || true
         sudo systemctl mask --now openscreentime-agent.service >/dev/null 2>&1 || sudo systemctl stop openscreentime-agent.service
         sleep 1
+        d=$(dirname "$f")
+        for g in $(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null); do echo 0 | sudo tee "$g" >/dev/null; done
         echo 0 | sudo tee "$f" >/dev/null 2>&1 || true
         sleep 3   # prove it stays down (the watchdog would have re-frozen by now)
-        echo "agent=$(systemctl is-active openscreentime-agent.service) freeze=$(cat "$f" 2>/dev/null || echo n/a)"
+        echo "agent=$(systemctl is-active openscreentime-agent.service) frozen cgroups=$(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null | wc -l)"
         echo "mia is thawed and the agent is masked. Re-arm with:"
         echo "  sudo systemctl unmask openscreentime-agent.service && sudo systemctl start openscreentime-agent.service openscreentime-watchdog.timer"'
 }
@@ -374,7 +378,7 @@ cmd_relock() {
     # the script runs under `set -e`, and SSH itself can return 255 under the
     # software-rendered desktop's load even when the remote command succeeded.
     ssh_as rescue "sudo systemctl unmask openscreentime-agent.service 2>/dev/null; sudo systemctl stop openscreentime-agent.service openscreentime-watchdog.timer 2>/dev/null; true" || true
-    ssh_as rescue "sudo systemctl stop 'openscreentime-lock@*' 2>/dev/null; echo 0 | sudo tee /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice/cgroup.freeze >/dev/null 2>&1; true" || true
+    ssh_as rescue "sudo systemctl stop 'openscreentime-lock@*' 2>/dev/null; for g in \$(sudo find /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice -name cgroup.freeze); do echo 0 | sudo tee \$g >/dev/null 2>&1; done; true" || true
     ssh_as rescue "sudo rm -f /var/lib/openscreentime/usage_ledger.json /var/lib/openscreentime/freeze_state.json; true" || true
     ssh_as rescue "printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/openscreentime --time-accel $accel run\n' | sudo tee /etc/systemd/system/openscreentime-agent.service.d/accel.conf >/dev/null; sudo systemctl daemon-reload" || true
     # Start + verify with a couple retries — SSH can 255 under the VM's load.
