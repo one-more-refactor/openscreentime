@@ -2630,13 +2630,17 @@ impl Agent {
         // thaws everyone) — not just this user, not just for 30 minutes.
         let evs = self.local_recovery("the unlock code at the lock screen");
         self.pending_events.extend(evs);
-        self.pending_events.push(tamper::tamper_event(
-            "parent_pin_override",
-            SEV_INFO,
-            &format!(
-                "{user} was unlocked for {minutes} min with the unlock code at the lock screen"
-            ),
-        ));
+        // Filed under the person it unlocked, not the whole computer.
+        self.pending_events.push(
+            tamper::tamper_event(
+                "parent_pin_override",
+                SEV_INFO,
+                &format!(
+                    "{user} was unlocked for {minutes} min with the unlock code at the lock screen"
+                ),
+            )
+            .for_user(user),
+        );
         self.notify_user(
             Some(user),
             &format!("You're back — {minutes} minutes"),
@@ -2684,17 +2688,22 @@ impl Agent {
         self.lock.host().freeze(user, false, false);
         self.frozen.remove(user);
         self.pending_freeze.remove(user);
-        self.pending_events.push(Event::new(
-            EV_SCREEN_TIME_EARNED,
-            SEV_INFO,
-            json!({
-                "user": user,
-                "minutes": minutes,
-                "via": "self",
-                "today": n,
-                "of": lock::SNOOZES_PER_DAY,
-            }),
-        ));
+        // Theirs, not the computer's: without the login the console told
+        // Philip's own snooze on Mia's page (acceptance round 3).
+        self.pending_events.push(
+            Event::new(
+                EV_SCREEN_TIME_EARNED,
+                SEV_INFO,
+                json!({
+                    "user": user,
+                    "minutes": minutes,
+                    "via": "self",
+                    "today": n,
+                    "of": lock::SNOOZES_PER_DAY,
+                }),
+            )
+            .for_user(user),
+        );
         self.notify_user(
             Some(user),
             &format!("{minutes} more minutes"),
@@ -4238,11 +4247,16 @@ mod tests {
         );
         let log = fake.w().log.clone();
         assert!(pos(&log, "thaw mia") < pos(&log, "switch 2"));
-        // The console hears how.
+        // The console hears how — and whose unlock it was: both events are
+        // filed under her login, so it's her moment, nobody else's.
         assert!(a
             .pending_events
             .iter()
-            .any(|e| e.ev_type == parentcode::EV_PARENT_CODE_OK));
+            .any(|e| e.ev_type == parentcode::EV_PARENT_CODE_OK
+                && e.device_user.as_deref() == Some("mia")));
+        assert!(a.pending_events.iter().any(|e| e.ev_type == EV_TAMPER
+            && e.payload["kind"] == "parent_pin_override"
+            && e.device_user.as_deref() == Some("mia")));
     }
 
     #[tokio::test]
@@ -4558,6 +4572,13 @@ mod tests {
             .filter(|e| e.ev_type == EV_SCREEN_TIME_EARNED)
             .count();
         assert_eq!(logged, 3, "each one is on the record");
+        // …filed under their login, never the whole computer's (acceptance
+        // round 3: Philip's own snoozes told on Mia's page).
+        assert!(a
+            .pending_events
+            .iter()
+            .filter(|e| e.ev_type == EV_SCREEN_TIME_EARNED)
+            .all(|e| e.device_user.as_deref() == Some("mia")));
 
         // A fourth: that's today's extra time.
         a.trusted_now += chrono::Duration::minutes(16);
