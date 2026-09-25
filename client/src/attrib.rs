@@ -16,6 +16,8 @@
 //! - **sites**: dnsmasq writes an extra-format query log (`dns.rs` enables
 //!   it); we tail it, reduce each queried name to its registrable domain, and
 //!   count queries per hour, device-wide — resolver traffic has no user.
+//!   Not counted: OpenScreenTime's own lookups (its server, its block
+//!   self-check).
 //!
 //! Slices accumulate in memory keyed by (user, hour, kind, key) and are
 //! drained to `POST /agent/usage` about once a minute; a failed post keeps
@@ -470,9 +472,12 @@ pub struct Attrib {
     /// (user, app) seen at the last walk: counting, or a bus-started one
     /// still being held (see [`SERVICE_GRACE_SECS`]).
     seen: HashMap<(String, String), Seen>,
-    /// Sites looked up and answered as blocked since the last
-    /// [`Attrib::take_blocked`], with how often.
+    /// Names looked up and answered as blocked by this computer's own rules
+    /// since the last [`Attrib::take_blocked`], with how often.
     blocked: HashMap<String, u32>,
+    /// OpenScreenTime's own server: the agent's lookups of it are not a
+    /// site anyone visited.
+    own_host: Option<String>,
 }
 
 fn hour_now() -> String {
@@ -497,16 +502,16 @@ pub fn registrable(domain: &str) -> String {
     labels[labels.len().saturating_sub(take)..].join(".")
 }
 
-/// The name a log line says was answered with the blocked address — `0.0.0.0`
-/// or `::`, what this computer's block rules answer (`config`) and what the
-/// family resolver answers for what it filters (`reply`, then `cached`).
-/// Safe search's own addresses and a name that simply doesn't exist
-/// (`NXDOMAIN`) are not blocks.
+/// The name a log line says this computer's own rules answered with the
+/// blocked address — `0.0.0.0` or `::`, from its config (`config`). What the
+/// family resolver upstream answers that way for what *it* filters (`reply`,
+/// then `cached`) is not this computer's block: acceptance round 5 told
+/// people "mozilla.org is blocked" for Firefox's background ads.mozilla.org,
+/// with mozilla.org working fine. Safe search's own addresses and a name
+/// that simply doesn't exist (`NXDOMAIN`) are not blocks either.
 fn blocked_name(line: &str) -> Option<&str> {
     let words: Vec<&str> = line.split_whitespace().collect();
-    let i = words
-        .iter()
-        .position(|w| matches!(*w, "config" | "reply" | "cached"))?;
+    let i = words.iter().position(|w| *w == "config")?;
     match (words.get(i + 1), words.get(i + 2), words.get(i + 3)) {
         (Some(name), Some(&"is"), Some(&("0.0.0.0" | "::"))) => Some(name),
         _ => None,
@@ -534,12 +539,32 @@ impl Attrib {
             log_offset: 0,
             seen: HashMap::new(),
             blocked: HashMap::new(),
+            own_host: None,
         }
     }
 
-    /// The sites answered as blocked since the last call, most looked-up
-    /// first — what lets the companion say "example.org is blocked on this
-    /// computer" instead of leaving the browser's "Unable to connect".
+    /// OpenScreenTime's own server (`client::server_host`): looking it up is
+    /// the agent talking to it, not a site.
+    pub fn set_own_host(&mut self, host: Option<String>) {
+        self.own_host = host.map(|h| h.trim_end_matches('.').to_ascii_lowercase());
+    }
+
+    /// A lookup no person made: the block self-check's own name, the
+    /// agent's server.
+    fn not_a_visit(&self, name: &str) -> bool {
+        let name = name.trim_end_matches('.');
+        crate::enforce::dns::is_selftest(name)
+            || self
+                .own_host
+                .as_deref()
+                .is_some_and(|h| name.eq_ignore_ascii_case(h))
+    }
+
+    /// The names this computer's rules answered as blocked since the last
+    /// call (lowercased, as looked up), most looked-up first — what lets the
+    /// companion say "example.org is blocked on this computer" instead of
+    /// leaving the browser's "Unable to connect". Which rule blocks each is
+    /// the caller's to say (`dns::blocking_rule`).
     pub fn take_blocked(&mut self) -> Vec<(String, u32)> {
         let mut out: Vec<(String, u32)> = self.blocked.drain().collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -547,20 +572,27 @@ impl Attrib {
     }
 
     /// Read what one stretch of the query log says: a hit per queried site,
-    /// and which sites were answered as blocked.
+    /// and which names this computer's rules answered as blocked — neither
+    /// for a lookup no person made ([`Attrib::not_a_visit`]).
     fn ingest_lines(&mut self, text: &str) {
         for line in text.lines() {
             if let Some(name) = queried_name(line) {
+                if self.not_a_visit(name) {
+                    continue;
+                }
                 let site = registrable(name);
                 if !site.is_empty() && site.contains('.') {
                     self.bump("", "site", site, 1);
                 }
             } else if let Some(name) = blocked_name(line) {
-                let site = registrable(name);
-                if site.contains('.')
-                    && (self.blocked.len() < 256 || self.blocked.contains_key(&site))
+                if self.not_a_visit(name) {
+                    continue;
+                }
+                let name = name.trim_end_matches('.').to_ascii_lowercase();
+                if name.contains('.')
+                    && (self.blocked.len() < 256 || self.blocked.contains_key(&name))
                 {
-                    *self.blocked.entry(site).or_insert(0) += 1;
+                    *self.blocked.entry(name).or_insert(0) += 1;
                 }
             }
         }
@@ -783,11 +815,14 @@ mod tests {
     }
 
     /// Acceptance round 4: example.org, blocked, was only Firefox's "Unable
-    /// to connect". What the query log says was answered as blocked — by
-    /// this computer's rules or by the family resolver — is collected per
-    /// site; safe search's addresses and names that don't exist are not.
+    /// to connect". What the query log says this computer's rules answered
+    /// as blocked is collected per name looked up. Round 5: what the family
+    /// resolver filters upstream (`reply … is 0.0.0.0` — Firefox's
+    /// ads.mozilla.org, told as "mozilla.org is blocked") is not this
+    /// computer's block; safe search's addresses and names that don't exist
+    /// never were.
     #[test]
-    fn blocked_answers_are_collected_per_site() {
+    fn blocked_answers_are_collected_per_name() {
         let log = "\
 Sep 25 09:12:01 dnsmasq[1234]: 17 127.0.0.1/40123 query[A] example.org from 127.0.0.1
 Sep 25 09:12:01 dnsmasq[1234]: 17 127.0.0.1/40123 config example.org is 0.0.0.0
@@ -802,14 +837,17 @@ Sep 25 09:12:03 dnsmasq[1234]: 21 127.0.0.1/40127 query[AAAA] www.google.com fro
 Sep 25 09:12:03 dnsmasq[1234]: 21 127.0.0.1/40127 config www.google.com is NODATA-IPv6
 Sep 25 09:12:04 dnsmasq[1234]: 22 127.0.0.1/40128 reply nosuch.example.net is NXDOMAIN
 Sep 25 09:12:04 dnsmasq[1234]: 23 127.0.0.1/40129 reply en.wikipedia.org is 185.15.59.224
+Sep 25 09:12:05 dnsmasq[1234]: 24 127.0.0.1/40130 cached ads.mozilla.org is 0.0.0.0
+Sep 25 09:12:06 dnsmasq[1234]: 25 127.0.0.1/40131 config WWW.Bet365.com. is 0.0.0.0
 ";
         let mut a = Attrib::new();
         a.ingest_lines(log);
         assert_eq!(
             a.take_blocked(),
             vec![
-                ("example.org".to_string(), 2),
-                ("pornhub.com".to_string(), 1)
+                ("example.org".to_string(), 1),
+                ("www.bet365.com".to_string(), 1),
+                ("www.example.org".to_string(), 1),
             ]
         );
         assert!(a.take_blocked().is_empty(), "taken");
@@ -820,6 +858,42 @@ Sep 25 09:12:04 dnsmasq[1234]: 23 127.0.0.1/40129 reply en.wikipedia.org is 185.
             .map(|s| s["key"].as_str().unwrap().to_string())
             .collect();
         assert!(sites.contains("example.org") && sites.contains("google.com"));
+    }
+
+    fn site_keys(a: &mut Attrib) -> std::collections::BTreeMap<String, i64> {
+        let mut out = std::collections::BTreeMap::new();
+        for s in a.drain(1000) {
+            *out.entry(s["key"].as_str().unwrap().to_string())
+                .or_insert(0) += s["amount"].as_i64().unwrap();
+        }
+        out
+    }
+
+    /// Acceptance round 5: the agent's own block self-check (every minute)
+    /// was "123movies.to 37×" in a child's sites and "123movies.to is
+    /// blocked on this computer" on her screen. Its name is never a site
+    /// and never a block; neither is the agent talking to its server.
+    #[test]
+    fn the_agent_s_own_lookups_are_not_sites_or_blocks() {
+        let name = crate::enforce::dns::SELFTEST_NAME;
+        let log = format!(
+            "\
+Sep 25 10:50:35 dnsmasq[1234]: 30 127.0.0.1/40200 query[AAAA] {name} from 127.0.0.1
+Sep 25 10:50:35 dnsmasq[1234]: 30 127.0.0.1/40200 config {name} is ::
+Sep 25 10:50:35 dnsmasq[1234]: 31 127.0.0.1/40201 query[A] {name} from 127.0.0.1
+Sep 25 10:50:35 dnsmasq[1234]: 31 127.0.0.1/40201 config {name} is 0.0.0.0
+Sep 25 10:50:36 dnsmasq[1234]: 32 127.0.0.1/40202 query[A] ost.home.example from 127.0.0.1
+Sep 25 10:50:36 dnsmasq[1234]: 33 127.0.0.1/40203 query[A] www.wikipedia.org from 127.0.0.1
+"
+        );
+        let mut a = Attrib::new();
+        a.set_own_host(Some("OST.home.example".into()));
+        a.ingest_lines(&log);
+        assert!(a.take_blocked().is_empty());
+        assert_eq!(
+            site_keys(&mut a),
+            [("wikipedia.org".to_string(), 1)].into_iter().collect()
+        );
     }
 
     fn desktop(name: &str, exec: &str, extra: &str) -> String {

@@ -705,13 +705,24 @@ user, exact `comm` matches only. One `app_blocked` event (info, `{ app,
 comm, user }`) per user/app/day.
 
 A blocked site is only the browser's "Unable to connect", so the agent says
-why: when the query log shows a site answered with the blocked address
-(`0.0.0.0` / `::` — this computer's rules, or the family resolver's filter)
+why: when the query log shows a name answered with the blocked address
+(`0.0.0.0` / `::`) **by this computer's own rules** (`config` — the
+blocklist, the catalog's app and category blocks, focus-hours sites, Tor)
 twice within 5 minutes, the person whose time is counting gets one
-notification, "example.org is blocked on this computer" — once per site per
-day, one a minute at most, never to someone stopped. Resolver traffic has no
-user, so it is said as a fact about the computer. There is no block page of
-our own: an HTTPS site can't be answered for without a certificate warning.
+notification naming the rule that blocks it, "example.org is blocked on this
+computer" (for `www.example.org` too) — once per site per day, one a minute
+at most, never to someone stopped. What the family resolver filters upstream
+is not named (Firefox's background `ads.mozilla.org` is not "mozilla.org is
+blocked"). Resolver traffic has no user, so it is said as a fact about the
+computer. There is no block page of our own: an HTTPS site can't
+be answered for without a certificate warning.
+
+Every minute the agent checks the block is real: `getent hosts
+selftest.openscreentime.internal` — a name every ruleset answers as blocked
+and nobody visits — must come back `0.0.0.0` / `::`. A real address or no
+answer twice in a row is a `sinkhole_ineffective` incident. It never looks
+up a real blocked site (that lookup once showed up as the child's browsing),
+and neither the sites list nor the notice ever counts the self-check's name.
 
 ### Presence: the `state` frame
 

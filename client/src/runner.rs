@@ -537,6 +537,8 @@ pub struct Agent {
     attrib_ticks: u32,
     /// Once-per-day dedupe for enforcement probe findings (kind[/user] → day).
     probe_reported: HashMap<String, chrono::NaiveDate>,
+    /// Block self-checks missed in a row ([`Agent::block_selftest`]).
+    selftest_misses: u8,
     /// Filtering temporarily relaxed because the family DNS upstream is
     /// unreachable (captive portal, a network that blocks public DNS) — so a
     /// kid isn't bricked off wifi entirely. Reported as a degraded gap.
@@ -704,6 +706,8 @@ impl Agent {
         } else {
             enforce::safesearch::SafeSearch::load()
         };
+        let mut attrib = crate::attrib::Attrib::new();
+        attrib.set_own_host(crate::client::server_host(&cfg.server_url));
         Ok(Agent {
             tamper_level: start_level.applied,
             tamper_cap_reported: start_level.capped().then_some(start_level.requested),
@@ -777,9 +781,10 @@ impl Agent {
             // already seen), and never one from before the restart.
             notif_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
             login_codes: Vec::new(),
-            attrib: crate::attrib::Attrib::new(),
+            attrib,
             attrib_ticks: 0,
             probe_reported: reported.probes,
+            selftest_misses: 0,
             dns_relaxed: false,
             dns_unreach_ticks: 0,
             focus_applied: Some(Vec::new()),
@@ -1530,6 +1535,15 @@ impl Agent {
         base
     }
 
+    /// The domains this computer's rules block right now — the ruleset the
+    /// resolver was given (`dns::block_rules` of the effective policy, focus
+    /// hours included).
+    fn block_rules(&self) -> Vec<String> {
+        let p = self.effective_network_policy();
+        let sinkhole = openscreentime_policy::catalog::expand(&p.blocks).domains;
+        enforce::dns::block_rules(&p.dns, &p.lockdown, &sinkhole)
+    }
+
     /// Whether the effective policy wants to force DNS (i.e. has any block).
     fn wants_force_dns(&self) -> bool {
         let now = self.local_now();
@@ -2035,9 +2049,8 @@ impl Agent {
     /// Two active checks, each finding deduped to once per day:
     /// - every user we believe frozen must read back frozen from the kernel
     ///   freezer — a lock screen over an unfrozen session is a lie;
-    /// - if anything is blocked, the system resolver must actually sinkhole a
-    ///   blocked domain — `getent hosts` walks the same path the child's apps
-    ///   do, so a routable answer means the block is theater.
+    /// - if anything is blocked, the system resolver must answer with this
+    ///   computer's block rules ([`Agent::block_selftest`]).
     fn probe_enforcement(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         if self.exec.dry_run() {
@@ -2104,55 +2117,14 @@ impl Agent {
             }
         }
 
-        // 2. Blocked means blocked. One domain per probe round is enough —
-        //    the sinkhole is one dnsmasq config; if one entry fails they all do.
-        let probe_domain = self.policies.values().find_map(|p| {
-            openscreentime_policy::catalog::expand(&p.blocks)
-                .domains
-                .first()
-                .cloned()
-                .or_else(|| {
-                    p.dns.blocklist.first().map(|d| {
-                        d.trim_start_matches("*.")
-                            .trim_start_matches('.')
-                            .to_string()
-                    })
-                })
-        });
-        //    With a DNS gap standing this is already known and said (the
-        //    filter isn't running): not a second incident.
-        //    (Safe search passed through is not a filter that isn't running.)
-        let dns_gap = self
-            .standing_gaps
-            .iter()
-            .any(|g| g.starts_with("dns_") && g != "dns_safesearch_unavailable");
-        if let Some(domain) = probe_domain.filter(|d| !d.is_empty() && !dns_gap) {
-            if let Some(out) = self.exec.try_probe("getent", &["hosts", &domain]) {
-                let answered_routable = out.lines().any(|l| {
-                    let addr = l.split_whitespace().next().unwrap_or("");
-                    // Sinkhole answers, in every form glibc may render them —
-                    // including the v4-mapped-v6 shape ::ffff:0.0.0.0, which
-                    // must NOT be read as routable (that was a false
-                    // "the lock isn't biting" on a perfectly healthy device).
-                    !addr.is_empty()
-                        && addr != "0.0.0.0"
-                        && addr != "::"
-                        && addr != "127.0.0.1"
-                        && addr != "::1"
-                        && addr != "::ffff:0.0.0.0"
-                        && !addr.ends_with(":0.0.0.0")
-                });
-                if answered_routable {
-                    if let Some(ev) = report(
-                        &mut self.probe_reported,
-                        "sinkhole_ineffective".to_string(),
-                        format!(
-                            "blocked domain {domain} still resolves — the DNS block is not biting"
-                        ),
-                    ) {
-                        events.push(ev);
-                    }
-                }
+        // 2. Blocked means blocked.
+        if let Some(msg) = self.block_selftest() {
+            if let Some(ev) = report(
+                &mut self.probe_reported,
+                "sinkhole_ineffective".to_string(),
+                msg,
+            ) {
+                events.push(ev);
             }
         }
         // Once a day each, restarts included.
@@ -2160,6 +2132,49 @@ impl Agent {
             self.save_reported();
         }
         events
+    }
+
+    /// Blocked means blocked: while anything is blocked here, the system
+    /// resolver must answer the self-check's own name
+    /// ([`enforce::dns::SELFTEST_NAME`], in every ruleset) with the block
+    /// address. `getent hosts` walks the same path the child's apps do, so
+    /// any other answer — a real address, or none at all (something other
+    /// than this computer's rules answers its lookups) — means the blocks
+    /// are theater. Never a real blocked site: resolving the first one on
+    /// the list every minute read as the child's browsing (acceptance round
+    /// 5). Said after two misses in a row, a minute apart — a resolver
+    /// restarting for new rules misses once. Returns what to report.
+    fn block_selftest(&mut self) -> Option<String> {
+        // With a DNS gap standing this is already known and said (the filter
+        // isn't running): not a second incident. (Safe search passed through
+        // is not a filter that isn't running.)
+        let dns_gap = self
+            .standing_gaps
+            .iter()
+            .any(|g| g.starts_with("dns_") && g != "dns_safesearch_unavailable");
+        if dns_gap || !self.exec.observes() || self.block_rules().is_empty() {
+            self.selftest_misses = 0;
+            return None;
+        }
+        // getent couldn't run at all: nothing learned either way.
+        let out = self
+            .exec
+            .try_probe("getent", &["hosts", enforce::dns::SELFTEST_NAME])?;
+        let miss = match selftest_answer(&out) {
+            SelfTest::Blocked => {
+                self.selftest_misses = 0;
+                return None;
+            }
+            SelfTest::Routable(addr) => format!(
+                "this computer's block self-check resolved to {addr} — something other than \
+                 its website rules answers its lookups, so blocked sites can open"
+            ),
+            SelfTest::Unanswered => "this computer's block self-check got no blocked answer — \
+                 its website rules aren't what answers its lookups, so blocked sites can open"
+                .to_string(),
+        };
+        self.selftest_misses = self.selftest_misses.saturating_add(1);
+        (self.selftest_misses >= 2).then_some(miss)
     }
 
     /// Snapshot the reboot-surviving enforcement state to disk. Users inside a
@@ -2629,12 +2644,26 @@ impl Agent {
     /// said as a fact about the computer, never as "you visited"; one site
     /// a minute at most. No page of our own: an HTTPS site can't be answered
     /// for without a certificate warning.
+    ///
+    /// `hits` are the names looked up and answered as blocked; the site told
+    /// is the rule of this computer's that blocks each (`www.bet365.com` →
+    /// "bet365.com", the rule) — a name none of its rules covers is not said
+    /// at all (acceptance round 5: not the agent's own self-check, not what
+    /// the family resolver filters upstream).
     fn tell_blocked(&mut self, counting: &[String], hits: Vec<(String, u32)>) {
         let now = Instant::now();
         self.blocked_recent
             .retain(|_, (_, t)| now.duration_since(*t) < BLOCKED_WINDOW);
-        for (site, n) in hits {
-            self.blocked_recent.entry(site).or_insert((0, now)).0 += n;
+        if !hits.is_empty() {
+            let rules = self.block_rules();
+            for (name, n) in hits {
+                if let Some(rule) = enforce::dns::blocking_rule(&name, &rules) {
+                    self.blocked_recent
+                        .entry(rule.to_string())
+                        .or_insert((0, now))
+                        .0 += n;
+                }
+            }
         }
         let today = self.trusted_now.with_timezone(&chrono::Local).date_naive();
         self.blocked_told.retain(|_, d| *d == today);
@@ -3595,6 +3624,38 @@ const BLOCKED_WINDOW: Duration = Duration::from_secs(5 * 60);
 const BLOCKED_REPEAT: u32 = 2;
 /// At most one "is blocked" a minute per person.
 const BLOCKED_TELL_GAP: Duration = Duration::from_secs(60);
+
+/// What `getent hosts <the self-check name>` said.
+#[derive(Debug, PartialEq)]
+enum SelfTest {
+    /// The block address: this computer's rules answered.
+    Blocked,
+    /// A real address: someone else answered.
+    Routable(String),
+    /// Nothing: the name wasn't answered at all.
+    Unanswered,
+}
+
+fn selftest_answer(getent: &str) -> SelfTest {
+    let addrs: Vec<&str> = getent
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    // The block address, in every form glibc may render it — including the
+    // v4-mapped-v6 shape ::ffff:0.0.0.0, which must NOT be read as routable
+    // (that was a false "the block isn't biting" on a healthy device).
+    let blocked = |a: &str| {
+        matches!(a, "0.0.0.0" | "::" | "127.0.0.1" | "::1" | "::ffff:0.0.0.0")
+            || a.ends_with(":0.0.0.0")
+    };
+    if let Some(a) = addrs.iter().find(|a| !blocked(a)) {
+        SelfTest::Routable(a.to_string())
+    } else if addrs.is_empty() {
+        SelfTest::Unanswered
+    } else {
+        SelfTest::Blocked
+    }
+}
 
 /// The blocked site to tell `user` about now, if any: looked up repeatedly,
 /// not told today — the most looked-up first.
@@ -4892,6 +4953,7 @@ mod tests {
     #[tokio::test]
     async fn a_site_that_keeps_being_blocked_is_named_once() {
         let (mut a, _fake) = agent_with_mia();
+        blocks_for_mia(&mut a);
         let mia = vec!["mia".to_string()];
         let said = |a: &Agent| -> Vec<String> {
             a.notifications
@@ -4926,6 +4988,7 @@ mod tests {
         );
         // Nobody whose time is counting, or someone stopped: nothing said.
         let (mut b, _fake) = agent_with_mia();
+        blocks_for_mia(&mut b);
         b.tell_blocked(&[], vec![("example.org".into(), 3)]);
         b.frozen.insert("mia".into());
         b.tell_blocked(&mia, vec![("example.org".into(), 3)]);
@@ -4933,6 +4996,100 @@ mod tests {
         // Someone with no rules here gets no status file: nothing said.
         b.tell_blocked(&["dad".to_string()], vec![("example.org".into(), 3)]);
         assert!(b.notifications.is_empty());
+    }
+
+    /// Mia's rules here: example.org on the blocklist, the adult category.
+    fn blocks_for_mia(a: &mut Agent) {
+        let p = a.policies.get_mut("mia").unwrap();
+        p.dns.blocklist = vec!["example.org".into()];
+        p.blocks.categories = vec!["adult".into()];
+    }
+
+    /// Acceptance round 5: Mia was told "123movies.to is blocked on this
+    /// computer" — the agent's own self-check, never her — and "mozilla.org
+    /// is blocked" for Firefox's background ads.mozilla.org, filtered by the
+    /// family resolver upstream while mozilla.org worked. Only this
+    /// computer's rules are named, and by the rule that blocks: a subdomain
+    /// is its rule, never the registrable domain around it.
+    #[tokio::test]
+    async fn only_this_computer_s_rules_are_named_by_the_rule() {
+        let (mut a, _fake) = agent_with_mia();
+        blocks_for_mia(&mut a);
+        let mia = vec!["mia".to_string()];
+        let said = |a: &Agent| -> Vec<String> {
+            a.notifications.iter().map(|n| n.title.clone()).collect()
+        };
+        a.tell_blocked(
+            &mia,
+            vec![
+                (enforce::dns::SELFTEST_NAME.into(), 9),
+                ("ads.mozilla.org".into(), 9),
+                ("123movies.to".into(), 9),
+            ],
+        );
+        a.tell_blocked(&mia, Vec::new());
+        assert!(said(&a).is_empty(), "{:?}", said(&a));
+        // www. and the bare name are one site: the rule's.
+        a.tell_blocked(
+            &mia,
+            vec![("www.pornhub.com".into(), 1), ("pornhub.com".into(), 1)],
+        );
+        assert_eq!(said(&a), vec!["pornhub.com is blocked on this computer"]);
+        a.blocked_told_at.clear();
+        a.tell_blocked(&mia, vec![("cdn.EXAMPLE.org.".into(), 2)]);
+        assert_eq!(
+            said(&a).last().unwrap(),
+            "example.org is blocked on this computer"
+        );
+        // A rule that's gone is not said any more.
+        let (mut b, _fake) = agent_with_mia();
+        b.tell_blocked(&mia, vec![("example.org".into(), 5)]);
+        assert!(said(&b).is_empty());
+    }
+
+    /// Acceptance round 5: the self-check resolved the first blocked catalog
+    /// domain every minute ("123movies.to 37×" in Mia's sites). It resolves
+    /// only its own name now, and a healthy computer answers it blocked; a
+    /// computer whose lookups bypass its rules (a real address, or no
+    /// answer) is said — after two misses in a row, not one.
+    #[tokio::test]
+    async fn the_block_self_check_resolves_only_its_own_name() {
+        let (mut a, _fake) = agent_with_mia();
+        blocks_for_mia(&mut a);
+        let probe = format!("getent hosts {}", enforce::dns::SELFTEST_NAME);
+        let answer = |out: &str| Exec::simulated(&[], &[(probe.as_str(), out)]);
+        let healthy = format!("0.0.0.0         {}\n", enforce::dns::SELFTEST_NAME);
+        let mapped = format!("::ffff:0.0.0.0  {}\n", enforce::dns::SELFTEST_NAME);
+        let routable = format!("104.21.3.4      {}\n", enforce::dns::SELFTEST_NAME);
+        for out in [&healthy, &mapped, &healthy] {
+            a.exec = answer(out);
+            assert_eq!(a.block_selftest(), None);
+        }
+        // Unanswered: once is a resolver restarting; twice is said.
+        a.exec = answer("");
+        assert_eq!(a.block_selftest(), None);
+        let said = a.block_selftest().expect("second miss is said");
+        assert!(said.contains("no blocked answer"), "{said}");
+        // A healthy answer starts the count over.
+        a.exec = answer(&healthy);
+        assert_eq!(a.block_selftest(), None);
+        a.exec = answer(&routable);
+        assert_eq!(a.block_selftest(), None);
+        let said = a.block_selftest().expect("second miss is said");
+        assert!(said.contains("104.21.3.4"), "{said}");
+        // Nothing blocked here, or the filter already known not running:
+        // nothing to say.
+        a.exec = answer("");
+        a.standing_gaps = vec!["dns_no_local_resolver".into()];
+        assert_eq!(a.block_selftest(), None);
+        assert_eq!(a.block_selftest(), None);
+        a.standing_gaps.clear();
+        a.policies.get_mut("mia").unwrap().dns.blocklist.clear();
+        a.policies.get_mut("mia").unwrap().blocks.categories.clear();
+        assert_eq!(a.block_selftest(), None);
+        assert_eq!(a.block_selftest(), None);
+        assert_eq!(selftest_answer(""), SelfTest::Unanswered);
+        assert_eq!(selftest_answer(":: x\n0.0.0.0 x\n"), SelfTest::Blocked);
     }
 
     /// Acceptance round 4: after a log-out (the lock handed the screen to
