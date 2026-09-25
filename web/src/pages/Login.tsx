@@ -57,6 +57,13 @@ function clock(secs: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** After this long without a code, the page says what a code needs. The
+ * server answers every name the same way (a name with no computer that may
+ * show a code gets a code that never comes), so the page can't know which it
+ * is — it can only say, gently, what makes a code come, and offer the other
+ * door. */
+export const NO_CODE_HINT_MS = 30_000;
+
 type Step = "name" | "code";
 
 export function Login() {
@@ -75,6 +82,7 @@ export function Login() {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [sentAt, setSentAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(() =>
     params.get("error") ? "That sign-in didn't work. Try again." : null,
@@ -99,6 +107,7 @@ export function Login() {
     setName("philip");
     void sendCode("philip").then((secs) => {
       setExpiresAt(Date.now() + secs * 1000);
+      setSentAt(Date.now());
       setStep("code");
     });
   }, [review, sendCode]);
@@ -114,6 +123,8 @@ export function Login() {
   const showSetupCode = firstRun && (askSetupCode || (config?.setup_code_required && !setupToken));
   const secsLeft = expiresAt ? Math.round((expiresAt - now) / 1000) : null;
   const expired = secsLeft !== null && secsLeft <= 0;
+  // Still waiting, nothing typed, a while on: say what a code needs.
+  const noCodeYet = !expired && !busy && !error && code === "" && sentAt !== null && now - sentAt >= NO_CODE_HINT_MS;
 
   async function create() {
     if (!name.trim() || busy) return;
@@ -147,6 +158,7 @@ export function Login() {
     try {
       const secs = await sendCode(name.trim());
       setExpiresAt(Date.now() + secs * 1000);
+      setSentAt(Date.now());
       setNow(Date.now());
       setCode("");
       setStep("code");
@@ -167,7 +179,7 @@ export function Login() {
       setCode("");
       setError(
         e instanceof ApiError && e.code === "code_expired"
-          ? "That code has run out. Ask for a new one."
+          ? "That code has expired. Send a new code, or use a passkey."
           : e instanceof Error && e.message
             ? sentence(e.message)
             : "That code didn't match. Try again.",
@@ -197,6 +209,7 @@ export function Login() {
     setStep("name");
     setError(null);
     setExpiresAt(null);
+    setSentAt(null);
   }
 
   return (
@@ -266,27 +279,53 @@ export function Login() {
                 {busy
                   ? "Checking…"
                   : expired
-                    ? "That code has run out."
+                    ? "That code has expired."
                     : secsLeft !== null
                       ? `Expires in ${clock(secsLeft)}`
                       : "It works for 5 minutes."}
               </p>
             )}
-            <div className="signin-row">
-              <Button size="sm" variant="secondary" icon="refresh" onClick={() => void askForCode()} disabled={busy}>
-                Send a new code
-              </Button>
-              <Button size="sm" variant="quiet" onClick={backToDoors}>
-                Cancel
-              </Button>
-            </div>
-            <p className="signin-foot">
-              Not at your computer?{" "}
-              <button type="button" className="link" onClick={() => void passkey()}>
-                Sign in with a passkey
-              </button>{" "}
-              instead.
-            </p>
+            {noCodeYet && (
+              <p className="hint signin-nocode">
+                No code? Your computer must be on, and it must be your own login — or{" "}
+                <button type="button" className="link" onClick={() => void passkey()}>
+                  use a passkey
+                </button>
+                .
+              </p>
+            )}
+            {expired ? (
+              // The code ran out (or never came): the two ways on, as doors.
+              <>
+                <Button block icon="refresh" onClick={() => void askForCode()} disabled={busy}>
+                  Send a new code
+                </Button>
+                <PasskeyButton label="Sign in with a passkey" onActivate={passkey} />
+                <div className="signin-row">
+                  <Button size="sm" variant="quiet" onClick={backToDoors}>
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="signin-row">
+                  <Button size="sm" variant="secondary" icon="refresh" onClick={() => void askForCode()} disabled={busy}>
+                    Send a new code
+                  </Button>
+                  <Button size="sm" variant="quiet" onClick={backToDoors}>
+                    Cancel
+                  </Button>
+                </div>
+                <p className="signin-foot">
+                  Not at your computer?{" "}
+                  <button type="button" className="link" onClick={() => void passkey()}>
+                    Sign in with a passkey
+                  </button>{" "}
+                  instead.
+                </p>
+              </>
+            )}
           </div>
         ) : (
           // ---- The two doors. ----
