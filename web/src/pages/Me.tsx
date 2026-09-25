@@ -24,7 +24,7 @@ import { useSession } from "../lib/session";
 import { useCountUp } from "../lib/useCountUp";
 import { duration, durationShort, sentence } from "../lib/format";
 import { describeWindow } from "../lib/schedule";
-import { daysBefore, deviceNow, stopSentence, type WallTime } from "../lib/day";
+import { daysBefore, deviceNow, stopIsNear, stopSentence, type WallTime } from "../lib/day";
 import { parentSeesSentence } from "../lib/parentSees";
 import { cantFilter, notBlockedSentence } from "../lib/degraded";
 import {
@@ -827,6 +827,9 @@ export function Me() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Every load that finished, good or not: the next one is scheduled from it.
+  const [loads, setLoads] = useState(0);
+
   const load = useCallback(async () => {
     try {
       setToday(await api.getMeToday());
@@ -834,6 +837,7 @@ export function Me() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load your day.");
     }
+    setLoads((n) => n + 1);
     // The week is decoration on the day — it failing is not an error.
     void api
       .getMeHistory()
@@ -847,10 +851,16 @@ export function Me() {
       .getCatalog()
       .then(setCatalog)
       .catch(() => setCatalog(null));
-    // Living data: the minutes move while the page is open.
-    const t = setInterval(() => void load(), 30_000);
-    return () => clearInterval(t);
   }, [load]);
+
+  // Living data: the minutes move while the page is open — every 30 s, and
+  // every 5 while the screen stops within five minutes, so "1 min left"
+  // becomes "Time's up" when the computer's does.
+  useEffect(() => {
+    if (loads === 0) return;
+    const t = setTimeout(() => void load(), stopIsNear(today?.rules) ? 5_000 : 30_000);
+    return () => clearTimeout(t);
+  }, [load, loads, today]);
 
   const account = me?.account;
   const member = account?.role === "member";
