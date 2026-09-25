@@ -63,15 +63,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY policy/ policy/
 COPY client/ client/
+# The agent draws its icons from the brand set (client/src/icons.rs and
+# service.rs include_str! ../../brand/icons/*.svg and ../../brand/app-icon*.svg),
+# so those ride along — without them the agent build fails.
+COPY brand/icons/ brand/icons/
+COPY brand/app-icon*.svg brand/
 
 WORKDIR /build/client
-# The build id: a hash of the agent's source (client/ + policy/). Compiled into
+# The build id: a hash of the agent's source (client/ + policy/ + the brand
+# files it embeds). Compiled into
 # the binaries and published in the manifest, so an installed agent can tell
 # "a different build" from "a different version number" — a fix merged
 # without a version bump still reaches the fleet, and an unchanged agent is
 # not re-installed just because the server image was rebuilt. CI computes it
 # the same way (.github/workflows/build.yml).
-RUN cd /build && find policy client -type f -not -path '*/target/*' -print0 \
+RUN cd /build && find policy client brand/icons brand/app-icon*.svg -type f -not -path '*/target/*' -print0 \
         | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16 > /build/agent-build-id \
     && cat /build/agent-build-id
 RUN OST_BUILD_ID="$(cat /build/agent-build-id)" \
@@ -102,8 +108,11 @@ FROM docker.io/oven/bun:1 AS web-builder
 
 WORKDIR /build/web
 # The console draws its icons straight from the brand set (web/src/components/Icon.tsx
-# imports ../../../brand/icons/*.svg), so that folder rides along.
+# imports ../../../brand/icons/*.svg), so that folder rides along. `tsc -b` also
+# type-checks the tests, which share the schedule vectors with the policy crate
+# (web/src/lib/{schedule,myRules}.test.ts import ../../../policy/tests/*.json).
 COPY brand/icons/ /build/brand/icons/
+COPY policy/tests/schedule-vectors.json /build/policy/tests/schedule-vectors.json
 COPY web/ .
 
 RUN (bun install --frozen-lockfile || bun install) && bun run build
