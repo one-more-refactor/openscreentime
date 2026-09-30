@@ -5,7 +5,7 @@
 //! the first-run intro — every surface that was supposed to explain this system
 //! to the person living under it — are compiled out. What remains, for the
 //! child, is a session that freezes mid-game with no message, on a machine
-//! whose power button is blocked by a polkit rule.
+//! whose power button was blocked by a polkit rule.
 //!
 //! The agent already writes everything needed to
 //! `/run/openscreentime/status.<user>.json` each tick: minutes used, minutes
@@ -52,7 +52,11 @@ fn read_status() -> Result<Value> {
 /// The current user's slice of the status snapshot.
 struct Mine {
     used: Option<u64>,
+    /// Minutes until the screen stops — the verdict, the same number the
+    /// app window and the warnings show. `None` = no limit.
     left: Option<i64>,
+    /// A parent's override is what keeps the screen on, until then.
+    unlocked_until: Option<chrono::DateTime<chrono::Local>>,
     frozen: bool,
     freeze_in: Option<u64>,
 }
@@ -65,10 +69,20 @@ fn mine() -> Result<Mine> {
         .and_then(|a| a.first())
         .cloned()
         .unwrap_or(Value::Null);
+    let clock: crate::glance::Clock = serde_json::from_value(me.clone()).unwrap_or_default();
+    let (left, unlocked_until) = match clock.left(chrono::Local::now()) {
+        crate::glance::Left::NoLimit => (None, None),
+        crate::glance::Left::Stopped => (Some(0), None),
+        crate::glance::Left::Minutes {
+            minutes,
+            unlocked_until,
+        } => (Some(minutes), unlocked_until),
+    };
     Ok(Mine {
         used: me.get("used_minutes").and_then(Value::as_u64),
-        left: me.get("remaining_minutes").and_then(Value::as_i64),
-        frozen: me.get("frozen").and_then(Value::as_bool).unwrap_or(false),
+        left,
+        unlocked_until,
+        frozen: clock.frozen,
         freeze_in: me.get("freeze_in_secs").and_then(Value::as_u64),
     })
 }
@@ -87,6 +101,7 @@ pub fn time(as_json: bool) -> Result<()> {
                 "limited": m.left.is_some(),
                 "used_minutes": m.used,
                 "left_minutes": m.left,
+                "unlocked_until": m.unlocked_until.map(|t| t.to_rfc3339()),
                 "frozen": m.frozen,
                 "freeze_in_secs": m.freeze_in,
             }))?
@@ -96,7 +111,10 @@ pub fn time(as_json: bool) -> Result<()> {
 
     match m.left {
         Some(x) if x > 0 => {
-            println!("You have {x} minutes left today.");
+            match m.unlocked_until {
+                Some(t) => println!("Unlocked until {} — {x} minutes.", t.format("%H:%M")),
+                None => println!("You have {x} minutes left."),
+            }
             if let Some(u) = m.used {
                 println!("(You've used {u} so far.)");
             }

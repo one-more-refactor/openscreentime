@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenScreenTime — brand board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* ---------- tokens ---------- */
+:root, .light {
+  --bg:#f4f2ee; --surface:#fff; --surface-2:#ecebe6; --rail:#efede8; --line:#e6e3dd; --line-2:#d5d1c9;
+  --ink:#1e1c19; --ink-2:#57544e; --ink-3:#726e66;
+  --brand:#2e7d46; --brand-strong:#266a3b; --brand-tint:#e4f1e8; --brand-ink:#1c5c33;
+  --warn:#8a6300; --warn-tint:#f7edd6; --stop:#b3151c; --stop-tint:#f8e3e2;
+  --shadow-1:0 1px 2px rgba(30,26,18,.05),0 1px 3px rgba(30,26,18,.06);
+  --shadow-2:0 4px 12px rgba(30,26,18,.07),0 14px 30px -10px rgba(30,26,18,.14);
+  --r-sm:10px; --r:16px; --r-lg:24px; --ease:cubic-bezier(.2,.7,.2,1);
+  --font:"Figtree",system-ui,sans-serif; --mono:"Space Mono",ui-monospace,monospace;
+}
+.dark {
+  --bg:#171614; --surface:#201e1b; --surface-2:#2a2723; --rail:#131211; --line:#302c27; --line-2:#423d37;
+  --ink:#f3f0ea; --ink-2:#b4aea4; --ink-3:#8b857b;
+  --brand:#46b06a; --brand-strong:#5cc07e; --brand-tint:#1e3a28; --brand-ink:#8fe0a6;
+  --warn:#d8ab4a; --warn-tint:#38300f; --stop:#e5595c; --stop-tint:#3a1d1e;
+  --shadow-1:0 1px 2px rgba(0,0,0,.4),0 1px 3px rgba(0,0,0,.5);
+  --shadow-2:0 6px 18px rgba(0,0,0,.5),0 18px 40px -12px rgba(0,0,0,.7);
+}
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
+@media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto} *{transition:none!important;animation:none!important} }
+body { margin:0; font-family:var(--font); background:var(--bg); color:var(--ink); line-height:1.5; -webkit-font-smoothing:antialiased; font-size:16px; }
+a { color:inherit; }
+p { margin:0; }
+.ic { width:24px; height:24px; flex:none; }
+svg { display:block; }
+.num { font-variant-numeric:tabular-nums; }
+
+/* ---------- board scaffolding ---------- */
+.wrap { max-width:1180px; margin:0 auto; padding:0 24px; }
+.top { position:sticky; top:0; z-index:5; background:rgba(244,242,238,.86); backdrop-filter:blur(10px); border-bottom:1px solid var(--line); }
+.top .wrap { display:flex; align-items:center; justify-content:space-between; height:64px; gap:24px; }
+.top nav a { flex:none; }
+.top nav { display:flex; gap:4px; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
+.top nav::-webkit-scrollbar { display:none; }
+.top nav a { text-decoration:none; font-size:13.5px; font-weight:600; color:var(--ink-2); padding:6px 12px; border-radius:999px; }
+.top nav a:hover { background:var(--surface-2); color:var(--ink); }
+.top nav a:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
+.lockup { display:inline-flex; align-items:center; gap:0; font-size:22px; font-weight:700; letter-spacing:-.02em; line-height:1; white-space:nowrap; }
+.lockup svg { width:.96em; height:.96em; margin-right:.22em; }
+.lockup .open { font-weight:500; color:var(--ink-2); }
+.lockup .st { font-weight:700; }
+.tag { display:inline-block; font-size:12.5px; font-weight:600; color:var(--ink-3); border:1px solid var(--line-2); border-radius:999px; padding:3px 10px; }
+
+.hero { padding-top:88px; padding-bottom:40px; display:grid; grid-template-columns:1fr auto; gap:40px; align-items:center; }
+@media (max-width:700px){ .hero{grid-template-columns:1fr} .hero .hm{display:none} }
+.hero .eyebrow { font-size:13px; font-weight:600; color:var(--ink-3); margin-bottom:14px; }
+.hero h1 { font-size:clamp(40px,6vw,72px); font-weight:800; letter-spacing:-.03em; line-height:1; margin:0 0 20px; }
+.hero .lede { font-size:20px; color:var(--ink-2); max-width:56ch; }
+
+section.sec { padding-top:72px; padding-bottom:8px; }
+.sec-h { display:grid; grid-template-columns:64px 1fr; gap:16px; align-items:baseline; margin-bottom:36px; border-top:1px solid var(--line); padding-top:28px; }
+.sec-h .n { font-size:13px; font-weight:700; color:var(--ink-3); }
+.sec-h h2 { font-size:32px; font-weight:700; letter-spacing:-.02em; line-height:1.1; margin:0 0 10px; }
+.sec-h .lede { color:var(--ink-2); max-width:60ch; font-size:17px; }
+h3.sub { font-size:18px; font-weight:600; margin:40px 0 14px; }
+.note { font-size:13.5px; color:var(--ink-3); max-width:70ch; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-1); padding:20px; }
+.grid { display:grid; gap:16px; }
+.g2 { grid-template-columns:repeat(2,1fr); } .g3 { grid-template-columns:repeat(3,1fr); } .g4 { grid-template-columns:repeat(4,1fr); } .g5 { grid-template-columns:repeat(5,1fr); }
+@media (max-width:900px){ .g5,.g4{grid-template-columns:repeat(2,1fr)} .g3{grid-template-columns:1fr 1fr} }
+@media (max-width:560px){ .g5,.g4,.g3,.g2{grid-template-columns:1fr} .sec-h{grid-template-columns:1fr} }
+.panel { border-radius:var(--r-lg); padding:28px; background:var(--bg); color:var(--ink); border:1px solid var(--line); }
+.panel.dark { border-color:#2a2723; }
+.panel h4 { margin:0 0 16px; font-size:13px; font-weight:600; color:var(--ink-3); }
+.spec { list-style:none; margin:0; padding:0; display:grid; gap:10px; font-size:14.5px; color:var(--ink-2); }
+.spec li { display:grid; grid-template-columns:150px 1fr; gap:12px; }
+.spec b { color:var(--ink); font-weight:600; }
+.spec code, code.t { font-family:var(--mono); font-size:12.5px; background:var(--surface-2); padding:1px 6px; border-radius:6px; color:var(--ink); }
+.cap { font-size:13px; color:var(--ink-3); margin-top:10px; }
+.cap b { color:var(--ink); font-weight:600; }
+
+/* idea */
+.props { display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-top:40px; }
+@media (max-width:1000px){ .props{grid-template-columns:repeat(2,1fr)} } @media (max-width:560px){ .props{grid-template-columns:1fr} }
+.prop { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:22px 20px 24px; box-shadow:var(--shadow-1); }
+.prop .ic { color:var(--brand); margin-bottom:16px; }
+.prop h3 { margin:0 0 6px; font-size:17px; font-weight:700; }
+.prop p { font-size:14.5px; color:var(--ink-2); }
+.line { margin:56px 0 0; padding:44px 40px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg); box-shadow:var(--shadow-1); display:grid; grid-template-columns:1fr auto; gap:32px; align-items:center; }
+@media (max-width:800px){ .line{grid-template-columns:1fr} }
+.line .big { font-size:clamp(30px,4.6vw,52px); font-weight:800; letter-spacing:-.03em; line-height:1.05; }
+.line .why { font-size:14.5px; color:var(--ink-2); max-width:44ch; }
+
+/* mark construction */
+.construct { display:grid; grid-template-columns:360px 1fr; gap:36px; align-items:start; }
+@media (max-width:820px){ .construct{grid-template-columns:1fr} }
+.gridbox { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:20px; box-shadow:var(--shadow-1); }
+.lockups { display:grid; grid-template-columns:1.5fr 1fr; gap:16px; }
+@media (max-width:820px){ .lockups{grid-template-columns:1fr} }
+.lk { display:flex; align-items:center; justify-content:center; min-height:150px; border-radius:var(--r); background:var(--surface); border:1px solid var(--line); padding:24px; }
+.lk.dark { background:#171614; border-color:#2a2723; }
+.lk svg { max-width:100%; height:auto; }
+.sizes { display:flex; align-items:flex-end; gap:28px; flex-wrap:wrap; }
+.sizes figure { margin:0; text-align:center; }
+.sizes figcaption { font-size:12.5px; color:var(--ink-3); margin-top:10px; }
+.sizes img, .sizes svg { display:block; margin:0 auto; }
+.trays { display:flex; gap:28px; flex-wrap:wrap; align-items:center; }
+.trays figure { margin:0; display:flex; align-items:center; gap:12px; font-size:14px; color:var(--ink-2); }
+.trays .tp { width:44px; height:36px; display:flex; align-items:center; justify-content:center; border-radius:8px; background:var(--surface-2); color:var(--ink); }
+.trays .tp svg { width:22px; height:22px; }
+.means { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+@media (max-width:820px){ .means{grid-template-columns:1fr} }
+.mean { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:28px 20px 22px; text-align:center; box-shadow:var(--shadow-1); }
+.mean .rw { position:relative; width:140px; height:140px; margin:0 auto 18px; }
+.mean .rw svg { position:absolute; inset:0; }
+.mean .in { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.mean .in b { font-size:40px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+.mean .in b.long { font-size:27px; }
+.mean .in span { font-size:12.5px; color:var(--ink-2); margin-top:4px; }
+.mean h4 { margin:0 0 4px; font-size:16px; }
+.mean p { font-size:14px; color:var(--ink-2); }
+.donts { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+@media (max-width:820px){ .donts{grid-template-columns:repeat(2,1fr)} } @media (max-width:480px){ .donts{grid-template-columns:1fr} }
+.dont { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:24px 16px 18px; text-align:center; }
+.dont .x { position:absolute; top:10px; right:10px; width:22px; height:22px; border-radius:50%; background:var(--stop-tint); color:var(--stop); display:flex; align-items:center; justify-content:center; }
+.dont .x .ic { width:14px; height:14px; }
+.dont .ex { height:96px; display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:12px; color:var(--ink-2); font-size:14px; }
+.dont p { font-size:13.5px; color:var(--ink-2); }
+.dont p b { color:var(--ink); }
+
+/* colour + type */
+.swatches { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+.sw { display:flex; align-items:center; gap:10px; }
+.sw i { width:40px; height:40px; border-radius:12px; border:1px solid rgba(0,0,0,.07); flex:none; }
+.dark .sw i { border-color:rgba(255,255,255,.08); }
+.sw b { display:block; font-size:13.5px; font-weight:600; }
+.sw span { display:block; font-size:12px; color:var(--ink-3); font-family:var(--mono); }
+.sw small { display:block; font-size:12px; color:var(--ink-2); }
+.type { display:grid; gap:14px; }
+.type .row { display:grid; grid-template-columns:170px 1fr; gap:16px; align-items:baseline; border-bottom:1px solid var(--line); padding-bottom:12px; }
+.type .row:last-child { border-bottom:0; }
+.type .k { font-size:12.5px; color:var(--ink-3); }
+@media (max-width:560px){ .type .row{grid-template-columns:1fr} }
+
+/* icon grid */
+.icons { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:6px; }
+.icons figure { margin:0; display:flex; flex-direction:column; align-items:center; gap:8px; padding:14px 6px 10px; border-radius:var(--r-sm); }
+.icons figure:hover { background:var(--surface-2); }
+.icons figcaption { font-size:11.5px; color:var(--ink-3); }
+.icons16 { display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin-top:18px; padding:14px 16px; border-radius:var(--r-sm); background:var(--surface); border:1px solid var(--line); }
+.dark .icons16 { background:var(--surface); }
+.icons16 .ic { width:16px; height:16px; }
+
+/* ---------- product mockups ---------- */
+.shot { margin:0; }
+.shot figcaption { font-size:13.5px; color:var(--ink-2); margin:14px 0 0; max-width:70ch; }
+.shot figcaption b { color:var(--ink); }
+.frame { background:var(--bg); border:1px solid var(--line-2); border-radius:18px; box-shadow:var(--shadow-2); overflow:hidden; position:relative; font-size:16px; }
+.frame.scroll { overflow-x:auto; }
+.frame.scroll > * { min-width:920px; }
+
+/* buttons + inputs (product grammar) */
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; height:44px; padding:0 20px; border-radius:999px; font:600 15px/1 var(--font); border:1px solid transparent; color:var(--ink); background:transparent; cursor:default; white-space:nowrap; }
+.btn .ic { width:18px; height:18px; }
+.btn.primary { background:var(--brand); color:#fff; box-shadow:var(--shadow-1); }
+.btn.secondary { background:var(--surface); border-color:var(--line-2); }
+.btn.quiet { color:var(--ink-2); }
+.btn.sm { height:36px; padding:0 14px; font-size:14px; }
+.btn.lg { height:52px; padding:0 28px; font-size:17px; }
+.btn.block { width:100%; }
+.field { display:flex; align-items:center; height:44px; padding:0 14px; border-radius:var(--r-sm); background:var(--surface); border:1px solid var(--line-2); font-size:16px; color:var(--ink); }
+.field.ph { color:var(--ink-3); }
+.field.focus { border-color:var(--brand); box-shadow:0 0 0 3px rgba(46,125,70,.22); }
+.label { display:block; font-size:13px; font-weight:600; color:var(--ink-2); margin-bottom:6px; }
+.hint { font-size:12.5px; color:var(--ink-3); margin-top:6px; }
+.chip { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; border-radius:999px; padding:3px 10px; }
+.chip.ok { background:var(--brand-tint); color:var(--brand-ink); }
+.chip.neutral { background:var(--surface-2); color:var(--ink-2); }
+.chip.warn { background:var(--warn-tint); color:var(--warn); }
+.chip.stop { background:var(--stop-tint); color:var(--stop); }
+.caret { display:inline-block; width:2px; height:1.1em; background:var(--ink); margin-left:2px; vertical-align:-2px; }
+
+/* lock screen */
+.lock { height:660px; display:flex; flex-direction:column; align-items:center; padding:28px 24px 24px; text-align:center; }
+.lock .lockup { font-size:16px; color:var(--ink-3); }
+.lock .lockup .st { color:var(--ink-2); }
+.lock .rw { position:relative; width:220px; height:220px; margin:40px auto 24px; }
+.lock .rw svg { position:absolute; inset:0; }
+.lock .rw .in { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.lock .rw .in b { font-size:64px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+.lock .rw .in span { font-size:14px; color:var(--ink-2); margin-top:6px; }
+.lock h2 { margin:0 0 8px; font-size:34px; font-weight:700; letter-spacing:-.02em; line-height:1.1; }
+.lock .detail { font-size:18px; color:var(--ink-2); }
+.lock .code { margin:28px auto 0; width:380px; max-width:100%; text-align:left; }
+.lock .code .row { display:flex; gap:10px; }
+.lock .code .field { flex:1; font-family:var(--mono); font-size:20px; font-weight:700; letter-spacing:.06em; }
+.lock .or { display:flex; align-items:center; gap:12px; color:var(--ink-3); font-size:12.5px; width:380px; max-width:100%; margin:18px auto 14px; }
+.lock .or::before, .lock .or::after { content:""; flex:1; height:1px; background:var(--line-2); }
+.lock .help { margin-top:auto; font-size:13px; color:var(--ink-3); }
+
+/* warning banner */
+.desk { height:340px; position:relative; background:var(--bg); }
+.desk .win { position:absolute; left:40px; top:44px; right:40px; bottom:-20px; background:var(--surface); border:1px solid var(--line); border-radius:12px 12px 0 0; opacity:.9; }
+.desk .win i { display:block; height:36px; border-bottom:1px solid var(--line); }
+.desk .win .l { position:absolute; left:28px; height:10px; border-radius:5px; background:var(--surface-2); }
+.notice { position:absolute; top:16px; right:16px; width:372px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-2); padding:14px 16px 14px 14px; display:grid; grid-template-columns:44px 1fr; gap:14px; text-align:left; }
+.notice .t { font-size:15px; font-weight:600; line-height:1.3; }
+.notice .s { font-size:13px; color:var(--ink-2); margin-top:2px; }
+.notice .a { display:flex; gap:6px; margin-top:10px; }
+.notice .app { font-size:11.5px; color:var(--ink-3); display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.notice .app svg { width:12px; height:12px; }
+
+/* app window */
+.win-app { width:420px; max-width:100%; margin:0 auto; background:var(--bg); border:1px solid var(--line-2); border-radius:12px; box-shadow:var(--shadow-2); overflow:hidden; }
+.win-app .tb { height:36px; display:flex; align-items:center; justify-content:center; font-size:12.5px; font-weight:600; color:var(--ink-2); border-bottom:1px solid var(--line); position:relative; background:var(--surface); }
+.win-app .tb i { position:absolute; right:14px; top:12px; width:12px; height:12px; border-radius:50%; border:1.5px solid var(--line-2); }
+.win-app .body { padding:24px 28px 22px; }
+.win-app .lockup { font-size:15px; }
+.win-app .rw { position:relative; width:168px; height:168px; margin:24px auto 22px; }
+.win-app .rw svg { position:absolute; inset:0; }
+.win-app .rw .in { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.win-app .rw .in b { font-size:56px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+.win-app .rw .in span { font-size:13px; color:var(--ink-2); margin-top:4px; }
+.rules { list-style:none; margin:0 0 22px; padding:0; display:grid; gap:0; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-sm); }
+.rules li { display:flex; align-items:center; gap:12px; padding:11px 14px; font-size:14px; border-top:1px solid var(--line); }
+.rules li:first-child { border-top:0; }
+.rules li .ic { width:20px; height:20px; color:var(--ink-2); }
+.rules li b { font-weight:600; margin-left:auto; }
+.win-app .promise { font-size:12.5px; color:var(--ink-3); margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+
+/* c + d layout */
+.cd { display:grid; grid-template-columns:420px minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start; margin-top:8px; }
+.cd > * { min-width:0; }
+.cd h3.sub { margin-top:32px; }
+.cd h3.sub.d { grid-column:2 / 4; }
+@media (max-width:1060px){ .cd{grid-template-columns:1fr 1fr} .cd h3.sub.d{grid-column:auto} .cd h3.sub{grid-column:1 / -1} }
+@media (max-width:640px){ .cd{grid-template-columns:1fr} .cd > div{order:1} .cd h3.sub.d{order:2} .cd > figure{order:3} }
+/* login */
+.login { padding:36px 22px; display:flex; justify-content:center; min-height:520px; }
+.login .box { width:100%; max-width:380px; }
+.login .lockup { font-size:26px; margin-bottom:28px; }
+.login h2 { margin:0 0 4px; font-size:24px; font-weight:700; letter-spacing:-.02em; }
+.login .sub { font-size:15px; color:var(--ink-2); margin-bottom:24px; }
+.login .or { display:flex; align-items:center; gap:12px; color:var(--ink-3); font-size:12.5px; margin:18px 0; }
+.login .or::before, .login .or::after { content:""; flex:1; height:1px; background:var(--line-2); }
+.digits { display:flex; gap:6px; align-items:center; margin:8px 0 14px; }
+.digits i { width:40px; height:52px; border-radius:var(--r-sm); background:var(--surface); border:1px solid var(--line-2); display:flex; align-items:center; justify-content:center; font:700 22px var(--mono); font-style:normal; }
+.digits i.on { border-color:var(--brand); box-shadow:0 0 0 3px rgba(46,125,70,.22); }
+.digits em { width:6px; height:2px; background:var(--line-2); border-radius:1px; }
+.foot { font-size:13px; color:var(--ink-3); margin-top:24px; }
+
+/* console shell */
+.shell { display:grid; grid-template-columns:232px 1fr; min-height:720px; }
+.rail { background:var(--rail); border-right:1px solid var(--line); padding:20px 14px; display:flex; flex-direction:column; }
+.rail .lockup { font-size:17px; padding:4px 10px 22px; }
+.nav a { display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:999px; font-size:14.5px; font-weight:600; color:var(--ink-2); text-decoration:none; }
+.nav a .ic { width:20px; height:20px; }
+.nav a.on { background:var(--brand-tint); color:var(--brand-ink); }
+.rail .today { margin-top:28px; padding:0 12px; font-size:12.5px; font-weight:600; color:var(--ink-3); }
+.rail .tl { list-style:none; margin:8px 0 0; padding:0; }
+.rail .tl li { display:flex; align-items:center; gap:10px; padding:6px 12px; font-size:14px; }
+.rail .tl li .m { margin-left:auto; color:var(--ink-3); font-size:12.5px; }
+.rail .me { margin-top:auto; padding:12px; font-size:13.5px; display:flex; align-items:center; gap:10px; color:var(--ink-2); }
+.rail .me .ic { width:18px; height:18px; margin-left:auto; }
+.main { padding:32px 36px 40px; }
+.ph { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:26px; }
+.ph .crumb { font-size:13px; font-weight:600; color:var(--ink-3); margin-bottom:6px; }
+.ph h1 { margin:0 0 6px; font-size:32px; font-weight:700; letter-spacing:-.02em; line-height:1.1; }
+.ph .verdict { font-size:15.5px; color:var(--ink-2); }
+.pause { display:flex; align-items:center; gap:16px; padding:14px 18px; margin-bottom:20px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); }
+.pause .b { width:48px; height:48px; border-radius:50%; background:var(--surface); border:1px solid var(--line-2); display:flex; align-items:center; justify-content:center; }
+.pause b { display:block; font-size:16px; }
+.pause span { font-size:13.5px; color:var(--ink-2); }
+.people { display:grid; grid-template-columns:repeat(2,1fr); gap:16px; }
+.pc { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-1); padding:18px 20px; }
+.pc .hd { display:grid; grid-template-columns:64px 1fr auto; gap:16px; align-items:center; }
+.av { position:relative; width:64px; height:64px; }
+.av svg { position:absolute; inset:0; }
+.av .face { position:absolute; inset:9px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:22px; }
+.av .face.mono { font-size:17px; font-weight:700; }
+.pc .nm { font-size:17px; font-weight:600; }
+.pc .meta { font-size:13px; color:var(--ink-3); }
+.pc .time { margin-top:14px; font-size:15px; color:var(--ink-2); }
+.pc .time b { font-weight:700; color:var(--ink); }
+.pc .time.stop b { color:var(--stop); }
+.pc .req { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); display:flex; align-items:center; gap:8px; font-size:14px; }
+.pc .req .ic { width:18px; height:18px; color:var(--warn); }
+.pc .req .sp { flex:1; }
+
+/* my computer */
+.me-hero { display:grid; grid-template-columns:auto 1fr; gap:28px; align-items:center; margin-bottom:20px; }
+.me-hero .rw { position:relative; width:150px; height:150px; }
+.me-hero .rw svg { position:absolute; inset:0; }
+.me-hero .rw .in { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.me-hero .rw .in b { font-size:38px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+.me-hero .rw .in b.long { font-size:29px; }
+.me-hero .rw .in span { font-size:12.5px; color:var(--ink-2); margin-top:4px; }
+.me-hero .big { font-size:26px; font-weight:700; letter-spacing:-.02em; }
+.me-hero .big small { font-size:16px; font-weight:400; color:var(--ink-2); }
+.mrules { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+.mrule { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:16px 18px; }
+.mrule .h { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; color:var(--ink-3); margin-bottom:8px; }
+.mrule .h .ic { width:18px; height:18px; }
+.mrule .h .e { margin-left:auto; color:var(--ink-2); font-weight:600; font-size:13px; }
+.mrule .v { font-size:19px; font-weight:600; }
+.mrule .v small { font-size:14px; font-weight:400; color:var(--ink-2); }
+.mrule .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.mrule .chips span { display:inline-flex; align-items:center; gap:6px; font-size:13.5px; padding:5px 10px; border-radius:999px; background:var(--surface-2); color:var(--ink); }
+.mrule .chips span .ic { width:14px; height:14px; color:var(--ink-3); }
+.mrule .chips .add { background:transparent; border:1px dashed var(--line-2); color:var(--ink-2); }
+.week { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:16px 18px 14px; }
+.week .h { display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }
+.week .h b { font-size:15px; }
+.week .h span { font-size:13px; color:var(--ink-3); }
+.bars { display:grid; grid-template-columns:repeat(7,1fr); gap:12px; align-items:end; height:120px; position:relative; }
+.bars .goal { position:absolute; left:0; right:0; border-top:1px dashed var(--line-2); }
+.bars .goal em { position:absolute; right:0; top:-18px; font-style:normal; font-size:11.5px; color:var(--ink-3); }
+.bar { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%; justify-content:flex-end; }
+.bar i { display:block; width:100%; max-width:44px; border-radius:8px; background:var(--brand); }
+.bar i.over { background:var(--stop); }
+.bar i.today { background:var(--brand); outline:2px solid var(--ink); outline-offset:2px; }
+.bar span { font-size:12px; color:var(--ink-3); }
+.bar span b { display:block; color:var(--ink); font-size:12.5px; font-weight:600; }
+.devrow { margin-top:16px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px 18px; display:flex; align-items:center; gap:12px; font-size:14.5px; }
+.devrow .ic { color:var(--ink-2); }
+.devrow .sp { flex:1; }
+
+/* voice */
+.voice { display:grid; gap:12px; }
+.pair { display:grid; grid-template-columns:180px 1fr 1fr; gap:16px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:16px 20px; align-items:start; }
+@media (max-width:820px){ .pair{grid-template-columns:1fr} }
+.pair .m { font-size:13px; font-weight:600; color:var(--ink-3); padding-top:3px; }
+.pair .say, .pair .not { font-size:15px; padding-left:28px; position:relative; }
+.pair .say::before, .pair .not::before { content:""; position:absolute; left:0; top:2px; width:18px; height:18px; border-radius:50%; }
+.pair .say::before { background:var(--brand-tint); }
+.pair .not::before { background:var(--stop-tint); }
+.pair .say .ic, .pair .not .ic { position:absolute; left:3px; top:5px; width:12px; height:12px; }
+.pair .say .ic { color:var(--brand-ink); } .pair .not .ic { color:var(--stop); }
+.pair .not { color:var(--ink-2); }
+.pair q { quotes:"“" "”"; }
+.pair small { display:block; font-size:12.5px; color:var(--ink-3); margin-top:4px; }
+
+footer { padding:64px 0 48px; color:var(--ink-3); font-size:13px; }
+footer .wrap { display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap; border-top:1px solid var(--line); padding-top:24px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <span class="lockup">{{mark:size=22}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+    <nav aria-label="Sections">
+      <a href="#idea">Idea</a><a href="#mark">Mark</a><a href="#colour">Colour &amp; type</a><a href="#icons">Icons</a><a href="#product">Product</a><a href="#voice">Voice</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap hero">
+  <div>
+  <div class="eyebrow">Brand board · September 2026</div>
+  <h1>The house clock.</h1>
+  <p class="lede">OpenScreenTime is the clock on the kitchen wall, not a cop at the door. Everyone can read it, nobody has to wind it, and it says the time plainly — to children, to parents, and to anyone keeping time for themselves.</p>
+  </div>
+  <div class="hm">{{mark:size=220}}</div>
+</div>
+
+<!-- ================================================================ 01 IDEA -->
+<section class="sec wrap" id="idea">
+  <div class="sec-h"><span class="n">01</span><div><h2>The idea</h2><p class="lede">One object explains every decision in the product. A wall clock has five properties, and each one is a promise we make.</p></div></div>
+
+  <div class="props">
+    <div class="prop">{{icon:family}}<h3>Fair</h3><p>Everyone reads the same clock. A child sees exactly what a parent sees about them, and the parent's own time hangs on the same wall.</p></div>
+    <div class="prop">{{icon:home}}<h3>Set it once</h3><p>You hang it and it runs for years. Nothing to maintain, nothing to babysit, nothing to check on.</p></div>
+    <div class="prop">{{icon:clock}}<h3>Quiet</h3><p>A clock doesn't nag. You glance at it. It only speaks when a person is actually needed.</p></div>
+    <div class="prop">{{icon:check}}<h3>Honest</h3><p>A clock doesn't lie and doesn't argue. When time is up, it says so plainly — calm, kind, firm, in that order.</p></div>
+    <div class="prop">{{icon:person}}<h3>Yours too</h3><p>A clock works for one person. It is also the clock on your own desk, for the time you set yourself.</p></div>
+  </div>
+
+  <div class="line">
+    <div>
+      <div class="big">Set it once.<br>It keeps time.</div>
+    </div>
+    <p class="why"><b>The line.</b> Six words, two readings: it runs on its own, and it holds the time you agreed on. It answers the owner's complaint directly — this should not feel like a project you maintain. The runner-up, “Fair time, for everyone at home”, survives as the descriptor under the wordmark where a second sentence is needed.</p>
+  </div>
+</section>
+
+<!-- ================================================================ 02 MARK -->
+<section class="sec wrap" id="mark">
+  <div class="sec-h"><span class="n">02</span><div><h2>The mark</h2><p class="lede">The activity ring you already have, read as a clock face. One added detail — a tick at twelve o'clock, the start line of every day — is what separates it from a progress spinner.</p></div></div>
+
+  <div class="construct">
+    <div class="gridbox">
+      <svg viewBox="-4 -4 72 72" width="100%" aria-label="Construction of the mark on a 64-unit grid">
+        <defs><pattern id="g8" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M8 0H0V8" fill="none" stroke="#e6e3dd" stroke-width=".4"/></pattern></defs>
+        <rect x="0" y="0" width="64" height="64" fill="url(#g8)" stroke="#d5d1c9" stroke-width=".5"/>
+        <circle cx="32" cy="32" r="22" fill="none" stroke="#d5d1c9" stroke-width="7"/>
+        <path d="M32 10A22 22 0 0 1 44.93 49.80" fill="none" stroke="#2e7d46" stroke-width="7"/>
+        <circle cx="44.93" cy="49.80" r="3.5" fill="#2e7d46"/>
+        <path d="M32 4.5v11" stroke="#1e1c19" stroke-width="3" stroke-linecap="round" fill="none"/>
+        <!-- guides -->
+        <path d="M32 32H54" stroke="#b3151c" stroke-width=".5" stroke-dasharray="1 1"/>
+        <circle cx="32" cy="32" r=".9" fill="#b3151c"/>
+        <path d="M32 32L44.93 49.80" stroke="#b3151c" stroke-width=".5" stroke-dasharray="1 1"/>
+        <path d="M32 24A8 8 0 0 1 36.7 38.47" fill="none" stroke="#b3151c" stroke-width=".5"/>
+        <text x="42" y="30.6" font-family="Figtree,sans-serif" font-size="3.6" fill="#b3151c">r 22</text>
+        <text x="30" y="21.2" font-family="Figtree,sans-serif" font-size="3.6" fill="#b3151c" text-anchor="end">144°</text>
+        <path d="M58 6.5v7" stroke="#b3151c" stroke-width=".4"/><path d="M57 6.5h2M57 13.5h2" stroke="#b3151c" stroke-width=".4"/>
+        <text x="59.5" y="11.3" font-family="Figtree,sans-serif" font-size="3.4" fill="#b3151c">7</text>
+        <path d="M22 4.5v11" stroke="#b3151c" stroke-width=".4"/><path d="M21 4.5h2M21 15.5h2" stroke="#b3151c" stroke-width=".4"/>
+        <text x="20" y="11" font-family="Figtree,sans-serif" font-size="3.4" fill="#b3151c" text-anchor="end">11</text>
+      </svg>
+    </div>
+    <div>
+      <ul class="spec">
+        <li><b>Box</b><span>64 units. Ring ø 44 (r 22), centred. The ring is 69% of the box.</span></li>
+        <li><b>Stroke</b><span>7 units — 16% of the ring diameter. Heavier than the data rings on purpose, so it holds at 16 px.</span></li>
+        <li><b>The tick</b><span>3 wide × 11 long, round caps, centred on the track at twelve o'clock, overhanging the track by 2 on each side. Ink. Always painted last, on top of the arc.</span></li>
+        <li><b>The arc</b><span>Starts flush under the tick (butt), sweeps <b>clockwise</b>, ends in a round cap (a disc, r 3.5). The static mark is fixed at <b>40% = 144°</b> — a morning, most of the day still ahead.</span></li>
+        <li><b>Colour</b><span>track <code>#d5d1c9</code> · arc <code>#2e7d46</code> · tick <code>#1e1c19</code>. Dark: <code>#423d37</code> / <code>#46b06a</code> / <code>#f3f0ea</code>. One-colour: everything <code>currentColor</code>, track at 25% opacity.</span></li>
+        <li><b>In the product</b><span>Data rings keep these proportions on a lighter stroke: 9% of ø on hero rings, 8% at 56–72 px, 7% at 28 px. The tick appears on every ring 40 px and larger; below that the ring is too small to carry it.</span></li>
+        <li><b>Files</b><span><code>mark.svg</code> <code>mark-dark.svg</code> <code>mark-mono.svg</code></span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="sub">Lockups</h3>
+  <div class="lockups">
+    <div class="lk">{{file:lockup-horizontal.svg}}</div>
+    <div class="lk">{{file:lockup-stacked.svg}}</div>
+    <div class="lk dark">{{file:lockup-horizontal-dark.svg}}</div>
+    <div class="lk dark" style="gap:36px">{{mark:size=64,theme=dark}}{{mark:size=40,theme=dark}}{{mark:size=24,theme=dark}}{{mark:size=16,theme=dark}}</div>
+  </div>
+  <ul class="spec" style="margin-top:18px">
+    <li><b>Geometry</b><span>For a wordmark set at size S: mark box <b>0.96 S</b>, centred on the cap-height midline (baseline − 0.35 S); gap box→text <b>0.22 S</b>; “Open” <b>500</b> ink-2; “ScreenTime” <b>700</b> ink; tracking <b>−0.02 em</b>; no space between the two words. Stacked: mark 2.4 S above the wordmark, gap 0.55 S. Minimum: 16 px text with a 15 px mark; below that use the mark alone.</span></li>
+    <li><b>Files</b><span><code>lockup-horizontal.svg</code> <code>lockup-horizontal-dark.svg</code> <code>lockup-stacked.svg</code> <code>lockup-stacked-dark.svg</code> — text is outlined from Figtree, so they render identically without the font.</span></li>
+  </ul>
+
+  <h3 class="sub">App icon, favicon, tray</h3>
+  <div class="grid g2">
+    <div class="panel light">
+      <h4>Light desktop · browser tab · panel</h4>
+      <div class="sizes">
+        <figure>{{filesz:app-icon.svg,256}}<figcaption>256 · app-icon.svg</figcaption></figure>
+        <figure>{{filesz:app-icon.svg,64}}<figcaption>64</figcaption></figure>
+        <figure>{{filesz:app-icon-small.svg,32}}<figcaption>32 · small</figcaption></figure>
+        <figure>{{filesz:app-icon-small.svg,16}}<figcaption>16 · small</figcaption></figure>
+        <figure>{{filesz:favicon.svg,16}}<figcaption>favicon 16</figcaption></figure>
+        <figure>{{filesz:favicon.svg,32}}<figcaption>favicon 32</figcaption></figure>
+      </div>
+      <div class="trays" style="margin-top:28px">
+        <figure><span class="tp">{{file:tray-ok.svg}}</span>Time left</figure>
+        <figure><span class="tp">{{file:tray-low.svg}}</span>15 min or less</figure>
+        <figure><span class="tp">{{file:tray-stopped.svg}}</span>Time's up</figure>
+        <figure><span class="tp">{{file:tray-paused.svg}}</span>Paused</figure>
+        <figure><span class="tp">{{file:app-icon-symbolic.svg}}</span>symbolic</figure>
+      </div>
+    </div>
+    <div class="panel dark">
+      <h4>Dark desktop · browser tab · panel</h4>
+      <div class="sizes">
+        <figure>{{filesz:app-icon.svg,256}}<figcaption>the same tile</figcaption></figure>
+        <figure>{{filesz:app-icon.svg,64}}<figcaption>64</figcaption></figure>
+        <figure>{{filesz:app-icon-small.svg,32}}<figcaption>32</figcaption></figure>
+        <figure>{{filesz:app-icon-small.svg,16}}<figcaption>16</figcaption></figure>
+        <figure>{{mark:size=16,theme=dark,tile=1}}<figcaption>favicon 16, dark tab</figcaption></figure>
+        <figure>{{mark:size=32,theme=dark,tile=1}}<figcaption>favicon 32, dark tab</figcaption></figure>
+      </div>
+      <div class="trays" style="margin-top:28px">
+        <figure><span class="tp">{{file:tray-ok.svg}}</span>Time left</figure>
+        <figure><span class="tp">{{file:tray-low.svg}}</span>15 min or less</figure>
+        <figure><span class="tp">{{file:tray-stopped.svg}}</span>Time's up</figure>
+        <figure><span class="tp">{{file:tray-paused.svg}}</span>Paused</figure>
+        <figure><span class="tp">{{file:app-icon-symbolic.svg}}</span>symbolic</figure>
+      </div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:14px">The app tile is warm paper on a squircle with a one-unit hairline, so it reads on both light and dark docks without a dark variant. Below 32 px the <code class="t">-small</code> file takes over: stroke 9, a 4 × 15 tick and a darker track. The favicon is the small geometry with a <code class="t">prefers-color-scheme</code> swap to a warm-dark tile. Tray icons are 22 px with a 3-unit stroke; the track is <code class="t">currentColor</code> at 25% so the panel colours it. The client should draw the tray's green state with the real fraction — the file shows the static 40%.</p>
+
+  <h3 class="sub">What the ring means — one thing, everywhere</h3>
+  <div class="means">
+    <div class="mean"><div class="rw">{{ring:d=140,frac=.2}}<div class="in"><b class="num long">1 h 12</b><span>min left</span></div></div><h4>Morning · 20% used</h4><p>18 of 90 minutes. The arc starts at the tick and moves the way a clock does.</p></div>
+    <div class="mean"><div class="rw">{{ring:d=140,frac=.75}}<div class="in"><b class="num">22</b><span>min left</span></div></div><h4>Afternoon · 75% used</h4><p>Still green. Amber only appears at 15 minutes, as a transition, never as a threat.</p></div>
+    <div class="mean"><div class="rw">{{ring:d=140,frac=1,color=stop}}<div class="in"><b class="num">0</b><span>min left</span></div></div><h4>Time's up · 100%</h4><p>The gauge completed, the arc back at the tick. Red is spent here and nowhere else today.</p></div>
+  </div>
+  <p class="note" style="margin-top:14px">The ring is <b>time used today</b>, filling clockwise from the tick. The number beside it may say what is <i>left</i>, because that is what a person asks. A number inside a ring must fit the inner circle with room to spare: up to three characters at 0.29 × ø, anything longer (“1 h 12”) drops to 0.2 × ø — never abbreviate to “1:12”. The ring never depletes, never spins, and never counts anything but a day.</p>
+
+  <h3 class="sub">Don't</h3>
+  <div class="donts">
+    <div class="dont"><span class="x">{{icon:close}}</span><div class="ex">{{ring:d=56,frac=.25,tick=0,color=ink3}}<span>Loading…</span></div><p><b>Not a spinner.</b> No loading rings, hold-to-confirm rings, code-entry rings or countdown rings. Those use a bar or a plain number.</p></div>
+    <div class="dont"><span class="x">{{icon:close}}</span><div class="ex"><svg width="56" height="56" viewBox="0 0 56 56" style="transform:scaleX(-1)">{{ring:d=56,frac=.4}}</svg></div><p><b>Never counter-clockwise.</b> The arc starts at the tick and goes the way a clock goes.</p></div>
+    <div class="dont"><span class="x">{{icon:close}}</span><div class="ex">{{ring:d=56,frac=.3,color=stop}}<span>27 min left</span></div><p><b>No red on a healthy day.</b> Red means stop. A ring at 30% in red is an alarm about nothing.</p></div>
+    <div class="dont"><span class="x">{{icon:close}}</span><div class="ex" style="font-size:20px">⏰ 🔒 🌙</div><p><b>Emoji are faces, not icons.</b> A child's chosen face is identity. Everything else is the monoline set below.</p></div>
+  </div>
+</section>
+
+<!-- ================================================================ 03 COLOUR + TYPE -->
+<section class="sec wrap" id="colour">
+  <div class="sec-h"><span class="n">03</span><div><h2>Colour and type</h2><p class="lede">Unchanged — the palette and the typeface were right; the execution was not. Colour is for hierarchy: most of any screen is paper, white and ink. Green is time and the one main action. Amber is a transition. Red is stop, and a healthy day has none.</p></div></div>
+
+  <div class="grid g2">
+    <div class="panel light">
+      <h4>Light — the default, and the only theme on the device</h4>
+      <div class="swatches">
+        <div class="sw"><i style="background:#f4f2ee"></i><div><b>bg</b><span>#f4f2ee</span><small>warm paper</small></div></div>
+        <div class="sw"><i style="background:#ffffff"></i><div><b>surface</b><span>#ffffff</span><small>cards, inputs</small></div></div>
+        <div class="sw"><i style="background:#ecebe6"></i><div><b>surface-2</b><span>#ecebe6</span><small>sunken, tracks</small></div></div>
+        <div class="sw"><i style="background:#e6e3dd"></i><div><b>line</b><span>#e6e3dd</span><small>hairlines</small></div></div>
+        <div class="sw"><i style="background:#d5d1c9"></i><div><b>line-2</b><span>#d5d1c9</span><small>input edges, ring track</small></div></div>
+        <div class="sw"><i style="background:#1e1c19"></i><div><b>ink</b><span>#1e1c19</span><small>text · the tick</small></div></div>
+        <div class="sw"><i style="background:#57544e"></i><div><b>ink-2</b><span>#57544e</span><small>secondary text</small></div></div>
+        <div class="sw"><i style="background:#726e66"></i><div><b>ink-3</b><span>#726e66</span><small>meta, paused ring</small></div></div>
+        <div class="sw"><i style="background:#2e7d46"></i><div><b>brand</b><span>#2e7d46</span><small>the ring · primary action</small></div></div>
+        <div class="sw"><i style="background:#e4f1e8"></i><div><b>brand-tint</b><span>#e4f1e8</span><small>selected, success</small></div></div>
+        <div class="sw"><i style="background:#8a6300"></i><div><b>warn</b><span>#8a6300</span><small>≤15 min, offline, waiting</small></div></div>
+        <div class="sw"><i style="background:#f7edd6"></i><div><b>warn-tint</b><span>#f7edd6</span><small>attention banner</small></div></div>
+        <div class="sw"><i style="background:#b3151c"></i><div><b>stop</b><span>#b3151c</span><small>time's up · destructive</small></div></div>
+        <div class="sw"><i style="background:#f8e3e2"></i><div><b>stop-tint</b><span>#f8e3e2</span><small>stop banner</small></div></div>
+      </div>
+    </div>
+    <div class="panel dark">
+      <h4>Dark — web console only, warm near-black, never OLED</h4>
+      <div class="swatches">
+        <div class="sw"><i style="background:#171614"></i><div><b>bg</b><span>#171614</span><small>warm near-black</small></div></div>
+        <div class="sw"><i style="background:#201e1b"></i><div><b>surface</b><span>#201e1b</span><small>cards, inputs</small></div></div>
+        <div class="sw"><i style="background:#2a2723"></i><div><b>surface-2</b><span>#2a2723</span><small>sunken, tracks</small></div></div>
+        <div class="sw"><i style="background:#302c27"></i><div><b>line</b><span>#302c27</span><small>hairlines</small></div></div>
+        <div class="sw"><i style="background:#423d37"></i><div><b>line-2</b><span>#423d37</span><small>input edges, ring track</small></div></div>
+        <div class="sw"><i style="background:#f3f0ea"></i><div><b>ink</b><span>#f3f0ea</span><small>text · the tick</small></div></div>
+        <div class="sw"><i style="background:#b4aea4"></i><div><b>ink-2</b><span>#b4aea4</span><small>secondary text</small></div></div>
+        <div class="sw"><i style="background:#8b857b"></i><div><b>ink-3</b><span>#8b857b</span><small>meta, paused ring</small></div></div>
+        <div class="sw"><i style="background:#46b06a"></i><div><b>brand</b><span>#46b06a</span><small>the ring · primary action</small></div></div>
+        <div class="sw"><i style="background:#1e3a28"></i><div><b>brand-tint</b><span>#1e3a28</span><small>selected, success</small></div></div>
+        <div class="sw"><i style="background:#d8ab4a"></i><div><b>warn</b><span>#d8ab4a</span><small>≤15 min, offline, waiting</small></div></div>
+        <div class="sw"><i style="background:#38300f"></i><div><b>warn-tint</b><span>#38300f</span><small>attention banner</small></div></div>
+        <div class="sw"><i style="background:#e5595c"></i><div><b>stop</b><span>#e5595c</span><small>time's up · destructive</small></div></div>
+        <div class="sw"><i style="background:#3a1d1e"></i><div><b>stop-tint</b><span>#3a1d1e</span><small>stop banner</small></div></div>
+      </div>
+    </div>
+  </div>
+
+  <h3 class="sub">Type — Figtree, and mono only for a code</h3>
+  <div class="card type">
+    <div class="row"><span class="k">Display · 56 / 800 / −0.03em · tabular</span><span class="num" style="font-size:56px;font-weight:800;letter-spacing:-.03em;line-height:1">1 h 12 min</span></div>
+    <div class="row"><span class="k">H1 · 28 / 700 / −0.02em</span><span style="font-size:28px;font-weight:700;letter-spacing:-.02em;line-height:1.15">Good afternoon</span></div>
+    <div class="row"><span class="k">H2 · 18 / 600</span><span style="font-size:18px;font-weight:600">Today's rules</span></div>
+    <div class="row"><span class="k">Body · 16 / 400</span><span>Time's up for today. You used all 90 minutes — screens come back tomorrow at 7:00.</span></div>
+    <div class="row"><span class="k">Small · 14 / 400</span><span style="font-size:14px">A parent can also unlock this computer from their console.</span></div>
+    <div class="row"><span class="k">Label · 13 / 600</span><span style="font-size:13px;font-weight:600;color:var(--ink-2)">Unlock code</span></div>
+    <div class="row"><span class="k">Meta · 12.5 / 500</span><span style="font-size:12.5px;font-weight:500;color:var(--ink-3)">Studio laptop · last seen 2 min ago</span></div>
+    <div class="row"><span class="k">Code · Space Mono 22 / 700</span><span style="font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:.06em">482 913</span></div>
+  </div>
+  <p class="note" style="margin-top:14px">Sentence case everywhere. No ALL-CAPS labels, no monospace outside a literal code. Numbers are set in Figtree with tabular figures so a counting number does not jitter. Umlauts are covered (Vali, Mika, Müller).</p>
+</section>
+
+<!-- ================================================================ 04 ICONS -->
+<section class="sec wrap" id="icons">
+  <div class="sec-h"><span class="n">04</span><div><h2>The icon set</h2><p class="lede">Forty-one monoline icons on a 24 px grid: 2 px stroke, round caps and joins, <code class="t">currentColor</code>, no fills except three tiny dots. The geometry rhymes with the clock — circles, arcs, and the twelve-tick wherever time is the subject. Each is a standalone file in <code class="t">icons/</code>, drawn with plain primitives so React and the egui SVG loader render the same shape.</p></div></div>
+
+  <div class="grid g2">
+    <div class="panel light">
+      <h4>Light · 24 px</h4>
+      <div class="icons">
+        <figure>{{icon:family}}<figcaption>family</figcaption></figure>
+        <figure>{{icon:person}}<figcaption>person</figcaption></figure>
+        <figure>{{icon:laptop}}<figcaption>laptop</figcaption></figure>
+        <figure>{{icon:home}}<figcaption>home</figcaption></figure>
+        <figure>{{icon:add}}<figcaption>add</figcaption></figure>
+        <figure>{{icon:settings}}<figcaption>settings</figcaption></figure>
+        <figure>{{icon:clock}}<figcaption>clock</figcaption></figure>
+        <figure>{{icon:give-time}}<figcaption>give-time</figcaption></figure>
+        <figure>{{icon:allowed-hours}}<figcaption>allowed-hours</figcaption></figure>
+        <figure>{{icon:sun}}<figcaption>sun</figcaption></figure>
+        <figure>{{icon:moon}}<figcaption>moon</figcaption></figure>
+        <figure>{{icon:week}}<figcaption>week</figcaption></figure>
+        <figure>{{icon:pause}}<figcaption>pause</figcaption></figure>
+        <figure>{{icon:play}}<figcaption>play</figcaption></figure>
+        <figure>{{icon:stop}}<figcaption>stop</figcaption></figure>
+        <figure>{{icon:lock}}<figcaption>lock</figcaption></figure>
+        <figure>{{icon:unlock}}<figcaption>unlock</figcaption></figure>
+        <figure>{{icon:key}}<figcaption>key</figcaption></figure>
+        <figure>{{icon:passkey}}<figcaption>passkey</figcaption></figure>
+        <figure>{{icon:ask}}<figcaption>ask</figcaption></figure>
+        <figure>{{icon:check}}<figcaption>check</figcaption></figure>
+        <figure>{{icon:close}}<figcaption>close</figcaption></figure>
+        <figure>{{icon:arrow-left}}<figcaption>arrow-left</figcaption></figure>
+        <figure>{{icon:arrow-right}}<figcaption>arrow-right</figcaption></figure>
+        <figure>{{icon:chevron-down}}<figcaption>chevron-down</figcaption></figure>
+        <figure>{{icon:chevron-right}}<figcaption>chevron-right</figcaption></figure>
+        <figure>{{icon:globe}}<figcaption>globe</figcaption></figure>
+        <figure>{{icon:apps}}<figcaption>apps</figcaption></figure>
+        <figure>{{icon:block}}<figcaption>block</figcaption></figure>
+        <figure>{{icon:offline}}<figcaption>offline</figcaption></figure>
+        <figure>{{icon:warning}}<figcaption>warning</figcaption></figure>
+        <figure>{{icon:info}}<figcaption>info</figcaption></figure>
+        <figure>{{icon:eye-off}}<figcaption>eye-off</figcaption></figure>
+        <figure>{{icon:bell}}<figcaption>bell</figcaption></figure>
+        <figure>{{icon:sign-out}}<figcaption>sign-out</figcaption></figure>
+        <figure>{{icon:copy}}<figcaption>copy</figcaption></figure>
+        <figure>{{icon:edit}}<figcaption>edit</figcaption></figure>
+        <figure>{{icon:remove}}<figcaption>remove</figcaption></figure>
+        <figure>{{icon:refresh}}<figcaption>refresh</figcaption></figure>
+        <figure>{{icon:menu}}<figcaption>menu</figcaption></figure>
+        <figure>{{icon:more}}<figcaption>more</figcaption></figure>
+      </div>
+      <div class="icons16">
+        {{icon:family}}{{icon:person}}{{icon:laptop}}{{icon:home}}{{icon:add}}{{icon:settings}}{{icon:clock}}{{icon:give-time}}{{icon:allowed-hours}}{{icon:sun}}{{icon:moon}}{{icon:week}}{{icon:pause}}{{icon:play}}{{icon:stop}}{{icon:lock}}{{icon:unlock}}{{icon:key}}{{icon:passkey}}{{icon:ask}}{{icon:check}}{{icon:close}}{{icon:arrow-left}}{{icon:arrow-right}}{{icon:chevron-down}}{{icon:chevron-right}}{{icon:globe}}{{icon:apps}}{{icon:block}}{{icon:offline}}{{icon:warning}}{{icon:info}}{{icon:eye-off}}{{icon:bell}}{{icon:sign-out}}{{icon:copy}}{{icon:edit}}{{icon:remove}}{{icon:refresh}}{{icon:menu}}{{icon:more}}
+        <span style="font-size:12px;color:var(--ink-3);margin-left:auto">16 px</span>
+      </div>
+    </div>
+    <div class="panel dark">
+      <h4>Dark · 24 px</h4>
+      <div class="icons">
+        <figure>{{icon:family}}<figcaption>family</figcaption></figure>
+        <figure>{{icon:person}}<figcaption>person</figcaption></figure>
+        <figure>{{icon:laptop}}<figcaption>laptop</figcaption></figure>
+        <figure>{{icon:home}}<figcaption>home</figcaption></figure>
+        <figure>{{icon:add}}<figcaption>add</figcaption></figure>
+        <figure>{{icon:settings}}<figcaption>settings</figcaption></figure>
+        <figure>{{icon:clock}}<figcaption>clock</figcaption></figure>
+        <figure>{{icon:give-time}}<figcaption>give-time</figcaption></figure>
+        <figure>{{icon:allowed-hours}}<figcaption>allowed-hours</figcaption></figure>
+        <figure>{{icon:sun}}<figcaption>sun</figcaption></figure>
+        <figure>{{icon:moon}}<figcaption>moon</figcaption></figure>
+        <figure>{{icon:week}}<figcaption>week</figcaption></figure>
+        <figure>{{icon:pause}}<figcaption>pause</figcaption></figure>
+        <figure>{{icon:play}}<figcaption>play</figcaption></figure>
+        <figure>{{icon:stop}}<figcaption>stop</figcaption></figure>
+        <figure>{{icon:lock}}<figcaption>lock</figcaption></figure>
+        <figure>{{icon:unlock}}<figcaption>unlock</figcaption></figure>
+        <figure>{{icon:key}}<figcaption>key</figcaption></figure>
+        <figure>{{icon:passkey}}<figcaption>passkey</figcaption></figure>
+        <figure>{{icon:ask}}<figcaption>ask</figcaption></figure>
+        <figure>{{icon:check}}<figcaption>check</figcaption></figure>
+        <figure>{{icon:close}}<figcaption>close</figcaption></figure>
+        <figure>{{icon:arrow-left}}<figcaption>arrow-left</figcaption></figure>
+        <figure>{{icon:arrow-right}}<figcaption>arrow-right</figcaption></figure>
+        <figure>{{icon:chevron-down}}<figcaption>chevron-down</figcaption></figure>
+        <figure>{{icon:chevron-right}}<figcaption>chevron-right</figcaption></figure>
+        <figure>{{icon:globe}}<figcaption>globe</figcaption></figure>
+        <figure>{{icon:apps}}<figcaption>apps</figcaption></figure>
+        <figure>{{icon:block}}<figcaption>block</figcaption></figure>
+        <figure>{{icon:offline}}<figcaption>offline</figcaption></figure>
+        <figure>{{icon:warning}}<figcaption>warning</figcaption></figure>
+        <figure>{{icon:info}}<figcaption>info</figcaption></figure>
+        <figure>{{icon:eye-off}}<figcaption>eye-off</figcaption></figure>
+        <figure>{{icon:bell}}<figcaption>bell</figcaption></figure>
+        <figure>{{icon:sign-out}}<figcaption>sign-out</figcaption></figure>
+        <figure>{{icon:copy}}<figcaption>copy</figcaption></figure>
+        <figure>{{icon:edit}}<figcaption>edit</figcaption></figure>
+        <figure>{{icon:remove}}<figcaption>remove</figcaption></figure>
+        <figure>{{icon:refresh}}<figcaption>refresh</figcaption></figure>
+        <figure>{{icon:menu}}<figcaption>menu</figcaption></figure>
+        <figure>{{icon:more}}<figcaption>more</figcaption></figure>
+      </div>
+      <div class="icons16">
+        {{icon:family}}{{icon:person}}{{icon:laptop}}{{icon:home}}{{icon:add}}{{icon:settings}}{{icon:clock}}{{icon:give-time}}{{icon:allowed-hours}}{{icon:sun}}{{icon:moon}}{{icon:week}}{{icon:pause}}{{icon:play}}{{icon:stop}}{{icon:lock}}{{icon:unlock}}{{icon:key}}{{icon:passkey}}{{icon:ask}}{{icon:check}}{{icon:close}}{{icon:arrow-left}}{{icon:arrow-right}}{{icon:chevron-down}}{{icon:chevron-right}}{{icon:globe}}{{icon:apps}}{{icon:block}}{{icon:offline}}{{icon:warning}}{{icon:info}}{{icon:eye-off}}{{icon:bell}}{{icon:sign-out}}{{icon:copy}}{{icon:edit}}{{icon:remove}}{{icon:refresh}}{{icon:menu}}{{icon:more}}
+        <span style="font-size:12px;color:var(--ink-3);margin-left:auto">16 px</span>
+      </div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:14px">Rules: the stroke never changes weight, even at 16 px (the grid is 24, so 16 px is a 1.33 px stroke — still crisp). Nothing is filled except the three dots in <i>more</i>, <i>info</i> and <i>warning</i>. No cog: settings is a pair of sliders, because you set a limit like a dial, not like machinery. No shield anywhere — a shield says guard, and this is a clock. The <i>stop</i> icon is a rounded square, not a hand or an octagon.</p>
+</section>
+
+<!-- ================================================================ 05 PRODUCT -->
+<section class="sec wrap" id="product">
+  <div class="sec-h"><span class="n">05</span><div><h2>The product in the brand</h2><p class="lede">Six real moments, drawn with real copy. Nothing here needs the brand explained to work; the brand is just why it looks the way it does.</p></div></div>
+
+  <!-- (a) LOCK -->
+  <h3 class="sub">a · The lock — on the device, full screen</h3>
+  <figure class="shot">
+    <div class="frame scroll"><div class="lock">
+      <span class="lockup">{{mark:size=16,color=ink3}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+      <div class="rw">{{ring:d=220,frac=1,color=stop,track=paper}}<div class="in"><b class="num">0</b><span>min left</span></div></div>
+      <h2>Time's up for today</h2>
+      <p class="detail">You used all 90 minutes. Screens come back tomorrow at 7:00.</p>
+      <div class="code">
+        <span class="label">Unlock code</span>
+        <div class="row"><div class="field focus num">482 9<span class="caret"></span></div><span class="btn secondary">Unlock</span></div>
+        <p class="hint">A parent's code from their console, or one of the recovery codes.</p>
+      </div>
+      <div class="or">or</div>
+      <span class="btn primary lg">{{icon:ask}}Ask for more time</span>
+      <p class="help">A parent can also unlock this computer from their console.</p>
+    </div></div>
+    <figcaption><b>The gauge completed, not an alarm raised.</b> Same paper, same ring, same type as the screen that let them in. The ring is the only red on the screen. The code field has focus so a parent standing there just types; digits group in threes in the one place mono is allowed. “Ask for more time” is the child's own way forward and is separate from the code. Wrong code: the ring flashes red once and the line reads “That's not the code — try again.” No shake, no siren.</figcaption>
+  </figure>
+
+  <!-- (b) WARNING -->
+  <h3 class="sub">b · The warning before a stop — small, not modal</h3>
+  <figure class="shot">
+    <div class="frame"><div class="desk">
+      <div class="win"><i></i><span class="l" style="top:56px;width:38%"></span><span class="l" style="top:80px;width:62%"></span><span class="l" style="top:104px;width:48%"></span><span class="l" style="top:128px;width:70%"></span><span class="l" style="top:152px;width:30%"></span></div>
+      <div class="notice">
+        <div>{{ring:d=44,frac=.94,color=warn,track=card}}</div>
+        <div>
+          <div class="app">{{mark:size=12}}OpenScreenTime</div>
+          <div class="t">5 minutes left — save your work</div>
+          <div class="s">Your time for today ends at 20:00.</div>
+          <div class="a"><span class="btn primary sm">Ask for more time</span><span class="btn quiet sm">OK</span></div>
+        </div>
+      </div>
+    </div></div>
+    <figcaption><b>A heads-up, not a takeover.</b> A normal desktop notification at 15, 5 and 1 minute, with the ring in amber and the two things a person can do. It never covers the work it is asking you to save; the full screen only goes up at zero. Amber is the transition colour and this is the one transition.</figcaption>
+  </figure>
+
+  <!-- (c) APP WINDOW + (d) LOGIN -->
+  <div class="cd">
+    <h3 class="sub">c · The app window — on the device</h3>
+    <h3 class="sub d">d · Signing in — two doors</h3>
+    <div>
+      <figure class="shot">
+        <div class="win-app">
+          <div class="tb">OpenScreenTime<i></i></div>
+          <div class="body">
+            <span class="lockup">{{mark:size=15}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+            <div class="rw">{{ring:d=168,frac=.64,track=paper}}<div class="in"><b class="num">27</b><span>min left</span></div></div>
+            <ul class="rules">
+              <li>{{icon:clock}}Every day<b class="num">1 h 15 min</b></li>
+              <li>{{icon:allowed-hours}}Screens on<b class="num">7:00 – 20:00</b></li>
+              <li>{{icon:moon}}Bedtime<b class="num">20:00</b></li>
+            </ul>
+            <span class="btn primary block">{{icon:ask}}Ask for more time</span>
+            <p class="promise">It counts your time and which apps and sites you use. It can't see your screen, your messages or what you type.</p>
+          </div>
+        </div>
+        <figcaption><b>The clock on the desk.</b> Time left, the ring, today's three rules in one glance, one verb. The honest footer stays in view — it is the product's thesis, not fine print.</figcaption>
+      </figure>
+    </div>
+        <figure class="shot">
+          <div class="frame"><div class="login"><div class="box">
+            <span class="lockup">{{mark:size=26}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+            <h2>Sign in</h2>
+            <p class="sub">Your own computer approves you. Nothing to remember.</p>
+            <span class="label">Your name</span>
+            <div class="field ph">e.g. philip</div>
+            <div style="height:12px"></div>
+            <span class="btn primary block">Continue</span>
+            <div class="or">or</div>
+            <span class="btn secondary block">{{icon:passkey}}Sign in with a passkey</span>
+          </div></div></div>
+          <figcaption><b>Two equal doors.</b> Type your name and your computer vouches for you, or use a passkey without typing anything. No password exists anywhere.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><div class="login"><div class="box">
+            <span class="lockup">{{mark:size=26}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+            <h2>Check your computer</h2>
+            <p class="sub">Philip's laptop is showing a 6-digit code. Type it here.</p>
+            <div class="digits"><i>4</i><i>8</i><i>2</i><em></em><i class="on">9</i><i></i><i></i></div>
+            <p class="hint num" style="margin:0 0 18px">Expires in 1:42 · <span style="color:var(--ink-2);font-weight:600">Cancel</span></p>
+            <p class="foot">Not at your computer? <span style="color:var(--ink);font-weight:600">Sign in with a passkey</span> instead.</p>
+          </div></div></div>
+          <figcaption><b>The second state.</b> One sentence says where the code is. Digits group in threes, the expiry counts down in plain sight, and the other door stays open.</figcaption>
+        </figure>
+  </div>
+
+  <!-- (e) FAMILY -->
+  <h3 class="sub" style="margin-top:48px">e · Family — the web console home</h3>
+  <figure class="shot">
+    <div class="frame scroll"><div class="shell">
+      <aside class="rail">
+        <span class="lockup">{{mark:size=17}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+        <nav class="nav">
+          <a class="on" href="#product">{{icon:family}}Family</a>
+          <a href="#product">{{icon:laptop}}Computers</a>
+          <a href="#product">{{icon:settings}}Settings</a>
+          <a href="#product">{{icon:person}}Me</a>
+        </nav>
+        <div class="today">Today</div>
+        <ul class="tl">
+          <li>{{ring:d=28,frac=.64,track=paper}}Mia<span class="m num">27 min</span></li>
+          <li>{{ring:d=28,frac=.5,state=paused,track=paper}}Noah<span class="m">paused</span></li>
+          <li>{{ring:d=28,frac=.47,track=paper}}Leo<span class="m num">1 h 36</span></li>
+          <li>{{ring:d=28,frac=0,state=none,track=paper}}Ada<span class="m">no limit</span></li>
+        </ul>
+        <div class="me">Philip {{icon:sign-out}}</div>
+      </aside>
+      <div class="main">
+        <div class="ph">
+          <div><div class="crumb">Family</div><h1>Good afternoon</h1><p class="verdict">Everyone is within their time. Mia asked for more.</p></div>
+          <span class="btn primary">{{icon:add}}Add a person</span>
+        </div>
+        <div class="pause"><span class="b">{{icon:pause}}</span><div><b>Pause everything</b><span>Stops every screen in the house. Press and hold to pause.</span></div></div>
+        <div class="people">
+          <div class="pc">
+            <div class="hd"><div class="av">{{ring:d=64,frac=.64}}<span class="face" style="background:#fce6cf">🦄</span></div><div><div class="nm">Mia</div><div class="meta">Kid · Mia's laptop</div></div></div>
+            <p class="time"><b class="num">27 min</b> left of 1 h 15 min</p>
+            <div class="req">{{icon:ask}}<span>Asked for 15 more minutes · 4 min ago</span><span class="sp"></span><span class="btn primary sm">Give 15 min</span><span class="btn quiet sm">Not now</span></div>
+          </div>
+          <div class="pc">
+            <div class="hd"><div class="av">{{ring:d=64,state=paused}}<span class="face" style="background:#d9e9f5;opacity:.7">🚀</span></div><div><div class="nm">Noah</div><div class="meta">Younger teen · Living room PC</div></div><span class="chip neutral">Paused</span></div>
+            <p class="time">Paused by you · 10 min ago</p>
+            <div class="req">{{icon:play}}<span>Time keeps for when you resume.</span><span class="sp"></span><span class="btn secondary sm">Resume</span></div>
+          </div>
+          <div class="pc">
+            <div class="hd"><div class="av">{{ring:d=64,frac=.47}}<span class="face" style="background:#dfeecf">🎮</span></div><div><div class="nm">Leo</div><div class="meta">Older teen · Leo's PC</div></div></div>
+            <p class="time"><b class="num">1 h 36 min</b> left of 3 h</p>
+          </div>
+          <div class="pc">
+            <div class="hd"><div class="av">{{ring:d=64,state=none}}<span class="face" style="background:#f7efc9">🐼</span></div><div><div class="nm">Ada</div><div class="meta">Little · Kitchen tablet</div></div></div>
+            <p class="time"><b class="num">12 min</b> today · no limit set</p>
+          </div>
+          <div class="pc">
+            <div class="hd"><div class="av">{{ring:d=64,frac=.3}}<span class="face mono" style="background:#e2e2f7;color:#3f3f86">P</span></div><div><div class="nm">Philip <span class="chip neutral" style="margin-left:6px">you</span></div><div class="meta">Your own day · private to you</div></div></div>
+            <p class="time"><b class="num">37 min</b> of a 2 h goal</p>
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <figcaption><b>The wall everyone reads.</b> What stays from today's Family page: the verdict sentence, hold-to-pause, cards sorted by who needs you, the parent's own card on the same wall. What changes: every ring now has its tick and means one thing; a parent's pause is a neutral tag and a dashed ring, not red; the nav has icons; the request has its two answers right there; “computer” is the word a person reads.</figcaption>
+  </figure>
+
+  <!-- (f) MY COMPUTER -->
+  <h3 class="sub" style="margin-top:48px">f · My computer — one adult, keeping time for themselves</h3>
+  <figure class="shot">
+    <div class="frame scroll"><div class="shell" style="min-height:0">
+      <aside class="rail">
+        <span class="lockup">{{mark:size=17}}<span class="open">Open</span><span class="st">ScreenTime</span></span>
+        <nav class="nav">
+          <a class="on" href="#product">{{icon:laptop}}My computer</a>
+          <a href="#product">{{icon:settings}}Settings</a>
+        </nav>
+        <div class="me" style="margin-top:auto">Jonas {{icon:sign-out}}</div>
+      </aside>
+      <div class="main">
+        <div class="ph">
+          <div><div class="crumb">My computer</div><h1>Studio laptop</h1><p class="verdict">Only you can see this. There is no parent here — the limits are the ones you set.</p></div>
+          <span class="chip ok">{{icon:check}}Online</span>
+        </div>
+        <div class="me-hero">
+          <div class="rw">{{ring:d=150,frac=.4,track=paper}}<div class="in"><b class="num long">1 h 48</b><span>min left</span></div></div>
+          <div>
+            <div class="big num">1 h 12 min used today <small>of the 3 h you set</small></div>
+            <p style="color:var(--ink-2);margin-top:6px;max-width:48ch">You're under your usual Wednesday. Focus hours end at 12:00 — the sites below open again then.</p>
+          </div>
+        </div>
+        <div class="mrules">
+          <div class="mrule"><div class="h">{{icon:clock}}My daily limit<span class="e">Edit</span></div><div class="v num">3 h <small>a day · a hard stop, with a 5-minute warning</small></div></div>
+          <div class="mrule"><div class="h">{{icon:allowed-hours}}My focus hours<span class="e">Edit</span></div><div class="v num">9:00 – 12:00 <small>Mon – Fri · blocked sites stay blocked</small></div></div>
+          <div class="mrule" style="grid-column:1 / -1"><div class="h">{{icon:block}}Sites I block for myself<span class="e">Edit</span></div>
+            <div class="chips"><span>{{icon:globe}}reddit.com</span><span>{{icon:globe}}youtube.com</span><span>{{icon:globe}}news.ycombinator.com</span><span>{{icon:globe}}twitter.com</span><span class="add">{{icon:add}}Add a site</span></div>
+          </div>
+        </div>
+        <div class="week">
+          <div class="h"><b>My week</b><span>average 2 h 05 min · goal 3 h</span></div>
+          <div class="bars">
+            <div class="goal" style="bottom:75%"><em>3 h</em></div>
+            <div class="bar"><i style="height:52%"></i><span><b>2 h 05</b>Thu</span></div>
+            <div class="bar"><i style="height:68%"></i><span><b>2 h 44</b>Fri</span></div>
+            <div class="bar"><i style="height:22%"></i><span><b>52 min</b>Sat</span></div>
+            <div class="bar"><i style="height:12%"></i><span><b>28 min</b>Sun</span></div>
+            <div class="bar"><i class="over" style="height:80%"></i><span><b>3 h 12</b>Mon</span></div>
+            <div class="bar"><i style="height:58%"></i><span><b>2 h 20</b>Tue</span></div>
+            <div class="bar"><i class="today" style="height:30%"></i><span><b>1 h 12</b>Wed</span></div>
+          </div>
+        </div>
+        <div class="devrow">{{icon:laptop}}<span>Studio laptop · Fedora 42 · last seen just now</span><span class="sp"></span><span style="font-size:13px;color:var(--ink-3)">Unlock code and recovery codes are in Settings</span></div>
+      </div>
+    </div></div>
+    <figcaption><b>The clock on your own desk.</b> No family, no bracket, no “parent” anywhere in the copy. The same ring, the same three rules, the same honesty: Monday went over and the bar says so in the one red. The verdict names what happens next (“the sites below open again at 12:00”) instead of grading the person.</figcaption>
+  </figure>
+</section>
+
+<!-- ================================================================ 06 VOICE -->
+<section class="sec wrap" id="voice">
+  <div class="sec-h"><span class="n">06</span><div><h2>Voice</h2><p class="lede">Calm, kind, firm — in that order, never traded against each other. The fact is always stated; the kindness is in how, and in what comes next. Sentence case. Second person. One verb per screen.</p></div></div>
+  <div class="voice">
+    <div class="pair"><div class="m">Time's up (kid)</div><div class="say">{{icon:check}}<q>Time's up for today. You used all 90 minutes — ask a parent, or earn a few more.</q></div><div class="not">{{icon:close}}<q>Session terminated. Daily limit exceeded.</q><small>A system event, and a verdict. Neither is a clock.</small></div></div>
+    <div class="pair"><div class="m">Time's up (adult, self-set)</div><div class="say">{{icon:check}}<q>You've used the 3 hours you set for today. Pausing in 60 seconds.</q></div><div class="not">{{icon:close}}<q>You've reached a great stopping point!</q><small>Cheer that hides the stop. Say the stop.</small></div></div>
+    <div class="pair"><div class="m">Request denied</div><div class="say">{{icon:check}}<q>Not this time. A parent said no for now — you can ask again later.</q></div><div class="not">{{icon:close}}<q>REQUEST DENIED</q><small>Caps and a courtroom. The refusal is honest, not cold.</small></div></div>
+    <div class="pair"><div class="m">Computer offline (soft)</div><div class="say">{{icon:check}}<q>Offline — it keeps today's rules and catches up when it's back.</q><small>Amber. No notification: a blip is not a human's problem.</small></div><div class="not">{{icon:close}}<q>Connection lost! Device unreachable.</q><small>Red and an exclamation mark for something that is fine.</small></div></div>
+    <div class="pair"><div class="m">A parent pauses the computer</div><div class="say">{{icon:check}}<q>Paused. A parent paused this computer — save your work. It comes back when they lift it.</q></div><div class="not">{{icon:close}}<q>Device locked by administrator.</q><small>Nobody at home is an administrator.</small></div></div>
+    <div class="pair"><div class="m">Five minutes left</div><div class="say">{{icon:check}}<q>5 minutes left — save your work.</q><small>Title is the fact; body is what to do.</small></div><div class="not">{{icon:close}}<q>⚠️ WARNING: 5 MIN REMAINING</q><small>An alarm for a transition.</small></div></div>
+    <div class="pair"><div class="m">First run, on the device</div><div class="say">{{icon:check}}<q>This computer keeps track of screen time. It counts your time and blocks a few things online. Here's the honest version — read on, or skip.</q></div><div class="not">{{icon:close}}<q>Welcome to OpenScreenTime! Let's get you protected 🎉</q><small>Protected from what? Cutesy warmth is not warmth.</small></div></div>
+    <div class="pair"><div class="m">Wrong unlock code</div><div class="say">{{icon:check}}<q>That's not the code — try again.</q><small>One red flash of the ring, then it settles.</small></div><div class="not">{{icon:close}}<q>ACCESS DENIED</q><small>The surveillance voice the brand left.</small></div></div>
+  </div>
+</section>
+
+<footer><div class="wrap"><span>OpenScreenTime · brand board · the house clock</span><span>Files: mark, lockups, app icon, favicon, tray states, OG card, 41 icons</span></div></footer>
+
+</body>
+</html>

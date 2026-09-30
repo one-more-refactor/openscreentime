@@ -1,0 +1,51 @@
+/* ============================================================================
+   ADD A PERSON — the person, then their computer.
+   ========================================================================== */
+.add-form { display: flex; flex-direction: column; gap: 22px; }
+.add-group { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.add-group > legend { margin-bottom: 8px; padding: 0; }
+.add-optional { margin-left: 8px; font-weight: 500; color: var(--ink-3); }
+.add-date { max-width: 16rem; }
+
+.add-brackets { display: grid; gap: 6px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 560px) { .add-brackets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.add-bracket {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+.add-bracket:hover { background: var(--surface-2); }
+.add-bracket:active { transform: scale(0.97); }
+.add-bracket[data-on="true"] { background: var(--brand-tint); color: var(--brand-ink); border-color: var(--brand); }
+.add-bracket-label { font-size: 0.875rem; font-weight: 600; line-height: 1.2; text-align: center; }
+.add-bracket-range { font-size: 0.78125rem; opacity: 0.8; }
+.add-blurb { min-height: 2.6em; font-size: 0.875rem; color: var(--ink-2); }
+
+.add-two { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+@media (max-width: 760px) { .add-two { grid-template-columns: 1fr; } }
+.add-step { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.add-step .h2 { margin: 0; }
+.add-n {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.add-note { margin-top: 16px; }
+.add-done { display: flex; gap: 8px; margin-top: 20px; flex-wrap: wrap; }

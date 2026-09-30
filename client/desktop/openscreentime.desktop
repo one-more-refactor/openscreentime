@@ -1,13 +1,16 @@
 [Desktop Entry]
 # Managed by OpenScreenTime — installed to /usr/share/applications by
 # `ost install-service` (GUI build), removed by `ost uninstall`.
+# StartupWMClass matches the window's Wayland app id / X11 class, so the dock
+# shows the running window under this entry and this icon.
 Type=Application
 Name=OpenScreenTime
 GenericName=Screen time
-Comment=See how much screen time is left — and exactly what OpenScreenTime can and can't see
+Comment=How much time is left today — and exactly what OpenScreenTime can and can't see
 Exec=/usr/local/bin/openscreentime app
 Icon=openscreentime
 Terminal=false
 Categories=Utility;System;
 StartupNotify=true
+StartupWMClass=openscreentime
 Keywords=screen time;screentime;parental;limit;time left;

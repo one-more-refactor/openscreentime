@@ -1,50 +1,46 @@
-// The OpenScreenTime wordmark. Replaces the old LED dot-matrix "SENTINEL"
-// mark — the rebrand's most visible change and the first step away from the
-// loud Nothing-style aesthetic toward "warm, not loud": a clean typographic
-// lockup, tight tracking, one weight contrast, no accent noise.
-//
-// "Open" reads as the quiet qualifier; "ScreenTime" carries the name. One
-// component, one place to retune, used in the top bar, login, and anywhere
-// the product needs to sign its name.
+// The OpenScreenTime lockup (brand/gen.py `lockup_h`): the mark, then "Open"
+// in 500 ink-2 and "ScreenTime" in 700 ink, tracked −0.02em. The mark box is
+// 0.96 × the type size and sits 0.22 × to the left of the text.
+
+/** The mark: the ring at a fixed 40 %, with its tick at twelve. */
+export function Mark({ size = 24, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      className={`mark ${className}`}
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      aria-hidden="true"
+    >
+      <circle cx="32" cy="32" r="22" fill="none" stroke="var(--line-2)" strokeWidth="7" />
+      <path d="M32 10A22 22 0 0 1 44.93 49.8" fill="none" stroke="var(--brand)" strokeWidth="7" />
+      <circle cx="44.93" cy="49.8" r="3.5" fill="var(--brand)" />
+      <path d="M32 4.5v11" stroke="var(--ink)" strokeWidth="3" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
 
 interface Props {
-  /** Font size in rem for the wordmark. The rest scales from it. */
+  /** Type size in rem. The mark and the gap scale from it. */
   size?: number;
-  /** Override the ink color (defaults to the theme foreground). */
-  color?: string;
   className?: string;
 }
 
-export function Wordmark({ size = 1.0625, color = "var(--fg)", className = "" }: Props) {
+export function Wordmark({ size = 1.0625, className = "" }: Props) {
   return (
     <span
-      className={`inline-flex items-baseline select-none ${className}`}
-      style={{
-        fontSize: `${size}rem`,
-        letterSpacing: "-0.015em",
-        lineHeight: 1,
-        color,
-      }}
+      className={`lockup ${className}`}
+      style={{ fontSize: `${size}rem` }}
+      role="img"
       aria-label="OpenScreenTime"
     >
-      {/* the marque: the activity ring, sized to the x-height. The green is time USED — a
-          small arc, most of the day still ahead — the same reading as AvatarRing. */}
-      <svg
-        viewBox="0 0 64 64"
-        aria-hidden="true"
-        style={{ width: "0.95em", height: "0.95em", marginRight: "0.4em", alignSelf: "center" }}
-      >
-        <circle cx="32" cy="32" r="22" fill="none" stroke="var(--line-2)" strokeWidth="9" />
-        <path
-          d="M 32 10 A 22 22 0 0 1 53.67 35.82"
-          fill="none"
-          stroke="var(--ok)"
-          strokeWidth="9"
-          strokeLinecap="round"
-        />
-      </svg>
-      <span style={{ fontWeight: 400, color: "var(--fg-dim)" }}>Open</span>
-      <span style={{ fontWeight: 600 }}>ScreenTime</span>
+      <Mark className="lockup-mark" />
+      <span className="lockup-open" aria-hidden="true">
+        Open
+      </span>
+      <span className="lockup-st" aria-hidden="true">
+        ScreenTime
+      </span>
     </span>
   );
 }

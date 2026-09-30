@@ -1,0 +1,17 @@
+[Desktop Entry]
+# Managed by OpenScreenTime — installed to /etc/xdg/autostart by
+# `ost install-service` (tray build), removed by `ost uninstall`.
+# Starts the per-user companion on every desktop login: the one channel for
+# "5 minutes left" warnings and "You're back". Also started by the
+# openscreentime-tray user unit where a systemd user session exists; the
+# companion keeps a single instance, so both can fire.
+Type=Application
+Name=OpenScreenTime companion
+Comment=Warns before the screen stops, and tells you when you're back
+Exec=/usr/local/bin/openscreentime tray
+Icon=openscreentime
+StartupWMClass=openscreentime
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Applications

@@ -34,6 +34,11 @@ type CommandRow = (
 
 /// GET /api/devices/:id/commands — the device's queue, pending first, then
 /// recent history (newest first inside each group).
+///
+/// Sign-in codes (`login_code`) are never listed: they are a person's way in,
+/// meant for that person's own screen — a session that could read them here
+/// could confirm-it's-them with a code it never had to see on the computer.
+/// (Their rows are emptied as soon as they're delivered anyway.)
 pub async fn list_for_device(
     State(st): State<AppState>,
     admin: AuthAdmin,
@@ -45,7 +50,7 @@ pub async fn list_for_device(
     let rows: Vec<CommandRow> = sqlx::query_as(
         "SELECT id, type, payload, status, result, created_at, sent_at, acked_at
          FROM commands
-         WHERE device_id = $1
+         WHERE device_id = $1 AND type <> 'login_code'
          ORDER BY (status IN ('queued','sent')) DESC, created_at DESC
          LIMIT $2",
     )
@@ -84,6 +89,7 @@ pub async fn cancel(
         "UPDATE commands SET status = 'cancelled'
          WHERE id = $1
            AND status IN ('queued','sent')
+           AND type <> 'login_code'
            AND device_id IN (SELECT id FROM devices WHERE tenant_id = $2)
          RETURNING device_id, type",
     )
@@ -102,17 +108,23 @@ pub async fn cancel(
 /// Daily janitor: settled commands older than 30 days serve no purpose — the
 /// event log is the durable audit trail, the queue is operational state.
 pub fn spawn_janitor(st: AppState) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-        loop {
-            tick.tick().await;
-            let _ = sqlx::query(
-                "DELETE FROM commands
-                 WHERE status IN ('acked','failed','cancelled')
-                   AND created_at < now() - interval '30 days'",
-            )
-            .execute(&st.db)
-            .await;
+    crate::supervise::spawn("command-janitor", move || {
+        let db = st.db.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                tick.tick().await;
+                if let Err(e) = sqlx::query(
+                    "DELETE FROM commands
+                     WHERE status IN ('acked','failed','cancelled')
+                       AND created_at < now() - interval '30 days'",
+                )
+                .execute(&db)
+                .await
+                {
+                    tracing::warn!(error = %e, "command janitor failed");
+                }
+            }
         }
     });
 }

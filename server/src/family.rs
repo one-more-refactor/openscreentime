@@ -30,12 +30,19 @@ type FamilyUserRow = (
     Option<Uuid>, // du.profile_id
     i32,          // used_seconds today (ledger columns are int4)
     i32,          // earned_seconds today
+    Option<i32>,  // d.utc_offset_secs (the device's local day)
 );
 
 struct Child {
     account: AccountRow,
     used_minutes: i64,
     earned_minutes: i64,
+    used_secs: i64,
+    earned_secs: i64,
+    /// UTC offset of one of their devices (for "when do screens stop").
+    utc_offset_secs: Option<i32>,
+    /// The latest parent override one of their computers reports running.
+    override_until: Option<DateTime<Utc>>,
     devices: Vec<Value>,
     pending_requests: usize,
     locked: bool,
@@ -59,17 +66,19 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     .fetch_all(&st.db)
     .await?;
 
-    // 3. Every device_user in the tenant with today's usage.
-    let user_rows: Vec<FamilyUserRow> = sqlx::query_as(
+    // 3. Every device_user in the tenant with today's usage — "today" on each
+    //    device's own calendar, the day its agent enforces (not UTC).
+    let user_rows: Vec<FamilyUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.account_id, du.profile_id,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
            LEFT JOIN screen_time_ledger l
-                  ON l.device_user_id = du.id AND l.day = CURRENT_DATE
+                  ON l.device_user_id = du.id AND l.day = {}
           WHERE d.tenant_id = $1
           ORDER BY du.os_username",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(admin.tenant_id)
     .fetch_all(&st.db)
     .await?;
@@ -78,7 +87,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
     let cmd_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT c.device_id, c.type FROM commands c
            JOIN devices d ON d.id = c.device_id
-          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent')
+          WHERE d.tenant_id = $1 AND c.status IN ('queued','sent') AND c.type <> 'login_code'
           ORDER BY c.created_at",
     )
     .bind(admin.tenant_id)
@@ -91,7 +100,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
 
     // 5. Profiles (the rules editor needs the full list), as JSON and as a
     //    policy map for limits/blocks.
-    let profiles = crate::profiles::list_for_tenant(&st.db, admin.tenant_id).await?;
+    //    A self-managed person's own rules are not in it (list_for_tenant):
+    //    their limit, focus hours and blocked sites are theirs alone.
+    let profiles =
+        crate::profiles::list_for_tenant(&st.db, admin.tenant_id, admin.admin_id).await?;
     let mut policies: HashMap<Uuid, Policy> = HashMap::new();
     if let Some(list) = profiles.as_array() {
         for p in list {
@@ -127,10 +139,29 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         }
     }
 
-    // Devices, with liveness, pending chips and spare keys folded in.
+    // Devices, with liveness, pending chips and spare keys folded in — and
+    // how many of their logins nobody has said who they are (Who's who).
     let recovery = crate::devices::recovery_unused_by_device(&st.db, admin.tenant_id).await?;
+    let unsorted: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT du.device_id, count(*) FROM device_users du
+           JOIN devices d ON d.id = du.device_id
+          WHERE d.tenant_id = $1 AND du.unsorted
+          GROUP BY du.device_id",
+    )
+    .bind(admin.tenant_id)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
     let mut devices_json = Vec::with_capacity(device_rows.len());
     let mut device_meta: HashMap<Uuid, (String, String, bool, bool)> = HashMap::new();
+    // What each computer last said it is (its `state` frame): the overrides
+    // it is running, per login.
+    let last_state: HashMap<Uuid, Value> = device_rows
+        .iter()
+        .filter_map(|r| r.14.clone().map(|s| (r.0, s)))
+        .collect();
+    let now = Utc::now();
     for r in &device_rows {
         let mut d = device_to_json(r);
         let p = pending.get(&r.0).cloned().unwrap_or_default();
@@ -139,6 +170,7 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         let lp = lock_pending(&p, r.14.as_ref());
         d["lock_pending"] = json!(lp);
         d["pending_commands"] = json!(p);
+        d["unsorted_logins"] = json!(unsorted.get(&r.0).copied().unwrap_or(0));
         device_meta.insert(r.0, (r.2.clone(), r.6.clone(), r.13, lp));
         devices_json.push(d);
     }
@@ -151,6 +183,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             account,
             used_minutes: 0,
             earned_minutes: 0,
+            used_secs: 0,
+            earned_secs: 0,
+            utc_offset_secs: None,
+            override_until: None,
             devices: Vec::new(),
             pending_requests: 0,
             locked: false,
@@ -162,7 +198,8 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .map(|(i, c)| (c.account.0, i))
         .collect();
 
-    for (du_id, device_id, os_username, account_id, _profile_id, used, earned) in user_rows {
+    for (du_id, device_id, os_username, account_id, _profile_id, used, earned, offset) in user_rows
+    {
         let Some(i) = account_id.and_then(|a| index.get(&a).copied()) else {
             continue;
         };
@@ -171,8 +208,15 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             .cloned()
             .unwrap_or_else(|| ("unknown".into(), "offline".into(), false, false));
         let c = &mut children[i];
-        c.used_minutes += i64::from(used) / 60;
-        c.earned_minutes += i64::from(earned) / 60;
+        c.used_secs += i64::from(used);
+        c.earned_secs += i64::from(earned);
+        // Minutes of the person's total, like the device shows (not a sum of
+        // per-device floors, which drifted up to a minute per device).
+        c.used_minutes = c.used_secs / 60;
+        c.earned_minutes = c.earned_secs / 60;
+        c.utc_offset_secs = c.utc_offset_secs.or(offset);
+        let ov = crate::ledger::reported_override(last_state.get(&device_id), &os_username, now);
+        c.override_until = c.override_until.max(ov);
         c.pending_requests += asks_by_du.get(&du_id).copied().unwrap_or(0);
         c.locked |= dev_locked;
         c.devices.push(json!({
@@ -184,6 +228,19 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
             "lock_pending": dev_lock_pending,
             "os_username": os_username,
         }));
+    }
+
+    // Today on computers that were removed: still their day.
+    for (account, kept) in crate::ledger::kept_today(&st.db, admin.tenant_id, None).await? {
+        let Some(&i) = index.get(&account) else {
+            continue;
+        };
+        let c = &mut children[i];
+        c.used_secs += kept.used_secs;
+        c.earned_secs += kept.earned_secs;
+        c.used_minutes = c.used_secs / 60;
+        c.earned_minutes = c.earned_secs / 60;
+        c.utc_offset_secs = c.utc_offset_secs.or(kept.utc_offset_secs);
     }
 
     children.sort_by_key(|c| c.account.2.to_lowercase());
@@ -202,6 +259,10 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
         .into_iter()
         .map(|c| {
             let bracket = members::bracket_of(&c.account);
+            // An adult (or anyone who manages themselves) sets their own
+            // rules, and the hub doesn't see them: their policy isn't in
+            // `policies` (it was dropped with the profile list), so the limit,
+            // the stop, and the blocks all come out empty. Minutes stay.
             let policy = c.account.9.and_then(|p| policies.get(&p));
             let limit = policy.and_then(members::limit_minutes);
             let profile_name = c
@@ -221,10 +282,34 @@ pub async fn get_family(State(st): State<AppState>, admin: AuthAdmin) -> AppResu
                 .unwrap_or_default();
             let mut v = members::account_json(&c.account);
             v["key"] = json!(c.account.0);
+            // The id every per-person call addresses (edit, remove, where the
+            // time went). The console declares it; without it those calls
+            // went to `/api/members/undefined`, and "where the time went"
+            // fell back to the parent's own day (acceptance round 4).
+            v["account_id"] = json!(c.account.0);
             v["name"] = json!(c.account.2);
             v["used_minutes"] = json!(c.used_minutes);
             v["earned_minutes"] = json!(c.earned_minutes);
             v["limit_minutes"] = json!(limit);
+            // Time left, the number their computer shows: the agent's own
+            // rules function with the same inputs — their use and grants
+            // today and the override their computer reports (an unlock code,
+            // a grant) — on the computer's clock. `rules` says when and why.
+            let day = policy.map(|p| {
+                crate::ledger::console_day(
+                    p,
+                    c.used_secs,
+                    c.earned_secs,
+                    c.utc_offset_secs,
+                    c.override_until,
+                    now,
+                )
+            });
+            v["left_minutes"] = json!(day.as_ref().and_then(|d| d.left_minutes));
+            v["rules"] = day.map(|d| d.rules).unwrap_or(Value::Null);
+            // The computer's clock (the first of theirs that reported one),
+            // for everything that describes its day.
+            v["utc_offset_secs"] = json!(c.utc_offset_secs);
             v["profile_name"] = profile_name;
             v["devices"] = json!(c.devices);
             v["pending_requests"] = json!(c.pending_requests);

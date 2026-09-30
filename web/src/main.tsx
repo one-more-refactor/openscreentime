@@ -9,11 +9,16 @@ import "@fontsource-variable/figtree/wght.css";
 import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
 import "./theme.css";
-import "./addon.css";
-import "./me.css";
+import "./styles/family.css";
+import "./styles/computers.css";
+import "./styles/settings.css";
+import "./styles/sign-in.css";
+import "./styles/add.css";
+import "./styles/person.css";
+import "./styles/me.css";
 
 // Warm light by default for a brand-new visitor; any explicit prior choice
-// (including follow-system) is respected. Runs before first paint.
+// (including "match my system") is respected.
 initTheme();
 
 const root = document.getElementById("root");

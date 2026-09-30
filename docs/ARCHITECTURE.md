@@ -1,326 +1,209 @@
 # OpenScreenTime architecture
 
-This is the technical map of how OpenScreenTime is put together: the four components,
-how they talk, how enforcement actually works on a device, and the trust
-boundaries that decide what the software can and cannot promise. It's written
-against the code — where a limitation exists, it's named rather than rounded up.
-
-For audience-specific guides see the [docs index](README.md). This document is
-for people building on, operating, or auditing the system.
-
----
+The technical map: the parts, how they talk, how a computer counts and stops,
+and the trust boundaries. Written against the code; where something is
+limited, it says so. The docs index ([`README.md`](README.md)) points to the
+doc that owns each detail.
 
 ## The shape of it
 
-OpenScreenTime is a self-hosted, zero-trust device manager for families and small
-organizations. One server holds policy and identity; each managed device runs a
-root agent that enforces that policy locally and keeps working when the server
-is unreachable. Everything is owned by the operator — their VPS, their domain,
-their data.
+A self-hosted **house clock**: one server holds the household's people, rules
+and history; each Linux computer runs a root agent that counts time, stops the
+screen and blocks what was blocked — and keeps doing all of that when the
+server is unreachable. **Allow by default**: nothing is blocked until someone
+blocks it. Everything runs on the operator's own machine.
 
 ```
-        ┌──────────────────────────────────────────────┐
-        │  Web control center (web/)                     │  Bun · React · Vite
-        │  Nothing-style monochrome UI · passkey login   │  Tailwind
-        └───────────────────────┬────────────────────────┘
-                                │ HTTPS / JSON — admin API, session cookie
-        ┌───────────────────────▼────────────────────────┐
-        │  Server (server/)                               │  Rust · Axum · SQLx
-        │  passkey auth · policy engine · command queue   │  Postgres · multi-tenant
-        │  event log · anti-cheat checks · phone alerts   │  serves the built SPA
-        └───────────────────────┬────────────────────────┘
-                                │ HTTPS + WebSocket — agent API, device-token bearer
-        ┌───────────────────────▼────────────────────────┐
-        │  Agent (client/)                                │  Rust · static binary
-        │  DNS + firewall · screen-time · tamper resist   │  systemd · per-user
-        │  usage ledger · lockout UI · tray companion     │  headless by default
-        └─────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────┐
+  │ Console (web/)                           │  React · Vite · Tailwind
+  │ Family · a person · Computers · Settings │  session cookie
+  └────────────────────┬─────────────────────┘
+                       │ HTTPS / JSON
+  ┌────────────────────▼─────────────────────┐
+  │ Server (server/)                         │  Rust · Axum · SQLx · Postgres
+  │ sign-in · rules · requests · usage       │  serves the console too
+  │ command queue · events · alerts · ops    │
+  └────────────────────┬─────────────────────┘
+                       │ HTTPS + WebSocket — the agent dials out, device-token bearer
+  ┌────────────────────▼─────────────────────┐
+  │ Agent (client/), one per computer        │  Rust · systemd · root
+  │ measure · rules · the lock · DNS + nft   │  app window + companion (desktop build)
+  └──────────────────────────────────────────┘
 
-        policy/ — the shared Policy document type, a path dependency of BOTH
-                  server and client, so the wire contract can't drift.
+  policy/ — the rules document and rules::evaluate, a dependency of server AND agent;
+            the console checks the same schedule vectors (policy/tests/schedule-vectors.json).
 ```
 
-| Path      | What it is                                              | Stack                      |
-|-----------|---------------------------------------------------------|----------------------------|
-| `server/` | Backend API, auth, policy engine, agent bus, anti-cheat | Rust, Axum, SQLx, Postgres |
-| `web/`    | Admin control center (the "Nothing" UI)                 | Bun, React, Vite, Tailwind |
-| `client/` | Linux device agent                                      | Rust                       |
-| `policy/` | Shared `Policy` document (used by server **and** client)| Rust                       |
+`web/src/types.ts` mirrors the Rust shapes by hand; keep it in step.
 
-The `policy/` crate is the load-bearing detail: because both sides depend on the
-same Rust type, a policy written by the server deserializes into the exact same
-structure the agent enforces. `web/src/types.ts` is a hand-maintained mirror of
-those shapes (no codegen) — keep it in step when the Rust changes.
+## Server (`server/`)
 
----
+Axum over SQLx/Postgres, one origin: it serves the built console itself
+(`static_web.rs`), so there's no production CORS beyond `OST_PUBLIC_URL`, from
+which the passkey domain, origin and cookie security are derived
+(`settings.rs`). Migrations run on start.
 
-## Components
+- **Sign-in** — two doors (docs/AUTH.md): your name → a 6-digit code on your
+  own computer (`login_code.rs`), or a discoverable passkey (`auth.rs`); SSO
+  when configured (`auth_oidc.rs`); one-time vouchers from `ost login` and
+  recovery links (`voucher.rs`, `recover.rs`). Sessions are DB-backed, sha256
+  at rest. Inside, only the keys ask again: `confirm.rs` is a layer over
+  `/api` that answers `428 step_up_required` until a 15-minute window is open.
+- **People and rules** — every person is an account with a role and an age
+  bracket (`members.rs`); their rules are their own profile, seeded from the
+  bracket preset (`presets.rs`, `profiles.rs`). A member session reaches `/me`
+  only. Adults' own rules (`/api/me/rules`) are not the hub's.
+- **Computers** — enrollment spends a one-time token for a long-lived device
+  token (`agent.rs`), links each OS login to a person (`members.rs`
+  `link_os_user`), and holds the unlock-code secret (`unlock_code.rs`).
+- **Command queue** — `commands` rows, pushed over the WebSocket when the
+  agent is connected, else pulled on its next heartbeat. Pause and Resume are
+  `lock` / `unlock`; the console reads the result from the agent's ack and
+  `state` frame, never from its own intention.
+- **Usage** — the agent reports its own seconds per login under its
+  device-local day; the server files them (`ledger.rs`) and answers with what
+  the same person used elsewhere, so one daily limit spans all their
+  computers. Where the time went (`usage.rs`) is stored per hour and shown
+  according to the person's bracket.
+- **Events** — the agent's reports and the server's audit, ingested
+  idempotently by the agent's event id (`events.rs`).
+- **Alerts** — a webhook and/or a Telegram bot for the moments a person is
+  needed; the bot also answers time requests (`alerts.rs`, `telegram.rs`).
+  A paired companion has its own narrow bearer API (`parent.rs`).
+- **The appliance** — `/health` checks the database (`ops.rs`); background
+  loops restart themselves (`supervise.rs`); a retention sweep prunes
+  sessions, codes, 21-day usage slices and 90-day events; operator problems
+  alert once per incident. `deploy/` starts it at boot, backs it up nightly
+  and updates it daily with a rollback (docs/DEPLOY.md).
+- **Agent builds** — the image bundles a headless (musl) and a desktop
+  (glibc, `gui,tray`) agent; `/install.sh` and `/api/agent/*` serve them
+  (`agent_dist.rs`).
 
-### Server (`server/`)
+Every handler takes an extractor (`AuthAdmin`, `AgentAuth`, `ParentAuth` in
+`state.rs`) that authenticates and carries `tenant_id`; queries filter on it.
+A fixed-window limiter guards the unauthenticated surfaces (`rate_limit.rs`).
 
-Axum over SQLx/Postgres, multi-tenant, single origin. It also serves the built
-web SPA itself (`static_web.rs`, `OST_WEB_DIR`, SPA fallback), so there's
-one origin and no production CORS. Responsibilities:
+## Agent (`client/`)
 
-- **Admin auth** — passkeys only (WebAuthn/FIDO2 via `webauthn-rs`). No
-  passwords anywhere. Sessions are DB-backed (`admin_sessions`), the cookie
-  carries a random token and the DB stores its sha256 (`auth.rs`).
-- **Device identity** — enrollment mints a one-time token; the agent exchanges
-  it for a long-lived `device_token` (sha256-at-rest) it sends as a bearer.
-- **Policy engine** — profiles hold a `Policy`; devices/users resolve to an
-  effective policy. Edits enqueue `apply_policy`.
-- **Command queue** — server→agent actions (`commands` table), delivered over
-  the WS bus immediately when connected, else pulled on the next heartbeat.
-- **Event log** — the agent's telemetry and the server's own audit trail
-  (`events` table); it's the record, and it isn't auto-pruned.
-- **Anti-cheat checks** — cross-checks each heartbeat against known state and
-  records an `evasion` event when they disagree (see [Anti-cheat](#anti-cheat)).
-- **Parent companion surface** — a scoped, revocable bearer token
-  (`parent_access_tokens`) an admin mints from Settings, accepted only on the
-  narrow `/api/parent/*` routes (list pending time requests, approve/deny, read
-  alerts). It is not a session and not tied to a passkey; it cannot reach
-  policy, devices, or admin settings. This is the auth the tray
-  parent-mode uses.
-- **Phone alerts** — an optional background worker (`alerts.rs`) that sends
-  one-way chat-bot messages (Discord/Slack webhook or Telegram) on confirmed
-  tamper, device lockdown, and new time requests. Send-only: no inbound webhook,
-  no bot polling. Configured via env; a no-op when unset.
+One Rust binary, root, under systemd (`openscreentime-agent.service`, a
+watchdog timer). `runner.rs` orchestrates:
 
-The extractors in `state.rs` are the auth "middleware": a handler that takes
-`AuthAdmin` gets admin-session auth for free; one that takes `AgentAuth` gets
-device-token auth. Rate limiting is a fixed-window in-memory limiter keyed per
-scope (`auth`, `enroll`, `dist`), applied as a route layer.
-
-### Agent (`client/`)
-
-A single static Rust binary, run as root by systemd, headless by default. The
-`run` loop (`runner.rs`) is the orchestrator: connect the WS bus (falling back
-to heartbeat polling), pull per-user policy, and run an **enforcement tick**
-every 10s that accounts screen time, evaluates lockouts, re-asserts tamper
-defenses, and reports usage. Enforcement primitives:
-
-- **DNS** (`enforce/dns.rs`) — pins `/etc/resolv.conf` to a local resolver
-  (dnsmasq), sets the immutable bit, re-pins on drift.
-- **Firewall** (`enforce/firewall.rs`) — an `nft` table (`inet openscreentime`),
-  default-deny, applied atomically (`add; delete; table{}` in one `nft -f` so a
-  bad rule can never leave the host with no table).
-- **Screen time** (`enforce/screentime.rs`) — per-Linux-user active-seat
-  accounting via `loginctl` (idle sessions excluded), enforced by the cgroup-v2
-  freezer. A persistent [usage ledger](#the-usage-ledger) survives restarts.
-- **Tamper resistance** (`tamper.rs`) — polkit masking of power/stop controls,
-  a watchdog heartbeat file, NM disconnect guard, and re-assertion of DNS/nft
-  drift. See [TAMPER.md](TAMPER.md) for the honest threat model.
-
-Two Cargo features gate optional local UI, both off by default so the fleet
-build stays minimal:
-
-- `gui` (eframe/egui) — the full-screen lockout overlay, spawned as a detached
-  `__lockout` subprocess so its blocking event loop never stalls the tick.
-- `tray` (ksni + notify-rust) — a per-user StatusNotifierItem companion that
-  reads the world-readable status snapshot and surfaces desktop notifications.
-  It runs as the desktop user, never root.
-
-### Web control center (`web/`)
-
-React + Vite + Tailwind, the "Nothing" monochrome design language (see
-[DESIGN.md](DESIGN.md)). `api.ts` is a typed fetch client with session-cookie
-auth; every list/detail endpoint unwraps a named envelope (`{ devices: [...] }`,
-`{ profile: {...} }`). Mock data (`mock.ts`) is served **only** when
-`VITE_USE_MOCK=1` — there is no transport-failure fallback, a dead backend fails
-loudly. Pages: Devices, Device detail, Profiles, Approvals, Events, Settings.
-
----
+- **The bus** — a WebSocket to the server with a poll fallback; presence is
+  the socket plus a `state` frame (paused? who's frozen? enforcing?) at least
+  every 60 s.
+- **The tick** — every 10 s on its own timer, whatever the network does:
+  measure, decide, enforce, write the ledger, touch the watchdog heartbeat.
+- **Measure** (`enforce/activity.rs`) — a minute counts only for the
+  foreground session on a seat, with keyboard/mouse/touch/gamepad input or
+  sound in the last 5 minutes. Billed from monotonic awake time, capped at
+  60 s a tick. The day is the local date on a **trusted clock**
+  (`clock.rs`: the wall clock while NTP-synced, else the server's time, else
+  the last anchor carried forward on `CLOCK_BOOTTIME`) — a hand-set clock is
+  ignored, and the day only moves forward. The ledger survives restarts.
+- **Decide** — `openscreentime_policy::rules::evaluate` (the function the
+  console uses too): allowed?, why not?, when is the next stop? One override
+  per person (a grant, a code at the lock, a Resume) beats limit, bedtime and
+  hours until it ends; a pause beats an override.
+- **Stop** (`lock/`, `warn.rs`) — warnings at 15, 5 and 1 minute through the
+  per-user companion (desktop notifications; terminals for someone without a
+  desktop). At the stop the agent starts the lock on VT 13 — `cage` hosting
+  `ost __lockscreen` as the unprivileged `ost-lock` user on a `gui` build, else
+  a text lock it draws itself on VT 14 with VT switching locked — switches to
+  it, and only then freezes the person's apps (`cgroup.freeze` on what their
+  user manager runs outside `session.slice`, never the session itself, so it
+  comes back working; `enforce/screentime/freeze.rs`). Unlock is the reverse. No lock can be shown → nobody is frozen. On a shared computer
+  the lock offers "Switch user" and stands in front of stopped people only. A stop that wasn't
+  announced gets a save-your-work countdown first; a pause is immediate. A
+  freeze never kills a session over a time limit. The lock's state is
+  persisted, so a restarted agent adopts it.
+- **Keys** (`parentcode.rs`) — the unlock code is a per-computer TOTP the
+  agent verifies offline (single-use, wrong-code back-off); recovery codes
+  arrive as HMACs. Codes typed at the graphical lock reach the agent over
+  `/run/openscreentime/lock.sock`, which answers only `ost-lock`
+  (`SO_PEERCRED`); the lock holds no secret. The same code opens `ost unlock`
+  and `sudo` on a managed computer (`pam.rs`).
+- **Block** — DNS: a local dnsmasq forwarding to the filtering upstream,
+  blocked domains sinkholed, safe-search rewrites, `resolv.conf` pinned and
+  made immutable (`enforce/dns.rs`). Firewall: one `inet openscreentime`
+  nftables table applied atomically, base policy accept with targeted drops
+  for bypasses — DoH, DoT, stray DNS, Tor, optionally VPN ports
+  (`enforce/firewall.rs`). Apps: a blocked app's processes are closed for the
+  user who blocks it (`enforce/apps.rs`). DNS and the firewall are
+  host-wide, so the agent merges everyone's network rules on that computer,
+  strictest field by field. A legacy `default_deny` profile is still honoured,
+  though the server opens those at startup.
+- **Report** — usage seconds per login, app-open seconds and site lookups per
+  hour (`attrib.rs`), events.
+- **Update** (`update.rs`) — from its own server's `/api/agent/latest`, same
+  build flavour, sha256-checked, refused if the new binary can't run here;
+  the watchdog puts the previous binary back if an update crash-loops.
+- **Surfaces** — `ost app` (the app window, `gui`), `ost tray` (the companion,
+  `tray`), and CLI answers for everyone: `ost time`, `ost ask`, `ost code`,
+  `ost login`.
 
 ## Data flows
 
-### Enrollment
+**First run and a computer joining.**
+`deploy/setup.sh` prints `https://<host>/#setup=<code>` → the first parent
+names the household and makes a passkey (first run then closes) → **Add a
+computer** mints a 24-hour one-time token → the one-liner downloads and
+verifies the agent, `ost enroll` spends the token (asking which login is whose
+if it can't tell), `install-service` installs the units → online within a
+minute.
 
-```
-admin clicks ADD DEVICE ─► server mints one-time enroll_token (TTL) ─► one-liner
-   │                                                                      │
-   │   curl install.sh | sudo OST_TOKEN=… sh                         ▼
-   │                                          installer downloads + sha256-verifies
-   ▼                                          the agent, runs `enroll`
-agent POSTs enroll_token ─► server issues device_token ─► agent writes
-   /etc/openscreentime/agent.toml (0600) and installs the systemd unit.
-```
+**Rules.** A save in the console → the person's profile → `apply_policy` to
+each of their computers → the agent re-pulls `/agent/policy` (every person's
+rules on that computer, the unlock-code material, the VPN profile), applies
+it, and caches the bundle root-only for offline use.
 
-Registration of the **first admin** is open; the moment an admin exists it locks
-(`403 registration_closed`). Recovery is a deliberate, temporary
-`OST_OPEN_REGISTRATION=1` window (see [OPERATIONS.md](OPERATIONS.md)).
+**Time.** Each tick the ledger grows locally. Every heartbeat carries this
+computer's seconds for its local day; the reply carries the person's use
+elsewhere and the server's clock. Grants (`credit_time`) are idempotent by
+command id and refused for an earlier day.
 
-### Policy propagation
-
-```
-admin edits profile ─► PUT /api/profiles/:id ─► enqueue apply_policy to
-                                                 affected devices
-WS-connected agent:  receives the command, re-pulls, re-applies.
-poll-mode agent:     notices policy_version changed on its next heartbeat,
-                     re-pulls, re-applies.
-```
-
-The agent caches the last-applied policy to `/etc/openscreentime/policy_cache.json`
-so the offline PIN-unlock path works with no server and no running agent.
-
-### Heartbeat, usage, and commands
-
-```
-every ~15s (poll) or per-tick (WS):
-  agent ─► { status, per-user used_minutes_today } ─► server
-                                                       │
-   server: last_seen = now();  ledger = GREATEST(recorded, reported);
-           regression check (see Anti-cheat);  returns queued commands
-                                                       │
-  agent ◄──────────────────── commands (lock, unlock, apply_policy, credit_time,
-                                        deny_earn, set_tamper_level, discover)
-  agent ─► ack ─► server updates command + (for lock/unlock) device.status
-```
-
-A background sweep flips any `online` device whose `last_seen` is older than
-3 minutes to `offline`. "Gone dark" (offline ≥ 7 days) is computed in the UI.
-
-### Events
-
-The agent buffers events in memory (cap 512, oldest dropped) and POSTs the whole
-batch every tick; on failure the batch is kept and retried, so an offline tamper
-event survives to reconnect (`Agent::flush_events`). The server also writes its
-own audit events (lock/unlock decisions, earn approvals, anti-cheat findings).
-
-### No remote shell
-
-OpenScreenTime used to broker a reverse-SSH session from the agent to a browser
-terminal. That capability was removed in v0.4 — there is no remote shell at
-all anymore; everything an operator can do goes through the UI. Historical
-`ssh` events remain readable in the event log as the record of past sessions.
-A possible replacement (a secure reverse tunnel carrying native SSH+RDP) was
-considered and deferred.
-
----
-
-## The enforcement model
-
-Everything the agent enforces flows through the **enforcement tick** (10s). The
-tick is idempotent by design: it re-asserts the desired state rather than
-reacting to edges, so drift (a flushed firewall, an un-pinned resolv.conf, an
-unfrozen user) is corrected within one tick regardless of how it happened.
-
-Screen-time freezing is a cgroup-v2 freeze — reversible, and it never terminates
-a session over a time limit (unsaved work is sacred). A whole-device **lock** is
-different: it's an explicit parent/tamper response and may fall back to ending
-the session if the freezer is unavailable.
-
-Three things can lock the whole device, and they share one code path
-(`decide_freeze` + the freeze branch of the tick), differing only in the message
-shown:
-
-| Source                | Trigger                                          | Cleared by                    |
-|-----------------------|--------------------------------------------------|-------------------------------|
-| Admin `lock` command  | Operator locks from the console                  | `unlock` command / parent PIN |
-| Offline hard-lockdown  | No server contact for `offline_lockdown_days`    | server contact / parent PIN   |
-| Confirmed tamper       | Sustained, verified evasion (see below)          | `unlock` / parent PIN at device |
-
-The **parent PIN always wins**, offline, at the machine — a dead VPS can never
-permanently brick the family laptop. The PIN is verified against the cached
-policy by `ost unlock`, which also tears down the nft table and
-un-pins resolv.conf.
-
----
+**Requests.** "Ask for more time" (the app, the lock, `ost ask`, `/me`) →
+`earn_requests` → a card on the Family page, a Telegram message → Give
+(`credit_time`) or Not now (`deny_earn`).
 
 ## Anti-cheat
 
-Screen-time enforcement is only meaningful if the accounting can't be trivially
-reset. OpenScreenTime treats this like an anti-cheat problem with checks on **both**
-ends, and — importantly — it distinguishes a real evasion attempt from a
-transient technical blip before doing anything drastic.
+- **Restarts and the clock** — the ledger is persisted and the day follows
+  the trusted clock, so a restart, a reboot or a clock set back hands out no
+  time.
+- **Verify, then lock** — a single odd signal is usually benign (a firewall
+  reload, suspend, NTP). Only one escalates to stopping every screen: the
+  agent's nftables table deleted again on consecutive ticks after it was put
+  back (with a boot grace). Everything else is repaired and reported.
+- **Server-side check** — a heartbeat reporting materially less than the
+  server already recorded for the same day raises one `evasion` event; the
+  recorded total never goes down.
+- **Offline** — past `OST_OFFLINE_GRACE_SECS` (15 min) the agent reports it
+  once it's back and keeps re-asserting its rules; an opt-in
+  `offline_lockdown_days` (at least 3) stops the computer until it reaches the
+  server again. The unlock code always opens it.
 
-### The usage ledger
-
-The per-user counters (`UsageTracker`) persist to
-`/var/lib/openscreentime/usage_ledger.json` every tick and reload on boot. This closes
-the **restart cheat**: without persistence a `systemctl restart` (crash,
-watchdog, self-update, or a kid who found the trick) dropped the in-memory
-counters to zero and granted a fresh daily budget.
-
-The day boundary is **forward-only**. `roll_day` resets the counters only when
-the wall clock has genuinely advanced past the accounting day; a clock set
-*backward* (to earlier today or yesterday) keeps the existing day and its usage.
-This closes the **clock set-back cheat**, which used to wipe the counter by
-making "today" look like a different day. The readers agree: usage is reported
-as long as the clock hasn't crossed into a later day, so a set-back can't zero
-the reported minutes either.
-
-### Verify, then lock
-
-A single anomalous signal is often benign — a dropped packet, a firewall flush
-from `firewalld` touching every table, an NTP correction, a laptop resuming from
-suspend. Locking a device on the first blip would feel unfair and would fire on
-false positives. So the agent **confirms** before it escalates (`TamperMonitor`):
-
-- A monitored signal must persist across consecutive enforcement ticks (with a
-  boot-grace window) before it counts as *confirmed*.
-- Today the one signal that escalates to a whole-device lockdown is **sustained
-  nftables tampering**. Our table is root-owned, exclusively ours, and rebuilt
-  atomically every tick — so if it's *still* gone a tick later, something with
-  root is deleting it faster than we heal it. That's a real attack, not
-  collateral.
-- Deliberately **not** auto-locked: `clock_skew` (suspend/resume and RTC-less
-  boot look identical to a clock-set — the ledger defuses that cheat instead),
-  `nm_disconnect` (roaming, a dropped packet), and `resolv_conf_drift`
-  (systemd-resolved and DHCP legitimately rewrite it; we just re-pin).
-
-A confirmed attempt sets `tamper_lockdown`, freezes every user with an honest
-`TAMPERING DETECTED` full-screen notice, and emits a `critical` event. A parent
-PIN at the device, or an admin `unlock`, lifts it.
-
-### Server-side cross-check
-
-The client is not trusted to be honest, so the server checks its story. Each
-heartbeat's reported per-user total is compared against the recorded total
-*before* the monotonic `GREATEST` clamp hides a drop. A heartbeat reporting
-materially less than the server already recorded — a wiped or rolled-back client
-ledger — records an `evasion` event. The clamp still neutralizes the cheat (the
-recorded total can't go down); the event makes it visible instead of silent.
-
-### What this does not claim
-
-On a device where the user has **physical access and root**, shutdown and
-network disconnection can never be made truly impossible — only expensive and
-detectable. Booting a live USB, pulling the disk, or holding the power button
-are outside software's reach and OpenScreenTime says so. The anti-cheat layer raises
-the cost of the *casual* cheats (restart, clock, DNS bypass, firewall tamper)
-and makes the rest loud. See [TAMPER.md](TAMPER.md) for the full boundary.
-
----
+Root and the machine in hand beats all of this eventually; see
+[`TAMPER.md`](TAMPER.md).
 
 ## Trust boundaries
 
 ```
-UNTRUSTED                            SEMI-TRUSTED                 TRUSTED
-─────────                            ────────────                 ───────
-managed Linux user  ── device_token ─►  agent (root)  ── passkey ─► operator
-(the person managed)   over TLS          on the device    session     (the console)
-                                            │
-                                            └─ policy_cache + parent_pin_hash
-                                               (offline authority at the machine)
+UNTRUSTED                 SEMI-TRUSTED                     TRUSTED
+the person at the  ─►  agent (root) on the computer  ─►  the server  ◄─  a parent
+computer (no root)     device token over TLS;            validates         passkey / own
+                       offline authority: the cached     everything        computer's code
+                       rules and unlock-code material
 ```
 
-- The **managed user** is untrusted by design. They may have a local login but
-  not root; enforcement assumes they'll try to get around it.
-- The **agent runs as root** and is the local authority. It authenticates to the
-  server with a device token over TLS and holds the cached policy + PIN hash so
-  it can make correct decisions with no network.
-- The **operator** is trusted, and proves it with a passkey — a phishing- and
-  password-database-resistant credential. There is no password to steal.
-- A managed user **with root** collapses the first boundary. OpenScreenTime detects
-  and reports sustained tampering and preserves a `ost-admin` recovery path
-  at every tamper level, but does not pretend root can't eventually win.
+- The person at the computer is untrusted by design: a login, no root.
+- The agent is root and the local authority. The server doesn't trust its
+  reports blindly: shapes are validated, totals only go up, under-reporting
+  is flagged.
+- A parent proves who they are at sign-in and again for the keys. No password
+  exists anywhere.
+- A person **with root** collapses the first boundary. OpenScreenTime makes
+  that slow and visible, and keeps recovery paths (`ost recover` as root, the
+  unlock code, and an `ost-admin` account that polkit always lets through if
+  the household creates one).
 
----
-
-## Where to go next
-
-- Deploy and operate: [DEPLOY.md](DEPLOY.md), [OPERATIONS.md](OPERATIONS.md)
-- The agent in detail: [AGENT.md](AGENT.md), [TAMPER.md](TAMPER.md)
-- The wire contract: [API.md](API.md), [DATA_MODEL.md](DATA_MODEL.md)
-- The policy document and presets: [PROFILES.md](PROFILES.md)
-- Build and test locally: [DEVELOPMENT.md](DEVELOPMENT.md)
+There is no remote shell, and the agent listens on nothing.

@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
-use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration};
+use webauthn_rs::prelude::{
+    DiscoverableAuthentication, PasskeyAuthentication, PasskeyRegistration,
+};
 use webauthn_rs::Webauthn;
 
 use crate::error::AppError;
@@ -115,17 +117,32 @@ pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Server-side WebAuthn registration challenge, keyed by a temp cookie.
 pub struct RegChallenge {
+    /// The WebAuthn user handle — the account id the passkey belongs to (for
+    /// a first-run household, the id the new account will be created with).
+    pub user_id: Uuid,
     pub username: String,
     pub display_name: String,
+    /// `Some(tenant)` when a signed-in account is adding a passkey to itself;
+    /// `None` for the first-run household.
+    pub existing_tenant: Option<Uuid>,
     pub reg: PasskeyRegistration,
     pub created: std::time::Instant,
 }
 
+/// Which passkey ceremony a stored challenge belongs to.
+pub enum PasskeyCeremony {
+    /// "Sign in with a passkey": no name first, the credential says who.
+    SignIn(DiscoverableAuthentication),
+    /// "Confirm it's you" for an already signed-in account.
+    Confirm {
+        admin_id: Uuid,
+        auth: PasskeyAuthentication,
+    },
+}
+
 /// Server-side WebAuthn authentication challenge, keyed by a temp cookie.
 pub struct AuthChallenge {
-    pub admin_id: Uuid,
-    pub tenant_id: Uuid,
-    pub auth: PasskeyAuthentication,
+    pub ceremony: PasskeyCeremony,
     pub created: std::time::Instant,
 }
 
@@ -198,10 +215,10 @@ pub struct AppState {
     pub oidc: Option<Arc<crate::auth_oidc::Oidc>>,
     pub rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     pub hub: Arc<Hub>,
-    /// Decoy device-login request ids (unknown name / nobody online) with the
-    /// instant they were issued, so `finish` can answer "pending" for the same
-    /// window a real one would — a 404 there was an account-and-presence oracle.
-    pub decoy_logins: Arc<RwLock<HashMap<uuid::Uuid, std::time::Instant>>>,
+    /// `OST_BOOTSTRAP_TOKEN`: the one-time setup code deploy/setup.sh wrote
+    /// and printed as a link. While no account exists, creating the household
+    /// needs it; unset (a local checkout) means first run is open.
+    pub bootstrap_token: Option<String>,
 }
 
 /// Extractor: an authenticated admin. Carries tenant_id so every downstream
@@ -353,8 +370,31 @@ impl FromRequestParts<AppState> for AgentAuth {
                 .fetch_optional(&state.db)
                 .await?;
 
-        let (device_id, tenant_id) =
-            row.ok_or_else(|| AppError::Unauthorized("invalid device token".into()))?;
+        let Some((device_id, tenant_id)) = row else {
+            // A removed computer still calling in: say so distinctly, so it
+            // takes itself off the machine instead of enforcing forever. A
+            // record folded into the same machine's newer one (`machine.rs`)
+            // is that record: the agent still running with the old token
+            // until the installer restarts it must never hear "removed".
+            let retired: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+                "SELECT d.id, d.tenant_id FROM retired_devices r
+                   LEFT JOIN devices d ON d.id = r.merged_into AND d.tenant_id = r.tenant_id
+                  WHERE r.token_hash = $1",
+            )
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
+            return match retired {
+                Some((Some(device_id), Some(tenant_id))) => Ok(AgentAuth {
+                    device_id,
+                    tenant_id,
+                }),
+                Some(_) => Err(AppError::DeviceRetired(
+                    "this computer was removed from its household".into(),
+                )),
+                None => Err(AppError::Unauthorized("invalid device token".into())),
+            };
+        };
         Ok(AgentAuth {
             device_id,
             tenant_id,

@@ -1,13 +1,12 @@
 # Contract 0.6 — the passive turn
 
+> **Historical.** The build contract for 0.6.0 (allow by default). Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
+
 The operator's reframe, verbatim in spirit: OpenScreenTime has been a strict
 gatekeeper wearing a friendly coat. 0.6 turns it into a **passive, visual
 family mirror with hard edges only where you explicitly drew them**. It shows
 what's happening; it blocks only what you said to block — and what it blocks,
 it blocks for real. Help people reduce; don't cut them off.
-
-When this conflicts with older docs (including `OPENSCREENTIME.md`'s bracket
-table and `DESIGN.md`'s zero-trust framing), **this wins**.
 
 ## 1. The blocking model flips
 
@@ -76,7 +75,9 @@ The idea: **install the client once, then never touch a terminal again.**
 
 - The agent must **detect silent failure**, not just log actions: after a
   lock, read back the freezer/session state and *verify the stop is real*;
-  after a DNS block, resolve a blocked domain and expect the sinkhole. A
+  after a DNS block, resolve a name the rules block and expect the sinkhole
+  (since 0.6.x the agent's own `selftest.openscreentime.internal`, never a
+  real blocked site — that lookup read as the child's browsing). A
   failed probe is `enforcement_degraded` — a critical event the console
   surfaces as plainly as a tamper.
 - "Your tests are fine" is not the bar. The bar is §6.

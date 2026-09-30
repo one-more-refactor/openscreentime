@@ -34,6 +34,143 @@ fn ensure_secure_server(server: &str) -> Result<()> {
     )
 }
 
+/// Where `enroll` reads the one-time token from, most private first:
+/// `OST_TOKEN` in the environment (what `install.sh` uses — an environment
+/// is readable only by its owner and root, where argv is in everyone's `ps`
+/// and in shell history), `--token -` for one line on stdin, and `--token
+/// <TOKEN>` as a last resort.
+pub fn resolve_token(
+    arg: Option<&str>,
+    env: Option<String>,
+    stdin: &mut dyn std::io::BufRead,
+) -> Result<String> {
+    let token = match arg {
+        Some("-") => {
+            let mut line = String::new();
+            stdin.read_line(&mut line)?;
+            line
+        }
+        Some(t) => t.to_string(),
+        None => env.unwrap_or_default(),
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!(
+            "an enroll token is required: OST_TOKEN=<token> in the environment, or \
+             --token - to read it from stdin"
+        );
+    }
+    Ok(token)
+}
+
+/// The login the install ran from: `sudo` records it in `SUDO_USER`; a root
+/// shell reached through `su` still carries the login uid in
+/// `/proc/self/loginuid`. On "my computer" that login is the parent's own.
+fn installer() -> Option<String> {
+    if let Ok(u) = std::env::var("SUDO_USER") {
+        if !u.is_empty() && u != "root" {
+            return Some(u);
+        }
+    }
+    let uid: u32 = std::fs::read_to_string("/proc/self/loginuid")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if uid == 0 || uid == u32::MAX {
+        return None;
+    }
+    users::get_user_by_uid(uid).map(|u| u.name().to_string_lossy().into_owned())
+}
+
+/// Which machine this is, for one household: HMAC-SHA256 keyed with the
+/// machine-id, over an app tag and the household's salt (the enroll preview
+/// hands it out) — systemd's advice for an app-specific id. Never the raw
+/// id: the server can recognise this machine when it is enrolled again
+/// (re-running the one-liner with a new token folds the older record in, so
+/// nobody's day is counted twice), and nothing more — no other household or
+/// server can match it. `None` for an id that isn't one (an image's
+/// "uninitialized", all zeros) or without a salt.
+pub fn machine_hash(machine_id: &str, salt: &str) -> Option<String> {
+    use hmac::{Hmac, Mac};
+    let id = machine_id.trim();
+    let salt = salt.trim();
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.bytes().all(|b| b == b'0')
+    {
+        return None;
+    }
+    if salt.is_empty() {
+        return None;
+    }
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(id.to_ascii_lowercase().as_bytes()).ok()?;
+    mac.update(b"openscreentime-machine:");
+    mac.update(salt.as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// [`machine_hash`] of this computer's `/etc/machine-id`.
+fn machine_identity(salt: &str) -> Option<String> {
+    let id = std::fs::read_to_string("/etc/machine-id")
+        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+        .ok()?;
+    machine_hash(&id, salt)
+}
+
+/// Parse the answer to "which login is Mia's?": a number from the list, or
+/// nothing (0, blank, nonsense) = "none of these".
+fn pick(answer: &str, logins: &[String]) -> Option<String> {
+    let n: usize = answer.trim().parse().ok()?;
+    logins.get(n.checked_sub(1)?).cloned()
+}
+
+/// Ask the person at the keyboard which login belongs to whoever this
+/// computer is for — only when it matters (more than one login) and when
+/// there is a terminal to ask on. Reads `/dev/tty`, never stdin: `install.sh`
+/// is piped into `sh`, so stdin is the script.
+fn ask_owner_login(
+    preview: &client::EnrollPreview,
+    logins: &[String],
+    installer: Option<&str>,
+) -> Option<String> {
+    use std::io::{BufRead, Write};
+    if logins.len() < 2 {
+        return None;
+    }
+    let owner = preview.owner.as_deref()?;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut out = &tty;
+    let whose = if preview.owner_is_parent {
+        "yours".to_string()
+    } else {
+        format!("{owner}'s")
+    };
+    let _ = writeln!(
+        out,
+        "\nThis computer is being set up for {owner}. Which login on it is {whose}?"
+    );
+    for (i, l) in logins.iter().enumerate() {
+        let now = if Some(l.as_str()) == installer {
+            "   (the one you're using now)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "  {}) {l}{now}", i + 1);
+    }
+    let _ = writeln!(
+        out,
+        "  0) none of these — every login stays a person of its own"
+    );
+    let _ = write!(out, "Number: ");
+    let _ = out.flush();
+    let mut line = String::new();
+    std::io::BufReader::new(&tty).read_line(&mut line).ok()?;
+    pick(&line, logins)
+}
+
 pub async fn run(server: &str, token: &str) -> Result<()> {
     ensure_secure_server(server)?;
     let hostname = hostname::get()
@@ -47,16 +184,49 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         os_users.len()
     );
 
+    // Whose computer is this, and which login is theirs? Only that login is
+    // linked to them; every other login is its own person (docs/AUTH.md).
+    let installer = installer();
+    let logins: Vec<String> = os_users.iter().map(|u| u.username.clone()).collect();
+    let preview = match client::enroll_preview(server, token).await {
+        Ok(preview) => Some(preview),
+        Err(e) => {
+            tracing::debug!("no enroll preview ({e}); not asking whose login is whose");
+            None
+        }
+    };
+    let owner_login = preview
+        .as_ref()
+        .and_then(|p| ask_owner_login(p, &logins, installer.as_deref()));
+    // This machine, as this household may know it (a server without a salt
+    // hears nothing).
+    let machine_id = preview
+        .as_ref()
+        .and_then(|p| p.machine_salt.as_deref())
+        .and_then(machine_identity);
+
     let req = EnrollRequest {
         enroll_token: token.to_string(),
         hostname,
         os: "linux".to_string(),
         agent_version: client::AGENT_VERSION.to_string(),
         os_users,
+        installer,
+        owner_login,
+        machine_id,
     };
 
     let resp = client::enroll(server, &req).await?;
     tracing::info!("enrolled: device_id={}", resp.device_id);
+    if !resp.users.is_empty() {
+        println!("Who's who on this computer:");
+        for u in &resp.users {
+            let role = if u.parent { " (parent)" } else { "" };
+            println!("  {} → {}{role}", u.os_username, u.person);
+        }
+        println!("  Wrong? Change it in the console, under Devices.");
+        println!();
+    }
 
     let cfg = AgentConfig {
         server_url: server.trim_end_matches('/').to_string(),
@@ -67,6 +237,9 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
         auto_update: true,
     };
     cfg.save()?;
+    // A computer that was removed and is now enrolled again is no longer
+    // retired: its agent enforces again.
+    crate::retire::clear_marker();
     tracing::info!("wrote {} (0600)", crate::config::CONFIG_PATH);
     println!("Enrolled. Config written to {}", crate::config::CONFIG_PATH);
     // Nothing to write down: the keys to this computer live in the console.
@@ -83,7 +256,70 @@ pub async fn run(server: &str, token: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_secure_server;
+    use super::{ensure_secure_server, machine_hash, pick, resolve_token};
+
+    #[test]
+    fn the_token_comes_from_the_environment_or_stdin() {
+        let mut none: &[u8] = b"";
+        // install.sh: OST_TOKEN only, nothing in argv.
+        let t = resolve_token(None, Some("env-tok\n".into()), &mut none).unwrap();
+        assert_eq!(t, "env-tok");
+        // `--token -`: one line on stdin, even with OST_TOKEN set.
+        let mut stdin: &[u8] = b"  stdin-tok \nrest\n";
+        let t = resolve_token(Some("-"), Some("env-tok".into()), &mut stdin).unwrap();
+        assert_eq!(t, "stdin-tok");
+        // `--token x` still works.
+        assert_eq!(
+            resolve_token(Some("argv-tok"), None, &mut none).unwrap(),
+            "argv-tok"
+        );
+        // Nothing anywhere, or only blanks: a plain error, never an empty token.
+        assert!(resolve_token(None, None, &mut none).is_err());
+        assert!(resolve_token(None, Some("  ".into()), &mut none).is_err());
+        let mut blank: &[u8] = b"\n";
+        assert!(resolve_token(Some("-"), None, &mut blank).is_err());
+    }
+
+    #[test]
+    fn the_answer_picks_a_login_or_none() {
+        let l = vec!["dad".to_string(), "mia".to_string()];
+        assert_eq!(pick("2\n", &l).as_deref(), Some("mia"));
+        assert_eq!(pick(" 1 ", &l).as_deref(), Some("dad"));
+        assert_eq!(pick("0", &l), None);
+        assert_eq!(pick("", &l), None);
+        assert_eq!(pick("3", &l), None);
+        assert_eq!(pick("mia", &l), None);
+    }
+
+    /// The machine identity: stable for one household, unrelated across
+    /// households, lower-case hex the server accepts — and never the id.
+    #[test]
+    fn the_machine_identity_is_per_household_and_never_the_id() {
+        let id = "5f0c3a6b9e2d4c1f8a7b6c5d4e3f2a1b";
+        let a = machine_hash(id, "salt-of-the-smiths").unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        // Stable: the same machine, the same household, the same answer —
+        // whatever whitespace or case the file has.
+        assert_eq!(
+            machine_hash(&format!("{}\n", id.to_uppercase()), "salt-of-the-smiths").as_deref(),
+            Some(a.as_str())
+        );
+        // Another household can't match it; another machine doesn't.
+        assert_ne!(machine_hash(id, "salt-of-the-joneses").unwrap(), a);
+        assert_ne!(
+            machine_hash("5f0c3a6b9e2d4c1f8a7b6c5d4e3f2a1c", "salt-of-the-smiths").unwrap(),
+            a
+        );
+        assert!(!a.contains(id));
+        // Not a machine-id, or no salt (an older server): nothing is sent.
+        assert_eq!(machine_hash("uninitialized", "s"), None);
+        assert_eq!(machine_hash(&"0".repeat(32), "s"), None);
+        assert_eq!(machine_hash("", "s"), None);
+        assert_eq!(machine_hash(id, " "), None);
+    }
 
     #[test]
     fn https_is_accepted() {

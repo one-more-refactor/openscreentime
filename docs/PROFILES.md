@@ -1,198 +1,97 @@
-# Preset Profiles
+# Rules and the five starting rules
 
-**Since 0.4 every household is seeded with five bracket presets** — `little`
-(0–6), `kid` (6–12), `younger_teen` (12–16), `older_teen` (16–18), `adult` —
-whose exact values live in `server/src/presets.rs` (table in
-`docs/CONTRACT-0.4.md` §3). Each carries one-click `blocks` from the built-in
-catalog (`policy/src/catalog.rs`). A person's bracket picks their preset; the
-parent edits from there. The three older presets below (`kids`/`teen`/`default`)
-are **legacy**: existing rows stay valid and editable, but new households don't
-get them.
+A person's rules are one JSON document, the `Policy` in
+[`policy/src/lib.rs`](../policy/src/lib.rs). The server stores it
+(`profiles.policy`), the console edits it, the agent enforces it, and all
+three read it with the same rules function
+([`policy/src/rules.rs`](../policy/src/rules.rs)). Each person has their own
+copy; a new person's copy starts from their age bracket's preset
+([`server/src/presets.rs`](../server/src/presets.rs)).
 
-Every new tenant used to be seeded with three `is_preset=true` profiles. They are fully editable (an
-edit clones the policy in place — the preset row stays but its `policy` is mutated). Presets can
-also be duplicated into `custom` profiles.
+## The five starting rules
 
-The `teen` and `default` presets are zero-trust (`default_deny`); **`kids` is not** — see below for why. The difference between them
-is how large the allowlist is, how strict screen-time is, how tight the network lockdown is, and
-how much gamification is on.
+Every household gets one preset per bracket (`is_preset = true`, kinds
+`little`, `kid`, `younger_teen`, `older_teen`, `adult`). All of them are
+**allow by default**: DNS `allow_all` through a filtering upstream, firewall
+`allow_all` with inbound 22 open, `block_vpn` off, `offline_lockdown_days` 0.
 
-## Shared fields
+| | Little 0–6 | Kid 6–12 | Younger teen 12–16 | Older teen 16–18 | Adult 18+ |
+|---|---|---|---|---|---|
+| Daily limit | 45 min | 60 min | 150 min | none | none |
+| Screens on | 08:00–19:00 every day | 07:00–20:00 Mon–Fri, 09:00–20:00 Sat–Sun | 07:00–21:00 Mon–Fri, 09:00–22:00 Sat–Sun | any time | any time |
+| Bedtime | 19:00–07:00 | 20:00–07:00 | 22:00–06:30 | — | — |
+| Upstream resolver | `1.1.1.3` (malware + adult) | `1.1.1.3` | `1.1.1.3` | `1.1.1.2` (malware) | `1.1.1.2` |
+| Safe search | on | on | on | off | off |
+| Blocked categories | adult, gambling, dating, proxies | adult, gambling, dating, proxies | adult, gambling, proxies | adult, gambling, proxies | — |
+| Anti-bypass (force DNS, DoH, DoT, Tor) | on | on | on | on | off |
+| Earning time | off | Read for 20 min · Finish chores (15 min each) | Finish homework (20 min) | off | off |
+| Can ask for more time | no | yes | yes | yes | no |
 
-A few `Policy` fields aren't preset-specific dials — they work the same way (or the same
-constraint applies) across `kids`, `teen`, and `default`, so they're documented once here instead
-of being repeated in every section below.
+Changing someone's age later doesn't rewrite their rules. Older households
+may still have the pre-0.4 `kids` / `teen` / `default` presets; those rows
+stay valid and editable, and nothing new is made from them.
 
-### `dns.upstream`
+**Unsorted logins.** A login nobody has sorted yet gets the **Kid** rules on
+a child's computer, and the **Adult** rules — which enforce nothing — on a
+parent's own computer or when the server re-links a login at startup, so a
+guess never locks a parent out ([`server/src/members.rs`](../server/src/members.rs)
+`link_os_user`). A parent sorts it under **Computers → Who's who**.
 
-Must be a literal IP address, never a hostname. `normalize_policy` (`server/src/profiles.rs`)
-rejects any value that doesn't parse as an `IpAddr` before it's ever stored. This isn't
-cosmetic validation: the value is interpolated verbatim into the agent's nftables ruleset
-(`ip daddr <upstream> ...`) on the device, so a hostname, typo, or injected nft syntax could
-abort the whole ruleset load on the box instead of just failing a DNS lookup. All three presets
-use `1.1.1.2` (Cloudflare's filtered/malware-blocking resolver).
+## What the rules mean
 
-### `lockdown` — network anti-bypass
+`rules::evaluate` answers three questions for the agent and the console:
+*allowed now?*, *why not?*, *when is the next stop?*. The cases, and the
+shared test vectors both sides check, are in
+[`policy/tests/schedule-vectors.json`](../policy/tests/schedule-vectors.json).
 
-`NetworkLockdown` (`policy/src/lib.rs`) is a set of firewall/DNS rules layered on top of the base
-allowlist to stop a managed user from routing around the policy entirely, plus one escalation
-knob for when the device goes dark:
+- **A limit of 0 is no limit.** Use a pause or allowed hours for "no screens".
+- **A day with no window is any time.** Windows use `days` 0 = Sunday … 6 =
+  Saturday.
+- **A window ending `00:00` runs to midnight**; one ending before it starts
+  runs past midnight.
+- **An empty window or a whole-day bedtime is refused on save**
+  (`rules::validate_screen_time`) **and ignored on the computer** — never a
+  24/7 lockout.
+- **One budget per person**: a daily limit covers all of a person's computers.
+- **One override per person** (a grant, the unlock code at the lock, a
+  Resume) beats the limit, bedtime and hours until it ends. A pause beats an
+  override.
 
-| Field | Type | Enforces |
-| --- | --- | --- |
-| `force_dns` | bool | Blocks plaintext DNS (UDP/TCP 53) egress to anything but the agent's own resolver, so a browser or OS can't be pointed at `8.8.8.8` directly. |
-| `block_doh` | bool | Drops the well-known public DNS-over-HTTPS resolver IPs (Cloudflare, Google, Quad9, …) so browsers can't tunnel DNS over HTTPS around the local resolver. |
-| `block_dot` | bool | Blocks DNS-over-TLS (TCP 853). |
-| `block_tor` | bool | Blocks Tor — known directory-authority/onion-router ports plus `.onion` resolution. |
-| `block_vpn` | bool | Blocks common commercial-VPN ports: WireGuard `51820`, OpenVPN `1194`, IPsec/IKE `500`/`4500`. |
-| `offline_lockdown_days` | u32 | Days the agent may run without reaching the command server before it escalates to a full parent-PIN lockdown. `0` = never escalate. A device silently cut off from the server is treated as a tamper signal — but because the parent PIN always unlocks locally, a server/VPS outage can never permanently brick the device. |
+## The document, field by field
 
-All five boolean flags default off and `offline_lockdown_days` defaults to `0`. When every field
-is at that default, the entire `lockdown` object is omitted from the stored/serialized policy
-(`NetworkLockdown::is_default` + `skip_serializing_if`) — a profile with no lockdown configured
-has no `lockdown` key at all, which is why the `default` preset below doesn't show one.
+| Field | What it is | Edited in the console |
+|---|---|---|
+| `version` | Always 1. | — |
+| `screen_time.enabled`, `.daily_limit_minutes` | The daily limit (0 = none). | Rules → Daily limit |
+| `screen_time.schedule` | Allowed windows `{days, start, end}`. | Rules → When screens can be on |
+| `screen_time.bedtime` | `{start, end}`, or null. | Rules → Bedtime |
+| `blocks.categories`, `.apps`, `.custom_domains` | One-click blocks from the catalog ([`policy/src/catalog.rs`](../policy/src/catalog.rs)) and sites by name. Blocked domains are sinkholed; a blocked app's processes are closed. Unknown ids expand to nothing. | Rules → Blocked |
+| `dns.safe_search` | Rewrites the big search and video sites to their safe modes. | Rules → Safe search |
+| `dns.upstream` | The resolver everything is forwarded to. **Must be a literal IP** — it goes verbatim into the nftables ruleset, so the server refuses anything else. | — |
+| `dns.mode`, `firewall.mode` | `allow_all`. `default_deny` still parses and the agent still honours it, but the server rewrites any profile using it to `allow_all` at startup. | — |
+| `dns.allowlist`, `dns.blocklist` | Retired from the console; still parsed. `["*"]` means "forward everything". | — |
+| `firewall.allow_inbound_ports`, `allow_outbound_ports` | Presets keep inbound 22 open so a mistake has a way in. | — |
+| `lockdown` | Anti-bypass: `force_dns`, `block_doh`, `block_dot`, `block_tor`, `block_vpn`, and `offline_lockdown_days` (0 = off; the agent floors any other value at 3 days). Omitted when all off. | — |
+| `gamification.earn_time` | `{enabled, tasks: [{id, label, reward_minutes}]}`. | Rules → Earning time |
+| `gamification.lockout` | **Dead.** `unlock_challenge` (`math` / `wait` / `parent_pin`) is read by nothing; the lock always takes the unlock code. | — |
+| `focus` | A self-managed person's own site blocks: `{sites, hours}` — blocked inside the focus hours, all day with none. Omitted when empty. | Me → My focus hours, Sites I block for myself |
+| `parent_pin_hash` | Argon2 hash of a legacy **backup code**. Still accepted at the lock, `ost unlock` and `sudo`; nothing in the console sets it. Omitted when unset. | — |
 
-### Unlock code (per-device TOTP), recovery codes — and `parent_pin_hash`, the backup code
+`lockdown`, `blocks`, `focus` and `parent_pin_hash` are left out of the JSON
+when empty, so a preset round-trips byte-for-byte through the `Policy` type;
+`presets::tests` fails if one doesn't.
 
-The parent's key to a managed device is a **per-device unlock code**: `POST
-/api/devices` mints a TOTP secret that only the server and the agent ever
-hold. The parent reads the live 6-digit code off the console (after entering
-change mode); the agent receives the secret on every policy pull
-(`parent_code.totp_secret`) and verifies codes **offline** (RFC 6238, ±1 step,
-single-use, lockout after five misses). The lockout overlay, `ost unlock`, and
-`sudo` on a managed machine (PAM) all ask for it. For when the phone is not
-around, the console generates eight one-time 8-digit **recovery codes**
-(delivered to the agent as keyed MACs, `parent_code.recovery_codes`, spent
-ones are logged as `parent_code_backup_used` and retired on both sides).
-There is no enroll-time recovery PIN any more.
+## An adult's own rules
 
-#### `parent_pin_hash` (backup code, profile-level override)
+An adult (self-managed) sets their own daily limit, focus hours and sites on
+their own page, through `GET` / `PUT /api/me/rules` ([`API.md`](API.md)).
+The hub can't read or change a member's own rules. The keys (unlock and
+recovery codes) are in Settings.
 
-The Argon2 hash of the household's parent/master PIN. It's never written directly into policy
-JSON; it's derived from the API's `parent_pin` field on profile create/update requests
-(`server/src/profiles.rs`):
+## Network rules on a shared computer
 
-- non-empty string (minimum 4 characters) → hashed with Argon2 server-side and stored as
-  `parent_pin_hash`
-- empty string `""` → clears the PIN (removes `parent_pin_hash`)
-- field omitted entirely → preserves whatever hash was already stored
-
-The agent verifies an entered PIN against this hash locally, so it keeps working with no server
-connection. It's the master unlock on managed devices: a correct PIN grants a 30-minute unlock
-grace. The stored value never contains the plaintext PIN. None of the three presets set a PIN out
-of the box.
-
-## `kids` — filtered, not walled off
-
-Deliberately **not** zero-trust. The earlier version allowed five domains and denied everything
-else, which broke Minecraft, Steam, school portals and `apt` — so in practice an adult either
-widened the allowlist until it meant nothing or switched enforcement off. Filtering at the
-resolver is stricter in the ways that matter and invisible the rest of the time.
-
-- **DNS:** `allow_all` through a filtering upstream — `1.1.1.3` (Cloudflare for Families:
-  malware **and** adult content), `safe_search: true`, plus an explicit blocklist for the things
-  that slip past a category filter: web proxies, torrent indexes, gambling, stranger-chat.
-- **Firewall:** `allow_all`, with inbound `22` open. Permissive so ordinary software works;
-  the lockdown flags below still emit targeted drops, because chain policy and lockdown rules
-  are independent.
-- **Screen time:** 60 min/day; windows 07:00–20:00 weekdays, 09:00–20:00 weekends; bedtime
-  20:00–07:00.
-- **Lockdown:** the bypass paths stay shut — `force_dns`, `block_doh`, `block_dot`, `block_tor`
-  all `true`. Two are deliberately off: **`block_vpn: false`**, because a parent-managed
-  WireGuard profile is a supported feature and enabling both makes the agent apply a tunnel its
-  own firewall then kills; and **`offline_lockdown_days: 0`**, because a device that cannot
-  reach the server must not brick itself — screen time still applies from the cached policy.
-- **Gamification:** earn-time ON (reading, chores tasks), lockout ON with `math` challenge,
-
-```jsonc
-{
-  "version": 1,
-  "dns": { "mode": "allow_all",
-    "allowlist": ["*"],
-    "blocklist": ["croxyproxy.com","proxysite.com","kproxy.com","hidester.com",
-                  "4everproxy.com","whoer.net","hide.me","vpnbook.com",
-                  "thepiratebay.org","1337x.to","torrentz2.eu","rarbg.to",
-                  "pornhub.com","xvideos.com","xnxx.com","onlyfans.com",
-                  "stake.com","bet365.com","roobet.com",
-                  "omegle.com","chatroulette.com"],
-    "safe_search": true, "upstream": "1.1.1.3" },
-  "firewall": { "mode": "allow_all", "allow_outbound_ports": [], "allow_inbound_ports": [22] },
-  "screen_time": { "enabled": true, "daily_limit_minutes": 60,
-    "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"20:00"},
-                  {"days":[0,6],"start":"09:00","end":"20:00"} ],
-    "bedtime": { "start":"20:00","end":"07:00" } },
-  "lockdown": { "force_dns": true, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
-  "gamification": {
-    "earn_time": { "enabled": true, "tasks": [
-      {"id":"reading","label":"Read for 20 min","reward_minutes":15},
-      {"id":"chores","label":"Finish chores","reward_minutes":15} ] },
-    "lockout": { "enabled": true, "unlock_challenge": "math" },
-
-}
-```
-
-## `teen` — trusted-but-guarded
-
-- **DNS:** default-deny with a broader allowlist (general web categories via allowlisted major
-  domains), `safe_search: true`. Still zero-trust, just roomier.
-- **Firewall:** default-deny; outbound `53, 80, 443` (+ `123` NTP).
-- **Screen time:** 180 min/day; windows to 21:00 weekdays, 22:00 weekends; bedtime
-  22:30–06:30.
-- **Lockdown:** DoH, DoT, and Tor blocked (`block_doh`/`block_dot`/`block_tor: true`); DNS isn't
-  forced and VPN ports aren't blocked (`force_dns`/`block_vpn: false`) — older teens get more
-  rope. `offline_lockdown_days: 0`, so there's no offline hard-lockdown escalation.
-- **Gamification:** earn-time ON (lighter rewards), lockout ON with `wait` challenge (cooldown
-  instead of math).
-
-```jsonc
-{
-  "version": 1,
-  "dns": { "mode": "default_deny",
-    "allowlist": ["*.wikipedia.org","github.com","google.com","youtube.com","duolingo.com","*.edu"],
-    "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
-  "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443,123], "allow_inbound_ports": [] },
-  "screen_time": { "enabled": true, "daily_limit_minutes": 180,
-    "schedule": [ {"days":[1,2,3,4,5],"start":"07:00","end":"21:00"},
-                  {"days":[0,6],"start":"08:00","end":"22:00"} ],
-    "bedtime": { "start":"22:30","end":"06:30" } },
-  "lockdown": { "force_dns": false, "block_doh": true, "block_dot": true, "block_tor": true, "block_vpn": false, "offline_lockdown_days": 0 },
-  "gamification": {
-    "earn_time": { "enabled": true, "tasks": [
-      {"id":"homework","label":"Finish homework","reward_minutes":20} ] },
-    "lockout": { "enabled": true, "unlock_challenge": "wait" },
-
-}
-```
-
-## `default` — baseline for any newly-enrolled user
-
-Applied automatically to every `device_user` at enrollment until an admin assigns something
-else. Zero-trust but minimally intrusive: it protects (default-deny DNS/firewall, safe-search)
-without screen-time limits or gamification, so an unclassified account isn't accidentally locked
-out — but also isn't wide open. It doesn't set `lockdown` at all (every flag would be at its
-default, so the field is omitted entirely — see "Shared fields" above) and doesn't set a
-`parent_pin_hash`.
-
-```jsonc
-{
-  "version": 1,
-  "dns": { "mode": "default_deny",
-    "allowlist": ["*"], "blocklist": [], "safe_search": true, "upstream": "1.1.1.2" },
-  "firewall": { "mode": "default_deny", "allow_outbound_ports": [53,80,443,123], "allow_inbound_ports": [] },
-  "screen_time": { "enabled": false, "daily_limit_minutes": 0, "schedule": [], "bedtime": null },
-  "gamification": {
-    "earn_time": { "enabled": false, "tasks": [] },
-    "lockout": { "enabled": false, "unlock_challenge": "wait" },
-
-}
-```
-
-> Note on `default`'s DNS `allowlist: ["*"]`: zero-trust posture is preserved structurally
-> (mode stays `default_deny`, firewall still restricts ports, safe-search on), but the wildcard
-> means an unclassified adult account isn't broken on day one. Tightening this is a one-click
-> edit. `kids`/`teen` never use `"*"`.
-
-## Seeding
-
-When a tenant is created the server inserts these three rows verbatim (from a Rust
-`presets.rs` module that mirrors this file). Keep `presets.rs` and this doc in sync.
+DNS and the firewall are one per computer, so the agent merges the network
+rules of everyone on that computer, field by field, strictest wins: blocks
+are unioned, safe search and the anti-bypass flags are on if anyone needs
+them, the most-filtering resolver is used (`runner.rs`
+`effective_network_policy`). Screen time is per person.

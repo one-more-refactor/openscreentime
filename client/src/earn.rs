@@ -2,7 +2,8 @@
 //! fired when a parent approves one.
 //!
 //! Earn-time is server-authoritative (the `screen_time_ledger` table). The
-//! agent's job is to (a) surface the offers on the lockout overlay, (b) credit
+//! agent's job is to (a) file a request when someone asks (the lock's "Ask for
+//! more time", the companion, `ost ask`), (b) credit
 //! local budget when the server sends `credit_time`, and (c) fire the
 //! `screen_time_earned` event. Whether the child really read for 20 minutes is
 //! a parent decision, made in the console.
@@ -26,6 +27,18 @@ pub struct EarnOffer {
     pub reward_minutes: u32,
 }
 
+/// A plain "can I have more time?" — the same task id and words the
+/// console's own ask files (`/api/me/ask`), so a parent reads "Asked for 15
+/// more minutes", never an earn task the child didn't pick.
+pub fn plain_ask() -> EarnOffer {
+    EarnOffer {
+        id: "ask".into(),
+        label: "Asked for more time".into(),
+        reward_minutes: 15,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn earn_offers(g: &Gamification) -> Vec<EarnOffer> {
     if !g.earn_time.enabled {
         return Vec::new();

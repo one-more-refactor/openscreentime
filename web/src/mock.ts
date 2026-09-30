@@ -9,8 +9,9 @@ import type {
   Catalog,
   MemberPatch,
   MeToday,
+  MyRules,
   NewMember,
-  ChangeModeStatus,
+  ConfirmStatus,
   RecoveryCodes,
   RecoveryCodesStatus,
   UnlockCode,
@@ -20,7 +21,6 @@ import type {
   Account,
   Admin,
   Device,
-  DeviceDetail,
   DeviceUser,
   EarnRequest,
   EnrollTokenResponse,
@@ -31,7 +31,7 @@ import type {
   Policy,
   Profile,
   Tenant,
-  TwoFactorStatus,
+  WhereData,
 } from "./types";
 import { defaultThemeFor } from "./types";
 
@@ -39,24 +39,8 @@ const TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 const kidsPolicy: Policy = {
   version: 1,
-  dns: {
-    mode: "default_deny",
-    allowlist: [
-      "wikipedia.org",
-      "khanacademy.org",
-      "pbskids.org",
-      "scratch.mit.edu",
-      "duolingo.com",
-    ],
-    blocklist: [],
-    safe_search: true,
-    upstream: "1.1.1.2",
-  },
-  firewall: {
-    mode: "default_deny",
-    allow_outbound_ports: [53, 80, 443],
-    allow_inbound_ports: [],
-  },
+  dns: { mode: "allow_all", allowlist: ["*"], blocklist: [], safe_search: true, upstream: "1.1.1.3" },
+  firewall: { mode: "allow_all", allow_outbound_ports: [], allow_inbound_ports: [] },
   screen_time: {
     enabled: true,
     daily_limit_minutes: 60,
@@ -83,7 +67,6 @@ const kidsPolicy: Policy = {
     block_tor: true,
     block_vpn: true,
   },
-  parent_pin_hash: "$argon2id$v=19$m=19456,t=2,p=1$mockmockmockmock$mockmockmockmockmockmockmockmock",
   blocks: {
     apps: ["tiktok", "snapchat", "instagram", "discord", "twitch", "omegle"],
     categories: ["social", "adult", "gambling", "dating", "proxies"],
@@ -93,25 +76,8 @@ const kidsPolicy: Policy = {
 
 const teenPolicy: Policy = {
   version: 1,
-  dns: {
-    mode: "default_deny",
-    allowlist: [
-      "*.wikipedia.org",
-      "github.com",
-      "google.com",
-      "youtube.com",
-      "duolingo.com",
-      "*.edu",
-    ],
-    blocklist: [],
-    safe_search: true,
-    upstream: "1.1.1.2",
-  },
-  firewall: {
-    mode: "default_deny",
-    allow_outbound_ports: [53, 80, 443, 123],
-    allow_inbound_ports: [],
-  },
+  dns: { mode: "allow_all", allowlist: ["*"], blocklist: ["9gag.com"], safe_search: true, upstream: "1.1.1.3" },
+  firewall: { mode: "allow_all", allow_outbound_ports: [], allow_inbound_ports: [] },
   screen_time: {
     enabled: true,
     daily_limit_minutes: 180,
@@ -133,18 +99,8 @@ const teenPolicy: Policy = {
 
 const defaultPolicy: Policy = {
   version: 1,
-  dns: {
-    mode: "default_deny",
-    allowlist: ["*"],
-    blocklist: [],
-    safe_search: true,
-    upstream: "1.1.1.2",
-  },
-  firewall: {
-    mode: "default_deny",
-    allow_outbound_ports: [53, 80, 443, 123],
-    allow_inbound_ports: [],
-  },
+  dns: { mode: "allow_all", allowlist: ["*"], blocklist: [], safe_search: true, upstream: "1.1.1.2" },
+  firewall: { mode: "allow_all", allow_outbound_ports: [], allow_inbound_ports: [] },
   screen_time: {
     enabled: false,
     daily_limit_minutes: 0,
@@ -201,6 +157,26 @@ export const mockProfiles: Profile[] = [
     created_at: "2026-06-20T12:00:00Z",
     updated_at: "2026-06-28T09:12:00Z",
   },
+  // An adult who keeps their own time: their rules are theirs, so the family
+  // view never lists this profile (the server leaves it out, and so does the
+  // mock).
+  {
+    id: "p-jonas",
+    tenant_id: TENANT_ID,
+    name: "Jonas's rules",
+    kind: "adult",
+    is_preset: false,
+    policy: {
+      ...defaultPolicy,
+      screen_time: { enabled: true, daily_limit_minutes: 180, schedule: [], bedtime: null },
+      focus: {
+        sites: ["reddit.com", "youtube.com", "news.ycombinator.com", "twitter.com"],
+        hours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "12:00" },
+      },
+    },
+    created_at: "2026-06-20T12:00:00Z",
+    updated_at: "2026-06-28T09:12:00Z",
+  },
 ];
 
 function du(
@@ -211,6 +187,7 @@ function du(
   profile_id: string,
   used_minutes_today = 0,
   earned_minutes_today = 0,
+  account_id?: string,
 ): DeviceUser {
   return {
     id,
@@ -221,6 +198,7 @@ function du(
     used_minutes_today,
     earned_minutes_today,
     created_at: "2026-06-10T08:00:00Z",
+    account_id,
   };
 }
 
@@ -290,6 +268,43 @@ export const mockDevices: Device[] = [
     users: [du("u-ada", "d-loft", "ada", "Ada", "p-default")],
   },
   {
+    id: "d-desk",
+    tenant_id: TENANT_ID,
+    name: "Desk laptop",
+    hostname: "desk-lt",
+    os: "linux",
+    agent_version: "0.6.1",
+    status: "online",
+    locked: false,
+    lock_pending: false,
+    tamper_level: 1,
+    public_ip: "84.112.22.9",
+    last_seen: ago(0),
+    created_at: "2026-06-20T12:00:00Z",
+    recovery_codes_unused: 8,
+    owner_account_id: "acc-jonas",
+    users: [du("u-jonas", "d-desk", "jonas", "Jonas", "p-jonas", 72, 0, "acc-jonas")],
+  },
+  {
+    // The parent's own computer — their login is theirs, never a child card.
+    id: "d-parent",
+    tenant_id: TENANT_ID,
+    name: "Studio laptop",
+    hostname: "studio",
+    os: "linux",
+    agent_version: "0.6.1",
+    status: "online",
+    locked: false,
+    lock_pending: false,
+    tamper_level: 1,
+    public_ip: "84.112.22.9",
+    last_seen: ago(0),
+    created_at: "2026-06-01T10:30:00Z",
+    recovery_codes_unused: 8,
+    owner_account_id: "acc-parent",
+    users: [du("u-parent", "d-parent", "philip", "Philip", "p-default", 72, 0, "acc-parent")],
+  },
+  {
     id: "d-new",
     tenant_id: TENANT_ID,
     name: "Kitchen Tablet Host",
@@ -336,7 +351,7 @@ export const mockEvents: Event[] = [
     type: "screen_time_earned",
     severity: "info",
     payload: { task: "reading", reward_minutes: 15 },
-    created_at: "2026-07-07T14:12:22Z",
+    created_at: ago(95),
   },
   {
     id: "e4",
@@ -346,7 +361,7 @@ export const mockEvents: Event[] = [
     type: "screen_time_exceeded",
     severity: "warn",
     payload: { balance_minutes: 0 },
-    created_at: "2026-07-07T13:58:00Z",
+    created_at: ago(26 * 60),
   },
   {
     id: "e5",
@@ -383,8 +398,8 @@ export const mockEvents: Event[] = [
 const mockAdmin: Admin = {
   id: "a-1",
   tenant_id: TENANT_ID,
-  username: "parent",
-  display_name: "Parent",
+  username: "philip",
+  display_name: "Philip",
   created_at: "2026-06-01T10:00:00Z",
 };
 
@@ -404,7 +419,7 @@ const mockHousehold: Household = {
 const mockAccount: Account = {
   id: "acc-parent",
   household_id: TENANT_ID,
-  display_name: "Parent",
+  display_name: "Philip",
   email: "parent@home.lan",
   role: "owner",
   age_bracket: "adult",
@@ -412,7 +427,7 @@ const mockAccount: Account = {
   self_managed: true,
   theme: null,
   effective_theme: "plain",
-  profile_id: null,
+  profile_id: "p-default",
   created_at: "2026-06-01T10:00:00Z",
 };
 
@@ -442,7 +457,7 @@ export const mockHouseholdAccounts: Account[] = [
     role: "member",
     age_bracket: "older_teen",
     birthdate: "2009-02-20",
-    self_managed: true,
+    self_managed: false,
     theme: null,
     effective_theme: "calm",
     profile_id: "p-teen",
@@ -493,6 +508,21 @@ export const mockHouseholdAccounts: Account[] = [
     profile_id: "p-default",
     created_at: "2026-06-02T08:15:00Z",
   },
+  {
+    // An adult in the household keeping time for themselves (?as=jonas).
+    id: "acc-jonas",
+    household_id: TENANT_ID,
+    display_name: "Jonas",
+    email: null,
+    role: "member",
+    age_bracket: "adult",
+    birthdate: "1996-03-14",
+    self_managed: true,
+    theme: null,
+    effective_theme: "plain",
+    profile_id: "p-jonas",
+    created_at: "2026-06-20T12:00:00Z",
+  },
 ];
 
 export const mockMe: Me = {
@@ -502,20 +532,12 @@ export const mockMe: Me = {
   tenant: mockTenant,
 };
 
-/** Design-review 2FA state: an authenticator is enrolled, email is available. */
-export const mockTwoFactor: TwoFactorStatus = {
-  totp_enrolled: true,
-  email_available: true,
-  telegram_available: true,
-};
-
-/** The code the mock step-up flow accepts, so the modal is demoable offline. */
-export const MOCK_STEPUP_CODE = "123456";
+/** The code design-review mode accepts wherever a code is typed. */
+export const MOCK_CODE = "123456";
 
 export const mockEarnRequests: EarnRequest[] = [
   {
     id: "er-1",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-mia",
     os_username: "mia",
@@ -523,14 +545,13 @@ export const mockEarnRequests: EarnRequest[] = [
     task_label: "Read for 20 min",
     minutes: 15,
     status: "pending",
-    created_at: "2026-07-07T14:02:11Z",
+    created_at: ago(4), // fresh in a demo
     decided_at: null,
     device_name: "Living Room PC",
     user_display_name: "Mia",
   },
   {
     id: "er-2",
-    tenant_id: TENANT_ID,
     device_id: "d-studio",
     device_user_id: "u-noah",
     os_username: "noah",
@@ -538,14 +559,13 @@ export const mockEarnRequests: EarnRequest[] = [
     task_label: "Finish homework",
     minutes: 20,
     status: "pending",
-    created_at: "2026-07-07T13:45:00Z",
+    created_at: ago(21),
     decided_at: null,
     device_name: "Studio Laptop",
     user_display_name: "Noah",
   },
   {
     id: "er-3",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-leo",
     os_username: "leo",
@@ -560,7 +580,6 @@ export const mockEarnRequests: EarnRequest[] = [
   },
   {
     id: "er-4",
-    tenant_id: TENANT_ID,
     device_id: "d-livingroom",
     device_user_id: "u-mia",
     os_username: "mia",
@@ -632,23 +651,74 @@ export function mockRegenEnrollToken(id: string): EnrollTokenResponse {
   };
 }
 
-export function mockDeviceDetail(id: string): DeviceDetail {
-  const dev = mockDevices.find((d) => d.id === id) ?? mockDevices[0];
-  return {
-    ...dev,
-    users: dev.users ?? [],
-    recent_events: mockEvents.filter((e) => e.device_id === dev.id).slice(0, 8),
-  };
-}
-
 /**
  * Mock for GET /api/family — assembled from the mock devices exactly the way
  * the server assembles it from real rows, so design-review mode exercises the
  * same shape the console gets in production.
  */
-/** The member account an OS user belongs to — by display name, the way the
- * server links on enroll; an unknown OS user gets a member made for it. */
+/** Design review: `?mock=solo` is a household of one — the parent and their
+ * own computer; `?mock=empty` is a fresh server with nothing added yet. */
+function household(): "full" | "solo" | "empty" {
+  if (typeof window === "undefined") return "full";
+  const m = new URLSearchParams(window.location.search).get("mock");
+  return m === "solo" ? "solo" : m === "empty" ? "empty" : "full";
+}
+
+/** Design review scenarios on top of the household: `?mock=degraded` — the
+ * living-room PC and the parent's laptop are stock desktops with no resolver,
+ * so they can't filter websites; `?mock=stops` — Mia is out of time (21 of
+ * her 17 minutes) and Leo is stopped by bedtime. */
+function scenario(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("mock");
+}
+
+const NO_RESOLVER = ["dns_no_local_resolver", "dns_policy_not_loaded"];
+
+/** The computers design review shows (all of them, or the solo household's). */
+export function mockVisibleDevices(): Device[] {
+  const h = household();
+  if (h === "empty") return [];
+  const all =
+    scenario() === "degraded"
+      ? mockDevices.map((d) =>
+          d.id === "d-livingroom" || d.id === "d-parent"
+            ? {
+                ...d,
+                last_state: {
+                  locked: false,
+                  frozen_users: [],
+                  enforcing: false,
+                  gaps: NO_RESOLVER,
+                  agent_version: d.agent_version,
+                  active_users: [],
+                },
+              }
+            : d,
+        )
+      : mockDevices;
+  if (h === "solo") return all.filter((d) => d.owner_account_id === mockAccount.id);
+  return all;
+}
+
+/** Everyone design review shows in the household. */
+export function mockVisibleAccounts(): Account[] {
+  return household() === "full" ? mockHouseholdAccounts : mockHouseholdAccounts.filter((a) => a.role !== "member");
+}
+
+/** Keeps their own time: the parent themselves, or an adult. */
+function selfManaged(a: Account): boolean {
+  return a.role !== "member" || a.age_bracket === "adult" || a.self_managed;
+}
+
+/** The account an OS user belongs to — the link the server made, else by
+ * display name the way the server links on enroll; an unknown OS user gets a
+ * member made for it. */
 function accountForOsUser(u: DeviceUser): Account {
+  if (u.account_id) {
+    const linked = mockHouseholdAccounts.find((a) => a.id === u.account_id);
+    if (linked) return linked;
+  }
   const name = u.display_name?.trim() || u.os_username;
   let acc = mockHouseholdAccounts.find(
     (a) => a.role === "member" && a.display_name.toLowerCase() === name.toLowerCase(),
@@ -675,14 +745,20 @@ function accountForOsUser(u: DeviceUser): Account {
 
 export function mockFamily(): FamilyResponse {
   const byKey = new Map<string, FamilyChild>();
-  for (const d of mockDevices) {
+  const solo = household() !== "full";
+  for (const d of mockVisibleDevices()) {
     for (const u of d.users ?? []) {
       const acc = accountForOsUser(u);
+      // A parent's own login is theirs — never a card on the family wall.
+      if (acc.role !== "member") continue;
+      const own = selfManaged(acc);
       const profile =
         mockProfiles.find((p) => p.id === (acc.profile_id ?? u.profile_id)) ?? null;
       const st = profile?.policy.screen_time;
+      // Someone who keeps their own time: the hub sees their minutes, never
+      // their rules (the server blanks them the same way).
       const limit =
-        st?.enabled && (st.daily_limit_minutes ?? 0) > 0 ? st.daily_limit_minutes : null;
+        !own && st?.enabled && (st.daily_limit_minutes ?? 0) > 0 ? st.daily_limit_minutes : null;
       const entry = {
         id: d.id,
         name: d.name,
@@ -717,12 +793,15 @@ export function mockFamily(): FamilyResponse {
           pending_requests: mockEarnRequests.filter(
             (r) => r.os_username === u.os_username && r.status === "pending",
           ).length,
+          blocked: mockBlocked.has(acc.id),
+          managed: acc.age_bracket !== "adult",
+          self_managed: own,
         });
       }
     }
   }
   // Members with no device yet still belong on the home screen.
-  for (const acc of mockHouseholdAccounts) {
+  for (const acc of solo ? [] : mockHouseholdAccounts) {
     if (acc.role !== "member" || byKey.has(acc.id)) continue;
     const profile = mockProfiles.find((p) => p.id === acc.profile_id) ?? null;
     byKey.set(acc.id, {
@@ -741,17 +820,58 @@ export function mockFamily(): FamilyResponse {
       profile_name: profile?.name ?? null,
       devices: [],
       pending_requests: 0,
+      blocked: mockBlocked.has(acc.id),
+      managed: acc.age_bracket !== "adult",
+      self_managed: selfManaged(acc),
     });
+  }
+  // Their own rules stay theirs: never in the hub's profile list.
+  const ownRules = new Set(
+    mockHouseholdAccounts.filter((a) => a.role === "member" && selfManaged(a)).map((a) => a.profile_id),
+  );
+  if (scenario() === "stops") {
+    const tomorrowAt7 = new Date();
+    tomorrowAt7.setUTCDate(tomorrowAt7.getUTCDate() + 1);
+    tomorrowAt7.setUTCHours(7, 0, 0, 0);
+    const stopped = (reason: "limit" | "bedtime", resume: Date | null) => ({
+      allowed: false,
+      reason,
+      minutes_left: 0,
+      stop_at: new Date().toISOString(),
+      resume_at: resume?.toISOString() ?? null,
+    });
+    for (const c of byKey.values()) {
+      if (c.name === "Mia") {
+        Object.assign(c, { used_minutes: 21, earned_minutes: 0, limit_minutes: 17, left_minutes: 0 });
+        c.rules = stopped("limit", null);
+      }
+      if (c.name === "Leo") {
+        c.left_minutes = 0;
+        c.rules = stopped("bedtime", tomorrowAt7);
+      }
+    }
   }
   return {
     children: [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)),
-    devices: mockDevices,
-    profiles: mockProfiles,
-    requests: mockEarnRequests.filter((r) => r.status === "pending"),
+    // The family's computers come without their logins (the server's
+    // /api/family has none; Computers reads them from /api/devices).
+    devices: mockVisibleDevices().map(({ users: _users, ...d }) => d),
+    profiles: mockProfiles.filter((p) => !ownRules.has(p.id)),
+    requests: solo ? [] : mockEarnRequests.filter((r) => r.status === "pending"),
     server_time: new Date().toISOString(),
   };
 }
 
+/** Old account blocks the console only offers to lift (design review:
+ * `?mock=blocked` blocks Noah). */
+const mockBlocked = new Set<string>(
+  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mock") === "blocked"
+    ? ["acc-noah"]
+    : [],
+);
+export function mockUnblockMember(id: string): void {
+  mockBlocked.delete(id);
+}
 
 // ---- Members ------------------------------------------------------------------
 
@@ -795,6 +915,15 @@ export function mockUpdateMember(id: string, patch: MemberPatch): Account {
 export function mockDeleteMember(id: string): void {
   const i = mockHouseholdAccounts.findIndex((a) => a.id === id);
   if (i >= 0) mockHouseholdAccounts.splice(i, 1);
+  // Like the server: a computer set up for them that never joined goes too.
+  for (let d = mockDevices.length - 1; d >= 0; d--) {
+    const dev = mockDevices[d];
+    const theirs = mockDeviceMember.get(dev.id) === id || dev.owner_account_id === id;
+    if (theirs && dev.status === "pending") {
+      mockDevices.splice(d, 1);
+      mockDeviceMember.delete(dev.id);
+    }
+  }
 }
 
 // ---- Unlock codes -------------------------------------------------------------
@@ -861,59 +990,38 @@ export function mockRecoveryCodesStatus(deviceId: string): RecoveryCodesStatus {
   };
 }
 
-// ---- Change mode ---------------------------------------------------------------
-// Mirrors the server's step-up grant: 15 minutes, one extension, lock anytime.
+// ---- Confirm it's you ------------------------------------------------------------
+// Mirrors the server's confirm window: 15 minutes, opened by a passkey or a code.
 
-const GRANT_MS = 15 * 60_000;
-let mockArmedUntil: number | null = null;
-let mockExtended = false;
-export const mockChangeMode = {
-  status(): ChangeModeStatus {
+const CONFIRM_MS = 15 * 60_000;
+// undefined = not asked yet. Design review: ?mock=confirmed opens the window
+// from the start (screenshots of the keys).
+let mockArmedUntil: number | null | undefined;
+export const mockConfirm = {
+  status(): ConfirmStatus {
+    if (mockArmedUntil === undefined)
+      mockArmedUntil =
+        new URLSearchParams(window.location.search).get("mock") === "confirmed" ? Date.now() + CONFIRM_MS : null;
     if (mockArmedUntil !== null && mockArmedUntil <= Date.now()) mockArmedUntil = null;
     return {
       armed_until: mockArmedUntil === null ? null : new Date(mockArmedUntil).toISOString(),
-      extended: mockExtended,
+      passkey: true,
+      computer: true,
     };
   },
-  enter(): { expires_at: string; extended: boolean } {
-    mockArmedUntil = Date.now() + GRANT_MS;
-    mockExtended = false;
-    return { expires_at: new Date(mockArmedUntil).toISOString(), extended: false };
-  },
-  lock(): ChangeModeStatus {
-    mockArmedUntil = null;
-    mockExtended = false;
-    return { armed_until: null, extended: false };
-  },
-  extend(): ChangeModeStatus {
-    if (mockArmedUntil === null || mockArmedUntil <= Date.now()) {
-      throw new MockError("step_up_required", "Change mode is off.", 428);
-    }
-    if (mockExtended) throw new MockError("already_extended", "Already extended once.", 409);
-    mockArmedUntil = Date.now() + GRANT_MS;
-    mockExtended = true;
-    return this.status();
+  open(): { armed_until: string } {
+    mockArmedUntil = Date.now() + CONFIRM_MS;
+    return { armed_until: new Date(mockArmedUntil).toISOString() };
   },
 };
 
-/** The shape api.ts's ApiError has, without importing api.ts (a cycle). */
-class MockError extends Error {
-  code: string;
-  status: number;
-  constructor(code: string, message: string, status: number) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.name = "ApiError";
-  }
-}
-
 // ---- The person's own page --------------------------------------------------------
 
-/** Which member the mock "me" page shows. Design review flips this with
- * `?as=mia` (little/kid → playful, teens → calm, adults → plain). */
+/** Whose session design review is: `?as=mia` signs in as Mia (a member
+ * session — her own page and nothing else), `?as=jonas` as an adult keeping
+ * his own time. Without it, the parent. */
 function mockMeAccount(): Account {
-  const q = new URLSearchParams(window.location.search).get("as");
+  const q = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("as") : null;
   if (q) {
     const acc = mockHouseholdAccounts.find((a) => a.display_name.toLowerCase() === q.toLowerCase());
     if (acc) return acc;
@@ -921,20 +1029,69 @@ function mockMeAccount(): Account {
   return mockMe.account;
 }
 
+/** Mock for GET /api/me — the parent, or whoever `?as=` names. */
+export function mockMeSession(): Me {
+  const account = mockMeAccount();
+  return account.id === mockMe.account.id ? mockMe : { ...mockMe, account };
+}
+
+/** Each self-managed person's own rules (the board's "My computer"). */
+const myRules = new Map<string, MyRules>();
+function ownRulesFor(acc: Account): MyRules {
+  let r = myRules.get(acc.id);
+  if (!r) {
+    const p = mockProfiles.find((x) => x.id === acc.profile_id && x.kind === "adult");
+    r = {
+      daily_limit_minutes: p?.policy.screen_time.daily_limit_minutes ?? 180,
+      focus_hours: p?.policy.focus?.hours ?? { days: [1, 2, 3, 4, 5], start: "09:00", end: "12:00" },
+      sites: p?.policy.focus?.sites ?? ["reddit.com", "youtube.com", "news.ycombinator.com", "twitter.com"],
+    };
+    myRules.set(acc.id, r);
+  }
+  return r;
+}
+
+/** Mock for GET /api/me/rules. A child's rules are a parent's: refused. */
+export function mockMyRules(): MyRules {
+  const acc = mockMeAccount();
+  if (!selfManaged(acc)) throw new Error("your rules are set by a parent");
+  return { ...ownRulesFor(acc) };
+}
+
+/** Mock for PUT /api/me/rules — stored as given (the page validated it). */
+export function mockSetMyRules(r: MyRules): MyRules {
+  const acc = mockMeAccount();
+  if (!selfManaged(acc)) throw new Error("your rules are set by a parent");
+  const next = { ...r, sites: [...new Set(r.sites.map((s) => s.trim().toLowerCase()))] };
+  myRules.set(acc.id, next);
+  return { ...next };
+}
+
 /** Mock for GET /api/me/today, assembled from the same rows as the family. */
 export function mockMeToday(): MeToday {
   const acc = mockMeAccount();
-  const fam = mockFamily();
-  const child = fam.children.find((c) => c.account_id === acc.id);
-  const profile = mockProfiles.find((p) => p.id === (acc.profile_id ?? child?.profile_id)) ?? null;
-  const used = child?.used_minutes ?? 37;
-  const earned = child?.earned_minutes ?? 0;
-  const limit = child?.limit_minutes ?? null;
+  const own = selfManaged(acc);
+  const rows = mockVisibleDevices().flatMap((d) =>
+    (d.users ?? []).filter((u) => accountForOsUser(u).id === acc.id).map((u) => ({ d, u })),
+  );
+  const profile = mockProfiles.find((p) => p.id === acc.profile_id) ?? null;
+  const rules = own ? ownRulesFor(acc) : null;
+  const used = rows.reduce((s, r) => s + (r.u.used_minutes_today ?? 0), 0);
+  const earned = rows.reduce((s, r) => s + (r.u.earned_minutes_today ?? 0), 0);
+  const st = profile?.policy.screen_time;
+  const limit = rules
+    ? rules.daily_limit_minutes || null
+    : st?.enabled && st.daily_limit_minutes > 0
+      ? st.daily_limit_minutes
+      : null;
   const left = limit === null ? null : Math.max(0, limit + earned - used);
-  const devices = (child?.devices ?? mockDevices.slice(0, 1)).map((d) => {
-    const full = mockDevices.find((x) => x.id === d.id);
-    return { name: d.name, status: d.status, locked: full?.locked ?? false };
-  });
+  // Someone who sets their own rules hears what a computer of theirs can't do.
+  const devices = rows.map(({ d }) => ({
+    name: d.name,
+    status: d.status,
+    locked: d.locked,
+    ...(own ? { gaps: d.status === "online" ? d.last_state?.gaps ?? [] : [] } : {}),
+  }));
   return {
     used_minutes: used,
     earned_minutes: earned,
@@ -942,13 +1099,19 @@ export function mockMeToday(): MeToday {
     left_minutes: left,
     locked: devices.length > 0 && devices.every((d) => d.locked),
     devices,
-    blocks: profile?.policy.blocks ?? { apps: [], categories: [], custom_domains: [] },
+    blocks: (!own && profile?.policy.blocks) || { apps: [], categories: [], custom_domains: [] },
     bracket: acc.age_bracket,
     theme: acc.theme ?? defaultThemeFor(acc.age_bracket),
     pending_request: mockPendingAsk,
-    bedtime: profile?.policy.screen_time.bedtime ?? null,
-    windows: profile?.policy.screen_time.schedule ?? [],
-    goal_minutes: 120,
+    bedtime: (!own && st?.bedtime) || null,
+    windows: (!own && st?.schedule) || [],
+    self_managed: own,
+    focus: rules ? { sites: rules.sites, hours: rules.focus_hours } : { sites: [], hours: null },
+    // The server's rule (usage.rs `hub_exposure`), for sample data only.
+    parent_sees:
+      acc.age_bracket === "adult" || acc.self_managed
+        ? { apps: false, sites: false }
+        : { apps: true, sites: acc.age_bracket !== "older_teen" },
   };
 }
 
@@ -1013,3 +1176,28 @@ export const mockCatalog: Catalog = {
     { id: "shein", name: "Shein", category: "shopping", has_native_client: false },
   ],
 };
+
+/** Mock for GET /api/usage/where and /api/me/where — a believable day. */
+export function mockWhere(): WhereData {
+  return {
+    apps: [
+      { key: "discord", seconds: 52 * 60 },
+      { key: "minecraft", seconds: 40 * 60 },
+      { key: "spotify", seconds: 35 * 60 },
+      { key: "steam", seconds: 12 * 60 },
+    ],
+    sites: [
+      { key: "youtube.com", hits: 420 },
+      { key: "wikipedia.org", hits: 160 },
+      { key: "discord.com", hits: 120 },
+      { key: "github.com", hits: 60 },
+    ],
+    hours: [15, 16, 17, 19, 20].map((h) => {
+      const d = new Date();
+      d.setHours(h, 0, 0, 0);
+      return { hour: d.toISOString(), amount: h === 17 ? 300 : 120 };
+    }),
+    sites_hidden_shared: false,
+    sites_hidden_age: false,
+  };
+}

@@ -1,17 +1,15 @@
 // ============================================================================
-// Confirm — the one dialog that asks you to prove it's you.
+// Confirm — the one dialog that asks you to prove it's you (docs/AUTH.md).
 //
-// Trust lives at login now: a session born from a passkey, SSO, or the
-// installed client on your own computer mutates freely — pausing, granting
-// time, changing rules just work, with nothing to arm first. The server
-// remains the authority; the rare route that still wants proof answers
-// 428 `step_up_required`, and `guard()` turns that into "confirm, then do it"
-// instead of a dead end.
+// Signing in is the proof: pausing, granting time, changing rules just work.
+// Only the keys — a computer's unlock code and recovery codes, your passkeys,
+// pairing tokens — ask again. The server answers those with 428
+// `step_up_required` while the session's confirm window is shut; `guard()`
+// turns that into "confirm, then do it" instead of a dead end.
 //
-// Two things still ask:
-//   - the sensitive corner (unlock codes, recovery codes, passkeys, pairing
-//     tokens) — one factor opens a fifteen-minute confirm window,
-//   - a session that predates trust-at-login — one factor repairs it for good.
+// Two ways to confirm, the same two you sign in with: your passkey, or a code
+// shown on your own computer. An account with neither (SSO only) confirms by
+// signing in again — the dialog always offers a way through.
 // ============================================================================
 import {
   createContext,
@@ -25,18 +23,19 @@ import {
 } from "react";
 import {
   ApiError,
-  extendChangeMode,
-  getChangeMode,
-  getTwoFactorStatus,
-  lockChangeMode,
-  startTelegramStepUp,
-  verifyStepUp,
+  auth,
+  confirmWithPasskey,
+  getConfirmStatus,
+  startConfirmCode,
+  verifyConfirmCode,
 } from "../api";
 import { STEP_UP_REQUIRED } from "../types";
-import type { SecondFactorMethod, StepUpGrant, TwoFactorStatus } from "../types";
+import type { ConfirmStatus } from "../types";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-import { CodeRing } from "../components/CodeRing";
+import { CodeBoxes } from "../components/CodeBoxes";
+import { PasskeyButton } from "../components/PasskeyButton";
+import { sentence } from "./format";
 
 /** Thrown when the user dismisses the dialog — callers no-op on it. */
 export class StepUpCancelled extends Error {
@@ -47,19 +46,11 @@ export class StepUpCancelled extends Error {
 }
 
 export interface ConfirmApi {
-  /** The sensitive-corner confirm window is open right now. */
+  /** The confirm window is open right now. */
   armed: boolean;
-  /** When it lapses (ISO), or null while shut. */
-  armedUntil: string | null;
-  /** The one allowed extension has been used. */
-  extended: boolean;
-  /** Open the window (asks for a factor unless it is already open). */
+  /** Open the window (asks unless it is already open). */
   enter: () => Promise<void>;
-  /** Shut it now. */
-  lock: () => Promise<void>;
-  /** Another fifteen minutes from now — once. */
-  extend: () => Promise<void>;
-  /** Resolve once the window is open, prompting for a factor if needed. */
+  /** Resolve once the window is open, asking if needed. */
   requireConfirm: () => Promise<void>;
   /** Run a call; if the server asks for proof, ask the person once and retry. */
   guard: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -75,49 +66,45 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   // The window, mirrored for rendering; the ref is what async code reads so a
   // guard() that started before a re-render still sees the current truth.
   const [armedUntil, setArmedUntil] = useState<string | null>(null);
-  const [extended, setExtended] = useState(false);
   const untilRef = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<TwoFactorStatus | null>(null);
-  // Everyone waiting on the dialog. Two calls can ask at once (a panel that
-  // loads a code and its recovery count together); one dialog answers them
-  // all, and cancelling it tells them all.
+  const [status, setStatus] = useState<ConfirmStatus | null>(null);
+  // Everyone waiting on the dialog: one dialog answers them all, and
+  // cancelling it tells them all.
   const waiters = useRef<{ resolve: () => void; reject: (e: Error) => void }[]>([]);
 
-  const setGrant = useCallback((until: string | null, ext: boolean) => {
+  const setWindow = useCallback((until: string | null) => {
     untilRef.current = until;
     setArmedUntil(until);
-    setExtended(ext);
   }, []);
 
-  // A reloaded console asks the server whether the window is still open, so
-  // the Security room doesn't show shut while sensitive reads quietly work.
+  // A fresh sign-in opens the window; a reload asks the server whether it
+  // still is, so the Security room doesn't show shut while reads work.
   useEffect(() => {
     let alive = true;
-    getChangeMode()
+    getConfirmStatus()
       .then((s) => {
-        if (!alive) return;
-        setGrant(live(s.armed_until) ? s.armed_until : null, s.extended);
+        if (alive) setWindow(live(s.armed_until) ? s.armed_until : null);
       })
       .catch(() => {
-        /* no session yet, or an older server: stay shut */
+        /* no session yet: stay shut */
       });
     return () => {
       alive = false;
     };
-  }, [setGrant]);
+  }, [setWindow]);
 
   // Shut the moment it lapses, without waiting for a failed call.
   useEffect(() => {
     if (!armedUntil) return;
     const ms = new Date(armedUntil).getTime() - Date.now();
     if (ms <= 0) {
-      setGrant(null, false);
+      setWindow(null);
       return;
     }
-    const t = setTimeout(() => setGrant(null, false), ms);
+    const t = setTimeout(() => setWindow(null), ms);
     return () => clearTimeout(t);
-  }, [armedUntil, setGrant]);
+  }, [armedUntil, setWindow]);
 
   const requireConfirm = useCallback(async () => {
     if (live(untilRef.current)) return;
@@ -126,33 +113,41 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       waiters.current.push({ resolve, reject });
     });
     if (first) {
-      // Load which factors this account has, so the dialog shows the right paths.
+      // Which ways this account has right now, so the dialog offers those.
       try {
-        setStatus(await getTwoFactorStatus());
+        const s = await getConfirmStatus();
+        if (live(s.armed_until)) {
+          setWindow(s.armed_until);
+          const all = waiters.current;
+          waiters.current = [];
+          all.forEach((w) => w.resolve());
+          return wait;
+        }
+        setStatus(s);
       } catch {
-        setStatus({ totp_enrolled: false });
+        setStatus({ armed_until: null, passkey: false, computer: false });
       }
       setOpen(true);
     }
     await wait;
-  }, []);
+  }, [setWindow]);
 
   // Optimistic: run the call; only if the server wants proof does anyone get
-  // asked. On a trusted session the dialog never appears at all.
+  // asked. Inside a live window the dialog never appears at all.
   const guard = useCallback(
     async <T,>(fn: () => Promise<T>): Promise<T> => {
       try {
         return await fn();
       } catch (e) {
         if (e instanceof ApiError && e.code === STEP_UP_REQUIRED) {
-          setGrant(null, false);
+          setWindow(null);
           await requireConfirm();
           return await fn();
         }
         throw e;
       }
     },
-    [requireConfirm, setGrant],
+    [requireConfirm, setWindow],
   );
 
   const enter = useCallback(async () => {
@@ -163,30 +158,15 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     }
   }, [requireConfirm]);
 
-  const lock = useCallback(async () => {
-    try {
-      await lockChangeMode();
-    } catch {
-      // Even if the server could not be told, the window shuts locally: the
-      // next sensitive read simply asks again.
-    }
-    setGrant(null, false);
-  }, [setGrant]);
-
-  const extend = useCallback(async () => {
-    const s = await extendChangeMode();
-    setGrant(s.armed_until, s.extended);
-  }, [setGrant]);
-
-  const onVerified = useCallback(
-    (grant: StepUpGrant) => {
-      setGrant(grant.expires_at, grant.extended ?? false);
+  const onConfirmed = useCallback(
+    (until: string) => {
+      setWindow(until);
       setOpen(false);
       const all = waiters.current;
       waiters.current = [];
       all.forEach((w) => w.resolve());
     },
-    [setGrant],
+    [setWindow],
   );
 
   const onCancel = useCallback(() => {
@@ -198,14 +178,14 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
   const armed = armedUntil !== null;
   const api = useMemo<ConfirmApi>(
-    () => ({ armed, armedUntil, extended, enter, lock, extend, requireConfirm, guard }),
-    [armed, armedUntil, extended, enter, lock, extend, requireConfirm, guard],
+    () => ({ armed, enter, requireConfirm, guard }),
+    [armed, enter, requireConfirm, guard],
   );
 
   return (
     <Ctx.Provider value={api}>
       {children}
-      <ConfirmModal open={open} status={status} onVerified={onVerified} onCancel={onCancel} />
+      <ConfirmModal open={open} status={status} onConfirmed={onConfirmed} onCancel={onCancel} />
     </Ctx.Provider>
   );
 }
@@ -220,68 +200,77 @@ export function useConfirm(): ConfirmApi {
 
 interface ModalProps {
   open: boolean;
-  status: TwoFactorStatus | null;
-  onVerified: (grant: StepUpGrant) => void;
+  status: ConfirmStatus | null;
+  onConfirmed: (until: string) => void;
   onCancel: () => void;
 }
 
-function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
-  const totp = status?.totp_enrolled ?? false;
-  const telegram = status?.telegram_available ?? false;
-  const [method, setMethod] = useState<SecondFactorMethod>("totp");
+function ConfirmModal({ open, status, onConfirmed, onCancel }: ModalProps) {
+  const [requestId, setRequestId] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The phone path: a tap sent, and a poll waiting for it to land.
-  const [tapSent, setTapSent] = useState(false);
 
-  // When the dialog opens, reset and default to the easiest available method:
-  // one tap on the phone beats typing any code.
   useEffect(() => {
     if (!open) return;
-    setMethod(telegram ? "telegram" : "totp");
+    setRequestId(null);
     setCode("");
-    setTapSent(false);
     setError(null);
     setBusy(false);
-  }, [open, totp, telegram]);
+  }, [open]);
 
-  // While a tap is out, poll the server until the window opens (the bot has
-  // no way to reach this tab — the tab asks). Two minutes, then give up.
-  useEffect(() => {
-    if (!open || !tapSent) return;
-    const startedAt = Date.now();
-    const t = setInterval(async () => {
-      if (Date.now() - startedAt > 120_000) {
-        clearInterval(t);
-        setTapSent(false);
-        setError("No tap arrived — try again, or use a code.");
-        return;
-      }
-      try {
-        const s = await getChangeMode();
-        if (s.armed_until && new Date(s.armed_until).getTime() > Date.now()) {
-          clearInterval(t);
-          onVerified({ method: "telegram", expires_at: s.armed_until, extended: s.extended });
-        }
-      } catch {
-        /* keep polling — a blip is not a verdict */
-      }
-    }, 2000);
-    return () => clearInterval(t);
-  }, [open, tapSent, onVerified]);
+  const passkey = status?.passkey ?? false;
+  const computer = status?.computer ?? false;
 
-  async function verify(full: string) {
+  async function withPasskey() {
+    setError(null);
+    try {
+      onConfirmed((await confirmWithPasskey()).armed_until);
+    } catch (e) {
+      if (e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError")) return;
+      setError(e instanceof Error ? sentence(e.message) : "That passkey didn't work.");
+    }
+  }
+
+  async function sendCode() {
     setBusy(true);
     setError(null);
     try {
-      onVerified(await verifyStepUp(method, full));
-    } catch (e) {
-      // The ring flashes red and empties; the message says why.
-      setError(e instanceof Error ? e.message : "That code didn't match.");
+      setRequestId((await startConfirmCode()).request_id);
       setCode("");
+    } catch (e) {
+      setError(e instanceof Error ? sentence(e.message) : "Couldn't reach your computer.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function verify(full: string) {
+    if (!requestId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onConfirmed((await verifyConfirmCode(requestId, full)).armed_until);
+    } catch (e) {
+      setCode("");
+      if (e instanceof ApiError && e.code === "code_expired") {
+        setRequestId(null);
+        setError("That code ran out. Send a new one.");
+      } else {
+        setError("That code didn't match. Try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // A fresh sign-in opens the window. A full page load, so nothing of this
+  // session lingers in memory.
+  async function signInAgain() {
+    try {
+      await auth.logout();
+    } finally {
+      window.location.assign("/login");
     }
   }
 
@@ -291,111 +280,65 @@ function ConfirmModal({ open, status, onVerified, onCancel }: ModalProps) {
       onClose={onCancel}
       title="Confirm it's you"
       footer={
-        <Button variant="ghost" onClick={onCancel} disabled={busy}>
+        <Button variant="quiet" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
       }
     >
-      <div className="flex flex-col gap-4">
-        <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-          Before we show the keys to your household, we need to be sure it's you. Enter a code once — it
-          stays confirmed for 15 minutes.
-        </p>
-
-        {(totp || telegram) && (
-          <div className="seg">
-            {telegram && (
-              <MethodTab
-                active={method === "telegram"}
-                label="Phone"
-                onClick={() => {
-                  setMethod("telegram");
-                  setError(null);
-                }}
-              />
-            )}
-            {!totp && !telegram && (
-              <p className="cf-nofactor">
-                You haven&rsquo;t set up a way to confirm yet. Add your phone or an authenticator
-                under <a href="/settings">Settings → Security &amp; access</a>, then come back here.
-              </p>
-            )}
-            {totp && (
-              <MethodTab
-                active={method === "totp"}
-                label="Authenticator"
-                onClick={() => {
-                  setMethod("totp");
-                  setError(null);
-                }}
-              />
-            )}
-          </div>
-        )}
-
-        {method === "telegram" ? (
-          tapSent ? (
-            <p className="text-sm" role="status" style={{ color: "var(--fg-dim)" }}>
-              Sent. Tap <strong style={{ color: "var(--fg)" }}>✅ It's me</strong> on your
-              phone — this dialog closes by itself.
-            </p>
-          ) : (
+      {requestId ? (
+        <div className="stack">
+          <p className="dialog-lede">
+            Type the code from the OpenScreenTime window on your computer.
+          </p>
+          <CodeBoxes
+            value={code}
+            disabled={busy}
+            error={!!error}
+            aria-label="The code from your computer"
+            onChange={(v) => {
+              setCode(v);
+              if (error) setError(null);
+            }}
+            onComplete={(full) => void verify(full)}
+          />
+          <p className="hint" data-error={!!error} role={error ? "alert" : undefined}>
+            {busy ? "Checking…" : (error ?? "It works for 5 minutes.")}
+          </p>
+        </div>
+      ) : (
+        <div className="stack">
+          <p className="dialog-lede">
+            You're about to see the keys to your household. It stays confirmed for 15 minutes.
+          </p>
+          {passkey && (
+            <PasskeyButton label="Use your passkey" onActivate={withPasskey} variant="primary" />
+          )}
+          {computer && (
             <Button
-              variant="ghost"
+              variant={passkey ? "secondary" : "primary"}
+              icon="laptop"
+              block
               disabled={busy}
-              onClick={() =>
-                void (async () => {
-                  setBusy(true);
-                  setError(null);
-                  try {
-                    await startTelegramStepUp();
-                    setTapSent(true);
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : "Could not reach your phone.");
-                  } finally {
-                    setBusy(false);
-                  }
-                })()
-              }
+              onClick={() => void sendCode()}
             >
-              {busy ? "Sending…" : "Send a tap to my phone"}
+              {busy ? "Sending…" : "Get a code on your computer"}
             </Button>
-          )
-        ) : (
-          <div className="cr-wrap">
-            <CodeRing
-              value={code}
-              disabled={busy}
-              error={!!error}
-              aria-label="Code from your authenticator"
-              onChange={(v) => {
-                setCode(v);
-                if (error) setError(null);
-              }}
-              onComplete={(full) => void verify(full)}
-            />
-            <p className="cr-note" data-error={!!error} role={error ? "alert" : undefined}>
-              {busy ? "Checking…" : (error ?? "The 6 digits from your authenticator")}
+          )}
+          {!passkey && !computer && (
+            <>
+              <p role="note">Sign in again to confirm. A fresh sign-in counts for 15 minutes.</p>
+              <Button block onClick={() => void signInAgain()}>
+                Sign in again
+              </Button>
+            </>
+          )}
+          {error && (
+            <p className="hint" data-error="true" role="alert">
+              {error}
             </p>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </Modal>
-  );
-}
-
-function MethodTab({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" onClick={onClick} className="focusable seg-btn" data-on={active}>
-      {label}
-    </button>
   );
 }

@@ -11,10 +11,12 @@
 //! the way in. The console redeems it and strips it from the address bar
 //! immediately.
 //!
-//! What this is not: a way to become a parent. The session a voucher buys can
-//! read, and it can step up like any other session, but it never *starts*
-//! stepped up — possession of the laptop is not possession of the second
-//! factor. Changing anything still needs a code.
+//! What this is not: a way to become a parent on someone else's computer. The
+//! voucher is for the person linked to the OS login that asked, and a parent
+//! is only vouched for from a computer declared as theirs (docs/AUTH.md).
+//!
+//! Signing in on another device instead? Type your name there; the code shows
+//! up in `ost code` and the app window (logincode.rs).
 
 use crate::client::ServerClient;
 use crate::config::AgentConfig;

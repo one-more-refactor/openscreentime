@@ -1,0 +1,46 @@
+# OpenScreenTime lock screen — its own session on its own VT (%i).
+# Installed to /etc/systemd/system/openscreentime-lock@.service by
+# `openscreentime install-service` (GUI build). Started and stopped by the agent;
+# never enabled. A separate unit from the agent on purpose: an agent restart
+# (watchdog, self-update) must never take a lock down.
+#
+# It runs the kiosk compositor cage — WITHOUT -s, so the keyboard cannot switch
+# VTs — as the unprivileged system user ost-lock, with a logind session on the
+# lock VT (PAMName + TTYPath). cage hosts `openscreentime __lockscreen`, which
+# only draws and asks the agent (over /run/openscreentime/lock.sock) to check a
+# typed code. If cage is missing, gives up, or is slow to come up, the agent
+# draws a text lock on the next VT (14) — never this one, which this unit
+# resets and deallocates on every start and stop.
+[Unit]
+Description=OpenScreenTime lock screen (VT %i)
+After=systemd-user-sessions.service systemd-logind.service
+Wants=systemd-logind.service
+Conflicts=getty@tty%i.service autovt@tty%i.service
+After=getty@tty%i.service autovt@tty%i.service
+
+[Service]
+Type=simple
+User=ost-lock
+Group=ost-lock
+PAMName=openscreentime-lock
+TTYPath=/dev/tty%i
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty%i
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_SESSION_CLASS=greeter
+# Where cage puts its Wayland socket when logind gives it no runtime dir.
+RuntimeDirectory=openscreentime-lock
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/bin/openscreentime __lock-session
+Restart=on-failure
+RestartSec=1
+# A cage that hangs (a GPU driver that never answers) must not hold the VT
+# for systemd's default 90 s after the agent gave up on it: the text lock is
+# already on this VT by then.
+TimeoutStopSec=5

@@ -8,35 +8,59 @@ mod agent;
 mod agent_dist;
 mod alerts;
 mod auth;
-mod auth_device;
 mod auth_oidc;
 mod commands;
+mod confirm;
 mod db;
 mod devices;
 mod earn;
 mod error;
 mod events;
 mod family;
+mod ledger;
+mod login_code;
+mod machine;
 mod members;
+mod ops;
 mod parent;
 mod presets;
 mod profiles;
 mod rate_limit;
+mod recover;
+mod settings;
 mod state;
 mod static_web;
-mod stepup;
+mod supervise;
 mod telegram;
+#[cfg(test)]
+mod tests_auth;
+#[cfg(test)]
+mod tests_console;
+#[cfg(test)]
+mod tests_machine;
+#[cfg(test)]
+mod tests_numbers;
+#[cfg(test)]
+mod tests_retire;
+#[cfg(test)]
+mod tests_rules;
+#[cfg(test)]
+mod tests_shapes;
+mod unlock_code;
 mod usage;
+mod voucher;
 mod vpn;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
+    extract::State,
     http::{header, HeaderValue, Method, StatusCode},
     middleware,
-    routing::{any, delete, get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -46,13 +70,6 @@ use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
 use crate::state::{AppState, Hub};
-
-async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": { "code": "not_found", "message": "no such route" } })),
-    )
-}
 
 /// Baseline browser hardening on every response. No CSP yet (the SPA inlines
 /// styles); these three are free and close framing/sniffing/referrer leaks.
@@ -72,64 +89,89 @@ async fn security_headers(mut resp: axum::response::Response) -> axum::response:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `openscreentime-server healthcheck` is the container's health probe
+    // (the runtime image has no curl): exit 0 iff /health says ok.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck().await;
+    }
+
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "openscreentime_server=debug,tower_http=info,info".into()),
+                .unwrap_or_else(|_| "openscreentime_server=info,tower_http=info,info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env.example)");
-    let rp_id = std::env::var("RP_ID").unwrap_or_else(|_| "localhost".into());
-    let rp_origin_str =
-        std::env::var("RP_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
+        std::env::var("DATABASE_URL").context("DATABASE_URL must be set (see .env.example)")?;
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    // Cookies are Secure unless explicitly opted out for plain-http dev.
-    let cookie_secure = std::env::var("OST_INSECURE_COOKIES").map(|v| v == "1") != Ok(true);
-    // Public base URL (OIDC redirect URI + post-login redirects); falls back
-    // to the WebAuthn RP origin.
-    // Falling back to RP_ORIGIN beats minting OIDC redirect URIs out of a
-    // value compose never expanded — see `state::configured`.
-    let public_url = state::configured("OST_PUBLIC_URL")
-        .unwrap_or_else(|| rp_origin_str.clone())
-        .trim_end_matches('/')
-        .to_string();
+    // One variable (OST_PUBLIC_URL) → RP id, origin, cookie security; the old
+    // RP_ID / RP_ORIGIN / OST_INSECURE_COOKIES still override.
+    let public = settings::PublicSettings::from_env()?;
+    tracing::info!(
+        public_url = %public.public_url,
+        rp_id = %public.rp_id,
+        secure_cookies = public.cookie_secure,
+        version = env!("CARGO_PKG_VERSION"),
+        "starting"
+    );
 
-    // Database.
-    let pool = db::connect(&database_url).await?;
+    // Database. Retried rather than fatal: after a reboot Postgres may simply
+    // still be starting, and boot order is not ours to control.
+    let pool = db::connect_with_retry(&database_url).await;
     db::migrate(&pool).await?;
     tracing::info!("migrations applied");
+
+    // `openscreentime-server recover <name>`: print a one-time sign-in link for
+    // a parent who lost every passkey, then exit (see recover.rs).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("recover") {
+        let Some(name) = args.get(2) else {
+            anyhow::bail!("usage: openscreentime-server recover <name>");
+        };
+        return recover::run(&pool, &public.public_url, name).await;
+    }
     // 0.4 backfills: every tenant gets the bracket presets it lacks, and every
-    // OS login that predates accounts gets a person. Both idempotent.
-    presets::backfill_all_tenants(&pool).await?;
+    // OS login that predates accounts gets a person. Both idempotent, and both
+    // retried on the next start — neither is worth refusing to serve over.
+    if let Err(e) = presets::backfill_all_tenants(&pool).await {
+        tracing::warn!(error = %e, "preset backfill incomplete");
+    }
     if let Err(e) = members::backfill_links(&pool).await {
         tracing::warn!(error = %e, "account backfill incomplete");
     }
+    // Pre-0.6 "only approved sites work" profiles become allow-by-default,
+    // keeping every block they had. Idempotent.
+    match profiles::open_legacy_networks(&pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(profiles = n, "opened legacy closed-network profiles"),
+        Err(e) => tracing::warn!(error = %e, "legacy network backfill incomplete"),
+    }
 
     // WebAuthn relying party.
-    let rp_origin = Url::parse(&rp_origin_str)?;
-    let webauthn = WebauthnBuilder::new(&rp_id, &rp_origin)?
+    let rp_origin = Url::parse(&public.rp_origin)?;
+    let webauthn = WebauthnBuilder::new(&public.rp_id, &rp_origin)?
         .rp_name("OpenScreenTime")
         .build()?;
 
-    // OIDC SSO (off unless the OST_OIDC_* env vars are all set).
-    let oidc = auth_oidc::init_from_env(&public_url).await?;
+    // OIDC SSO (off unless the OST_OIDC_* env vars are all set). Discovery runs
+    // in the background: an unreachable IdP hides the SSO button, nothing more.
+    let oidc = auth_oidc::init_from_env(&public.public_url)?;
 
     let state = AppState {
         db: pool,
         webauthn: Arc::new(webauthn),
-        cookie_secure,
-        public_url,
+        cookie_secure: public.cookie_secure,
+        public_url: public.public_url.clone(),
         reg_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         auth_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         oidc,
         rate_limiter: Arc::new(rate_limit::RateLimiter::from_env()),
         hub: Arc::new(Hub::default()),
-        decoy_logins: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        bootstrap_token: state::configured("OST_BOOTSTRAP_TOKEN"),
     };
 
     // Offline sweeper: agents on the WS bus flip to offline the moment the
@@ -138,46 +180,31 @@ async fn main() -> anyhow::Result<()> {
     // left untouched; `locked` is its own column and survives.
     {
         let db = state.db.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            let mut sweeps: u64 = 0;
-            loop {
-                tick.tick().await;
-                match sqlx::query(
-                    "UPDATE devices SET status = 'offline'
-                     WHERE status = 'online' AND last_seen < now() - interval '90 seconds'",
-                )
-                .execute(&db)
-                .await
-                {
-                    Ok(res) => {
-                        tracing::debug!(swept = res.rows_affected(), "offline sweep");
-                    }
-                    Err(e) => tracing::warn!(error = %e, "offline sweep failed"),
-                }
-                // Retention: usage_slices and the event log grow forever
-                // otherwise. Prune once an hour (every 120 sweeps) — attribution
-                // is a rolling ~2-week signal and the event feed is an audit
-                // trail, not an archive.
-                sweeps += 1;
-                if sweeps.is_multiple_of(120) {
-                    for q in [
-                        "DELETE FROM admin_sessions WHERE expires_at < now()",
-                        "DELETE FROM device_vouchers WHERE expires_at < now() - interval '1 hour'",
-                        "DELETE FROM login_requests WHERE expires_at < now() - interval '1 hour'",
-                    ] {
-                        let _ = sqlx::query(q).execute(&db).await;
-                    }
-                    let _ = sqlx::query(
-                        "DELETE FROM usage_slices WHERE hour < now() - interval '21 days'",
+        supervise::spawn("offline-sweep", move || {
+            let db = db.clone();
+            async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut sweeps: u64 = 0;
+                loop {
+                    tick.tick().await;
+                    match sqlx::query(
+                        "UPDATE devices SET status = 'offline'
+                         WHERE status = 'online' AND last_seen < now() - interval '90 seconds'",
                     )
                     .execute(&db)
-                    .await;
-                    let _ = sqlx::query(
-                        "DELETE FROM events WHERE created_at < now() - interval '90 days'",
-                    )
-                    .execute(&db)
-                    .await;
+                    .await
+                    {
+                        Ok(res) => {
+                            tracing::debug!(swept = res.rows_affected(), "offline sweep");
+                        }
+                        Err(e) => tracing::warn!(error = %e, "offline sweep failed"),
+                    }
+                    // Retention: first shortly after boot (a server restarted
+                    // more often than hourly must still prune), then hourly.
+                    sweeps += 1;
+                    if sweeps % 120 == 2 {
+                        prune(&db).await;
+                    }
                 }
             }
         });
@@ -185,8 +212,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Phone alerts: one-way chat-bot messages on tamper/lockdown + time
     // requests. No-op unless a channel is configured in the environment.
-    alerts::spawn(state.db.clone(), alerts::AlertConfig::from_env());
+    let alert_cfg = alerts::AlertConfig::from_env();
+    alerts::spawn(state.db.clone(), alert_cfg.clone());
     telegram::spawn(state.clone());
+    // System health: database, backups, updates, devices gone quiet — logged
+    // always, sent to the same channels when one is configured.
+    ops::spawn(state.db.clone(), alert_cfg);
 
     // Settled commands age out after 30 days; the event log is the audit trail.
     commands::spawn_janitor(state.clone());
@@ -194,9 +225,10 @@ async fn main() -> anyhow::Result<()> {
     // CORS: the Vite dev server (RP_ORIGIN) talks to us with credentials.
     let cors = CorsLayer::new()
         .allow_origin(
-            rp_origin_str
+            public
+                .rp_origin
                 .parse::<HeaderValue>()
-                .expect("RP_ORIGIN must be a valid header value"),
+                .context("RP_ORIGIN must be a valid header value")?,
         )
         .allow_credentials(true)
         .allow_methods([
@@ -213,9 +245,18 @@ async fn main() -> anyhow::Result<()> {
     let auth_attempts = Router::new()
         .route("/api/auth/register/start", post(auth::register_start))
         .route("/api/auth/register/finish", post(auth::register_finish))
+        // Door one: your name, then a code on your own computer.
+        .route("/api/auth/code/start", post(login_code::start))
+        .route("/api/auth/code/verify", post(login_code::verify))
+        // Door two: a passkey, no name first.
         .route("/api/auth/login/start", post(auth::login_start))
         .route("/api/auth/login/finish", post(auth::login_finish))
-        .route("/api/auth/device/start", post(auth_device::start))
+        // Confirm it's you with a code (a passkey confirm needs no bucket).
+        .route("/api/auth/confirm/code/start", post(confirm::code_start))
+        .route("/api/auth/confirm/code/verify", post(confirm::code_verify))
+        // One-time links: device vouchers (`ost login`) and recovery links.
+        .route("/api/auth/voucher", post(voucher::redeem))
+        .route("/api/auth/link", post(voucher::redeem_link))
         .route("/api/auth/oidc/start", get(auth_oidc::start))
         .route("/api/auth/oidc/callback", get(auth_oidc::callback))
         .route(
@@ -227,19 +268,10 @@ async fn main() -> anyhow::Result<()> {
             rate_limit::limit_auth,
         ));
 
-    // The device-login poll gets its own generous bucket — it fires ~60 times
-    // per honest sign-in and must not exhaust (or be exhausted by) the auth
-    // bucket that guards the passkey fallback.
-    let login_poll = Router::new()
-        .route("/api/auth/device/finish", post(auth_device::finish))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit::limit_poll,
-        ));
-
     // Enrollment: 5 req / 60 s / IP.
     let enroll = Router::new()
         .route("/agent/enroll", post(agent::enroll))
+        .route("/agent/enroll/preview", post(agent::enroll_preview))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::limit_enroll,
@@ -276,39 +308,43 @@ async fn main() -> anyhow::Result<()> {
         .merge(agent_dist)
         // --- Auth ----------------------------------------------------------
         .merge(auth_attempts)
-        .merge(login_poll)
         .route("/api/auth/config", get(auth_oidc::auth_config))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(members::me))
         .route("/api/me/today", get(members::today))
         .route("/api/me/history", get(members::history))
         .route("/api/me/goal", post(members::set_goal))
+        .route(
+            "/api/me/rules",
+            get(members::my_rules).put(members::set_my_rules),
+        )
         .route("/api/me/where", get(usage::me_where))
         .route("/api/usage/where", get(usage::where_api))
         .route("/api/me/ask", post(members::ask))
         .route("/api/catalog", get(members::catalog_json))
         .route("/api/me/passkeys", get(auth::list_passkeys))
+        .route("/api/me/passkeys/new/start", post(auth::passkey_add_start))
+        .route(
+            "/api/me/passkeys/new/finish",
+            post(auth::passkey_add_finish),
+        )
         .route("/api/me/passkeys/{id}", delete(auth::delete_passkey))
-        // --- Step-up 2FA (docs/AUTH.md) -------------------------------------
-        .route("/api/me/2fa", get(stepup::status))
-        .route("/api/me/2fa/totp/start", post(stepup::totp_start))
-        .route("/api/me/2fa/totp/confirm", post(stepup::totp_confirm))
+        // --- Confirm it's you (the sensitive corner, docs/AUTH.md) ----------
+        .route("/api/auth/confirm", get(confirm::status))
+        .route(
+            "/api/auth/confirm/passkey/start",
+            post(confirm::passkey_start),
+        )
+        .route(
+            "/api/auth/confirm/passkey/finish",
+            post(confirm::passkey_finish),
+        )
+        // --- Telegram alerts (one-way; pairing lives in the sensitive corner)
         .route(
             "/api/me/telegram",
             get(telegram::status).delete(telegram::unpair),
         )
         .route("/api/me/telegram/pair", post(telegram::pair_start))
-        .route(
-            "/api/auth/stepup/telegram/start",
-            post(telegram::verify_start),
-        )
-        // Email step-up retired: no email codes anywhere (username + passkey only).
-        .route("/api/auth/stepup/verify", post(stepup::verify))
-        // --- Change mode (the grant, made visible/endable/extendable) -------
-        .route("/api/auth/stepup", get(stepup::change_mode_status))
-        .route("/api/auth/stepup/lock", post(stepup::change_mode_lock))
-        .route("/api/auth/stepup/extend", post(stepup::change_mode_extend))
-        .route("/api/auth/voucher", post(stepup::redeem_voucher))
         // --- Devices -------------------------------------------------------
         .route(
             "/api/devices",
@@ -414,17 +450,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/earn-request", post(earn::create_request))
         .route("/agent/commands/{id}/ack", post(agent::ack_command))
         .route("/agent/ws", get(agent::ws))
-        .route("/agent/voucher", post(stepup::mint_voucher))
-        .route("/agent/login-decision", post(auth_device::decision))
+        .route("/agent/voucher", post(voucher::mint))
         .route("/agent/usage", post(usage::ingest))
         // --- Parent companion API ------------------------------------------
         .merge(parent_api)
-        // Read is free, write is stepped — enforced as a layer rather than a
-        // per-handler extractor so that forgetting it is not possible. See
-        // stepup::require_step_up for why.
+        // The sensitive corner needs a live confirm window, and a paused
+        // account changes nothing — a layer, so no route can forget it. See
+        // confirm::require_confirm.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            stepup::require_step_up,
+            confirm::require_confirm,
         ))
         // A member session (a child on their own page) is confined to a short
         // allow-list; every other /api route is the hub's. Fails closed.
@@ -437,27 +472,10 @@ async fn main() -> anyhow::Result<()> {
     // Serve the built web UI (see `web/`) as the fallback for any path that
     // didn't match an /api, /agent, or /health route above — this never
     // shadows those routes since fallbacks only run on unmatched requests.
-    // No-op (API-only) if OST_WEB_DIR isn't present, e.g. plain `cargo
-    // run` in dev without a web build.
-    // An unmatched /api or /agent path must be a real 404, not the SPA shell
-    // rewritten to 200 — otherwise a route that silently stops existing looks
-    // healthy to a monitor. Static routes win over these wildcards.
-    let app = app
-        .route("/api/{*rest}", any(api_not_found))
-        .route("/agent/{*rest}", any(api_not_found));
-    let app = match static_web::web_dir() {
-        Some(dir) => {
-            use tower_http::services::{ServeDir, ServeFile};
-            let index = dir.join("index.html");
-            // Serve real files; any miss falls back to index.html. The 404 that
-            // ServeDir carries through is flipped to 200 by the `spa_ok`
-            // map_response layer below, so client-side routes resolve cleanly.
-            let serve = ServeDir::new(&dir).not_found_service(ServeFile::new(index));
-            app.fallback_service(serve)
-                .layer(axum::middleware::map_response(static_web::spa_ok))
-        }
-        None => app,
-    };
+    // An unmatched /api or /agent path is a JSON 404, every other path the
+    // SPA shell (200, or 304 on a reload). API-only if OST_WEB_DIR isn't
+    // present, e.g. plain `cargo run` in dev without a web build.
+    let app = static_web::mount(app, static_web::web_dir().as_deref());
 
     let app = app
         .layer(middleware::map_response(security_headers))
@@ -496,6 +514,88 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received; draining");
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "openscreentime-server" }))
+/// Retention: usage_slices and the event log grow forever otherwise —
+/// attribution is a rolling ~2-week signal and the event feed is an audit
+/// trail, not an archive. Failures are logged, never fatal.
+async fn prune(db: &sqlx::PgPool) {
+    for (what, q) in [
+        (
+            "sessions",
+            "DELETE FROM admin_sessions WHERE expires_at < now()",
+        ),
+        (
+            "vouchers",
+            "DELETE FROM device_vouchers WHERE expires_at < now() - interval '1 hour'",
+        ),
+        (
+            "login codes",
+            "DELETE FROM login_codes WHERE expires_at < now() - interval '1 hour'",
+        ),
+        (
+            "sign-in links",
+            "DELETE FROM signin_links WHERE expires_at < now() - interval '1 day'",
+        ),
+        (
+            "usage slices",
+            "DELETE FROM usage_slices WHERE hour < now() - interval '21 days'",
+        ),
+        (
+            "events",
+            "DELETE FROM events WHERE created_at < now() - interval '90 days'",
+        ),
+        (
+            "ops log",
+            "DELETE FROM ops_log WHERE created_at < now() - interval '90 days'",
+        ),
+        (
+            // A removed computer's minutes, kept for the person's day and
+            // their week (the history looks back 14 days).
+            "kept usage",
+            "DELETE FROM retired_usage WHERE day < CURRENT_DATE - 21",
+        ),
+    ] {
+        if let Err(e) = sqlx::query(q).execute(db).await {
+            tracing::warn!(what, error = %e, "retention prune failed");
+        }
+    }
+    // Sign-in codes nobody picked up: out of the command queue.
+    login_code::scrub_commands(db).await;
+}
+
+/// `GET /health` — liveness AND the one dependency that matters: 200
+/// `{"status":"ok"}` when the database answers, 503 `{"status":"degraded"}`
+/// when it doesn't. Unauthenticated; the DB probe is cached for two seconds.
+async fn health(State(st): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let db_ok = ops::db_ok_cached(&st.db).await;
+    let code = if db_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(serde_json::json!({
+            "status": if db_ok { "ok" } else { "degraded" },
+            "service": "openscreentime-server",
+            "version": env!("CARGO_PKG_VERSION"),
+            "db": if db_ok { "ok" } else { "unreachable" },
+        })),
+    )
+}
+
+/// The container healthcheck: ask our own `/health` on loopback.
+async fn healthcheck() -> anyhow::Result<()> {
+    let port = std::env::var("BIND_ADDR")
+        .ok()
+        .and_then(|a| a.rsplit(':').next().map(str::to_string))
+        .unwrap_or_else(|| "8080".into());
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()?
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
+        .await
+        .context("server not answering")?;
+    anyhow::ensure!(resp.status().is_success(), "unhealthy: {}", resp.status());
+    Ok(())
 }

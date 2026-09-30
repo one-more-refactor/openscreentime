@@ -1,43 +1,36 @@
 // ============================================================================
-// ADD A CHILD — a person first, their computer second.
+// ADD A PERSON — who they are first, their computer second.
 //
-// Step 1 is who they are: a name and a birthdate. The birthdate decides the
-// age bracket (how much they decide for themselves, how hard the stops are)
-// and the bracket picks the starting rules; a parent can override the bracket
-// — a mature eleven-year-old, a late bloomer — without lying about the date.
+// Step 1 is the person: a name, a face if you like, and a birthday. The
+// birthday picks the age bracket (how much they decide for themselves, how
+// firm the stops are) and the bracket picks the starting rules; a parent can
+// override the bracket without lying about the date.
 //
 // Step 2 is their computer: the one-line install, and next to it the unlock
-// code for that machine — read live from here whenever it is needed, never
-// scanned into anything. OpenScreenTime itself is the authenticator.
+// code for that computer — read here whenever it's needed. A person who will
+// use a computer that is already set up skips step 2 (Computers → Details →
+// Who's who links their login).
 // ============================================================================
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import * as api from "../api";
 import {
   AGE_BRACKETS,
-  THEMES,
   bracketForBirthdate,
-  defaultThemeFor,
   type Account,
   type AgeBracket,
   type EnrollTokenResponse,
-  type Theme,
 } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { UnlockCodePanel } from "../components/UnlockCodePanel";
+import { EnrollCommand } from "../components/EnrollCommand";
+import { TextInput } from "../components/TextInput";
+import { Button } from "../components/Button";
+import { Icon } from "../components/Icon";
 import { PageHead } from "../layout/PageHead";
 import { familyChanged } from "../lib/family";
-
-const BRACKET_BLURB: Record<AgeBracket, string> = {
-  little: "You decide everything. Hard daily limit, the simplest stop, no asking for time.",
-  kid: "Hard limit, hard stop — but they can ask you for time and earn it with tasks.",
-  younger_teen: "Limits plus their own goals; a two-minute wind-down before the stop.",
-  older_teen: "Mostly self-set. You see how it goes and can still cap it.",
-  adult: "Private self-tracking. Nobody enforces anything; they can block things for themselves.",
-};
-
-/** The faces a parent can pick — the same friendly set as a child's own page. */
-const FACES = ["🦊", "🐼", "🦖", "🚀", "⚽", "🎨", "🐙", "🌟", "🦄", "🐸", "🎮", "🎧", "📚", "🌈", "🐳", "🐯"];
+import { FACES } from "../lib/avatar";
+import { BRACKET_BLURB } from "../lib/brackets";
 
 export function AddChild() {
   const { guard } = useConfirm();
@@ -45,247 +38,231 @@ export function AddChild() {
   const [face, setFace] = useState<string | null>(null);
   const [birthdate, setBirthdate] = useState("");
   const [override, setOverride] = useState<AgeBracket | null>(null);
-  const [theme, setTheme] = useState<Theme | null>(null);
+  const [newComputer, setNewComputer] = useState(true);
   const [member, setMember] = useState<Account | null>(null);
   const [enroll, setEnroll] = useState<EnrollTokenResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
 
   const derived = useMemo(() => (birthdate ? bracketForBirthdate(birthdate) : null), [birthdate]);
   const bracket: AgeBracket = override ?? derived ?? "kid";
-  const autoTheme = defaultThemeFor(bracket);
-
-  const origin = window.location.origin;
-  const oneLiner = enroll
-    ? `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${enroll.enroll_token} sh -s -- --server ${origin}`
-    : "";
+  const first = name.trim();
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || busy) return;
+    if (!first || busy) return;
     setBusy(true);
     setError(null);
     try {
-      // The person first — with their bracket's starting rules — then the
-      // computer, carrying their name so a parent can find it later, and
-      // linked to them so whoever logs in on it lands on their own page.
-      // Both are changes, so both sit behind change mode.
+      // The person first — with their bracket's starting rules — then their
+      // computer, carrying their name and linked to them, so their login on
+      // it lands on their own page.
       const { m, dev } = await guard(async () => {
         const m = await api.createMember({
-          display_name: name.trim(),
+          display_name: first,
           birthdate: birthdate || null,
           age_bracket: bracket,
-          theme,
         });
-        // The face is a person-detail, not part of member creation — set it
-        // right after, so a child arrives already looking like themselves.
+        // The face is a person-detail, not part of creating them — set right
+        // after, so they arrive already looking like themselves.
         if (face) await api.updateMember(m.id, { avatar: face });
-        const dev = await api.createDevice(`${name.trim()}'s computer`, m.id);
+        const dev = newComputer ? await api.createDevice(`${first}'s computer`, m.id) : null;
         return { m, dev };
       });
+      familyChanged();
+      if (!dev) {
+        navigate(`/child/${encodeURIComponent(m.id)}`);
+        return;
+      }
       setMember(m);
       setEnroll(dev);
-      familyChanged();
     } catch (err) {
       if (err instanceof StepUpCancelled) return;
-      setError(err instanceof Error ? err.message : "Could not set that up");
+      setError(err instanceof Error ? err.message : "Couldn't add them. Try again.");
     } finally {
       setBusy(false);
     }
   }
 
-  function done() {
-    navigate(member ? `/child/${encodeURIComponent(member.id)}` : "/");
-  }
+  if (enroll) {
+    return (
+      <div className="page add">
+        <PageHead
+          back={{ to: "/", label: "Family" }}
+          title={`Set up ${first}'s computer`}
+          sub="The command works once. The unlock code you can always come back for."
+        />
 
-  function copy() {
-    void navigator.clipboard?.writeText(oneLiner);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+        <div className="add-two">
+          <section className="card card-pad add-step">
+            <p className="add-n">1</p>
+            <h2 className="h2">Install it</h2>
+            <p className="lede">Open a Terminal on their computer, paste this in, and press Enter.</p>
+            <EnrollCommand token={enroll.enroll_token} />
+          </section>
+
+          <section className="card card-pad add-step">
+            <p className="add-n">2</p>
+            <h2 className="h2">Your unlock code</h2>
+            <p className="lede">
+              On {first}'s computer it unlocks the screen and gives time back. It changes every 30
+              seconds and works even with no internet.
+            </p>
+            <UnlockCodePanel device={enroll.device} autoShow variant="step" />
+          </section>
+        </div>
+
+        <div className="banner add-note">
+          <Icon name="key" size={20} />
+          <div className="banner-main">
+            <p>
+              <b>Make recovery codes while you think of it.</b> They're the spare keys for when your
+              phone is out of reach. You'll find them later in Settings.
+            </p>
+          </div>
+        </div>
+
+        <div className="add-done">
+          <Button onClick={() => navigate(member ? `/child/${encodeURIComponent(member.id)}` : "/")}>Done</Button>
+          <Link to="/" className="btn btn-quiet">
+            Finish later
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="ch-wrap">
-      {!enroll ? (
-        <>
-          <PageHead
-            back={{ to: "/", label: "Family" }}
-            eyebrow="Add a child"
-            title="Who is this for?"
-            sub="You'll set up their computer next. Linux computers only for now — Windows, Mac, phones and tablets are not supported yet."
-          />
+    <div className="page page-narrow add">
+      <PageHead
+        back={{ to: "/", label: "Family" }}
+        title="Add a person"
+        sub="Who they are first; their computer next. Linux computers only, for now."
+      />
 
-          <form onSubmit={create} className="add-form add-form-wide">
-            <label className="add-label" htmlFor="child-name">
-              What's their name?
-            </label>
-            <input
-              id="child-name"
-              className="add-input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Robin"
-              autoFocus
-              autoComplete="off"
-            />
+      <form onSubmit={create} className="card card-pad add-form">
+        <TextInput
+          label="Their name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Robin"
+          autoFocus
+          autoComplete="off"
+          maxLength={40}
+        />
 
-            <p className="add-label" style={{ marginTop: "0.6rem" }}>
-              Give them a face <span className="add-optional">optional — they can change it later</span>
-            </p>
-            <div className="pills faces" role="radiogroup" aria-label="Their face">
+        <fieldset className="add-group">
+          <legend className="label">
+            A face <span className="add-optional">optional, they can change it</span>
+          </legend>
+          <div className="pills" role="radiogroup" aria-label="Their face">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={face === null}
+              className="pill pill-face"
+              data-on={face === null}
+              onClick={() => setFace(null)}
+            >
+              {first ? first[0].toUpperCase() : "Aa"}
+            </button>
+            {FACES.map((f) => (
               <button
+                key={f}
                 type="button"
                 role="radio"
-                aria-checked={face === null}
-                className="pill"
-                data-on={face === null}
-                onClick={() => setFace(null)}
+                aria-checked={face === f}
+                className="pill pill-face"
+                data-on={face === f}
+                aria-label={`Use ${f} as their face`}
+                onClick={() => setFace(f)}
               >
-                {name.trim() ? name.trim()[0].toUpperCase() : "Aa"}
+                {f}
               </button>
-              {FACES.map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  role="radio"
-                  aria-checked={face === f}
-                  className="pill pill-face"
-                  data-on={face === f}
-                  aria-label={`Use ${f} as their face`}
-                  onClick={() => setFace(f)}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
+            ))}
+          </div>
+        </fieldset>
 
-            <label className="add-label" htmlFor="child-birthdate" style={{ marginTop: "0.6rem" }}>
-              When were they born? <span className="add-optional">optional — it picks the age bracket</span>
-            </label>
-            <input
-              id="child-birthdate"
-              className="add-input"
-              type="date"
-              value={birthdate}
-              max={new Date().toISOString().slice(0, 10)}
-              onChange={(e) => {
-                setBirthdate(e.target.value);
-                setOverride(null);
-              }}
-            />
+        <TextInput
+          label="Their birthday"
+          type="date"
+          value={birthdate}
+          max={new Date().toISOString().slice(0, 10)}
+          onChange={(e) => {
+            setBirthdate(e.target.value);
+            setOverride(null);
+          }}
+          hint="Optional. It picks the age bracket below."
+          className="add-date"
+        />
 
-            <p className="add-label" style={{ marginTop: "0.6rem" }}>
-              Age bracket
-              {derived && !override && <span className="add-optional">from their birthdate</span>}
-              {override && <span className="add-optional">chosen by you</span>}
-            </p>
-            <div className="add-brackets" role="radiogroup" aria-label="Age bracket">
-              {AGE_BRACKETS.map((b) => (
-                <button
-                  key={b.key}
-                  type="button"
-                  role="radio"
-                  aria-checked={b.key === bracket}
-                  className="add-bracket"
-                  data-on={b.key === bracket}
-                  onClick={() => setOverride(b.key === derived ? null : b.key)}
-                >
-                  <span className="add-bracket-label">{b.label}</span>
-                  <span className="add-bracket-range">{b.range}</span>
-                </button>
-              ))}
-            </div>
-            <p className="add-bracket-blurb">{BRACKET_BLURB[bracket]}</p>
+        <fieldset className="add-group">
+          <legend className="label">
+            Age bracket
+            {derived && !override && <span className="add-optional">from their birthday</span>}
+            {override && <span className="add-optional">chosen by you</span>}
+          </legend>
+          <div className="add-brackets" role="radiogroup" aria-label="Age bracket">
+            {AGE_BRACKETS.map((b) => (
+              <button
+                key={b.key}
+                type="button"
+                role="radio"
+                aria-checked={b.key === bracket}
+                className="add-bracket"
+                data-on={b.key === bracket}
+                onClick={() => setOverride(b.key === derived ? null : b.key)}
+              >
+                <span className="add-bracket-label">{b.label}</span>
+                <span className="add-bracket-range">{b.range}</span>
+              </button>
+            ))}
+          </div>
+          <p className="hint add-blurb">{BRACKET_BLURB[bracket]}</p>
+        </fieldset>
 
-            <details className="add-more">
-              <summary>How their own page looks</summary>
-              <p className="rl-value" style={{ margin: "0.4rem 0 0.6rem" }}>
-                When they open OpenScreenTime on their computer they see their own page. Auto picks{" "}
-                <strong>{THEMES.find((t) => t.key === autoTheme)?.label}</strong> for this bracket.
-              </p>
-              <div className="pills">
-                <button type="button" className="pill" data-on={theme === null} onClick={() => setTheme(null)}>
-                  Auto
-                </button>
-                {THEMES.map((t) => (
-                  <button
-                    key={t.key}
-                    type="button"
-                    className="pill"
-                    data-on={theme === t.key}
-                    title={t.blurb}
-                    onClick={() => setTheme(t.key)}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            </details>
-
-            <button className="ch-btn ch-btn-yes add-submit" disabled={busy || !name.trim()}>
-              {busy ? "Setting up…" : "Continue"}
+        <fieldset className="add-group">
+          <legend className="label">Their computer</legend>
+          <div className="pills" role="radiogroup" aria-label="Their computer">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={newComputer}
+              className="pill"
+              data-on={newComputer}
+              onClick={() => setNewComputer(true)}
+            >
+              <Icon name="laptop" size={16} />
+              Set one up next
             </button>
-            {error && <p className="fam-error">{error}</p>}
-          </form>
-        </>
-      ) : (
-        <>
-          <PageHead
-            back={{ to: "/", label: "Family" }}
-            eyebrow="Add a child"
-            title={`Set up ${name}'s computer`}
-            sub="Two things. The command works once; the code you can always come back for."
-          />
-
-          <div className="add-two">
-            <section className="add-col card">
-              <h2 className="ch-h2">1 · Install it</h2>
-              <p className="add-step-text">
-                Open a Terminal on their computer, paste this in, and press Enter.
-              </p>
-              <pre className="add-code">{oneLiner}</pre>
-              <button className="ch-btn" onClick={copy}>
-                {copied ? "Copied" : "Copy command"}
-              </button>
-              <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
-                This command works for 24 hours and only once.
-              </p>
-            </section>
-
-            <section className="add-col card">
-              <h2 className="ch-h2">2 · Your unlock code</h2>
-              <p className="add-step-text">
-                On {name}'s computer this code unlocks the screen, reopens time and allows{" "}
-                <code>sudo</code>. Read it here, on your phone, whenever you need it — it changes
-                every 30 seconds and works on the computer even with no internet. No authenticator
-                app to set up.
-              </p>
-              <UnlockCodePanel device={enroll.device} autoShow variant="step" />
-            </section>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!newComputer}
+              className="pill"
+              data-on={!newComputer}
+              onClick={() => setNewComputer(false)}
+            >
+              One that's already here
+            </button>
           </div>
+          {!newComputer && (
+            <p className="hint">Afterwards, link their login under Computers → Details → Who's who.</p>
+          )}
+        </fieldset>
 
-          <div className="add-note">
-            <p>
-              <strong>Make recovery codes now, while you think of it.</strong> They are the spare
-              key for when your phone is out of reach — eight one-time codes, shown once, typed on
-              the computer itself.
-            </p>
-            <p className="ch-meta">
-              The unlock code and the recovery codes live under Settings → Unlock codes from here on.
-            </p>
-          </div>
-
-          <button className="ch-btn ch-btn-yes add-submit" onClick={done}>
-            Done
-          </button>
-          <p className="ch-meta" style={{ marginTop: "0.75rem" }}>
-            <Link to="/" className="ph-link">Back to the family</Link> without finishing — the computer
-            stays set up and waiting.
+        {error && (
+          <p className="hint" data-error="true" role="alert">
+            {error}
           </p>
-        </>
-      )}
+        )}
+        <div>
+          <Button type="submit" disabled={busy || !first}>
+            {busy ? "Adding…" : newComputer ? "Continue" : `Add ${first || "them"}`}
+          </Button>
+        </div>
+      </form>
     </div>
   );
 }

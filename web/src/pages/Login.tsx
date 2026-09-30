@@ -1,279 +1,382 @@
 // ============================================================================
-// LOGIN / FIRST-RUN REGISTRATION — the front door, kept small on purpose.
+// SIGN IN — two doors, nothing else (docs/AUTH.md, brand board § d).
 //
-// Fresh install (no account yet): a single passkey-only registration — pick a
-// username, create your passkey. That is the ONLY option; there is no email,
-// no password, no code, and nothing third-party.
+//   Your name → Continue → a 6-digit code shows up on your own computer →
+//   type it here, in six boxes.
+//   Sign in with a passkey → one tap, no name first.
+//   (Sign in with SSO — only when the server has it.)
 //
-// Otherwise (login): type your username and your own computer asks "is this
-// you?" — one tap on its notification signs this browser in (the client-code /
-// number-match flow). Beneath it, a small "Log in with passkey" for phones and
-// unmanaged browsers. SSO stays available when the server has it configured.
+// A fresh server shows "Create your household" instead: your name, then a
+// passkey. The setup link the installer printed carries the one-time setup
+// code in its fragment (#setup=…); only without it does a code field appear.
 // ============================================================================
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSession } from "../lib/session";
-import { ApiError, getAuthConfig } from "../api";
+import { takeToken } from "../lib/fragment";
+import { ApiError, getAuthConfig, usingMock } from "../api";
 import type { AuthConfig } from "../types";
-import { Wordmark, PasskeyButton, TextInput, Button } from "../components";
+import { Wordmark } from "../components/Wordmark";
+import { PasskeyButton } from "../components/PasskeyButton";
+import { TextInput } from "../components/TextInput";
+import { Button } from "../components/Button";
+import { CodeBoxes } from "../components/CodeBoxes";
+import { sentence } from "../lib/format";
 
-type Phase = "idle" | "waiting";
+const SETUP_KEY = "ost-setup";
 
-const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
+/** The setup code from the installer's link — taken from the address bar
+ * before the redirect to /login (lib/fragment.ts), then kept for this tab
+ * only, so a reload mid-setup doesn't lose it. */
+function takeSetupToken(): string {
+  const fromLink = takeToken("setup");
+  try {
+    if (fromLink) sessionStorage.setItem(SETUP_KEY, fromLink);
+    return fromLink ?? sessionStorage.getItem(SETUP_KEY) ?? "";
+  } catch {
+    return fromLink ?? "";
+  }
+}
+
+function forgetSetupToken() {
+  try {
+    sessionStorage.removeItem(SETUP_KEY);
+  } catch {
+    /* nothing kept */
+  }
+}
+
+/** The browser's passkey prompt was dismissed — not an error worth shouting. */
+function dismissed(e: unknown): boolean {
+  return e instanceof Error && (e.name === "NotAllowedError" || e.name === "AbortError");
+}
+
+/** "4:52" */
+function clock(secs: number): string {
+  const s = Math.max(0, secs);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** After this long without a code, the page says what a code needs. The
+ * server answers every name the same way (a name with no computer that may
+ * show a code gets a code that never comes), so the page can't know which it
+ * is — it can only say, gently, what makes a code come, and offer the other
+ * door. */
+export const NO_CODE_HINT_MS = 30_000;
+
+type Step = "name" | "code";
 
 export function Login() {
-  const { login, register, deviceLogin, mock } = useSession();
+  const { createHousehold, signInWithPasskey, sendCode, enterCode } = useSession();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  // Design review only (VITE_USE_MOCK=1): ?mock=code / ?mock=firstrun open
+  // those states directly. Compiled out of a real build.
+  const review = usingMock ? params.get("mock") : null;
 
   const [config, setConfig] = useState<AuthConfig | null>(null);
-  const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [userError, setUserError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [matchCode, setMatchCode] = useState("");
+  const [setupToken, setSetupToken] = useState<string>(takeSetupToken);
+  const [askSetupCode, setAskSetupCode] = useState(false);
+  const [name, setName] = useState("");
+  const [step, setStep] = useState<Step>("name");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(() =>
-    params.get("error") ? "Sign-in failed. If your computer never asked, use “Log in with passkey” below." : null,
+    params.get("error") ? "That sign-in didn't work. Try again." : null,
   );
 
   useEffect(() => {
     let alive = true;
     getAuthConfig()
-      .then((c) => alive && setConfig(c))
-      .catch(() => alive && setConfig({ oidc: false, oidc_name: "SSO", needs_setup: false }));
+      .then((c) => alive && setConfig(review === "firstrun" ? { ...c, needs_setup: true } : c))
+      .catch(
+        () =>
+          alive &&
+          setConfig({ oidc: false, oidc_name: "SSO", needs_setup: false, setup_code_required: false }),
+      );
     return () => {
       alive = false;
     };
-  }, []);
+  }, [review]);
 
-  const registering = config?.needs_setup === true;
+  useEffect(() => {
+    if (review !== "code") return;
+    setName("philip");
+    void sendCode("philip").then((secs) => {
+      setExpiresAt(Date.now() + secs * 1000);
+      setSentAt(Date.now());
+      setStep("code");
+    });
+  }, [review, sendCode]);
 
-  function validUsername(): string | null {
-    const u = username.trim().toLowerCase();
-    if (!USERNAME_RE.test(u)) {
-      setUserError("3–32 characters: a–z, 0–9, dot, underscore, hyphen.");
-      return null;
-    }
-    setUserError(null);
-    return u;
-  }
+  // The code's clock, in plain sight.
+  useEffect(() => {
+    if (step !== "code" || !expiresAt) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [step, expiresAt]);
 
-  // LOGIN: type your username → your own computer approves (number match).
-  async function runDeviceLogin() {
-    const who = username.trim();
-    if (!who) return;
+  const firstRun = config?.needs_setup === true;
+  const showSetupCode = firstRun && (askSetupCode || (config?.setup_code_required && !setupToken));
+  const secsLeft = expiresAt ? Math.round((expiresAt - now) / 1000) : null;
+  const expired = secsLeft !== null && secsLeft <= 0;
+  // Still waiting, nothing typed, a while on: say what a code needs.
+  const noCodeYet = !expired && !busy && !error && code === "" && sentAt !== null && now - sentAt >= NO_CODE_HINT_MS;
+
+  async function create() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
     setError(null);
-    setPhase("waiting");
     try {
-      await deviceLogin(who, setMatchCode);
+      await createHousehold(name.trim(), setupToken || undefined);
+      forgetSetupToken();
       navigate("/", { replace: true });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "That didn't work. Check the username, or use “Log in with passkey” below.");
-      setPhase("idle");
-      setMatchCode("");
+      if (dismissed(e)) {
+        setError("No passkey was made. Try again when you're ready.");
+      } else if (e instanceof ApiError && e.code === "registration_closed") {
+        setError("This server already has a household. Sign in instead.");
+        setConfig((c) => (c ? { ...c, needs_setup: false } : c));
+      } else if (e instanceof ApiError && e.status === 401) {
+        setAskSetupCode(true);
+        setError("That setup code isn't right. Open the link the installer printed, or type the code.");
+      } else {
+        setError(e instanceof Error && e.message ? sentence(e.message) : "That didn't work. Try again.");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
-  // LOGIN fallback: passkey for this username.
-  async function runPasskeyLogin() {
-    const who = username.trim();
-    if (!who) {
-      setUserError("Enter your username first.");
-      return;
-    }
+  async function askForCode() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
     setError(null);
     try {
-      await login(who);
+      const secs = await sendCode(name.trim());
+      setExpiresAt(Date.now() + secs * 1000);
+      setSentAt(Date.now());
+      setNow(Date.now());
+      setCode("");
+      setStep("code");
+    } catch (e) {
+      setError(e instanceof Error && e.message ? sentence(e.message) : "That didn't work. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verify(full: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await enterCode(full);
+      navigate("/", { replace: true });
+    } catch (e) {
+      setCode("");
+      setError(
+        e instanceof ApiError && e.code === "code_expired"
+          ? "That code has expired. Send a new code, or use a passkey."
+          : e instanceof Error && e.message
+            ? sentence(e.message)
+            : "That code didn't match. Try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function passkey() {
+    setError(null);
+    try {
+      await signInWithPasskey();
       navigate("/", { replace: true });
     } catch (e) {
       setError(
-        e instanceof Error && e.message ? e.message : "The passkey didn't match — try again.",
+        dismissed(e)
+          ? null
+          : e instanceof Error && e.message
+            ? sentence(e.message)
+            : "That passkey didn't work. Try again.",
       );
     }
   }
 
-  // FIRST-RUN: passkey-only account creation.
-  async function runRegister() {
-    const u = validUsername();
-    if (!u) return;
+  function backToDoors() {
+    setStep("name");
     setError(null);
-    try {
-      await register(u, displayName.trim() || undefined);
-      navigate("/", { replace: true });
-    } catch (e) {
-      if (e instanceof ApiError && e.code === "registration_closed") {
-        setError("An account already exists on this server — sign in instead.");
-        return;
-      }
-      if (e instanceof ApiError && e.status === 409) {
-        setUserError("That username is taken — pick another.");
-        return;
-      }
-      setError(
-        e instanceof Error && e.message ? e.message : "Creating your passkey failed. Try once more — and if your browser never asked, check that passkeys are allowed for this site.",
-      );
-    }
+    setExpiresAt(null);
+    setSentAt(null);
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-6">
-      <div className="w-full max-w-sm">
-        <div className="mb-2">
-          <Wordmark size={2} />
-        </div>
-        <p className="mb-10 text-sm" style={{ color: "var(--fg-dim)" }}>
-          Screen time for the whole family.
-        </p>
+    <div className="signin">
+      <div className="signin-box">
+        <Wordmark size={1.625} className="signin-lockup" />
 
-        {phase === "waiting" ? (
-          <div className="flex flex-col gap-4" role="status" aria-live="polite">
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Check your computer.</p>
-            <p className="text-sm" style={{ color: "var(--fg-dim)" }}>
-              A notification on your computer is showing three numbers. Tap the one that matches
-              this:
-            </p>
-            <p
-              style={{
-                fontSize: "2.4rem",
-                fontWeight: 600,
-                letterSpacing: "0.3em",
-                color: "var(--fg-display)",
-                fontVariantNumeric: "tabular-nums",
-                textAlign: "center",
-              }}
-            >
-              {matchCode}
-            </p>
-            <span className="login-wait-bar" aria-hidden="true" />
-            <Button variant="ghost" onClick={() => window.location.reload()}>
-              Cancel
-            </Button>
-          </div>
-        ) : registering ? (
-          // ---- First-run registration: passkey only, the only option. ----
-          // A real <form> with named fields so a password manager (1Password,
-          // the browser's own) recognises this as a sign-up and offers to fill
-          // and save the username + passkey.
+        {!config ? null : firstRun ? (
+          // ---- First run: your name, then a passkey. ----
           <form
-            className="flex flex-col gap-4"
+            className="signin-form"
             onSubmit={(e) => {
               e.preventDefault();
-              void runRegister();
+              void create();
             }}
           >
-            <p style={{ color: "var(--fg-display)", fontWeight: 500 }}>Create the first account.</p>
+            <h1 className="signin-title">Create your household</h1>
+            <p className="signin-sub">Your name, then a passkey on this device. No password, anywhere.</p>
             <TextInput
-              label="Username"
-              name="username"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={username}
-              autoComplete="username webauthn"
-              onChange={(e) => {
-                setUsername(e.target.value);
-                if (userError) setUserError(null);
-              }}
-              placeholder="e.g. dad"
-              aria-invalid={!!userError}
-              hint={userError ?? "This is how you'll sign in. No email, ever."}
-            />
-            <TextInput
-              label="Display name (optional)"
+              label="Your name"
               name="name"
               autoComplete="name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Parent"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Philip"
+              autoFocus
             />
-            <PasskeyButton label="Create account" onActivate={runRegister} disabled={!username.trim()} />
-          </form>
-        ) : (
-          // ---- Login: username → your computer approves; passkey beneath. ----
-          // Wrapped in a <form> with an autocomplete="username webauthn" field so
-          // a password manager surfaces the saved sign-in (and the passkey) here.
-          <form
-            className="flex flex-col gap-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void runDeviceLogin();
-            }}
-          >
-            <TextInput
-              label="Username"
-              name="username"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={username}
-              autoComplete="username webauthn"
-              onChange={(e) => {
-                setUsername(e.target.value);
-                if (userError) setUserError(null);
-              }}
-              placeholder="e.g. dad"
-              aria-invalid={!!userError}
-              hint={userError ?? undefined}
-            />
-            <Button type="submit" disabled={!username.trim()}>
-              Continue
+            {showSetupCode && (
+              <TextInput
+                label="Setup code"
+                name="setup-code"
+                autoComplete="off"
+                spellCheck={false}
+                value={setupToken}
+                onChange={(e) => setSetupToken(e.target.value.trim())}
+                hint="It's in the link the installer printed."
+              />
+            )}
+            <Button type="submit" block icon="passkey" disabled={!name.trim() || busy}>
+              {busy ? "Waiting for your passkey…" : "Create passkey"}
             </Button>
-            <p className="text-xs" style={{ color: "var(--fg-dim)" }}>
-              Your own computer approves the sign-in — nothing to type, nothing to remember.
+          </form>
+        ) : step === "code" ? (
+          // ---- Door one, part two: the code from your computer. ----
+          <div className="signin-form">
+            <h1 className="signin-title">Check your computer</h1>
+            <p className="signin-sub">
+              Enter the code from your computer. It's in the OpenScreenTime window there.
             </p>
-            <button
-              type="button"
-              className="focusable text-xs login-link"
-              style={{
-                color: "var(--fg-dim)",
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                padding: "0.25rem 0",
-                textAlign: "left",
+            <CodeBoxes
+              value={code}
+              disabled={busy || expired}
+              error={!!error}
+              aria-label="The code from your computer"
+              onChange={(v) => {
+                setCode(v);
+                if (error) setError(null);
               }}
-              onClick={() => void runPasskeyLogin()}
+              onComplete={(full) => void verify(full)}
+            />
+            {error ? (
+              <p className="hint" data-error="true" role="alert">
+                {error}
+              </p>
+            ) : (
+              <p className="hint num" role="status">
+                {busy
+                  ? "Checking…"
+                  : expired
+                    ? "That code has expired."
+                    : secsLeft !== null
+                      ? `Expires in ${clock(secsLeft)}`
+                      : "It works for 5 minutes."}
+              </p>
+            )}
+            {noCodeYet && (
+              <p className="hint signin-nocode">
+                {/* The rule the server keeps (login_code.rs): a code goes only to a
+                    computer set up as yours, to your login on it. */}
+                No code? Your computer must be on and set up as yours (Computers → Add my computer, or Who's who) — or{" "}
+                <button type="button" className="link" onClick={() => void passkey()}>
+                  use a passkey
+                </button>
+                .
+              </p>
+            )}
+            {expired ? (
+              // The code ran out (or never came): the two ways on, as doors.
+              <>
+                <Button block icon="refresh" onClick={() => void askForCode()} disabled={busy}>
+                  Send a new code
+                </Button>
+                <PasskeyButton label="Sign in with a passkey" onActivate={passkey} />
+                <div className="signin-row">
+                  <Button size="sm" variant="quiet" onClick={backToDoors}>
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="signin-row">
+                  <Button size="sm" variant="secondary" icon="refresh" onClick={() => void askForCode()} disabled={busy}>
+                    Send a new code
+                  </Button>
+                  <Button size="sm" variant="quiet" onClick={backToDoors}>
+                    Cancel
+                  </Button>
+                </div>
+                <p className="signin-foot">
+                  Not at your computer?{" "}
+                  <button type="button" className="link" onClick={() => void passkey()}>
+                    Sign in with a passkey
+                  </button>{" "}
+                  instead.
+                </p>
+              </>
+            )}
+          </div>
+        ) : (
+          // ---- The two doors. ----
+          <div className="signin-form">
+            <h1 className="signin-title">Sign in</h1>
+            <p className="signin-sub">Your own computer approves you. Nothing to remember.</p>
+            <form
+              className="signin-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void askForCode();
+              }}
             >
-              Log in with passkey →
-            </button>
-            {config?.oidc && (
-              <button
-                type="button"
-                className="focusable text-xs login-link"
-                style={{
-                  color: "var(--fg-dim)",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "0.25rem 0",
-                  textAlign: "left",
-                }}
+              <TextInput
+                label="Your name"
+                name="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="username"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. philip"
+                autoFocus
+              />
+              <Button type="submit" block disabled={!name.trim() || busy}>
+                Continue
+              </Button>
+            </form>
+            <p className="signin-or">or</p>
+            <PasskeyButton label="Sign in with a passkey" onActivate={passkey} />
+            {config.oidc && (
+              <Button
+                variant="quiet"
+                block
                 onClick={() => {
                   window.location.href = "/api/auth/oidc/start";
                 }}
               >
-                Sign in with {config.oidc_name} →
-              </button>
+                Sign in with {config.oidc_name}
+              </Button>
             )}
-          </form>
-        )}
-
-        {error && (
-          <div
-            className="mt-4 flex items-start gap-2 border rounded px-3 py-2"
-            style={{ borderColor: "var(--accent)" }}
-            role="alert"
-          >
-            <span className="text-xs" style={{ color: "var(--accent)" }}>
-              {error}
-            </span>
           </div>
         )}
 
-        {mock && (
-          <Button variant="ghost" onClick={() => navigate("/devices", { replace: true })}>
-            Enter design review (skip auth) →
-          </Button>
+        {error && step === "name" && (
+          <p className="hint signin-error" data-error="true" role="alert">
+            {error}
+          </p>
         )}
       </div>
     </div>

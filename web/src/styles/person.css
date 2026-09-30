@@ -1,0 +1,278 @@
+/* ============================================================================
+   A PERSON — today and rules (pages/Person*.tsx), and the pieces only a day
+   uses: WhereTheTime, Moments, FluentSlider, AppGlyph.
+   ========================================================================== */
+
+/* ---- Today | Rules ------------------------------------------------------- */
+.pp-tabs {
+  display: flex;
+  gap: 4px;
+  margin: -8px 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+.pp-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+.pp-tab:hover { color: var(--ink); background: var(--surface-2); }
+.pp-tab.active { color: var(--ink); }
+.pp-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--brand);
+}
+.pp-banner { margin-bottom: 16px; }
+
+/* ---- the hero: the ring, the number, the verbs ---------------------------- */
+.pp-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  padding: 24px 28px;
+}
+.pp-hero-main { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.pp-big { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; }
+.pp-big small { font-size: 1rem; font-weight: 400; letter-spacing: 0; color: var(--ink-2); }
+.pp-next { margin: 0; color: var(--ink-2); max-width: 46ch; }
+.pp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
+.pp-req {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--warn-tint);
+}
+.pp-req-ic { color: var(--warn); }
+.pp-req-text { flex: 1 1 14rem; margin: 0; font-size: 0.9375rem; display: flex; flex-direction: column; }
+.pp-req-reason { color: var(--ink-2); font-style: italic; }
+.pp-req-actions { display: flex; gap: 4px; }
+
+@media (max-width: 640px) {
+  .pp-hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 22px 18px; gap: 18px; }
+  .pp-hero-main { align-items: center; }
+  .pp-actions { justify-content: center; }
+  .pp-req { text-align: left; }
+}
+
+/* ---- their computers ------------------------------------------------------ */
+.pp-dev-ic {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.pp-devices .row[data-state="online"] .pp-dev-ic { background: var(--brand-tint); color: var(--brand-ink); }
+.pp-devices .row[data-state="offline"] .pp-dev-ic { background: var(--warn-tint); color: var(--warn); }
+
+.pp-keys { display: flex; flex-direction: column; gap: 16px; }
+.pp-keys .uc + .uc { padding-top: 16px; border-top: 1px solid var(--line); }
+
+/* ---- rules ---------------------------------------------------------------- */
+.pp-section-head { flex-direction: column; align-items: flex-start; gap: 2px; }
+.pp-limit { padding: 18px 20px; }
+
+.pp-window { flex-wrap: wrap; }
+.pp-window[data-editing="true"] { background: var(--bg); }
+.pp-edit {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.pp-time { width: 5.5rem; text-align: center; letter-spacing: 0.02em; }
+.pp-dash { color: var(--ink-3); }
+.pp-edit-note { flex-basis: 100%; }
+
+.pp-blocked { display: flex; flex-direction: column; gap: 22px; padding: 20px; }
+/* A computer of theirs can't filter websites: said at the top of the list. */
+.pp-noblock { margin: 0; }
+.pp-block-group { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.pp-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.pp-chips .chip .ic { color: var(--ink-3); }
+
+/* A block toggle. Blocked is ink, never green — green is time. */
+.blk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font: 500 0.875rem/1.2 var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+.blk:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
+.blk:active:not(:disabled) { transform: scale(0.97); }
+.blk[aria-pressed="true"] { background: var(--surface-2); border-color: var(--ink); color: var(--ink); font-weight: 600; }
+.blk:disabled { opacity: 0.55; cursor: default; }
+
+.pp-apps {
+  align-self: stretch;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+}
+.pp-app {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease);
+}
+.pp-app:hover:not(:disabled) { border-color: var(--line-2); }
+.pp-app:active:not(:disabled) { transform: scale(0.98); }
+.pp-app[aria-pressed="true"] { border-color: var(--ink); background: var(--surface-2); }
+.pp-app[data-covered="true"] { cursor: default; border-style: dashed; }
+.pp-app-name { font-size: 0.875rem; font-weight: 600; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-app-state { font-size: 0.78125rem; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-app[aria-pressed="true"] .pp-app-state { color: var(--ink-2); }
+
+/* App glyphs (components/AppGlyph): a quiet tile, monochrome brand marks. */
+.apps-mono {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 0.78125rem;
+  font-weight: 700;
+}
+.apps-glyph { background: var(--surface-2); color: var(--ink); }
+
+.pp-add-site { align-self: stretch; display: flex; align-items: flex-start; gap: 8px; }
+.pp-add-site .fieldset { flex: 1; max-width: 26rem; }
+.pp-safe { align-self: stretch; margin: 0 -20px -20px; border-top: 1px solid var(--line); }
+
+.pp-add-task { align-items: flex-start; }
+.pp-add-task .fieldset { flex: 1; }
+
+.pp-own { display: flex; gap: 16px; align-items: flex-start; }
+.pp-own > .ic { flex: none; color: var(--ink-3); margin-top: 2px; }
+.pp-own .h2 { margin-bottom: 4px; }
+
+.pp-danger { margin-top: 48px; }
+.pp-danger .card { box-shadow: none; background: transparent; }
+
+.pp-sheet-group { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pp-sheet-group > legend { margin-bottom: 8px; padding: 0; }
+.pp-sheet-blurb { font-size: 0.875rem; color: var(--ink-2); }
+
+/* ---- the daily-limit slider (components/FluentSlider) --------------------- */
+.fs { display: flex; align-items: center; gap: 16px; width: 100%; }
+.fs-value {
+  flex: none;
+  min-width: 7.5rem;
+  font-size: 1.125rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.fs-range {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  min-width: 8rem;
+  height: 28px;
+  background: transparent;
+  cursor: pointer;
+}
+.fs-range:disabled { cursor: default; opacity: 0.45; }
+.fs-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, var(--brand) 0 var(--fs-pct, 0%), var(--surface-2) var(--fs-pct, 0%) 100%);
+}
+.fs-range::-moz-range-track { height: 6px; border-radius: 3px; background: var(--surface-2); }
+.fs-range::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--brand); }
+.fs-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -8px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--brand);
+  box-shadow: var(--shadow-1);
+}
+.fs-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--brand);
+  box-shadow: var(--shadow-1);
+}
+.fs-range:focus-visible { outline: none; }
+.fs-range:focus-visible::-webkit-slider-thumb { box-shadow: var(--glow); }
+.fs-range:focus-visible::-moz-range-thumb { box-shadow: var(--glow); }
+@media (max-width: 480px) {
+  .fs { flex-direction: column; align-items: stretch; gap: 4px; }
+}
+
+/* ---- where the time went (components/WhereTheTime) ------------------------ */
+.wt { display: flex; flex-direction: column; gap: 18px; }
+.wt-h { margin: 0 0 10px; font-size: 0.8125rem; font-weight: 600; color: var(--ink-3); }
+.wt-hours { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; align-items: end; }
+.wt-hour { position: relative; display: grid; gap: 4px; border-radius: 4px; background: var(--surface-2); }
+.wt-hour-fill { display: block; height: 22px; border-radius: 4px; background: var(--brand); }
+.wt-hour-label { position: absolute; top: 26px; left: 0; font-size: 0.78125rem; color: var(--ink-3); white-space: nowrap; }
+.wt-hours { margin-bottom: 18px; }
+.wt-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: 20px 32px; }
+.wt-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; }
+.wt-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.wt-row .apps-mono { width: 26px; height: 26px; border-radius: 7px; }
+.wt-name { width: 7.5rem; flex: none; font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wt-site { width: 9rem; }
+.wt-bar { flex: 1; min-width: 2rem; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.wt-bar-fill { display: block; height: 100%; border-radius: inherit; background: var(--brand); transition: width var(--dur-3) var(--ease); }
+.wt-amount { flex: none; min-width: 4.5rem; text-align: right; font-size: 0.8125rem; color: var(--ink-2); }
+.wt-note { margin: 0; font-size: 0.8125rem; color: var(--ink-3); }
+
+/* ---- moments (components/Moments) ------------------------------------------ */
+.moments-card { margin-top: 12px; }
+.moments { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.moment { display: flex; align-items: baseline; gap: 10px; font-size: 0.9375rem; }
+.moment-dot { flex: none; align-self: center; width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); }
+.moment[data-tone="warn"] .moment-dot { background: var(--warn); }
+.moment[data-tone="crit"] .moment-dot { background: var(--stop); }
+.moment-text { min-width: 0; color: var(--ink); }
+.moment-when { margin-left: auto; flex: none; font-size: 0.8125rem; color: var(--ink-3); white-space: nowrap; }

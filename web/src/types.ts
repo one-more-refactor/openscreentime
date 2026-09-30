@@ -14,7 +14,6 @@
 // everything. Same silent drift as the schedule/windows mismatch.
 export type DnsMode = "default_deny" | "allow_all";
 export type FirewallMode = "default_deny" | "allow_all";
-export type UnlockChallenge = "math" | "wait" | "parent_pin";
 
 export interface DnsPolicy {
   mode: DnsMode;
@@ -62,9 +61,11 @@ export interface EarnTimePolicy {
   tasks: EarnTask[];
 }
 
+/** Still in the document, read by nothing: the lock has one way back (the
+ * unlock code) and the console no longer offers a choice. */
 export interface LockoutPolicy {
   enabled: boolean;
-  unlock_challenge: UnlockChallenge;
+  unlock_challenge: string;
 }
 
 export interface GamificationPolicy {
@@ -99,6 +100,26 @@ export interface Policy {
   /** One-click app / category blocks from the built-in catalog. Absent =
    * nothing blocked. */
   blocks?: AppBlocks;
+  /** A self-managed person's own site blocks and the hours they hold
+   * (policy crate `Focus`). Absent = none. */
+  focus?: Focus;
+}
+
+/** Sites a person blocks for themselves, and the focus hours they hold in.
+ * No hours = blocked all day, every day. */
+export interface Focus {
+  sites: string[];
+  hours: TimeWindow | null;
+}
+
+/** GET/PUT /api/me/rules — a self-managed person's own rules (the hub for
+ * themselves, or an adult). A child gets 403: a parent sets theirs. */
+export interface MyRules {
+  /** 0 = no limit */
+  daily_limit_minutes: number;
+  /** when the sites below are blocked; null = all day */
+  focus_hours: TimeWindow | null;
+  sites: string[];
 }
 
 /** Catalog-driven blocks (policy crate `AppBlocks`). Ids refer to
@@ -185,6 +206,10 @@ export interface DeviceUser {
   earned_minutes_today?: number;
   /** present in mock data only; the server does not return it */
   created_at?: string;
+  /** The person this login belongs to. */
+  account_id?: string | null;
+  /** nobody has said who this login is yet (Devices → Who's who) */
+  unsorted?: boolean;
 }
 
 /** One row of a device's command queue (GET /api/devices/:id/commands). */
@@ -216,16 +241,18 @@ export interface Device {
   public_ip: string | null;
   last_seen: string | null;
   created_at: string;
-  /** bumped when the device's VPN profiles change (cache-busting stamp) */
-  vpn_updated_at?: string | null;
   /** while set and in the future, being unreachable is allowed, not trouble */
   offline_allowed_until?: string | null;
   /** present on list + detail responses */
   users?: DeviceUser[];
   /** command types still queued/sent — server-backed PENDING chips */
   pending_commands?: string[];
+  /** /api/family: logins on it nobody has sorted yet (Devices → Who's who) */
+  unsorted_logins?: number;
   /** one-time recovery codes not yet used (0 when none were generated) */
   recovery_codes_unused?: number;
+  /** "This is <person>'s computer" — whose it was set up for. */
+  owner_account_id?: string | null;
 }
 
 // ---- Family (GET /api/family) ----------------------------------------------
@@ -264,6 +291,14 @@ export interface FamilyChild {
   earned_minutes: number;
   /** null = no limit configured (disabled or zero — never "0 left of 0") */
   limit_minutes: number | null;
+  /** time left: minutes until their screen stops — the number their computer
+   *  shows (limit, bedtime, the end of the hours or of an override, whichever
+   *  first; per person, on the computer's own day). null = no limit */
+  left_minutes?: number | null;
+  /** when screens stop and why — the same verdict */
+  rules?: RulesVerdict | null;
+  /** their computer's clock (seconds east of UTC); null = none reported yet */
+  utc_offset_secs?: number | null;
   /** the person's own daily goal (minutes), or null */
   goal_minutes?: number | null;
   profile_id: string | null;
@@ -271,8 +306,13 @@ export interface FamilyChild {
   devices: ChildDevice[];
   /** earn requests waiting on a parent */
   pending_requests: number;
-  /** paused via the Danger Zone: can read their own page, can't change anything; devices locked */
+  /** an account block from before Pause was the one verb: they can read their
+   *  own page but not ask for anything. The console only offers to lift it. */
   blocked?: boolean;
+  /** false for adults: the hub enforces nothing on them */
+  managed?: boolean;
+  /** keeps their own time — their rules are theirs; the hub sees only minutes */
+  self_managed?: boolean;
 }
 
 export interface FamilyResponse {
@@ -281,27 +321,6 @@ export interface FamilyResponse {
   profiles: Profile[];
   requests: EarnRequest[];
   server_time: string;
-}
-
-export type VpnKind = "wireguard" | "openvpn";
-
-/** A named VPN profile (GET /api/devices/:id/vpn). Configs render MASKED —
- * secrets appear as ••• and survive edit round-trips server-side. */
-export interface VpnProfile {
-  id: string;
-  name: string;
-  kind: VpnKind;
-  config_masked: string;
-  status: "untested" | "testing" | "active" | "failed";
-  last_error: string | null;
-  last_tested_at: string | null;
-  is_active: boolean;
-  updated_at: string;
-}
-
-export interface DeviceDetail extends Device {
-  users: DeviceUser[];
-  recent_events: Event[];
 }
 
 export type EventType =
@@ -367,13 +386,6 @@ export interface ParentToken {
   revoked: boolean;
 }
 
-/** Response from minting a parent token — `token` is shown exactly once. */
-export interface MintedParentToken {
-  id: string;
-  label: string;
-  token: string;
-}
-
 // ---- People, roles, age brackets -------------------------------------------
 // The account model the "everyone has an account" pivot introduces. Grounded
 // in docs/AUTH.md. Kept alongside the legacy Admin/Tenant during the interleave
@@ -430,15 +442,9 @@ export interface Account {
   created_at: string;
 }
 
-/** How a person's own page looks — playful for small children, calm for
- * teens, plain for adults. Null on an account means "auto by bracket". */
+/** The server still stores a per-person "look"; the console has one look
+ * for everyone now and ignores it. */
 export type Theme = "playful" | "calm" | "plain";
-
-export const THEMES: { key: Theme; label: string; blurb: string }[] = [
-  { key: "playful", label: "Playful", blurb: "Big friendly ring, bright colours — for little ones" },
-  { key: "calm", label: "Calm", blurb: "Quieter stats and goals — for teens" },
-  { key: "plain", label: "Plain", blurb: "A compact private dashboard — for adults" },
-];
 
 export function defaultThemeFor(b: AgeBracket): Theme {
   return b === "little" || b === "kid" ? "playful" : b === "adult" ? "plain" : "calm";
@@ -480,14 +486,43 @@ export type MemberPatch = Partial<{
   avatar: string;
 }>;
 
+/** Why screens stop (the agent's `reason`, policy::rules::StopReason). */
+export type StopReason = "limit" | "bedtime" | "outside_hours" | "paused";
+
+/** When screens stop — the same rules function the computer enforces with,
+ *  with the same inputs (their day, the override the computer reports), on
+ *  the computer's clock. Times carry the computer's UTC offset. */
+export interface RulesVerdict {
+  allowed: boolean;
+  /** why they are stopped now (allowed = false) or why the next stop comes */
+  reason: StopReason | null;
+  /** minutes until the next stop, whichever comes first; null = none ahead */
+  minutes_left: number | null;
+  /** RFC 3339 */
+  stop_at: string | null;
+  /** when a current stop lifts on its own (bedtime ends, window opens…) */
+  resume_at: string | null;
+  /** a parent's override (an unlock code, a grant) runs until then */
+  override_until?: string | null;
+  /** the computer's clock, seconds east of UTC */
+  utc_offset_secs?: number;
+}
+
 /** GET /api/me/today — the person's own day, for their own page. */
 export interface MeToday {
   used_minutes: number;
   earned_minutes: number;
   limit_minutes: number | null;
+  /** minutes until the screen stops — what the computer shows */
   left_minutes: number | null;
+  rules?: RulesVerdict;
+  /** the computer's clock (seconds east of UTC): the week and focus hours
+   *  are its day, not this browser's */
+  utc_offset_secs?: number | null;
   locked: boolean;
-  devices: { name: string; status: DeviceStatus; locked: boolean }[];
+  /** `gaps`: what an online computer can't do right now (last_state.gaps) —
+   *  only for someone who sets their own rules. */
+  devices: { name: string; status: DeviceStatus; locked: boolean; gaps?: string[] }[];
   blocks: AppBlocks;
   bracket: AgeBracket;
   theme: Theme;
@@ -496,6 +531,21 @@ export interface MeToday {
   windows: TimeWindow[];
   /** the person's own daily goal (minutes), or null if none set */
   goal_minutes?: number | null;
+  /** they keep their own time (the hub for themselves, or an adult): their
+   *  page is "My computer" and /api/me/rules is theirs */
+  self_managed?: boolean;
+  /** their own site blocks and focus hours */
+  focus?: Focus;
+  /** what a parent sees of their day beyond the minutes — the server's own
+   *  rule (server/src/usage.rs `hub_exposure`), never re-derived here */
+  parent_sees: ParentSees;
+}
+
+/** What a parent sees of a person's day besides their minutes. Both false:
+ *  minutes only (an adult, or someone who manages themselves). */
+export interface ParentSees {
+  apps: boolean;
+  sites: boolean;
 }
 
 /** One day of a person's own history (GET /api/me/history). */
@@ -574,20 +624,30 @@ export interface Me {
   tenant: Tenant;
 }
 
-// ---- Two-factor / step-up ("reading is free, changing needs a factor") -----
+// ---- Confirm it's you (the sensitive corner, docs/AUTH.md) -----------------
 
-export type SecondFactorMethod = "totp" | "telegram";
-
-/** Error code the server returns from a mutation with no valid step-up grant. */
+/** Error code the server returns from a sensitive route while the session's
+ * confirm window is shut. */
 export const STEP_UP_REQUIRED = "step_up_required";
 
-export interface TwoFactorStatus {
-  /** An authenticator-app secret is enrolled and confirmed. */
-  totp_enrolled: boolean;
-  /** @deprecated email step-up retired; kept optional during transition. */
-  email_available?: boolean;
-  /** A Telegram chat is paired — one tap on the phone is a factor. */
-  telegram_available?: boolean;
+/** GET /api/auth/confirm — is the window open, and how can this account open it. */
+export interface ConfirmStatus {
+  armed_until: string | null;
+  /** The account has a passkey. */
+  passkey: boolean;
+  /** One of the account's own computers is online to show a code. */
+  computer: boolean;
+}
+
+/** A passed confirm: the window is open until `armed_until`. */
+export interface ConfirmGrant {
+  armed_until: string;
+}
+
+/** A code on its way to a computer (sign-in or confirm). */
+export interface CodeRequest {
+  request_id: string;
+  expires_in_secs: number;
 }
 
 /** Pairing state of the account's Telegram companion. */
@@ -607,28 +667,6 @@ export interface TelegramPairing {
   bot: string | null;
   deep_link: string | null;
   expires_in_minutes: number;
-}
-
-/** Returned by TOTP enrollment start — the secret is shown exactly once. */
-export interface TotpEnrollment {
-  /** base32 secret for manual entry. */
-  secret: string;
-  /** otpauth://totp/… — render as a QR for scanning into the app. */
-  otpauth_uri: string;
-}
-
-/** A successful step-up: change mode is on until `expires_at`. */
-export interface StepUpGrant {
-  method: SecondFactorMethod;
-  expires_at: string;
-  /** the one allowed extension has been used */
-  extended: boolean;
-}
-
-/** GET /api/auth/stepup — is change mode on for this session, and until when. */
-export interface ChangeModeStatus {
-  armed_until: string | null;
-  extended: boolean;
 }
 
 // ---- Command / action responses --------------------------------------------
@@ -672,8 +710,10 @@ export interface EarnRequest {
 export interface AuthConfig {
   oidc: boolean;
   oidc_name: string;
-  /** No account exists yet → the entry page shows first-run registration. */
+  /** No account exists yet → the entry page shows "Create your household". */
   needs_setup: boolean;
+  /** …and it needs the one-time setup code (normally in the #setup= link). */
+  setup_code_required: boolean;
 }
 
 // ---- API error -------------------------------------------------------------
@@ -682,16 +722,3 @@ export interface ApiErrorBody {
   error: { code: string; message: string };
 }
 
-// ---- Screen-time history ----------------------------------------------------
-
-export interface UsageDay {
-  day: string; // YYYY-MM-DD
-  used_minutes: number;
-  earned_minutes: number;
-}
-
-export interface UsageHistoryResponse {
-  days: UsageDay[];
-  /** consecutive days with any usage, counted back from today (server-computed) */
-  streak_days: number;
-}

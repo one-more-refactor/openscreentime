@@ -106,7 +106,7 @@ pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult
     if let Some(s) = existing {
         return Ok(s);
     }
-    let fresh = crate::stepup::gen_totp_secret();
+    let fresh = crate::unlock_code::gen_totp_secret();
     // Race-safe: whoever lands first wins, everybody reads the winner back.
     let secret: String = sqlx::query_scalar(
         "UPDATE devices SET parent_totp_secret = COALESCE(parent_totp_secret, $2)
@@ -123,12 +123,12 @@ pub async fn ensure_parent_code(db: &sqlx::PgPool, device_id: Uuid) -> AppResult
 /// console. `seconds_left` lets the UI draw the countdown and refetch on the
 /// step boundary instead of polling.
 fn unlock_code_json(device_name: &str, secret: &str) -> AppResult<Value> {
-    let (code, seconds_left) = crate::stepup::current_totp(secret)
+    let (code, seconds_left) = crate::unlock_code::current_totp(secret)
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("device secret is not valid base32")))?;
     Ok(json!({
         "code": code,
         "seconds_left": seconds_left,
-        "period": crate::stepup::TOTP_STEP,
+        "period": crate::unlock_code::TOTP_STEP,
         "device_name": device_name,
     }))
 }
@@ -154,7 +154,7 @@ pub async fn rotate_unlock_code(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
-    let fresh = crate::stepup::gen_totp_secret();
+    let fresh = crate::unlock_code::gen_totp_secret();
     let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE devices SET parent_totp_secret = $2 WHERE id = $1")
         .bind(id)
@@ -221,7 +221,7 @@ pub async fn generate_recovery_codes(
         .execute(&mut *tx)
         .await?;
     for (i, code) in codes.iter().enumerate() {
-        let mac = crate::stepup::recovery_mac(&secret, code).ok_or_else(|| {
+        let mac = crate::unlock_code::recovery_mac(&secret, code).ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!("device secret is not valid base32"))
         })?;
         sqlx::query("INSERT INTO device_recovery_codes (device_id, idx, mac) VALUES ($1, $2, $3)")
@@ -342,7 +342,7 @@ pub async fn mark_recovery_code_used(db: &sqlx::PgPool, device_id: Uuid, payload
 async fn pending_command_types(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT type FROM commands
-         WHERE device_id = $1 AND status IN ('queued','sent')
+         WHERE device_id = $1 AND status IN ('queued','sent') AND type <> 'login_code'
          ORDER BY created_at",
     )
     .bind(device_id)
@@ -392,7 +392,7 @@ pub async fn get_device(
 ) -> AppResult<Json<Value>> {
     let row = get_device_row(&st.db, id, admin.tenant_id).await?;
     let users = device_users_json(&st.db, id).await?;
-    let recent = events::recent_for_device(&st.db, admin.tenant_id, id, 25).await?;
+    let recent = events::recent_for_device(&st.db, admin.tenant_id, admin.admin_id, id, 25).await?;
 
     let mut d = device_to_json(&row);
     d["online"] = json!(d["status"] == "online");
@@ -419,19 +419,27 @@ pub struct CreateDeviceReq {
 pub async fn create_device(
     State(st): State<AppState>,
     admin: AuthAdmin,
+    jar: axum_extra::extract::cookie::CookieJar,
     Json(req): Json<CreateDeviceReq>,
 ) -> AppResult<Json<Value>> {
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
     if let Some(acct) = req.account_id {
-        crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        let owner = crate::members::get_account(&st.db, acct, admin.tenant_id).await?;
+        // A parent's own computer is a door to that parent: its enroll token
+        // becomes a device that mints vouchers — fresh sessions — for them.
+        // So setting one up is in the sensitive corner, like a fresh enroll
+        // token for any computer.
+        if owner.4 != "member" {
+            crate::confirm::require_window(&st, &jar).await?;
+        }
     }
     let enroll_token = gen_token();
     // The unlock-code secret is born with the device; only the agent ever
     // receives it (on its first policy pull). The parent reads codes off the
     // console.
-    let secret = crate::stepup::gen_totp_secret();
+    let secret = crate::unlock_code::gen_totp_secret();
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO devices (tenant_id, name, enroll_token, enroll_token_expires_at, status,
                               parent_totp_secret, owner_account_id)
@@ -532,14 +540,39 @@ pub async fn delete_device(
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
+    // Removing a computer frees it: its token is kept as a tombstone, so the
+    // agent hears `410 device_retired` (not a 401 it would retry forever
+    // with the old rules still in force) and takes itself off the machine.
+    // The day of everyone who used it stays theirs: its ledger is filed
+    // under each person first (`machine::keep_usage`), or "17 min left of
+    // 17" is what a child who used 37 would show.
+    let mut tx = st.db.begin().await?;
+    sqlx::query("SELECT 1 FROM devices WHERE id = $1 AND tenant_id = $2 FOR UPDATE")
+        .bind(id)
+        .bind(admin.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound("device not found".into()))?;
+    crate::machine::keep_usage(&mut tx, id, None).await?;
+    sqlx::query(
+        "INSERT INTO retired_devices (token_hash, device_id, tenant_id)
+         SELECT device_token, id, tenant_id FROM devices
+          WHERE id = $1 AND tenant_id = $2 AND device_token IS NOT NULL
+         ON CONFLICT (token_hash) DO NOTHING",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&mut *tx)
+    .await?;
     let res = sqlx::query("DELETE FROM devices WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(admin.tenant_id)
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound("device not found".into()));
     }
+    tx.commit().await?;
     st.hub.force_unregister(id).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -627,18 +660,23 @@ type DeviceUserRow = (
     i32,
     i32,
     Option<Uuid>,
+    bool,
 );
 
 pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<Value> {
-    let rows: Vec<DeviceUserRow> = sqlx::query_as(
+    // "Today" on the device's own calendar — the day its agent enforces.
+    let rows: Vec<DeviceUserRow> = sqlx::query_as(&format!(
         "SELECT du.id, du.device_id, du.os_username, du.display_name, du.profile_id, \
                 p.name, p.kind, \
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id \
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), du.account_id, \
+                du.unsorted \
          FROM device_users du JOIN profiles p ON p.id = du.profile_id \
+         JOIN devices d ON d.id = du.device_id \
          LEFT JOIN screen_time_ledger l \
-                ON l.device_user_id = du.id AND l.day = CURRENT_DATE \
+                ON l.device_user_id = du.id AND l.day = {} \
          WHERE du.device_id = $1 ORDER BY du.os_username",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(device_id)
     .fetch_all(db)
     .await?;
@@ -656,6 +694,8 @@ pub async fn device_users_json(db: &sqlx::PgPool, device_id: Uuid) -> AppResult<
                 "used_minutes_today": r.7 / 60,
                 "earned_minutes_today": r.8 / 60,
                 "account_id": r.9,
+                // Nobody has said who this login is yet (Who's who).
+                "unsorted": r.10,
             })
         })
         .collect();
@@ -705,7 +745,7 @@ pub async fn assign_profile(
             .await?;
     prof.ok_or_else(|| AppError::NotFound("profile not found".into()))?;
 
-    sqlx::query("UPDATE device_users SET profile_id = $1 WHERE id = $2")
+    sqlx::query("UPDATE device_users SET profile_id = $1, unsorted = false WHERE id = $2")
         .bind(req.profile_id)
         .bind(device_user_id)
         .execute(&st.db)
@@ -723,11 +763,11 @@ pub struct AssignAccountReq {
 }
 
 /// `POST /api/device-users/{id}/assign-account` — relink an OS login to a
-/// different person in the household. Enrollment links unmatched logins to the
-/// device's owner; a second account on a child's laptop (a parent's, say) ends
-/// up with the child's rules until it is moved here. The login takes the new
-/// person's rules immediately (profile_id follows the account) and the agent
-/// re-pulls.
+/// different person in the household (Devices → Who's who; behind confirm,
+/// since it decides who that login signs in as). Every login but the owner's
+/// enrolls as a person of its own; this is where "that one's me" goes. The
+/// login takes the new person's rules immediately (profile_id follows the
+/// account) and the agent re-pulls.
 pub async fn assign_account(
     State(st): State<AppState>,
     admin: AuthAdmin,
@@ -746,27 +786,58 @@ pub async fn assign_account(
         .ok_or_else(|| AppError::NotFound("device user not found".into()))?
         .0;
 
-    let acct: Option<(Option<Uuid>,)> =
-        sqlx::query_as("SELECT profile_id FROM admins WHERE id = $1 AND tenant_id = $2")
-            .bind(req.account_id)
-            .bind(admin.tenant_id)
-            .fetch_optional(&st.db)
+    // The login takes that person's own rules — whoever they are. A parent
+    // or an adult with none yet gets them now, from their bracket (an adult's
+    // enforce nothing). It used to keep whatever the login had, so pointing
+    // the `philip` login at Philip left him on the child rules the unsorted
+    // login was created with.
+    let acct = crate::members::get_account(&st.db, req.account_id, admin.tenant_id)
+        .await
+        .map_err(|_| AppError::NotFound("person not found".into()))?;
+    let profile_id = crate::members::ensure_profile(&st.db, &acct).await?;
+    let previous: Option<Uuid> =
+        sqlx::query_scalar("SELECT account_id FROM device_users WHERE id = $1")
+            .bind(device_user_id)
+            .fetch_one(&st.db)
             .await?;
-    let profile_id = acct
-        .ok_or_else(|| AppError::NotFound("person not found".into()))?
-        .0;
 
-    sqlx::query(
-        "UPDATE device_users SET account_id = $1, profile_id = COALESCE($2, profile_id) WHERE id = $3",
+    let mut tx = st.db.begin().await?;
+    let login: String = sqlx::query_scalar(
+        "UPDATE device_users SET account_id = $1, profile_id = $2, unsorted = false
+          WHERE id = $3 RETURNING os_username",
     )
     .bind(req.account_id)
     .bind(profile_id)
     .bind(device_user_id)
-    .execute(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
+    // The owner's login is the one last pointed at the computer's owner here —
+    // which is how a parent settles theirs on their own computer (it is what
+    // their sign-in codes and `ost login` go to). Pointing it at someone else
+    // unsettles it.
+    sqlx::query(
+        "UPDATE devices
+            SET owner_os_username = CASE
+                    WHEN owner_account_id = $2 THEN $3
+                    WHEN lower(owner_os_username) = lower($3) THEN NULL
+                    ELSE owner_os_username END
+          WHERE id = $1",
+    )
+    .bind(device_id)
+    .bind(req.account_id)
+    .bind(&login)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // The person this login was before may be left with no computer at all.
+    let removed = match previous.filter(|p| *p != req.account_id) {
+        Some(p) => crate::members::drop_if_leftover(&st.db, admin.tenant_id, p).await?,
+        None => false,
+    };
 
     enqueue_command(&st, device_id, "apply_policy", json!({})).await?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "removed_person": removed })))
 }
 
 // --- Screen-time history -----------------------------------------------------
