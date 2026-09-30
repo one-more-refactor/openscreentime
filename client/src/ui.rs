@@ -1,13 +1,13 @@
 //! The house clock on the device: the brand board's tokens, type, ring, icons
 //! and buttons as egui building blocks, shared by the app window and the lock
 //! so they can't drift apart (brand/board.html, docs/DESIGN-CLIENT.md).
-//! Compiled only with `--features gui`.
+//! Compiled only with `--features gui` (`main.rs` gates `mod ui`; a second
+//! `#![cfg]` here is a hard "duplicated attribute" error on Rust 1.89).
 //!
 //! One idea, carried to the last screen: the ring is time used today, filling
 //! clockwise from the tick at 12. The lock is that ring completed — the gauge
 //! finished, not an alarm raised.
 
-#![cfg(feature = "gui")]
 // A shared token + helper module: not every token/helper is used by every
 // surface, and that's fine — they are the language, kept complete on purpose.
 #![allow(dead_code)]
