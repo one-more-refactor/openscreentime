@@ -5,21 +5,22 @@
 // reopens time and allows `sudo`. It is verified on the device, offline — but
 // the secret behind it never leaves the server and the agent. There is no QR
 // to scan, no authenticator entry to keep: when a parent needs the code they
-// open this (on their phone, usually), prove it's them once (change mode), and
+// open this (on their phone, usually), confirm it's them (a passkey, or a code
+// on their own computer — a fresh sign-in counts), and
 // read the code that is valid right now. Recovery codes are the phone-is-dead
 // fallback: eight one-time 8-digit codes, shown once, generated here.
 //
-// Used in two places with one body: Add a child (step 2) and Settings →
-// Unlock codes. Every read here is a sensitive read (428 without change mode),
-// so everything goes through guard().
+// Used with one body in Add a person (step 2), Settings → Security, and the
+// person page. Every read here is a sensitive read (428 outside the confirm
+// window), so everything goes through guard().
 // ============================================================================
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import type { RecoveryCodesStatus, UnlockCode } from "../types";
 import { useConfirm, StepUpCancelled } from "../lib/confirm";
 import { Button } from "./Button";
 import { Modal } from "./Modal";
-import { relTime } from "../lib/format";
+import { ago } from "../lib/format";
 
 export interface UnlockCodeDevice {
   id: string;
@@ -31,9 +32,9 @@ export interface UnlockCodeDevice {
 
 interface Props {
   device: UnlockCodeDevice;
-  /** Show the live code as soon as the panel mounts (Add a child, step 2). */
+  /** Show the live code as soon as the panel mounts (Add a person, step 2). */
   autoShow?: boolean;
-  /** Compact row (Settings list) vs. the full step (Add a child). */
+  /** Compact row (Settings list) vs. the full step (Add a person). */
   variant?: "row" | "step";
 }
 
@@ -156,84 +157,80 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
 
   const pending = device.status === "pending";
   const period = code?.period ?? 30;
-  const frac = code ? secondsLeft / period : 0;
   const unused = recovery?.unused ?? 0;
+  const makeCodes = () => (unused > 0 ? setConfirmGenerate(true) : void generate());
 
   return (
     <div className="uc" data-variant={variant}>
       {variant === "row" && (
         <div className="uc-head">
-          <span className="uc-name">{device.name}</span>
-          <span className="uc-meta">
-            {pending
-              ? "not set up yet"
-              : device.last_seen
-                ? `last heard ${relTime(device.last_seen)}`
-                : ""}
-            {recovery && !pending ? ` · ${unused} of ${recovery.total} recovery codes left` : ""}
-          </span>
+          <div className="uc-who">
+            <p className="uc-name">{device.name}</p>
+            <p className="uc-meta">
+              {pending
+                ? "Not set up yet"
+                : recovery
+                  ? unused === 0
+                    ? "No recovery codes yet"
+                    : `${unused} of ${recovery.total} recovery codes left`
+                  : device.last_seen
+                    ? `Last seen ${ago(device.last_seen)}`
+                    : ""}
+            </p>
+          </div>
           <span className="uc-actions">
-            <button
-              type="button"
-              className="ch-btn"
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={showing ? "eye-off" : "key"}
               disabled={busy}
               onClick={() => setShowing((s) => !s)}
               aria-expanded={showing}
             >
               {showing ? "Hide code" : "Show code"}
-            </button>
-            <button
-              type="button"
-              className="ch-btn"
-              disabled={busy}
-              onClick={() => (unused > 0 ? setConfirmGenerate(true) : void generate())}
-            >
+            </Button>
+            <Button variant="quiet" size="sm" disabled={busy} onClick={makeCodes}>
               Recovery codes
-            </button>
-            <button type="button" className="ch-btn" disabled={busy} onClick={() => setConfirmReplace(true)}>
+            </Button>
+            <Button variant="quiet" size="sm" disabled={busy} onClick={() => setConfirmReplace(true)}>
               Replace
-            </button>
+            </Button>
           </span>
         </div>
       )}
 
       {showing && (
         <div className="uc-live" data-testid="unlock-code-live">
-          <div className="uc-ring" style={{ "--p": frac } as CSSProperties} aria-hidden="true">
-            <span className="uc-ring-s">{code ? secondsLeft : "·"}</span>
-          </div>
-          <div className="uc-code-wrap">
-            <p className="uc-label">Unlock code for {device.name}</p>
-            <p className="uc-code" aria-live="polite" aria-atomic="true">
-              {code ? spaced(code.code) : "··· ···"}
-            </p>
-            <p className="uc-note">
-              {code
-                ? `Changes in ${secondsLeft}s · works on the computer even offline`
-                : (status?.msg ?? "Reading…")}
-            </p>
-          </div>
+          <p className="uc-label">Unlock code for {device.name}</p>
+          <p className="uc-code num" aria-live="polite" aria-atomic="true">
+            {code ? spaced(code.code) : "··· ···"}
+          </p>
+          {code && (
+            <div className="uc-bar" aria-hidden="true">
+              <i style={{ width: `${Math.round((secondsLeft / period) * 100)}%` }} />
+            </div>
+          )}
+          <p className="uc-note">
+            {code
+              ? `Changes in ${secondsLeft}s · works on the computer even offline`
+              : (status?.msg ?? "Reading…")}
+          </p>
         </div>
       )}
 
       {variant === "step" && (
         <div className="uc-step-actions">
-          <button
-            type="button"
-            className="ch-btn"
-            disabled={busy}
-            onClick={() => (unused > 0 ? setConfirmGenerate(true) : void generate())}
-          >
+          <Button variant="secondary" size="sm" disabled={busy} onClick={makeCodes}>
             {unused > 0 ? `Recovery codes · ${unused} left` : "Make recovery codes"}
-          </button>
-          <button type="button" className="ch-btn" disabled={busy} onClick={() => setConfirmReplace(true)}>
+          </Button>
+          <Button variant="quiet" size="sm" disabled={busy} onClick={() => setConfirmReplace(true)}>
             Replace the code
-          </button>
+          </Button>
         </div>
       )}
 
       {status && (!showing || code) && (
-        <p className="dev-inline-status" data-tone={status.crit ? "crit" : undefined} role="status">
+        <p className="hint" data-error={status.crit} role="status">
           {status.msg}
         </p>
       )}
@@ -245,24 +242,24 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
         title="Recovery codes"
         footer={
           <>
-            <Button variant="ghost" onClick={() => window.print()}>
-              PRINT
+            <Button variant="quiet" onClick={() => window.print()}>
+              Print
             </Button>
             <Button
-              variant="ghost"
+              variant="secondary"
+              icon="copy"
               onClick={() => void navigator.clipboard?.writeText((fresh ?? []).join("\n"))}
             >
-              COPY ALL
+              Copy all
             </Button>
             <Button onClick={() => setFresh(null)}>I've saved them</Button>
           </>
         }
       >
         <div className="rc-sheet">
-          <p className="text-sm" style={{ color: "var(--fg-dim)", margin: 0 }}>
-            For <span style={{ color: "var(--fg)" }}>{device.name}</span>, when your phone is out of
-            reach. Each code works once, on the computer itself, with no internet. They are shown
-            only now — print them or put them somewhere safe.
+          <p className="dialog-lede">
+            For <strong>{device.name}</strong>, for when your phone is out of reach. Each code works
+            once, on the computer itself, with no internet. You'll only see them now.
           </p>
           <ol className="rc-grid">
             {(fresh ?? []).map((c) => (
@@ -278,23 +275,22 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
       <Modal
         open={confirmGenerate}
         onClose={() => setConfirmGenerate(false)}
-        title="New recovery codes"
+        title="Make new recovery codes?"
         danger
         footer={
           <>
-            <Button variant="ghost" onClick={() => setConfirmGenerate(false)} disabled={busy}>
-              CANCEL
+            <Button variant="quiet" onClick={() => setConfirmGenerate(false)} disabled={busy}>
+              Cancel
             </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void generate()}>
+            <Button variant="danger-solid" disabled={busy} onClick={() => void generate()}>
               {busy ? "Making…" : "Make new codes"}
             </Button>
           </>
         }
       >
-        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
-          <span className="dot text-fg">{device.name}</span> still has {unused} unused recovery
-          {unused === 1 ? " code" : " codes"}. Making new ones throws those away — anything you
-          printed stops working once the computer checks in.
+        <p className="dialog-lede">
+          {device.name} still has {unused} unused recovery {unused === 1 ? "code" : "codes"}. New ones
+          replace them — anything you printed stops working once the computer checks in.
         </p>
       </Modal>
 
@@ -305,20 +301,20 @@ export function UnlockCodePanel({ device, autoShow = false, variant = "row" }: P
         danger
         footer={
           <>
-            <Button variant="ghost" onClick={() => setConfirmReplace(false)} disabled={busy}>
-              CANCEL
+            <Button variant="quiet" onClick={() => setConfirmReplace(false)} disabled={busy}>
+              Cancel
             </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void replace()}>
+            <Button variant="danger-solid" disabled={busy} onClick={() => void replace()}>
               {busy ? "Replacing…" : "Replace"}
             </Button>
           </>
         }
       >
-        <p className="text-xs leading-relaxed" style={{ color: "var(--fg-dim)" }}>
-          Give <span className="dot text-fg">{device.name}</span> a new key? The current codes stop
-          working as soon as that computer next checks in
-          {unused > 0 ? `, and its ${unused} recovery ${unused === 1 ? "code is" : "codes are"} cleared too` : ""}
-          . Do this if you think someone has been reading the code over your shoulder.
+        <p className="dialog-lede">
+          Give {device.name} a new unlock code? The current one stops working as soon as the
+          computer next checks in
+          {unused > 0 ? `, and its ${unused} recovery ${unused === 1 ? "code goes" : "codes go"} too` : ""}.
+          Do this if someone may have seen the code over your shoulder.
         </p>
       </Modal>
     </div>

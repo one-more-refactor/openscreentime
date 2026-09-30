@@ -1,8 +1,9 @@
 # 0.4.0 build contract — "it finally works"
 
+> **Historical.** The build contract for 0.4.0. Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
+
 The shared contract for the 0.4.0 push. Three workstreams (server, client,
-web) build against this in parallel; when they disagree with older docs, this
-wins. `docs/OPENSCREENTIME.md` is still the product north star.
+web) build against this in parallel.
 
 Scope, in one breath: every person is an **account** with a **role** and an
 **age bracket**; the parent code is a **per-device TOTP** (authenticator app,

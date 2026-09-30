@@ -1,0 +1,223 @@
+{
+  "GET /api/events": {
+    "events": [
+      {
+        "created_at": "string",
+        "device_id": "string",
+        "device_user_id": "string",
+        "id": "string",
+        "payload": "object",
+        "severity": "string",
+        "tenant_id": "string",
+        "type": "string"
+      }
+    ]
+  },
+  "GET /api/family": {
+    "children": [
+      {
+        "account_id": "string",
+        "age_bracket": "string",
+        "avatar": "null",
+        "birthdate": "null",
+        "blocked": "boolean",
+        "blocked_apps": [
+          "string"
+        ],
+        "blocks": {
+          "apps": [],
+          "categories": [
+            "string"
+          ],
+          "custom_domains": []
+        },
+        "can_ask": "boolean",
+        "created_at": "string",
+        "devices": [
+          {
+            "device_user_id": "string",
+            "id": "string",
+            "lock_pending": "boolean",
+            "locked": "boolean",
+            "name": "string",
+            "os_username": "string",
+            "status": "string"
+          }
+        ],
+        "display_name": "string",
+        "earned_minutes": "number",
+        "effective_theme": "string",
+        "email": "null",
+        "goal_minutes": "null",
+        "household_id": "string",
+        "id": "string",
+        "key": "string",
+        "left_minutes": "number",
+        "limit_minutes": "number",
+        "locked": "boolean",
+        "managed": "boolean",
+        "name": "string",
+        "pending_requests": "number",
+        "profile_id": "string",
+        "profile_name": "string",
+        "role": "string",
+        "rules": {
+          "allowed": "boolean",
+          "minutes_left": "number",
+          "override_until": "null",
+          "reason": "string",
+          "resume_at": "null",
+          "stop_at": "string",
+          "utc_offset_secs": "number"
+        },
+        "self_managed": "boolean",
+        "tenant_id": "string",
+        "theme": "null",
+        "used_minutes": "number",
+        "utc_offset_secs": "null"
+      }
+    ],
+    "devices": [
+      {
+        "agent_version": "string",
+        "created_at": "string",
+        "hostname": "string",
+        "id": "string",
+        "last_seen": "string",
+        "last_state": "null",
+        "lock_pending": "boolean",
+        "locked": "boolean",
+        "name": "string",
+        "offline_allowed_until": "null",
+        "online": "boolean",
+        "os": "string",
+        "owner_account_id": "string",
+        "pending_commands": [],
+        "public_ip": "null",
+        "recovery_codes_unused": "number",
+        "status": "string",
+        "tamper_level": "number",
+        "tenant_id": "string",
+        "unsorted_logins": "number",
+        "vpn_updated_at": "null"
+      }
+    ],
+    "profiles": [
+      {
+        "created_at": "string",
+        "id": "string",
+        "is_preset": "boolean",
+        "kind": "string",
+        "name": "string",
+        "policy": {
+          "blocks": {
+            "apps": [],
+            "categories": [
+              "string"
+            ],
+            "custom_domains": []
+          },
+          "dns": {
+            "allowlist": [
+              "string"
+            ],
+            "blocklist": [],
+            "mode": "string",
+            "safe_search": "boolean",
+            "upstream": "string"
+          },
+          "firewall": {
+            "allow_inbound_ports": [
+              "number"
+            ],
+            "allow_outbound_ports": [],
+            "mode": "string"
+          },
+          "gamification": {
+            "earn_time": {
+              "enabled": "boolean",
+              "tasks": [
+                {
+                  "id": "string",
+                  "label": "string",
+                  "reward_minutes": "number"
+                }
+              ]
+            },
+            "lockout": {
+              "enabled": "boolean",
+              "unlock_challenge": "string"
+            }
+          },
+          "lockdown": {
+            "block_doh": "boolean",
+            "block_dot": "boolean",
+            "block_tor": "boolean",
+            "block_vpn": "boolean",
+            "force_dns": "boolean",
+            "offline_lockdown_days": "number"
+          },
+          "screen_time": {
+            "bedtime": {
+              "end": "string",
+              "start": "string"
+            },
+            "daily_limit_minutes": "number",
+            "enabled": "boolean",
+            "schedule": [
+              {
+                "days": [
+                  "number"
+                ],
+                "end": "string",
+                "start": "string"
+              }
+            ]
+          },
+          "version": "number"
+        },
+        "tenant_id": "string",
+        "updated_at": "string"
+      }
+    ],
+    "requests": [
+      {
+        "created_at": "string",
+        "decided_at": "null",
+        "device_id": "string",
+        "device_name": "string",
+        "device_user_id": "string",
+        "id": "string",
+        "minutes": "number",
+        "os_username": "string",
+        "status": "string",
+        "task_id": "string",
+        "task_label": "string",
+        "user_display_name": "null"
+      }
+    ],
+    "server_time": "string"
+  },
+  "GET /api/usage/where": {
+    "apps": [
+      {
+        "key": "string",
+        "seconds": "number"
+      }
+    ],
+    "hours": [
+      {
+        "amount": "number",
+        "hour": "string"
+      }
+    ],
+    "sites": [
+      {
+        "hits": "number",
+        "key": "string"
+      }
+    ],
+    "sites_hidden_age": "boolean",
+    "sites_hidden_shared": "boolean"
+  }
+}

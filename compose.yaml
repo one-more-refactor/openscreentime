@@ -1,11 +1,13 @@
-# OpenScreenTime — production compose stack (rootless Podman / podman-compose, or
-# docker compose). Builds the server+web image from ../Containerfile and runs
-# it behind the operator's EXISTING external reverse proxy (which terminates
-# TLS) — see docs/DEPLOY.md.
+# OpenScreenTime — production compose stack (Podman + podman-compose, rootful
+# or rootless, or docker compose). Runs the server+web image behind the
+# operator's EXISTING reverse proxy (which terminates TLS) — see docs/DEPLOY.md.
 #
-# Usage:
-#   cp .env.example .env   # then edit .env
-#   podman-compose up -d
+# Usage: deploy/setup.sh --domain ost.example.com  (writes .env, gets the image,
+# starts this stack, installs start-at-boot / backup / update units).
+#
+# The server runs localhost/openscreentime-server:current. deploy/update.sh
+# points that tag at a new image (pulled from the registry, or built from the
+# Containerfile) and keeps the old one as :previous for its rollback.
 #
 # Note: server/docker-compose.yml is a separate, untouched dev-only stack
 # (DB only, for `cargo run` against a local Postgres).
@@ -14,7 +16,9 @@ services:
   db:
     image: docker.io/library/postgres:15
     container_name: openscreentime-db
-    restart: unless-stopped
+    # `always` (not unless-stopped): Podman's own boot service only restarts
+    # `always` containers; deploy/setup.sh also installs openscreentime.service.
+    restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-openscreentime}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -32,11 +36,22 @@ services:
       retries: 10
 
   server:
+    image: localhost/openscreentime-server:current
+    # Only used by `compose build` / `up --build`; the deploy scripts tag
+    # :current themselves.
     build:
       context: .
       dockerfile: Containerfile
     container_name: openscreentime-server
-    restart: unless-stopped
+    restart: always
+    # /health answers 200 only while the server AND its database work. The
+    # runtime image has no curl, so the binary probes itself.
+    healthcheck:
+      test: ["CMD", "/app/openscreentime-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
       db:
         condition: service_healthy

@@ -3,9 +3,10 @@
 //! shows, a one-time recovery code, or a profile backup code — fully offline
 //! against the cached bundle, see `parentcode`) and,
 //! on success, suspends network enforcement for a configurable window: tears
-//! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`, and
-//! un-freezes every login user. Requires root (same check every other
-//! enforcing subcommand uses).
+//! down our nft table (and the legacy one), un-pins `/etc/resolv.conf`,
+//! un-freezes every login user and takes down the lock screen (thaw first,
+//! then back to their session, then the lock). Requires root (same check every
+//! other enforcing subcommand uses).
 //!
 //! Minimal-but-real auto-resume: spawns a detached copy of this binary running
 //! the hidden `__resume-enforcement` helper (see `main.rs`), which sleeps for
@@ -64,7 +65,7 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
     // This process has no view of the running agent's in-memory lock. Persist
     // the recovery so the live agent clears its whole-device lock on the next
     // tick and a reboot doesn't reload it — otherwise it re-freezes in ~10 s.
-    crate::runner::record_local_recovery();
+    crate::runner::record_local_recovery(minutes);
 
     if minutes > 0 {
         spawn_resume(minutes * 60).unwrap_or_else(|e| {
@@ -87,7 +88,7 @@ pub async fn run(ctx: &Arc<AgentCtx>, code: &str, minutes: u64) -> Result<()> {
 /// unfreeze re-froze on the next tick; this does the whole thing once.
 pub async fn recover(ctx: &Arc<AgentCtx>) -> Result<()> {
     ctx.require_root_for_enforcement()?;
-    crate::runner::record_local_recovery();
+    crate::runner::record_local_recovery(0);
     let exec = Exec::new(ctx.clone());
     let _ = exec.run("systemctl", &["stop", crate::service::WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["mask", "--now", crate::service::AGENT_UNIT]);
@@ -110,17 +111,12 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
     // legacy table goes too: an agent upgraded from the Sentinel name can have
     // left one loaded, and half a teardown is worse than none — the user would
     // still be firewalled by rules nothing on the box admits to owning.
-    for table in [
-        enforce::firewall::NFT_TABLE,
-        enforce::firewall::LEGACY_NFT_TABLE,
-    ] {
-        if let Err(e) = exec.run("nft", &["delete", "table", "inet", table]) {
-            tracing::debug!("nft table {table} delete (probably already absent): {e}");
-        }
-    }
+    enforce::firewall::teardown(exec);
 
-    // 2) Un-pin resolv.conf so the host can use whatever resolver it likes.
-    let _ = exec.run("chattr", &["-i", "/etc/resolv.conf"]);
+    // 2) Un-pin resolv.conf and give the computer its own DNS back — BEFORE
+    // stopping the resolver: a pin left pointing at a stopped dnsmasq is a
+    // computer with no DNS at all for the whole unlock window.
+    enforce::dns::unpin_resolv_conf(exec);
     let _ = exec.run("systemctl", &["stop", "dnsmasq"]);
 
     // 3) Un-freeze every login user (cgroup freezer), regardless of which users
@@ -135,8 +131,13 @@ fn suspend_enforcement(exec: &Exec, policy: &Policy) -> Result<()> {
         }
     }
 
+    // 4) The lock screen, after the thaw: back to the person's session, then
+    //    stop the lock. Works with the agent dead — it reads what the agent
+    //    recorded. (A live agent sees the recovery marker and agrees.)
+    crate::lock::teardown_recorded(exec, crate::runner::recorded_lock());
+
     tracing::info!(
-        "enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen"
+        "enforcement teardown complete: nft table removed, resolv.conf un-pinned, users un-frozen, lock down"
     );
     Ok(())
 }
@@ -165,7 +166,18 @@ pub fn resume_after(secs: u64) -> Result<()> {
     let exec = Exec::new(ctx.clone());
     // This CLI path holds no server state — never tear down (or start) a VPN
     // profile from here; the running agent reconciles it on its next apply.
-    enforce::apply_network_policy(ctx, &exec, None, &policy, &enforce::vpn::VpnState::Keep)?;
+    // The safe-search front ends the agent last looked up (kept on disk).
+    let (gaps, _) = enforce::apply_network_policy(
+        ctx,
+        &exec,
+        None,
+        &policy,
+        &enforce::vpn::VpnState::Keep,
+        &enforce::safesearch::SafeSearch::load(),
+    );
+    for gap in gaps {
+        tracing::warn!("not in force after the suspend window: {}", gap.kind());
+    }
     tracing::warn!("ADMIN RECOVERY: suspend window elapsed — enforcement re-applied");
     Ok(())
 }

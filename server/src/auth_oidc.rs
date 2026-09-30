@@ -1,7 +1,10 @@
 //! OIDC SSO (tested against Authentik). Enabled only when all of
 //! OST_OIDC_ISSUER / OST_OIDC_CLIENT_ID / OST_OIDC_CLIENT_SECRET
-//! are set; provider endpoints are discovered at startup via
-//! `<issuer>/.well-known/openid-configuration`.
+//! are set; provider endpoints are discovered via
+//! `<issuer>/.well-known/openid-configuration` in the background, retried
+//! until the provider answers. An IdP that is down (or boots slower than we do
+//! after a power cut) only hides the SSO button meanwhile — it must never take
+//! passkey login and the agent API down with it.
 //!
 //! Flow: `GET /api/auth/oidc/start` 302s to the authorize URL with a random
 //! `state` held in-memory (10-min TTL); `GET /api/auth/oidc/callback` exchanges
@@ -70,14 +73,13 @@ struct PendingSignup {
     suggested_name: String,
 }
 
-/// Discovered provider config + in-flight `state` store.
+/// Provider config (endpoints once discovered) + in-flight `state` store.
 pub struct Oidc {
     pub name: String,
     client_id: String,
     client_secret: String,
-    authorization_endpoint: String,
-    token_endpoint: String,
-    userinfo_endpoint: String,
+    /// Filled by the background discovery; empty while the IdP is unreachable.
+    endpoints: std::sync::OnceLock<DiscoveryDoc>,
     redirect_uri: String,
     http: reqwest::Client,
     states: tokio::sync::Mutex<HashMap<String, PendingState>>,
@@ -93,9 +95,10 @@ struct DiscoveryDoc {
     userinfo_endpoint: String,
 }
 
-/// Reads the OST_OIDC_* env vars; when all three are set, runs discovery
-/// and returns a live config. Returns None when the feature is off.
-pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
+/// Reads the OST_OIDC_* env vars; when all three are set, returns the config
+/// and starts discovery in the background (retrying until the provider
+/// answers). Returns None when the feature is off.
+pub fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
     // `configured` (state.rs) is what decides a variable was really set —
     // empty strings and unexpanded compose placeholders both count as unset,
     // which is what keeps a no-OIDC deploy from crash-looping on discovery.
@@ -112,36 +115,104 @@ pub async fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    let discovery_url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
-    );
-    let doc: DiscoveryDoc = http
-        .get(&discovery_url)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| anyhow::anyhow!("OIDC discovery at {discovery_url} failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("OIDC discovery document invalid: {e}"))?;
-
-    tracing::info!(issuer, "OIDC SSO enabled");
-    Ok(Some(Arc::new(Oidc {
+    let oidc = Arc::new(Oidc {
         name,
         client_id,
         client_secret,
-        authorization_endpoint: doc.authorization_endpoint,
-        token_endpoint: doc.token_endpoint,
-        userinfo_endpoint: doc.userinfo_endpoint,
+        endpoints: std::sync::OnceLock::new(),
         redirect_uri: format!("{public_url}/api/auth/oidc/callback"),
         http,
         states: tokio::sync::Mutex::new(HashMap::new()),
         pending_signups: tokio::sync::Mutex::new(HashMap::new()),
-    })))
+    });
+    let bg = oidc.clone();
+    crate::supervise::spawn("oidc-discovery", move || {
+        let (oidc, issuer) = (bg.clone(), issuer.clone());
+        async move { oidc.discover_until_ready(&issuer).await }
+    });
+    Ok(Some(oidc))
+}
+
+#[cfg(test)]
+impl Oidc {
+    /// An SSO config with no provider behind it, holding one first-run
+    /// identity parked the way `callback` parks it. Returns the /welcome token.
+    pub(crate) async fn parked_for_test(email: &str) -> (Arc<Oidc>, String) {
+        let oidc = Arc::new(Oidc {
+            name: "SSO".into(),
+            client_id: "test".into(),
+            client_secret: "test".into(),
+            endpoints: std::sync::OnceLock::new(),
+            redirect_uri: "http://localhost/api/auth/oidc/callback".into(),
+            http: reqwest::Client::new(),
+            states: tokio::sync::Mutex::new(HashMap::new()),
+            pending_signups: tokio::sync::Mutex::new(HashMap::new()),
+        });
+        let token = gen_token();
+        oidc.pending_signups.lock().await.insert(
+            token.clone(),
+            PendingSignup {
+                created: Instant::now(),
+                email: email.into(),
+                suggested_username: "someone".into(),
+                suggested_name: "Someone".into(),
+            },
+        );
+        (oidc, token)
+    }
 }
 
 impl Oidc {
+    /// Discovery ran and the SSO button can be offered.
+    pub fn ready(&self) -> bool {
+        self.endpoints.get().is_some()
+    }
+
+    fn endpoints(&self) -> anyhow::Result<&DiscoveryDoc> {
+        self.endpoints
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("OIDC provider not discovered yet"))
+    }
+
+    /// Fetch the discovery document, retrying with backoff (capped at five
+    /// minutes) until the provider answers.
+    async fn discover_until_ready(&self, issuer: &str) {
+        let url = format!(
+            "{}/.well-known/openid-configuration",
+            issuer.trim_end_matches('/')
+        );
+        let mut delay = Duration::from_secs(5);
+        loop {
+            let doc = async {
+                self.http
+                    .get(&url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<DiscoveryDoc>()
+                    .await
+            }
+            .await;
+            match doc {
+                Ok(doc) => {
+                    let _ = self.endpoints.set(doc);
+                    tracing::info!(issuer, "OIDC SSO enabled");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        issuer,
+                        error = %e,
+                        retry_in_secs = delay.as_secs(),
+                        "OIDC discovery failed; SSO stays hidden until it succeeds"
+                    );
+                }
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(300));
+        }
+    }
+
     async fn issue_state(&self, redirect_to: String) -> String {
         let token = gen_token();
         let mut states = self.states.lock().await;
@@ -162,9 +233,10 @@ impl Oidc {
         states.remove(token).map(|s| s.redirect_to)
     }
 
-    async fn exchange_code(&self, code: &str) -> reqwest::Result<TokenResponse> {
-        self.http
-            .post(&self.token_endpoint)
+    async fn exchange_code(&self, code: &str) -> anyhow::Result<TokenResponse> {
+        Ok(self
+            .http
+            .post(&self.endpoints()?.token_endpoint)
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("code", code),
@@ -176,18 +248,19 @@ impl Oidc {
             .await?
             .error_for_status()?
             .json()
-            .await
+            .await?)
     }
 
-    async fn fetch_userinfo(&self, access_token: &str) -> reqwest::Result<UserInfo> {
-        self.http
-            .get(&self.userinfo_endpoint)
+    async fn fetch_userinfo(&self, access_token: &str) -> anyhow::Result<UserInfo> {
+        Ok(self
+            .http
+            .get(&self.endpoints()?.userinfo_endpoint)
             .bearer_auth(access_token)
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await
+            .await?)
     }
 }
 
@@ -195,17 +268,22 @@ impl Oidc {
 /// whether this is a fresh install (no account yet) so it can show the
 /// first-run registration flow instead of login.
 pub async fn auth_config(State(st): State<AppState>) -> Json<Value> {
+    // SSO is offered only once the provider has been discovered; until then
+    // the button simply isn't there (passkeys work regardless).
     let (enabled, name) = match &st.oidc {
-        Some(o) => (true, o.name.clone()),
+        Some(o) => (o.ready(), o.name.clone()),
         None => (false, "SSO".to_string()),
     };
-    // needs_setup: no admin exists yet → the console should show registration.
+    // needs_setup: no account exists yet → the console shows "Create your
+    // household". setup_code_required: …and it needs the one-time setup code
+    // (normally carried in the #setup= link the installer printed).
     let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
         .fetch_one(&st.db)
         .await
         .unwrap_or(1);
     Json(json!({
         "needs_setup": admins == 0,
+        "setup_code_required": admins == 0 && st.bootstrap_token.is_some(),
         "auth": { "oidc": enabled, "oidc_name": name },
     }))
 }
@@ -216,9 +294,12 @@ pub async fn start(State(st): State<AppState>, jar: CookieJar) -> AppResult<(Coo
         .oidc
         .as_ref()
         .ok_or_else(|| AppError::NotFound("sso is not configured".into()))?;
+    let endpoints = oidc.endpoints().map_err(|_| {
+        AppError::NotFound("sso is not reachable right now — try again in a minute".into())
+    })?;
     let state = oidc.issue_state("/".to_string()).await;
 
-    let mut url = url::Url::parse(&oidc.authorization_endpoint)
+    let mut url = url::Url::parse(&endpoints.authorization_endpoint)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("bad authorization endpoint: {e}")))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -412,12 +493,20 @@ pub struct SetupFinishReq {
     username: String,
     #[serde(default)]
     display_name: Option<String>,
+    /// The one-time setup code (`#setup=` link), exactly as the passkey first
+    /// run needs it: being able to sign in at the IdP is not the same as
+    /// being the person who installed this server.
+    #[serde(default)]
+    setup_token: Option<String>,
 }
 
 /// POST /api/auth/oidc/setup/:token — create the first-run account with the
 /// chosen username, stamp the verified email, and sign them in. Consumes the
-/// token. `create_tenant_with_admin(require_first = true)` still guards the
-/// zero-admin race, so a second concurrent finisher is refused.
+/// token. Like the passkey first run it needs the server's setup code when it
+/// has one (`auth::ensure_first_run`) — otherwise anyone the IdP lets sign in
+/// could claim a fresh server. `create_tenant_with_admin(require_first =
+/// true)` still guards the zero-admin race, so a second concurrent finisher
+/// is refused.
 pub async fn setup_finish(
     State(st): State<AppState>,
     jar: CookieJar,
@@ -430,6 +519,8 @@ pub async fn setup_finish(
         .ok_or_else(|| AppError::NotFound("sso is not configured".into()))?;
 
     let username = crate::auth::normalize_username(&req.username)?;
+    // Before the parked identity is taken: a wrong code must not burn it.
+    crate::auth::ensure_first_run(&st, req.setup_token.as_deref()).await?;
 
     // Take the parked identity out (single-use) only once the username validates,
     // so a bad name lets them try again rather than burning the link.
@@ -451,7 +542,7 @@ pub async fn setup_finish(
         .unwrap_or(pending.suggested_name);
 
     let (tenant_id, admin_id) =
-        create_tenant_with_admin(&st.db, &username, &display_name, true).await?;
+        create_tenant_with_admin(&st.db, None, &username, &display_name, true).await?;
     sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
         .bind(&pending.email)
         .bind(admin_id)

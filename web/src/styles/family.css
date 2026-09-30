@@ -1,0 +1,145 @@
+/* ============================================================================
+   FAMILY — the wall everyone reads (brand board § e).
+   ========================================================================== */
+.fam-banner, .fam-trouble { margin-bottom: 20px; }
+.fam-trouble .banner-main { align-self: center; }
+
+/* ---- pause everything: a card with a round button; holding fills a bar ---- */
+.pause {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+.pause-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease),
+    box-shadow var(--dur-1) var(--ease);
+}
+.pause-btn:hover:not(:disabled) { background: var(--surface-2); }
+.pause-btn[data-phase="holding"] { transform: scale(0.95); background: var(--surface-2); }
+.pause-btn:disabled { cursor: default; opacity: 0.6; }
+.pause-copy { min-width: 0; }
+.pause-label { margin: 0; font-size: 1rem; font-weight: 700; }
+.pause-hint { margin: 1px 0 0; font-size: 0.84375rem; color: var(--ink-2); }
+/* The hold: a bar along the bottom edge fills while the finger stays down. */
+.pause-hold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--ink);
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  pointer-events: none;
+}
+.pause[data-phase="idle"] .pause-hold { transition: transform var(--dur-2) var(--ease); }
+/* All paused: calm, not red — a parent chose this. */
+.pause[data-paused="true"] { background: var(--surface-2); border-color: var(--line-2); box-shadow: none; }
+
+/* ---- the people ----------------------------------------------------------- */
+.people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+@media (max-width: 760px) { .people { grid-template-columns: minmax(0, 1fr); } }
+
+.pc {
+  position: relative;
+  padding: 18px 20px;
+  transition: box-shadow var(--dur-1) var(--ease), transform var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+.pc:has(.pc-name:hover) { box-shadow: var(--shadow-2); transform: translateY(-2px); }
+.pc-hd {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+.pc-who { min-width: 0; display: flex; flex-direction: column; }
+.pc-name {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The whole card opens the person; the request buttons sit above the link. */
+.pc-name::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.pc-name:focus-visible { outline: none; }
+.pc-name:focus-visible::after { outline: 2px solid var(--brand); outline-offset: 2px; }
+.pc-name .tag { margin-left: 6px; vertical-align: 2px; }
+.pc-meta {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-time { margin: 14px 0 0; font-size: 0.9375rem; color: var(--ink-2); }
+.pc-time b { font-weight: 700; color: var(--ink); }
+.pc-time[data-tone="warn"] b { color: var(--warn); }
+.pc-time[data-tone="stop"] b { color: var(--stop); }
+.pc-earned { color: var(--ink-3); }
+
+.pc-req {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 0.875rem;
+}
+.pc-req-ic { color: var(--warn); }
+.pc-req-ic-quiet { color: var(--ink-3); }
+.pc-req-text { flex: 1; min-width: 12rem; display: flex; flex-direction: column; }
+.pc-req-reason { color: var(--ink-2); font-style: italic; }
+.pc-req-actions { display: flex; gap: 4px; margin-left: auto; }
+
+.pc-you .pc-name { color: var(--ink); }
+
+/* ---- first run ------------------------------------------------------------ */
+.fr {
+  max-width: 34rem;
+  padding: 28px 28px 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+.fr-title { margin: 4px 0 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.01em; }
+.fr-steps { margin: 0 0 6px; padding-left: 1.25rem; display: grid; gap: 8px; color: var(--ink-2); }
+.fr-steps b { color: var(--ink); font-weight: 600; }
+.fr-lede { margin: 0; color: var(--ink-2); }
+.fr-doors { list-style: none; padding-left: 0; }
+.fr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* On the wall, beside your own card. */
+.people > .fr { max-width: none; padding: 22px 22px 20px; gap: 12px; }

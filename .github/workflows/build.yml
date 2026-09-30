@@ -18,6 +18,12 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# An explicit `bash` runs every step with `-eo pipefail` (see ci.yml): without
+# it `cargo build … | tee` passes whatever the build did.
+defaults:
+  run:
+    shell: bash
+
 # ─────────────────────────────────────────────────────────────
 # Jobs:
 #   1. build-server   → openscreentime-server binary (glibc, x86_64)
@@ -89,33 +95,43 @@ jobs:
 
   # ── 2. Agent binary (musl-static) ──────────────────────────
   build-agent:
-    name: "🤖 Build agent binary (musl-static)"
+    name: "🤖 Build agent binaries (musl-static + desktop)"
     runs-on: ubuntu-latest
+    # The desktop build links glibc dynamically, so the machine it is built on
+    # sets the oldest glibc it runs on. ubuntu-latest (24.04, glibc 2.39) made
+    # it refuse to start on Debian 12 / Ubuntu 22.04 / Mint 21. Build in the
+    # same Debian bookworm image the Containerfile uses; the check below keeps
+    # the floor at glibc 2.35.
+    container: docker.io/library/rust:1.90-slim-bookworm
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain + musl target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.89"
-          targets: x86_64-unknown-linux-musl
+      - name: Install build deps + musl target
+        run: |
+          apt-get update -qq
+          # musl-tools + jq for the headless static build; the -dev packages for
+          # the desktop build's GUI (eframe/glow → OpenGL/xkb/wayland) and tray
+          # (notify-rust → dbus). The desktop binary is glibc-dynamic and links
+          # these at runtime — they're present on any GNOME install.
+          apt-get install -y --no-install-recommends \
+            musl-tools jq binutils ca-certificates \
+            pkg-config libdbus-1-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+          rustup target add x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client
 
-      - name: Install build deps
+      # Same recipe as the Containerfile: a hash of the agent's source, compiled
+      # into the binaries and published in manifest.json (client/src/update.rs).
+      - name: Agent build id
         run: |
-          sudo apt-get update -qq
-          # musl-tools + jq for the headless static build; the -dev packages for
-          # the desktop build's GUI (eframe/glow → OpenGL/xkb/wayland) and tray
-          # (notify-rust → dbus). The desktop binary is glibc-dynamic and links
-          # these at runtime — they're present on any GNOME install.
-          sudo apt-get install -y --no-install-recommends \
-            musl-tools jq \
-            pkg-config libdbus-1-dev libxkbcommon-dev libwayland-dev \
-            libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+          ID=$(find policy client brand/icons brand/app-icon*.svg -type f -not -path '*/target/*' -print0 \
+            | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+          echo "OST_BUILD_ID=$ID" >> "$GITHUB_ENV"
+          echo "agent build id: $ID"
 
       - name: Build release (musl, headless)
         working-directory: client
@@ -130,6 +146,19 @@ jobs:
       - name: Build release (glibc, desktop = gui+tray)
         working-directory: client
         run: cargo build --release --features gui,tray 2>&1 | tee /tmp/agent-desktop-build.txt
+
+      # Fail loudly instead of shipping a binary that won't start on the
+      # families' laptops: Ubuntu 22.04 / Mint 21 have glibc 2.35.
+      - name: Check the desktop build's glibc floor (≤ 2.35)
+        working-directory: client
+        run: |
+          NEED=$(objdump -T target/release/openscreentime | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "desktop agent needs glibc $NEED"
+          if [ "$(printf '%s\n2.35\n' "$NEED" | sort -V | tail -1)" != "2.35" ]; then
+            echo "::error::the desktop agent needs glibc $NEED — newer than 2.35 (Ubuntu 22.04). Build it on an older base."
+            exit 1
+          fi
 
       - name: Stage versioned artifacts + manifest
         working-directory: client
@@ -148,11 +177,12 @@ jobs:
 
           jq -n \
             --arg version "$VERSION" \
+            --arg build "$OST_BUILD_ID" \
             --arg file "$FILE" \
             --arg sha256 "$SHA256" \
             --arg dfile "$DFILE" \
             --arg dsha256 "$DSHA256" \
-            '{version: $version, artifacts: [
+            '{version: $version, build: $build, artifacts: [
                {target: "x86_64-linux-musl",  features: "headless", url: ("/api/agent/download/" + $file),  sha256: $sha256},
                {target: "x86_64-linux-gnu",   features: "desktop",  url: ("/api/agent/download/" + $dfile), sha256: $dsha256}
              ]}' \
@@ -222,9 +252,9 @@ jobs:
         run: |
           mkdir -p screenshots
 
-          # Serve dist in background
+          # Serve dist in background (-s: the SPA answers every route)
           cd web
-          bunx --bun serve -p 4173 dist &
+          bunx --bun serve -s -p 4173 dist &
           SERVER_PID=$!
           echo "Waiting for server…"
           for i in $(seq 1 20); do
@@ -234,22 +264,18 @@ jobs:
 
           cd ..
 
-          # Playwright inline script — screenshots all major routes
-          bunx playwright screenshot \
-            --browser chromium \
-            --full-page \
-            --viewport-size "1440,900" \
-            http://localhost:4173 \
-            screenshots/00-login.png
-
-          # We use the mock build, so navigate to authenticated pages directly
-          for route in devices profiles events settings; do
+          # The mock build is signed in as the sample parent, so every page
+          # of the console can be opened directly. acc-mia is a sample kid.
+          n=0
+          for route in login "" "child/acc-mia" "child/acc-mia/rules" computers settings me; do
+            name="${route:-family}"
             bunx playwright screenshot \
               --browser chromium \
               --full-page \
               --viewport-size "1440,900" \
               "http://localhost:4173/${route}" \
-              "screenshots/$(printf '%02d' $RANDOM)-${route}.png" || true
+              "screenshots/$(printf '%02d' $n)-${name//\//-}.png" || true
+            n=$((n + 1))
           done
 
           kill $SERVER_PID 2>/dev/null || true

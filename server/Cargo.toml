@@ -25,7 +25,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 url = "2"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
@@ -49,3 +49,7 @@ dotenvy = "0.15"
 hmac = "0.12"
 sha1 = "0.10"
 base32 = "0.5"
+
+[dev-dependencies]
+# Paused-clock tests for the background-task supervisor.
+tokio = { version = "1", features = ["full", "test-util"] }

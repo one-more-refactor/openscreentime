@@ -1,0 +1,174 @@
+/* ============================================================================
+   ME — the person's own page: "my day", and "My computer" (brand board § f).
+   One look for everyone, on the brand's tokens.
+   ========================================================================== */
+.me-top { margin: -8px 0 28px; }
+.me-top .lockup { font-size: 17px; }
+.me-waiting { display: flex; flex-direction: column; gap: 20px; }
+
+.me-intro { margin-bottom: 20px; background: var(--surface); border: 1px solid var(--line); }
+.me-intro > .ic { color: var(--ink-3); }
+
+/* ---- the hero: the ring and the number ------------------------------------ */
+.me-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  padding: 24px 28px;
+}
+.me-hero-main { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.me-big { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; }
+.me-big small { font-size: 1rem; font-weight: 400; letter-spacing: 0; color: var(--ink-2); }
+.me-next { margin: 0; color: var(--ink-2); max-width: 60ch; }
+.me-hatch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  color: var(--ink-3);
+  max-width: 64ch;
+}
+.me-hatch .ic { margin-top: 2px; flex: none; }
+.me-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.me-ask-more { display: inline-flex; gap: 2px; }
+.me-ask .hint { flex-basis: 100%; }
+.me-asked { display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 0; font-weight: 600; color: var(--brand-ink); }
+@media (max-width: 640px) {
+  .me-hero { grid-template-columns: 1fr; justify-items: center; text-align: center; padding: 22px 18px; gap: 18px; }
+  .me-hero-main { align-items: center; }
+  .me-ask { justify-content: center; }
+  .me-hatch { text-align: left; }
+}
+
+/* ---- a child's rules, in one glance ---------------------------------------- */
+.me-rules { list-style: none; margin: 0; padding: 4px 20px; }
+.me-rule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.me-rule:first-child { border-top: 0; }
+.me-rule > .ic { flex: none; color: var(--ink-3); }
+.me-rule-label { flex: none; min-width: 7rem; color: var(--ink-2); }
+.me-rule-value { margin-left: auto; font-weight: 600; text-align: right; }
+@media (max-width: 520px) {
+  .me-rule { flex-wrap: wrap; }
+  .me-rule-value { margin-left: 32px; text-align: left; flex-basis: 100%; }
+}
+
+/* ---- my rules: three cards, each edited in place --------------------------- */
+.me-mrules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 720px) { .me-mrules { grid-template-columns: minmax(0, 1fr); } }
+.me-mrule { padding: 16px 18px; min-width: 0; }
+.me-mrule[data-wide="true"] { grid-column: 1 / -1; }
+.me-mrule[data-editing="true"] { box-shadow: var(--shadow-2); }
+.me-mrule-h { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; color: var(--ink-3); }
+.me-mrule-h h3 { margin: 0; font-size: 0.8125rem; font-weight: 600; color: var(--ink-3); }
+.me-edit {
+  margin-left: auto;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-2);
+  font: 600 0.8125rem var(--font);
+  cursor: pointer;
+}
+.me-edit:hover { background: var(--surface-2); color: var(--ink); }
+.me-mrule-v { margin: 0; font-size: 1.1875rem; font-weight: 600; }
+.me-mrule-v small { font-size: 0.875rem; font-weight: 400; color: var(--ink-2); }
+.me-mrule-edit { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.me-mrule-edit > .btn { align-self: flex-start; }
+.me-mrule-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.me-days { display: flex; gap: 6px; flex-wrap: wrap; }
+.me-day {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink-2);
+  font: 600 0.875rem var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+.me-day:hover { background: var(--surface-2); }
+.me-day[aria-pressed="true"] { background: var(--brand-tint); color: var(--brand-ink); border-color: var(--brand); }
+.me-times { display: flex; align-items: center; gap: 8px; }
+.me-chips { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.me-chips .chip .ic { color: var(--ink-3); }
+/* A computer that can't filter websites, said at the list it can't keep. */
+.me-noblock { margin: 8px 0 10px; }
+.me-chip-add {
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px dashed var(--line-2);
+  background: transparent;
+  color: var(--ink-2);
+  font: 500 0.84375rem var(--font);
+  cursor: pointer;
+}
+.me-chip-add:hover { color: var(--ink); border-style: solid; }
+.me-add-site { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 14px; }
+.me-add-site .fieldset { flex: 1 1 14rem; max-width: 24rem; }
+.me-saved { margin-top: 10px; }
+
+/* ---- the week ----------------------------------------------------------------- */
+.me-week { padding: 18px 20px 16px; }
+.me-week-h { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 14px; }
+.me-week-h .h2 { margin: 0; font-size: 1rem; }
+.me-bars { display: flex; flex-direction: column; gap: 8px; }
+.me-bars-plot {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+  height: 120px;
+}
+.me-bars-limit { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line-2); pointer-events: none; }
+.me-bars-limit em { position: absolute; right: 0; top: -19px; font-style: normal; font-size: 0.78125rem; color: var(--ink-3); }
+.me-bar {
+  display: block;
+  justify-self: center;
+  width: 100%;
+  max-width: 44px;
+  border-radius: 8px;
+  background: var(--brand);
+  animation: bar-in var(--dur-3) var(--ease) both;
+  transform-origin: bottom;
+}
+.me-bar[data-over="true"] { background: var(--stop); }
+.me-bar[data-today="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
+@keyframes bar-in { from { transform: scaleY(0); } }
+.me-bars-labels { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; }
+.me-bars-labels span { display: flex; flex-direction: column; align-items: center; font-size: 0.78125rem; color: var(--ink-3); text-align: center; }
+.me-bars-labels b { color: var(--ink); font-size: 0.8125rem; font-weight: 600; white-space: nowrap; }
+.me-bars-labels span[data-today="true"] { color: var(--ink); font-weight: 600; }
+@media (max-width: 480px) {
+  .me-bars-plot, .me-bars-labels { gap: 6px; }
+  .me-bars-labels b { font-size: 0.78125rem; white-space: normal; }
+}
+
+/* ---- this computer ------------------------------------------------------------ */
+.me-devices { display: flex; flex-direction: column; }
+.me-devrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px 18px; font-size: 0.90625rem; }
+.me-devices > .me-devrow + .me-devrow { border-top: 1px solid var(--line); }
+.me-devrow > .ic { color: var(--ink-2); }
+.me-devrow .sp { flex: 1; }
+.me-devrow-keys { font-size: 0.8125rem; color: var(--ink-3); text-decoration: none; }
+.me-devrow-keys:hover { color: var(--ink); text-decoration: underline; }
+.me-online { gap: 4px; }
+
+.me-see { margin-top: 32px; }
+.me-see .lede { margin-top: 8px; max-width: 60ch; }
+.me-foot { display: flex; justify-content: flex-end; margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); }

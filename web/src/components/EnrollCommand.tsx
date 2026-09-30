@@ -1,62 +1,38 @@
-import { Button } from "./Button";
+import { CopyField } from "./CopyField";
 
-/**
- * The enroll instructions shown after creating a device / regenerating a
- * token. Primary path: the curl|sh one-liner served by the server itself
- * (GET /install.sh) with the token passed via env so it stays out of argv
- * and shell history. Secondary: the manual from-source enroll command.
- */
-export function EnrollCommand({ token }: { token: string }) {
-  const origin = window.location.origin;
-  const oneLiner = `curl -fsSL ${origin}/install.sh | sudo OST_TOKEN=${token} sh -s -- --server ${origin}`;
-  const manual = `sudo ./openscreentime enroll \\
-  --server ${origin} \\
-  --token ${token}
-sudo ./openscreentime install-service`;
-
+/** The one-line install for a computer. It downloads with wget where there is
+ * one (stock Debian and Ubuntu have wget and no curl — acceptance round 4),
+ * else curl (Arch). Both are quiet (`2>/dev/null` on the download, so a
+ * computer without one of them never says "command not found"). When neither
+ * download works — no downloader, the server down, a typo in the address —
+ * sh is handed a two-command script instead: one clear sentence naming the
+ * server, then `exit 1`, never an empty script that "succeeds" (acceptance
+ * round 5: the only word was "curl: command not found" on a computer that
+ * had wget). The token rides in an environment variable, so it stays out of
+ * argv; the installer asks which login is whose when the computer has
+ * several. A console on plain http (trying it out at home) gets
+ * `--insecure-http`, without which the installer refuses. */
+export function installCommand(token: string, origin = window.location.origin): string {
+  const insecure = origin.startsWith("http://") ? " --insecure-http" : "";
+  const script = `${origin}/install.sh`;
+  const failed = `echo \\"Couldn't download the installer from ${origin} — is the address right and the server up?\\" >&2; exit 1`;
   return (
-    <div className="flex flex-col gap-3">
-      <div
-        className="border rounded"
-        style={{ borderColor: "var(--line-2)", background: "var(--bg)" }}
-      >
-        <div
-          className="flex items-center justify-between gap-3 px-3 py-2 border-b"
-          style={{ borderColor: "var(--line)" }}
-        >
-          <span className="label" style={{ color: "var(--fg-faint)" }}>
-            RUN AS ROOT ON THE DEVICE
-          </span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => navigator.clipboard?.writeText(oneLiner)}
-          >
-            COPY
-          </Button>
-        </div>
-        <pre className="text-[0.6875rem] text-fg p-3 overflow-x-auto whitespace-pre-wrap break-all">
-          {oneLiner}
-        </pre>
-      </div>
-      <details>
-        <summary
-          className="focusable label cursor-pointer select-none"
-          style={{ color: "var(--fg-faint)" }}
-        >
-          MANUAL INSTALL (BINARY BUILT FROM SOURCE)
-        </summary>
-        <pre
-          className="text-[0.6875rem] border rounded p-3 mt-2 overflow-x-auto"
-          style={{
-            borderColor: "var(--line)",
-            background: "var(--surface-2)",
-            color: "var(--fg-dim)",
-          }}
-        >
-          {manual}
-        </pre>
-      </details>
+    `(wget -qO- ${script} || curl -fsSL ${script} || echo "${failed}") 2>/dev/null | ` +
+    `sudo OST_TOKEN=${token} sh -s -- --server ${origin}${insecure}`
+  );
+}
+
+export function EnrollCommand({ token, origin = window.location.origin }: { token: string; origin?: string }) {
+  return (
+    <div className="enroll">
+      <CopyField value={installCommand(token, origin)} label="Copy command" />
+      <p className="hint">It works once, within 24 hours. Linux only for now.</p>
+      {origin.startsWith("http://") && (
+        <p className="hint" data-error="true">
+          This console isn't on https, so the command says <code>--insecure-http</code>: its token and the
+          download travel unencrypted. Fine for trying it out on your own network, not across the internet.
+        </p>
+      )}
     </div>
   );
 }

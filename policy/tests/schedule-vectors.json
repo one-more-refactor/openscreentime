@@ -1,0 +1,35 @@
+{
+  "_comment": "Shared test vectors for the allowed-hours / bedtime semantics. policy/src/rules.rs (validate_screen_time) and web/src/lib/schedule.ts (windowProblem, bedtimeProblem, describeWindow) must both agree with every row.",
+  "windows": [
+    { "start": "15:00", "end": "19:00", "valid": true, "label": "15:00 – 19:00" },
+    { "start": "07:30", "end": "20:00", "valid": true, "label": "07:30 – 20:00" },
+    { "start": "18:00", "end": "00:00", "valid": true, "label": "18:00 – midnight" },
+    { "start": "20:00", "end": "01:00", "valid": true, "label": "20:00 – 01:00 (next day)" },
+    { "start": "00:00", "end": "00:00", "valid": true, "label": "all day" },
+    { "start": "15:00", "end": "15:00", "valid": false },
+    { "start": "late", "end": "19:00", "valid": false },
+    { "start": "24:00", "end": "19:00", "valid": false },
+    { "start": "10:60", "end": "19:00", "valid": false }
+  ],
+  "bedtimes": [
+    { "start": "21:00", "end": "07:00", "valid": true },
+    { "start": "22:00", "end": "00:00", "valid": true },
+    { "start": "00:30", "end": "06:00", "valid": true },
+    { "start": "00:00", "end": "00:00", "valid": false },
+    { "start": "07:00", "end": "07:00", "valid": false },
+    { "start": "", "end": "07:00", "valid": false }
+  ],
+  "_focus": "Focus hours (a self-managed person's own site blocks): are the sites blocked at this moment? hours null = all day. day 0 = Sunday. policy/src/rules.rs (focus_blocking) and the web must agree with every row.",
+  "focus": [
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "09:30" }, "blocking": true },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "12:00" }, "blocking": false },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 1, "time": "08:59" }, "blocking": false },
+    { "hours": { "days": [1,2,3,4,5], "start": "09:00", "end": "12:00" }, "at": { "day": 6, "time": "10:00" }, "blocking": false },
+    { "hours": null, "at": { "day": 0, "time": "03:00" }, "blocking": true },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 6, "time": "01:30" }, "blocking": true },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 6, "time": "02:00" }, "blocking": false },
+    { "hours": { "days": [5], "start": "22:00", "end": "02:00" }, "at": { "day": 5, "time": "21:59" }, "blocking": false },
+    { "hours": { "days": [0,1,2,3,4,5,6], "start": "18:00", "end": "00:00" }, "at": { "day": 3, "time": "23:59" }, "blocking": true },
+    { "hours": { "days": [0,1,2,3,4,5,6], "start": "00:00", "end": "00:00" }, "at": { "day": 2, "time": "13:00" }, "blocking": true }
+  ]
+}

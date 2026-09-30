@@ -33,8 +33,11 @@
 #   deploy/test/vm.sh seat [accel]       # give mia a GRAPHICAL Weston login + accel the agent (default 60)
 #   deploy/test/vm.sh view               # watch mia's SCREEN in your browser (noVNC)
 #   deploy/test/vm.sh unview             # stop the browser viewer server
-#   deploy/test/vm.sh watch              # poll mia's cgroup freeze state until it flips (text)
+#   deploy/test/vm.sh watch              # poll until something of mia's is frozen (text)
 #   deploy/test/vm.sh thaw               # rescue path: stop the agent + unfreeze mia
+#   deploy/test/vm.sh type <text>        # type at the VM's keyboard (QMP send-key): digits, a-z, space;
+#                                        #   "\n" is Enter — e.g. vm.sh type '123456\n' at the lock
+#   deploy/test/vm.sh shot [file.png]    # headless screenshot (QMP screendump)
 #   deploy/test/vm.sh console            # attach to the serial console (Ctrl-a x to quit)
 #   deploy/test/vm.sh reset              # wipe the overlay disk (rollback)
 #   deploy/test/vm.sh down               # power off the VM
@@ -52,10 +55,11 @@ overlay="$work/overlay.qcow2"
 seed="$work/seed.iso"
 pidfile="$work/qemu.pid"
 sshkey="$work/id_ed25519"
-ssh_port=28022   # a high, uncontended host port (2222 is often taken by tunnels/bastions)
-vnc_display=0    # QEMU VNC on 127.0.0.1:5900 (= 5900 + display), localhost-only
-ws_port=5700     # QEMU's BUILT-IN VNC-over-websocket — noVNC connects straight here
-novnc_port=6080  # local static server for the in-browser noVNC client
+# Ports are overridable so two harness VMs can run side by side.
+ssh_port="${OST_VM_SSH_PORT:-28022}"   # a high, uncontended host port (2222 is often taken by tunnels/bastions)
+vnc_display="${OST_VM_VNC:-0}"         # QEMU VNC on 127.0.0.1:5900 (= 5900 + display), localhost-only
+ws_port="${OST_VM_WS_PORT:-5700}"      # QEMU's BUILT-IN VNC-over-websocket — noVNC connects straight here
+novnc_port="${OST_VM_NOVNC_PORT:-6080}" # local static server for the in-browser noVNC client
 mem=3072         # a Wayland compositor + software GL wants more than the headless 2G
 novnc_dir="$work/novnc"
 # Arch, not Ubuntu, on purpose: the agent is built against the host's (rolling)
@@ -191,13 +195,14 @@ cmd_install() {
     # the headless `wall` text broadcast) — which is the whole point of watching
     # this over VNC. It still locks via the cgroup freezer underneath.
     local bin="$root/client/target/release/openscreentime"
-    echo "==> building the agent (release, --features gui)"
-    ( cd "$root/client" && cargo build --release --features gui )
+    local features="${OST_VM_FEATURES:-gui}"
+    echo "==> building the agent (release, --features $features)"
+    ( cd "$root/client" && cargo build --release --features "$features" )
     # The host server (10.0.2.2 from inside QEMU user-net) is plain http, which
     # the agent refuses UNLESS the host is loopback or `.local` — a deliberate
     # anti-downgrade guard. Give it a `.local` alias so the dev URL is honoured
     # without weakening the check.
-    local server="http://ost-host.local:8080"
+    local server="http://ost-host.local:${OST_VM_SERVER_PORT:-8080}"
     echo "==> copying agent into the VM and enrolling against $server (→ 10.0.2.2)"
     scp -q -i "$sshkey" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -P "$ssh_port" "$bin" rescue@localhost:/tmp/openscreentime
@@ -207,7 +212,7 @@ cmd_install() {
     ssh_as rescue "grep -q ost-host.local /etc/hosts || echo '10.0.2.2 ost-host.local' | sudo tee -a /etc/hosts >/dev/null; \
         sudo pacman -Sy --noconfirm --needed nftables dnsmasq >/dev/null 2>&1 || true; \
         sudo install -m0755 /tmp/openscreentime /usr/local/bin/openscreentime \
-        && sudo openscreentime enroll --server $server --token '$token' \
+        && sudo OST_TOKEN='$token' openscreentime enroll --server $server \
         && sudo openscreentime install-service \
         && sudo openscreentime status"
     cat <<EOF
@@ -219,19 +224,19 @@ cmd_install() {
     2. deploy/test/vm.sh seat          # mia autologin on tty1 (a seat0 session)
                                        # + accelerate the agent (1 real sec = 1 sim min)
     3. deploy/test/vm.sh watch         # poll mia's freezer; it flips to 1 when the
-                                       # limit is hit (after a short on-screen countdown).
-    4. Recover — the lock is STICKY (hitting the daily limit locks mia for the
-       day; being back "under budget" does NOT auto-thaw — that needs an unlock
-       grant). The guaranteed way back, since rescue is unmanaged:
+                                       # limit is hit — right after the lock takes VT 13.
+    4. Get back in the real way: type the unlock code at the lock
+         deploy/test/vm.sh type '123456\n'   # the code the console shows
+       or grant time / Resume from the console. The guaranteed way back,
+       since rescue is unmanaged:
          deploy/test/vm.sh thaw        # stop the agent + write 0 to the freezer
-       Or the real UX: an unlock code / earn-time grant from the console.
 EOF
 }
 
 # Give mia a real GRAPHICAL local seat: autologin on tty1 → a Weston (Wayland)
 # session. That does three things at once — it is a LOCAL seat (Active=yes,
-# Remote=no) so the agent counts it as screen time; it puts a /run/user/1000/
-# wayland-0 socket where the lockout overlay looks for it; and it renders a
+# Remote=no) so the agent counts it as screen time; it is a logind seat0
+# session on VT 1, which the lock switches away from and back to; and it renders a
 # desktop QEMU's VGA scans out, so VNC/noVNC shows it. Also accelerates the
 # agent's clock so the daily budget is reachable in seconds.
 cmd_seat() {
@@ -245,17 +250,19 @@ cmd_seat() {
     echo "==> watch it in the browser:  deploy/test/vm.sh view"
 }
 
-# Poll mia's cgroup-v2 freezer until it flips (or ~2 min elapse).
+# Poll mia's cgroup-v2 freezer until something of hers is frozen (or ~2 min
+# elapse). A stop freezes her apps, not her whole slice: any cgroup.freeze
+# reading 1 under her user slice counts.
 cmd_watch() {
-    ssh_as rescue 'uid=$(id -u mia); f=/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.freeze
-        echo "watching $f (Ctrl-C to stop)"
+    ssh_as rescue 'uid=$(id -u mia); d=/sys/fs/cgroup/user.slice/user-$uid.slice
+        echo "watching $d (Ctrl-C to stop)"
         for i in $(seq 1 60); do
-            v=$(cat "$f" 2>/dev/null || echo "?")
-            printf "t=%3ds freeze=%s\n" "$((i*2))" "$v"
-            [ "$v" = "1" ] && { echo ">>> FROZEN — mia'"'"'s whole seat is suspended. Recover: vm.sh thaw"; exit 0; }
+            n=$(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null | wc -l)
+            printf "t=%3ds frozen cgroups=%s\n" "$((i*2))" "$n"
+            [ "$n" -gt 0 ] && { echo ">>> FROZEN — mia'"'"'s apps are stopped:"; sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + | sed "s|$d/||; s|/cgroup.freeze||"; echo "Recover: vm.sh thaw"; exit 0; }
             sleep 2
         done
-        echo "(still 0 — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny?)"'
+        echo "(nothing frozen — is mia on a LOCAL seat? run vm.sh seat; is the limit tiny? a desktop in its first minute is not frozen yet)"'
 }
 
 # The guaranteed rescue. The agent is Restart=always AND has a watchdog timer
@@ -268,9 +275,11 @@ cmd_thaw() {
         sudo systemctl stop openscreentime-watchdog.timer 2>/dev/null || true
         sudo systemctl mask --now openscreentime-agent.service >/dev/null 2>&1 || sudo systemctl stop openscreentime-agent.service
         sleep 1
+        d=$(dirname "$f")
+        for g in $(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null); do echo 0 | sudo tee "$g" >/dev/null; done
         echo 0 | sudo tee "$f" >/dev/null 2>&1 || true
         sleep 3   # prove it stays down (the watchdog would have re-frozen by now)
-        echo "agent=$(systemctl is-active openscreentime-agent.service) freeze=$(cat "$f" 2>/dev/null || echo n/a)"
+        echo "agent=$(systemctl is-active openscreentime-agent.service) frozen cgroups=$(sudo find "$d" -name cgroup.freeze -exec grep -l "^1" {} + 2>/dev/null | wc -l)"
         echo "mia is thawed and the agent is masked. Re-arm with:"
         echo "  sudo systemctl unmask openscreentime-agent.service && sudo systemctl start openscreentime-agent.service openscreentime-watchdog.timer"'
 }
@@ -292,10 +301,34 @@ cmd_view() {
     local url="http://localhost:$novnc_port/vnc.html?host=localhost&port=$ws_port&path=&resize=scale&autoconnect=1"
     echo "==> open this in your browser:"
     echo "      $url"
-    echo "    (mia's Weston desktop; the lockout overlay appears fullscreen when the limit hits.)"
+    echo "    (mia's Weston desktop; the lock takes over the screen on its own VT when the limit hits.)"
     echo "    stop the viewer server later with: vm.sh unview"
     command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 &
     true
+}
+
+# Type at the VM's keyboard through QMP send-key — how the lock test enters a
+# code the way a person would. Digits, lower-case letters and space; "\n" is Enter.
+cmd_type() {
+    local text="${1:-}"
+    [ -S "$work/qmp.sock" ] || { echo "no QMP socket — is the VM up?"; exit 1; }
+    python3 - "$work/qmp.sock" "$text" <<'PY'
+import socket, json, sys, time
+sock_path, text = sys.argv[1], sys.argv[2].replace("\\n", "\n")
+s = socket.socket(socket.AF_UNIX); s.connect(sock_path); f = s.makefile("rwb")
+def cmd(o):
+    f.write((json.dumps(o)+"\n").encode()); f.flush()
+    while True:
+        m = json.loads(f.readline())
+        if "return" in m or "error" in m: return m
+f.readline(); cmd({"execute":"qmp_capabilities"})
+names = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot"}
+for ch in text:
+    k = names.get(ch, ch)
+    cmd({"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":k}],"hold-time":60}})
+    time.sleep(0.12)
+PY
+    echo "typed ${#text} key(s)"
 }
 
 cmd_unview() {
@@ -334,9 +367,9 @@ PY
 }
 
 # Reset for a fresh, watchable lock: clear the persisted usage ledger + freeze
-# state, thaw mia (which un-suspends her Weston too), kill any leftover overlay,
+# state, thaw mia (which un-suspends her Weston too), stop any leftover lock,
 # and re-arm the agent at $accel. Then you can watch the desktop → "Time's up"
-# overlay transition again from a clean slate. mia's daily budget comes from the
+# lock transition again from a clean slate. mia's daily budget comes from the
 # console/DB — set her Kid limit small first (e.g. 1 min), and note the agent
 # only re-reads policy on (re)start, which this does.
 cmd_relock() {
@@ -345,7 +378,7 @@ cmd_relock() {
     # the script runs under `set -e`, and SSH itself can return 255 under the
     # software-rendered desktop's load even when the remote command succeeded.
     ssh_as rescue "sudo systemctl unmask openscreentime-agent.service 2>/dev/null; sudo systemctl stop openscreentime-agent.service openscreentime-watchdog.timer 2>/dev/null; true" || true
-    ssh_as rescue "sudo pkill -f __lockout 2>/dev/null; echo 0 | sudo tee /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice/cgroup.freeze >/dev/null 2>&1; true" || true
+    ssh_as rescue "sudo systemctl stop 'openscreentime-lock@*' 2>/dev/null; for g in \$(sudo find /sys/fs/cgroup/user.slice/user-\$(id -u mia).slice -name cgroup.freeze); do echo 0 | sudo tee \$g >/dev/null 2>&1; done; true" || true
     ssh_as rescue "sudo rm -f /var/lib/openscreentime/usage_ledger.json /var/lib/openscreentime/freeze_state.json; true" || true
     ssh_as rescue "printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/openscreentime --time-accel $accel run\n' | sudo tee /etc/systemd/system/openscreentime-agent.service.d/accel.conf >/dev/null; sudo systemctl daemon-reload" || true
     # Start + verify with a couple retries — SSH can 255 under the VM's load.
@@ -357,7 +390,7 @@ cmd_relock() {
     done
     if [ -n "$ok" ]; then echo "==> clean slate — agent re-armed, accel=$accel."
     else echo "==> agent did NOT come active (SSH flaked under load) — just run: vm.sh relock $accel"; fi
-    echo "    Watch in the browser (vm.sh view); the 'Time's up' overlay lands once mia's"
+    echo "    Watch in the browser (vm.sh view); the 'Time's up' lock lands once mia's"
     echo "    accelerated screen time passes her daily limit."
 }
 
@@ -372,9 +405,10 @@ case "${1:-}" in
     view)    cmd_view ;;
     unview)  cmd_unview ;;
     shot)    shift; cmd_shot "$@" ;;
+    type)    shift; cmd_type "$@" ;;
     relock)  shift; cmd_relock "$@" ;;
     console) exec tail -f "$work/console.log" ;;
     reset)   rm -f "$overlay"; echo "overlay wiped — next 'up' boots a pristine VM." ;;
     down)    [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" && echo "VM stopped." || echo "not running." ;;
-    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -54 ;;
+    *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -60 ;;
 esac

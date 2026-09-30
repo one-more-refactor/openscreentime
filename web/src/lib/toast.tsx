@@ -7,27 +7,30 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Icon, type IconName } from "../components/Icon";
 
 export type ToastTone = "ok" | "warn" | "crit";
+
+export interface ToastAction {
+  label: string;
+  run: () => void | Promise<void>;
+}
 
 interface ToastItem {
   id: number;
   tone: ToastTone;
   message: string;
+  action?: ToastAction;
 }
 
 interface ToastApi {
-  /** Show a toast. Defaults to `crit` since most call sites report failures. */
-  toast: (message: string, tone?: ToastTone) => void;
+  /** A short note after something happened. `action` is usually "Undo". */
+  toast: (message: string, tone?: ToastTone, action?: ToastAction) => void;
 }
 
 const Ctx = createContext<ToastApi | null>(null);
 
-const toneColor: Record<ToastTone, string> = {
-  ok: "var(--ok)",
-  warn: "var(--warn)",
-  crit: "var(--crit)",
-};
+const ICON: Record<ToastTone, IconName> = { ok: "check", warn: "warning", crit: "warning" };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
@@ -38,10 +41,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const toast = useCallback(
-    (message: string, tone: ToastTone = "crit") => {
+    (message: string, tone: ToastTone = "ok", action?: ToastAction) => {
       const id = nextId.current++;
-      setItems((prev) => [...prev.slice(-3), { id, tone, message }]);
-      window.setTimeout(() => dismiss(id), tone === "crit" ? 8000 : 5000);
+      setItems((prev) => [...prev.slice(-2), { id, tone, message, action }]);
+      // Long enough to read and reach the undo; failures stay a little longer.
+      window.setTimeout(() => dismiss(id), tone === "crit" ? 9000 : action ? 8000 : 5000);
     },
     [dismiss],
   );
@@ -51,38 +55,30 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={api}>
       {children}
-      <div
-        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] flex flex-col gap-2 w-[min(28rem,calc(100vw-2rem))]"
-        role="status"
-        aria-live="polite"
-      >
+      <div className="toasts" role="status" aria-live="polite">
         {items.map((t) => (
-          <div
-            key={t.id}
-            className="relative flex items-start gap-3 border rounded px-3 py-2.5 font-mono text-xs"
-            style={{
-              borderColor: toneColor[t.tone],
-              background: "var(--surface)",
-              color: "var(--fg)",
-            }}
-          >
-            <span className="tick tick-tl" />
-            <span className="tick tick-tr" />
-            <span className="tick tick-bl" />
-            <span className="tick tick-br" />
-            <span
-              className={`led mt-1 ${t.tone === "crit" ? "led-glow-crit" : t.tone === "warn" ? "led-glow-warn" : "led-glow-ok"}`}
-              style={{ background: toneColor[t.tone] }}
-              aria-hidden
-            />
-            <p className="flex-1 min-w-0 break-words">{t.message}</p>
+          <div key={t.id} className="toast" data-tone={t.tone}>
+            <Icon name={ICON[t.tone]} size={20} className="toast-ic" />
+            <p className="toast-msg">{t.message}</p>
+            {t.action && (
+              <button
+                type="button"
+                className="btn btn-quiet btn-sm toast-action"
+                onClick={() => {
+                  dismiss(t.id);
+                  void t.action?.run();
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
             <button
+              type="button"
               onClick={() => dismiss(t.id)}
-              className="focusable flex-none text-sm leading-none"
-              style={{ color: "var(--fg-faint)" }}
-              aria-label="Dismiss notification"
+              className="btn-icon btn-icon-sm"
+              aria-label="Dismiss"
             >
-              ✕
+              <Icon name="close" size={16} />
             </button>
           </div>
         ))}

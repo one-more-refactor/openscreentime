@@ -1,10 +1,6 @@
 # OpenScreenTime — Product & Design Brief
 
-> The north star for the Sentinel → **OpenScreenTime** rebrand + rebuild.
-> Decisions below were made with the operator, not guessed. When something
-> here conflicts with older docs, this wins — and where **`CONTRACT-0.6.md`**
-> (the passive turn: allow-by-default, client-first login, where-time-goes)
-> conflicts with THIS, 0.6 wins.
+> **Historical.** The 0.4 product brief. What is still true of it now lives in [`PRODUCT.md`](PRODUCT.md). Kept for the record; it does not describe the product today — see [`README.md`](README.md) for the doc that owns each question.
 
 ## What it is
 
@@ -125,13 +121,15 @@ The new enforcement model is where the red-team screen-time fixes land:
 
 - Read the kernel freeze state back **every tick**; stop treating "not evaluated"
   as "within policy" (kills the VT-flip and `echo 0 > cgroup.freeze` bypasses).
-- Day roll + budget anchored to a fixed timezone + monotonic time (kills the
-  clock/timezone budget reset).
+- Day roll anchored to a trusted clock — NTP, the family server, else boottime
+  (kills the clock-set budget reset; a hand-set clock is ignored). See
+  `docs/TRACKING.md`.
 - **Fail loudly** if the freezer isn't available — no silent no-op while the UI
   says "frozen."
 - **Brick-safe:** a host that can't enforce does not self-lock the family out;
-  `daily_limit = 0` means **zero, not unlimited**; a malformed schedule can't
-  mean a 24/7 lockout.
+  `daily_limit = 0` means **no daily limit** (the console never shows "0 left
+  of 0" — use Pause or allowed hours for "no screens"); a malformed schedule
+  can't mean a 24/7 lockout (it is refused on save and ignored on the device).
 - **Plain words:** when it stops, it says it stopped.
 
 ## Type & motion

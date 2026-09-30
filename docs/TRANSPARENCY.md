@@ -1,147 +1,165 @@
-# Transparency: what OpenScreenTime actually does on your machine
+# What OpenScreenTime knows about you
 
-This document is for you — the person using the managed device, not the parent who set it
-up. It exists because the whole point of OpenScreenTime is that it doesn't lie to you by omission.
-Every claim below is backed by the actual agent code, not marketing copy. If something here
-turns out to be wrong, that's a bug in the product, not an acceptable gap.
+This is for you — the person whose computer it is, not the parent who set it
+up. Every line is checked against the code. If something here is wrong, that
+is a bug in the product, not a gap we meant to leave.
 
-## What this is
+## What it is
 
-OpenScreenTime is a program (`openscreentime`) that runs as root on this computer, filters network
-traffic, tracks how long you're logged in, and enforces limits your parent sets. It reports
-status back to a server your family controls. It is not hidden — it shows up in your system
-tray (if you have the companion running), in `systemctl status`, and as a running process.
-It does not pretend to be something else.
+OpenScreenTime is a program (`openscreentime`) that runs as root on this
+computer. It counts your screen time, blocks what your household chose to
+block, and stops the screen when your time is up. It reports to a server your
+family runs — not to us, and not to anyone else. It isn't hidden: it's the
+OpenScreenTime window (`ost app`), your own page in the console (`/me`),
+`systemctl status openscreentime-agent`, and a process you can see.
 
-## What your parents can see
+## What a parent sees, by age
 
-Everything the agent sends the server is one of these, and nothing else:
+Your age bracket decides how much of your day a parent sees. The server
+decides this every time a parent looks (`server/src/usage.rs`, `hub_exposure`).
 
-- **Device status**: online/offline, public IP, agent version, hostname.
-- **The list of OS user accounts on this machine** (usernames, display names, UIDs) — so
-  policy can be applied per person.
-- **Screen time totals**: minutes used today, per OS user. Just "logged into an active
-  local session, not idle."
-- **Where the time went** (added in 0.6): a rough picture of your day — which of a fixed
-  list of well-known apps were *open* (in minutes, per OS user; "open," not "focused" — the
-  agent can't tell which window is in front), and which **websites your computer looked up**,
-  as a count of DNS requests per registrable domain (e.g. "youtube.com ×40"), bucketed by
-  hour. This is **activity, not history**: it's the domain names your machine asked its
-  resolver about — not the pages, not the URLs, not the contents, and it's counts, not a
-  timeline of visits. The site counts are **per device, not per person**, so on a shared
-  computer they mix everyone's lookups together. You see the exact same picture of your own
-  day, on your own page, that a parent sees.
-- **Lock/unlock events**: when the device was locked or unlocked, and by what (admin
-  command, screen-time expiry, PIN override, offline lockdown).
-- **Policy changes**: when a new policy was applied and its version.
-- **Tamper events**: see "what happens if you fight it" below — every detected tamper
-  attempt, with a severity level.
-- **Earn-time requests**: when you pick a task on the lockout screen to earn extra minutes
-  (task name and minutes requested), and how your parent decided it.
-Two things that used to be on this list are gone entirely, not merely hidden: streak/nudge
-events (the app no longer nudges you at all) and LAN discovery scans (it no longer looks at
-other devices on your network under any circumstances).
+| You are | A parent sees |
+|---|---|
+| **Little** (0–6), **Kid** (6–12), **Younger teen** (12–16) | Your time today and on past days. **Which apps were open**, in minutes, and when in the day. **Which sites this computer looked up**, as a count per site (for example "youtube.com ×40"). |
+| **Older teen** (16–18) | Your time today and on past days. Which apps were open, in minutes, and when. **Not the sites.** |
+| **Adult** (18+), keeping your own time | Your minutes, today and on past days. **Not your apps, not your sites, not your own rules, not what happened in your sessions** — the server refuses. |
 
-That's the complete list. There is no hidden channel — `client/src/client.rs` is the only
-code that talks to the server, and every request body it builds is listed above.
+Up to older teen, a parent also sees what happened on your computers: when it
+was paused or resumed, when time ran out, time you asked for or were given,
+when an unlock code was typed (right or wrong), when a blocked app was closed,
+when someone tried to get around the rules, and when someone signed in to the
+console from it. For an adult, or anyone keeping their own time, the server
+leaves out everything that happened under your login; only what happened to
+the computer itself (a pause, someone deleting its firewall) still shows.
 
-## What they cannot see
+Three details that matter:
 
-Based on reading the entire agent codebase, these are **not implemented** — not hidden
-somewhere else, not planned, not collected and just "not shown to you":
+- **Sites are counted per computer, not per person.** The computer's resolver
+  doesn't know who asked. If you share a computer with someone younger, a
+  parent looking at *their* day sees the sites that computer looked up —
+  yours included.
+- **Apps count while they're open**, not while they're in front. The computer
+  can't tell which window you're looking at.
+- **"Looked up" is not "visited".** It's the name your computer asked for:
+  one visit can mean many lookups, and background apps look things up too.
+  It's activity, not a history. What the computer looks up on its own is
+  left out (the list is below), and so are OpenScreenTime's own lookups.
 
-- **No screenshots.** Nothing captures the display.
-- **No keylogging.** Nothing reads keystrokes outside of the lockout screen's own unlock
-  input (which never leaves the device unless it's a parent-PIN check against a hash
-  already cached locally).
-- **No camera or microphone access.** The agent has no code that touches either.
-- **No message or file contents.** The agent doesn't read your browser, chat apps, or
-  documents.
-- **No full browsing history, no page contents, no keystrokes.** The agent never sees the
-  pages you open, what's on them, or what you type into them. DNS filtering happens locally
-  (a dnsmasq config the agent generates and reloads) — every query is either allowed and
-  forwarded or answered with NXDOMAIN, on your machine, on the spot.
+You see the same picture of your own day on your own page — except that on a
+computer you share, the site list is left off, so you don't see someone
+else's.
 
-- **No remote shell.** Earlier versions of OpenScreenTime let a parent open a root shell on this
-  device (always disclosed to you while it was live). That capability has been **removed
-  entirely** — there is no remote shell at all anymore, and no code path that could open
-  one. The promise got stronger: it's no longer "a shell is never open without you
-  knowing", it's "there is no shell". If shells were ever opened on this device in the
-  past, those sessions are still visible as `ssh` entries in the event log — the record
-  wasn't erased along with the feature.
+## What the computer sends
 
-## What they can do remotely
+Everything the agent sends the server, and nothing else:
 
-A parent, from the web dashboard, can push these commands to the agent:
+- **The computer**: its name, operating system, public IP address, agent
+  version, which OS logins exist, who is logged in right now, and whether
+  enforcement is working.
+- **Your time**: seconds of screen time, per login, per day.
+- **Apps**: which apps were open, in seconds per hour, per login — by name
+  ("Firefox", "Text Editor", "Minecraft"): the apps the computer's app menu
+  lists, and the well-known ones OpenScreenTime can block. Background parts
+  of the desktop (what starts with every login, the shell, services) are not
+  apps and aren't sent. This is sent for everyone, adults included; the
+  server only shows it as the table above allows.
+- **Sites**: how many times the computer looked up each site, per hour, for
+  the whole computer — counted once, from when the agent is running (a
+  restart doesn't count the day again). A browser also looks up some sites on
+  its own (the new-tab page's shortcuts), so a count is activity, not proof
+  of a visit. Not counted, because no person asked for them:
+  - the computer's own update checks and mirrors — `deb.debian.org`,
+    `security.debian.org`, `ftp.debian.org` and `ftp.<country>.debian.org`,
+    Debian's updater and app catalogue (`ftp-master.debian.org`,
+    `appstream.debian.org`), Ubuntu's `archive`, `security`, `ports`, `changelogs`, `motd` and `esm`
+    `.ubuntu.com`, `packages.linuxmint.com`, `fedoraproject.org`;
+  - app stores' own traffic — `flathub.org`, `snapcraft.io`,
+    `snapcraftcontent.com`, GNOME Software's ratings (`odrs.gnome.org`);
+  - "am I online?" checks — `nmcheck.gnome.org`, `networkcheck.kde.org`,
+    `connectivity-check.ubuntu.com`, `detectportal.firefox.com`;
+  - Firefox in the background — `services.mozilla.com`,
+    `telemetry.mozilla.org`, `aus5.mozilla.org`, `ads.mozilla.org`,
+    `cdn.mozilla.net`, `safebrowsing.googleapis.com`,
+    `use-application-dns.net`;
+  - the resolver library's own NAT64 check — `ipv4only.arpa`;
+  - the clock — `pool.ntp.org`, `ntp.ubuntu.com`;
+  - OpenScreenTime itself — its server, and the name it checks its own
+    block with (`selftest.openscreentime.internal`).
 
-- **Lock the whole device**, immediately, no grace period (this is a deliberate parent
-  action, not an automatic enforcement — you get a "LOCKED BY AN ADMIN" screen and every
-  user session is frozen right away).
-- **Unlock it.**
-- **Change policy**: screen time limits, allowed hours, bedtime, DNS allow/block lists,
-  firewall rules, tamper level.
-- **Grant or deny extra time**, including approving/denying an earn-time request you sent.
-- **Scan the local network** to help onboard another device.
+  Each entry covers the names under it too. A site someone opens is still
+  counted: `www.debian.org`, `www.mozilla.org` and `extensions.gnome.org`
+  are not on the list. (The list lives in `client/src/attrib.rs`,
+  `OS_LOOKUPS`.)
+- **Events**: the things listed above (paused, time's up, codes, blocked apps,
+  tampering, sign-ins).
+- **Your requests** for more time, and the reason if you gave one.
 
-That's everything — and everything on that list goes through the same UI and the same
-audited command queue. There is **no remote shell**: a parent cannot reach a terminal,
-your files, or arbitrary commands on this device through OpenScreenTime. Older versions had a
-(always-disclosed) remote shell; it has been removed outright, and any past sessions
-remain visible as `ssh` entries in the event log.
+The server keeps the app and site counts for 21 days and events for 90 days.
+Daily totals are kept.
 
-## What you'll experience
+## What it can't see
 
-- **10 minutes and 2 minutes before your time runs out**, you get a nudge ("good time to
-  finish up" / "wrap up and save now"), once each per day. If bedtime is configured, you
-  also get a wind-down warning up to 15 minutes before it starts.
-- **When your time actually runs out** (daily limit, outside allowed hours, or bedtime), a
-  full-screen lockout appears immediately — but nothing freezes yet. You get **60 seconds**
-  to save your work before the freeze lands. This countdown is shown on screen.
-- **The freeze itself pauses your processes** (a cgroup freeze), it does not kill your
-  session or destroy unsaved work. Screen-time enforcement is explicitly designed to never
-  escalate to terminating your session — only an explicit admin lock (or the offline
-  lockdown below) can do that, and only as a last resort if freezing isn't available.
-- **Getting back in**: solve a short math challenge for a 5-minute breather, wait out a
-  cooldown, request extra time for a task (goes to your parent for approval, and you're
-  told clearly if it's denied instead of being left hanging), or have a parent enter their
-  PIN — which grants 30 minutes and always works as a master override, on any lockout,
-  whether or not that's the configured challenge. A parent physically at the machine can
-  always get you unlocked.
-- **Admin locks are immediate**, with no 60-second grace — that's a deliberate parent
-  action, not an automatic timeout, so the save-your-work courtesy doesn't apply.
-- **Offline hard lockdown**: if your parent has turned this on, and the device genuinely
-  can't reach the server for a set number of days, the device locks itself down the same
-  way an admin lock would. A parent PIN still unlocks it. This exists so that pulling the
-  network cable indefinitely isn't a way to escape limits forever — but it only engages
-  after days of silence, not a brief outage.
+Not built — not collected and hidden, not planned:
 
-## What happens if you fight it
+- **Your screen.** Nothing takes screenshots.
+- **What you type.** To know whether someone is at the computer, the agent
+  notices *that* a key was pressed or the mouse moved in the last five
+  minutes — never which key, and nothing about it leaves the computer.
+- **Your messages, files, camera or microphone.** No code touches them.
+- **Pages.** Only the site's name is seen, never the address after it, the
+  page, or what's on it.
+- **Your phone or other devices.** Only computers with the agent installed.
 
-OpenScreenTime is honest that it cannot make tampering physically impossible if you have root and
-physical access to the machine. What it does instead:
+One thing stays on this computer only: the local resolver's log, with every
+name looked up and when. The agent reads it to make the counts above; it is
+readable by root only, is cut back at 20 MB, and is never sent
+(`/var/lib/openscreentime/dnsq.log`).
 
-- **Local tampering is detected and repaired automatically.** Editing `/etc/resolv.conf`,
-  flushing the firewall table, disconnecting the network, or jumping the system clock are
-  all checked every ~10 seconds. If any of them drifted, the agent puts them back and files
-  a `tamper` event your parent sees, with a severity level.
-- **Shutdown, reboot, and suspend are blocked for you** (not root) by default, via a polkit
-  rule — you can't power off your way around a lockout. An opt-in stricter mode also blocks
-  you from stopping the agent's systemd service and disables switching virtual terminals.
-- **If the agent process dies, systemd restarts it immediately**, and a separate watchdog
-  checks its heartbeat file on a timer and restarts it again if that goes stale — killing
-  the process once doesn't get you anywhere.
-- **If you have root, you can ultimately remove the agent.** No software can prevent that,
-  and OpenScreenTime doesn't claim otherwise — claiming unbypassable enforcement would be a lie.
-  But it is never a silent bypass: the server marks a device offline within minutes of
-  losing contact, and that shows up on your parent's dashboard as plainly as if you'd
-  smashed the laptop. Going dark is visible, not invisible.
+## What a parent can do from the console
 
-## Why it's built this way
+- **Pause** your computer, and **resume** it.
+- **Change your rules**: daily limit, when screens can be on, bedtime, what's
+  blocked, safe search, earning time.
+- **Give you time**, and answer your requests.
+- **Check it's on** ("Is it answering?").
+- **Send a sign-in code** to their *own* computer — never to yours.
+- **Remove** the computer.
 
-The point of OpenScreenTime isn't to spy on you without your knowledge — it's to enforce agreed
-limits (time, content, bedtime) in a way that's checkable. Every mechanism above either
-reports something structural (time used, lock state, a policy change) or an
-attempt to bypass enforcement. Nothing reports the content of what you do, say, or look at.
-If you don't trust that, you don't have to take it on faith: the agent's source is what this
-document was written from, line by line, and the tray, the events log, and this file are
-supposed to always agree.
+That's all of it. There is **no remote shell**: a parent can't open a
+terminal, read your files or run commands on this computer through
+OpenScreenTime.
+
+## What you'll notice
+
+- **Warnings at 15, 5 and 1 minute** before any stop — your limit, bedtime,
+  the end of allowed hours, or a pause planned ahead.
+- **At the stop**, the screen switches to the OpenScreenTime lock. Your apps
+  are paused, not closed; unsaved work stays where it was. If the stop
+  wasn't announced (say a rule just changed), you get a save-your-work
+  countdown first: 30 seconds for Little, 60 for Kid, two minutes for teens.
+  A parent's pause is immediate.
+- **Getting more time**: choose **Ask for more time** (Kid and teens), or a
+  parent types the unlock code at the lock (30 minutes), or gives time or
+  resumes from the console.
+- **The unlock code** also answers `sudo` on this computer. You can't use
+  `sudo` without it; a parent can.
+- **Offline**, the computer keeps today's rules and your time. If a parent
+  turned on offline lockdown, a computer that can't reach the server for
+  several days stops until it does — the unlock code still opens it.
+
+## If you fight it
+
+It can't make tampering impossible if you have root and the machine in your
+hands, and it doesn't claim to. What it does:
+
+- Changes to its DNS setting or firewall are put back within seconds.
+- Power off, reboot and suspend are never blocked. They don't get round a
+  stop either: your time today and a stop are kept on disk, so the computer
+  comes back to the same day.
+- If the agent stops, systemd restarts it, and a watchdog checks it's alive.
+- If its firewall keeps being deleted, it stops every screen and tells a
+  parent, in plain words: OpenScreenTime was changed.
+- If you remove it, the computer goes quiet on the parent's console — which
+  shows up as plainly as a switched-off laptop.
+
+The details are in [`TAMPER.md`](TAMPER.md).

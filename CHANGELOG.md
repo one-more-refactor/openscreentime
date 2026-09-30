@@ -18,6 +18,249 @@ there is no stable version. See the notice at the top of `README.md`.
 
 ## [Unreleased]
 
+**Headline: the house clock. Set it once. It keeps time.** OpenScreenTime is
+now the clock on the kitchen wall, not a cop at the door — one look, one ring
+and one set of words from the console to the lock. A stop is a real lock on
+its own screen that can never strand anyone; only real use counts; signing in
+has two doors and no passwords or authenticator apps; an adult can keep time
+for just themselves; and the server looks after itself.
+
+**For parents**
+- **A rebuilt console.** Family, a person's page in two parts — **Today**
+  (time left, requests, Pause, Give 15/30 min, where the time went, the keys)
+  and **Rules** (daily limit, when screens can be on, bedtime, what's blocked,
+  earning time) — **Computers** and **Settings**. Every ring means time used
+  today, filling clockwise from a tick at twelve; red means time's up and
+  nothing else; a pause is calm, never red. Icons, type and colours come from
+  one brand board.
+- **One rules model.** The "Protection" slider that overwrote your rules is
+  gone; so are "Block account", "Ping" (now "Is it answering?") and the
+  Profiles, Events and Approvals pages.
+- **Sign-in: two doors.** Type your name and your own computer shows a
+  6-digit code, or use a passkey. Pausing, giving time and changing rules just
+  work; only the keys (unlock and recovery codes, passkeys, pairing, Who's
+  who) ask you to confirm it's you. Lost every passkey? The operator runs
+  `openscreentime-server recover <name>` for a one-time link.
+- **Who's who.** Every login on a computer is its own person; a login nobody
+  has sorted says so on the Family page.
+- **Fair numbers.** The day's time is one budget across all of a person's
+  computers, filed under each computer's own local day, so "today" is the
+  same everywhere and midnight no longer raises false alarms.
+
+**For children and teens**
+- **The lock.** When time is up the screen switches to the OpenScreenTime
+  lock on its own console — "Time's up for today", "Bedtime until 07:00",
+  "Paused by a parent". Apps are paused, not closed. The code field has the
+  keyboard, and **Ask for more time** is right there. A computer that can't
+  show the lock freezes nobody.
+- **Warnings at 15, 5 and 1 minute** before every stop, as normal
+  notifications — even on GNOME, without a tray.
+- **Only real use counts:** the session on screen, with a key, the mouse or
+  sound in the last five minutes. A locked screen, a closed lid or an SSH login
+  costs nothing. Changing the clock changes nothing either.
+- The math and wait challenges are gone; the unlock code is the one way a
+  parent opens the lock.
+
+**For an adult keeping their own time**
+- **My computer:** your own daily limit (a hard stop with the same warnings),
+  focus hours, and sites you block for yourself — blocked in your focus hours,
+  or all day. Nobody else sees your apps or sites, and a household of one gets
+  a console that says "It's just you so far".
+
+**For the operator**
+- **One command:** `deploy/setup.sh --domain …` writes `.env`, starts the
+  stack and prints the one-time setup link. `OST_PUBLIC_URL` is the one
+  setting; the passkey domain, origin and cookies derive from it.
+- **It runs itself:** starts at boot, backs up nightly, updates daily and
+  rolls back — image and database — if the new version isn't healthy.
+  `/health` checks the database. Server problems (a failed backup or update,
+  the database gone) reach your phone once per incident.
+- **Computers update from your server**, never downgrade, refuse a build that
+  can't run there, and roll back on their own if an update crash-loops. The
+  server now bundles a desktop build (app window, graphical lock, companion)
+  next to the headless one; `install.sh` picks the right one. Desktop builds
+  need glibc 2.35 or newer.
+- Event ingest is idempotent and enrollment retry-safe; a half-finished
+  install can simply be run again.
+
+**Fixed**
+- **Tamper level 3 needs `--tamper-max` on the computer.** The server (or
+  `agent.toml`) could raise a computer to level 3 without it. Now a request
+  above the computer's ceiling is capped at 1 and says so: the ack carries
+  `capped: true` and the console gets a `tamper_level_capped` event.
+- **Power off, reboot and suspend work again for everyone.** A polkit rule
+  denied them to every login but root — parents and adults on their own
+  computers included — and kept laptops from sleeping. With the day's time
+  and every stop kept on disk, a restart or a suspend isn't a way around a
+  stop. The only rule left is level 3's "can't stop the agent" (root and
+  `ost-admin` exempt, and nothing else granted); below level 3 the agent
+  deletes the old rule file on its next start.
+- **"What can a parent see?" tells the truth for older teens.** It said
+  "apps and sites" to everyone; a parent sees an older teen's apps only. The
+  page now says what the server returns in `parent_sees` — the same rule
+  that decides what the parent's view shows.
+- **An adult's page shows a parent their minutes, and that's all.** Their
+  moments (time's up, a blocked app, a code typed) showed on the person page.
+  The server now leaves events under an adult's or self-managed person's
+  login out of `/api/events` and a computer's `recent_events` for everyone
+  but them, and the page no longer asks.
+- **A parent's own rules are theirs, even from another parent.** Only
+  members' own rules were protected; one parent could read and change
+  another's through `/api/profiles/:id`. Now that's a 403 for anyone but the
+  person, who changes them through `/api/me/rules`.
+- **The enroll token stays out of `ps`.** `install.sh` took the token from
+  `OST_TOKEN` and then passed it to `ost enroll --token`, in every user's
+  process list. It now hands it over in the environment; `ost enroll` reads
+  `OST_TOKEN` (or `--token -` for stdin) when `--token` is absent.
+- **CI tests what ships, and fails when a test does.** Steps ran `cargo test
+  | tee` without `pipefail`, so a failing test passed. Now every step runs
+  `bash -eo pipefail`; the server job runs every DB-backed test (the
+  ledger's too — one variable, `OST_TEST_DATABASE_URL` or `DATABASE_URL`,
+  for all) and fails if they would skip; the client is tested as the
+  headless and the `gui,tray` build; the web runs `bun test`.
+- **Pause everything says "Press and hold to pause."** It said "for a
+  second"; the hold is 600 ms.
+- **Website rules work on a stock Debian or Ubuntu desktop.** Its
+  NetworkManager carries the dnsmasq *program*, so the installer installed
+  nothing and nothing was filtered. It now installs the dnsmasq service,
+  set up to run next to systemd-resolved, and makes `/etc/resolv.conf` a file
+  the filter owns where it was resolved's link (the link comes back when
+  OpenScreenTime leaves) — before, the first network change turned the filter
+  off, and with a block in force left the computer with no DNS at all.
+  Installed computers set it up on their next update.
+- **One thing that can't be applied never takes the rest with it.** DNS, the
+  firewall, its lockdown rules and the VPN are applied one by one; a failing
+  one is reported on its own and the others still apply.
+- **"Can't filter websites" is said once.** A computer that can't apply
+  part of its rules sends one moment per part (as a warning, not a critical
+  alert), not one per start — a restart or a reboot with the same gap is
+  not news.
+- **Time given takes the lock down at once**, instead of up to 10 seconds
+  later with "This computer is stopped for now" on screen.
+- **The stop time the warnings announce holds still.** In the last minute it
+  could move by a second and change "ends at 03:24" to "ends at 03:23".
+- **A removed computer keeps nothing of OpenScreenTime**: the binary, its
+  state, its config and the companions still running are gone too (packages
+  it installed stay, with their own config back), and an old sign-in code no
+  longer pops up again.
+- **No kernel messages over the text lock.**
+- **"Where the time went" names the apps people use.** Only the blocking
+  catalog could name an app, so an afternoon of Firefox and Text Editor was
+  "Nothing yet today". Any app the computer's menu lists now counts while it
+  is open (background parts of the desktop don't); `TRANSPARENCY.md` says so.
+- **Moments are the right person's.** A parent's own snooze on a child's
+  computer showed on the child's page, and a code typed at the child's lock
+  never did. Every event about a person is filed under their login (the
+  server also reads it from older agents' events); the computer's own — a
+  pause, a gap, a lost connection — shows on Computers and on its owner's
+  page. A gap the computer has fixed reads as fixed, not red.
+- **Signing in by name never just waits.** After 30 s the code page says what
+  a code needs (your computer on, and set up as yours — Add my computer, or
+  Who's who) or offers a passkey; when
+  the code runs out it says so, with Send a new code and the passkey door —
+  the same for every name, so it tells nobody who exists.
+- **/me with no computer** says your rules are saved for when one is added,
+  instead of promising focus hours nothing enforces.
+- **Safe search no longer takes Google, YouTube and Bing away.** It pointed
+  them at their safe-search front ends with a DNS `cname=` the local resolver
+  can't follow, so with safe search on (every child's default) those sites
+  didn't open at all. The agent now looks the front ends up itself and
+  answers with their addresses — every Google country domain, the five
+  YouTube names, Bing, and now DuckDuckGo too — refreshed hourly and when the
+  network changes, and kept across a reboot. One it can't look up is left
+  alone (the site works, without safe search) and the console hears
+  `dns_safesearch_unavailable`.
+- **A stop holds behind someone else's desktop.** When a child's time ran
+  out while a sibling had the screen, her video kept playing until she came
+  back; now her apps stop at once, the sibling keeps the screen, and her
+  session meets the lock when it comes back.
+- **A lock for nobody goes.** When a stopped person's session ends (a
+  log-out, a crash), their lock no longer waits on screen for someone to
+  press S: the login screen gets the screen within about a second, and they
+  meet the lock at their next login.
+- **"You're back" arrives with the desktop**, not five seconds after it.
+- **A person's page works against a real server.** `/api/family` never sent
+  the `account_id` the console addresses a person by (only the console's
+  sample data had it), so a child's "Where the time went" showed the
+  parent's own apps, Edit and Remove failed with "400 Bad Request", and her
+  computer's pauses never reached her page. The server sends it now, "where
+  the time went" never falls back to your own day, and a test holds the
+  console's types and sample data to what the server really sends.
+- **The install line works on stock Debian and Ubuntu**, which have wget and
+  no curl: it downloads with wget, else curl, and with neither it fails out
+  loud instead of "finishing" with nothing installed. The installer runs only
+  once it has arrived whole, and has `--help`.
+- **"You're back" after Give 15 stays on screen.** The grant gave exactly 15
+  minutes, so the 15-minute warning followed two seconds later and pushed the
+  welcome into the notification list; right after a welcome, the warning it
+  already said now stays quiet (the last minute's always comes).
+- **Files, Characters and Disks no longer show up in "Where the time went"**
+  because GNOME's search woke them while you typed: an app the desktop starts
+  in the background counts only once it has stayed a minute.
+- **"Give me 15 more minutes" counts down live**, says how long when pressed
+  early ("Not yet — in 3 s") instead of ignoring the key, and no longer
+  starts its minute again after a fresh login or an agent restart; a new stop
+  waits again.
+- **"My week" shows today once.** In a browser in another time zone (Berlin)
+  a computer that hadn't said its clock put today's minutes on yesterday too;
+  the console now reads such a computer's day on UTC, as the server files it.
+- **The first-run cards show once**; closing or skipping them counts as seen.
+- **A blocked site says so.** A site that keeps being blocked is named in one
+  notification — "example.org is blocked on this computer" — instead of
+  leaving only the browser's "Unable to connect" (once per site a day, never
+  to someone whose time is up; no block page).
+- **Sign-in's "No code?"** says the real rule: the computer must be on and set
+  up as yours.
+- **Nobody is told about a site they never opened.** The agent's minute-by-
+  minute check that blocks hold used to look up a real blocked site, so a
+  child was told "123movies.to is blocked on this computer" and her parent saw
+  "123movies.to 37×". The check has a name of its own now
+  (`selftest.openscreentime.internal`) that nothing counts. The notice names
+  only what this computer's own rules block, by the rule ("bet365.com" for
+  www.bet365.com) — not what the family resolver filters (Firefox's
+  background ads.mozilla.org was "mozilla.org is blocked").
+- **"Where the time went" leaves out what the computer looks up on its
+  own** — update checks ("debian.org 3097×"), "am I online?" checks,
+  Firefox's background services, the clock. The short list is in
+  `docs/TRANSPARENCY.md`; a site someone opens still counts.
+- **A restart or reboot doesn't count the day again.** The agent read its
+  whole query log from the top on every start, so each site's count doubled
+  after a reboot and a child with no browser open was told again that
+  bet365.com is blocked. It now counts from when it starts.
+- **Reloading a console page works.** F5 on Computers or a bookmarked
+  person's page was a blank page (the server answered the browser's "is my
+  copy still good?" with an empty 404); every console page now reloads, and
+  its page is always checked for a newer version.
+- **The install line says what went wrong.** When the download fails — the
+  server down, a typo in the address — it says "Couldn't download the
+  installer from … — is the address right and the server up?" instead of
+  "curl: command not found".
+- **"Not yet — in 49 s" counts down** with the lock's own countdown instead of
+  keeping the number from when G was pressed.
+- **Removing a person removes the computer set up for them** if it never
+  connected ("Tmp's computer" stayed behind); a computer that did stays.
+
+### Upgrading
+
+- **Migrations run by themselves** on start (0026, 0027, 0030; 0028 and 0029
+  don't exist).
+- **Logins nobody has sorted get no limits** on a parent's own computer (and
+  when the server re-links a login at startup) until you sort them under
+  **Computers → Who's who**; on a child's computer they get the Kid rules.
+  Where more than one login on a parent's computer was linked to that parent,
+  the upgrade unlinks them all — pick yours again in Who's who before you can
+  sign in with a code there.
+- **The old TOTP 2FA, number-match login approvals and change mode are
+  gone.** Sign in with a passkey, or add your own computer and use the code it
+  shows.
+- **Computers update themselves from your server**; an agent too old to show
+  sign-in codes gets them once it has updated.
+- **For the graphical lock, a desktop computer needs `cage`.** The agent
+  installs it where apt, pacman or dnf has it; without it the lock is a text
+  screen on its own console, which works the same.
+- An install from before the boot/backup/update timers: run
+  `deploy/install-auto-update.sh` once.
+
 ## [0.6.1] - 2026-09-14
 
 **Headline: a real app on the device, a warmer console, and a lock that can

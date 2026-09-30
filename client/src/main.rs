@@ -10,15 +10,19 @@ mod app;
 mod attrib;
 mod childcli;
 mod client;
+mod clock;
 mod config;
+mod console;
 mod earn;
 mod enforce;
 mod enroll;
-#[cfg(feature = "gui")]
-mod intro;
-mod lockout;
+mod glance;
+mod icons;
+mod lock;
 mod login;
 mod loginbroker;
+mod logincode;
+mod mark;
 mod pam;
 mod parent;
 mod parentcode;
@@ -26,6 +30,7 @@ mod paths;
 mod pin;
 mod policy;
 mod protocol;
+mod retire;
 mod runner;
 mod service;
 mod sysusers;
@@ -37,6 +42,7 @@ mod ui;
 mod unlock;
 mod update;
 mod util;
+mod warn;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -52,6 +58,7 @@ use config::AgentCtx;
                   Everyday commands need no special permissions:\n  \
                   ost time     how much is left today\n  \
                   ost ask      ask a parent for more\n  \
+                  ost code     the code for signing in on the web\n  \
                   ost login    open the console, already signed in\n\n\
                   Every read command also takes --json.",
     after_help = "Setup and recovery need root: enroll, run, install-service, unlock."
@@ -79,8 +86,11 @@ enum Cmd {
     Enroll {
         #[arg(long)]
         server: String,
+        /// The one-time enroll token. Prefer OST_TOKEN=<token> in the
+        /// environment (install.sh does): argv shows up in `ps` and shell
+        /// history. `--token -` reads it from stdin.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Run the main loop (WS bus + policy enforcement).
     Run,
@@ -102,11 +112,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show the code for signing in on the web. Type your name on the sign-in
+    /// page (on any device); the code shows up here, and in the app window.
+    Code {
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the console in a browser, already signed in.
     ///
     /// Uses this computer's own enrollment as proof of identity: no password,
-    /// no passkey prompt. The session can read everything; changing anything
-    /// still asks for a second factor.
+    /// no passkey prompt.
     Login {
         /// Print the sign-in URL instead of opening a browser (headless boxes,
         /// or opening it on another machine). stdout is the URL and nothing else.
@@ -219,44 +234,52 @@ async fn main() -> Result<()> {
     // after the suspend window elapses. Not a real subcommand (kept out of
     // --help / clap's Cmd enum) since it's an implementation detail, not
     // something an operator should invoke directly.
+    // Hidden: rewrite stale systemd units after a self-update (service.rs).
+    // Spawned via systemd-run by the agent, whose sandbox can't write them.
+    if raw_args.get(1).map(String::as_str) == Some("__refresh-units") {
+        return service::refresh_units();
+    }
+
+    // Hidden: finish taking OpenScreenTime off a computer that was removed
+    // from its household (retire.rs). Spawned via systemd-run by the agent.
+    if raw_args.get(1).map(String::as_str) == Some("__retire") {
+        return retire::run_helper();
+    }
+
     if raw_args.get(1).map(String::as_str) == Some("__resume-enforcement") {
         let secs: u64 = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3600);
         return unlock::resume_after(secs);
     }
 
-    // Hidden GUI presenter subprocess (spawned detached by the runner so the
-    // blocking egui event loop never stalls the enforcement tick). Reads the
-    // root-only staged LockSpec file whose path is the argument (never the spec
-    // itself — it carries the parent-PIN hash, which must not sit on argv), shows
-    // the overlay, and writes an unlock grant on a verified dismissal.
-    if raw_args.get(1).map(String::as_str) == Some("__lockout") {
+    // The lock screen's own session (openscreentime-lock@<vt>.service, as the
+    // unprivileged `ost-lock` user): `__lock-session` starts cage, which hosts
+    // `__lockscreen`, the window that shows the lock and passes typed codes to
+    // the agent over the lock socket. Neither holds a secret.
+    if raw_args.get(1).map(String::as_str) == Some("__lock-session") {
         #[cfg(feature = "gui")]
         {
-            let spec_path = raw_args.get(2).map(String::as_str).unwrap_or("");
-            return lockout::gui::run_from_spec_file(spec_path);
+            return lock::screen::run_session();
         }
         #[cfg(not(feature = "gui"))]
         {
-            anyhow::bail!("__lockout requires a build with --features gui");
+            anyhow::bail!("__lock-session requires a build with --features gui");
         }
     }
-
-    // Hidden first-run intro subprocess (spawned detached by the tray on first
-    // launch). Shows the skippable child-facing cards, then marks itself seen.
-    if raw_args.get(1).map(String::as_str) == Some("__intro") {
+    if raw_args.get(1).map(String::as_str) == Some("__lockscreen") {
         #[cfg(feature = "gui")]
         {
-            return intro::run();
+            return lock::screen::run_lockscreen();
         }
         #[cfg(not(feature = "gui"))]
         {
-            anyhow::bail!("__intro requires a build with --features gui");
+            anyhow::bail!("__lockscreen requires a build with --features gui");
         }
     }
 
     // The on-device window (`ost app`): dispatched here, ahead of the async
     // runtime's own threads, so the blocking egui event loop owns the main
-    // thread — the same reason `__intro` and `__lockout` run from here.
+    // thread — the same reason `__lockscreen` runs from here. The first-run
+    // intro lives inside it.
     if raw_args.get(1).map(String::as_str) == Some("app") {
         #[cfg(feature = "gui")]
         {
@@ -283,6 +306,7 @@ async fn main() -> Result<()> {
             | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
+            | Cmd::Code { .. }
             | Cmd::Login { .. }
             | Cmd::Status { .. }
     );
@@ -293,6 +317,7 @@ async fn main() -> Result<()> {
             | Cmd::Pair { .. }
             | Cmd::Time { .. }
             | Cmd::Ask { .. }
+            | Cmd::Code { .. }
             | Cmd::Login { .. }
             | Cmd::Status { .. }
     );
@@ -303,7 +328,14 @@ async fn main() -> Result<()> {
     }
 
     match cli.cmd {
-        Cmd::Enroll { server, token } => enroll::run(&server, &token).await,
+        Cmd::Enroll { server, token } => {
+            let token = enroll::resolve_token(
+                token.as_deref(),
+                std::env::var("OST_TOKEN").ok(),
+                &mut std::io::stdin().lock(),
+            )?;
+            enroll::run(&server, &token).await
+        }
         Cmd::Run => {
             // Before any state is read: adopt whatever the previous product
             // name left behind, so an upgrade doesn't start the day with an
@@ -324,6 +356,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Time { json } => childcli::time(json),
         Cmd::Ask { json } => childcli::ask(json),
+        Cmd::Code { json } => logincode::cli(json),
         Cmd::Login { print_url, json } => login::run(print_url, json).await,
         Cmd::Pair { server, token } => parent::pair(&server, &token),
         #[cfg(feature = "tray")]

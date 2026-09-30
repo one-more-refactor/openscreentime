@@ -144,7 +144,7 @@ pub async fn create_profile_for(
 
 /// The account's rules, creating them from the bracket preset if the account
 /// predates 0.4 and has none yet.
-async fn ensure_profile(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<Uuid> {
+pub(crate) async fn ensure_profile(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<Uuid> {
     if let Some(p) = acct.9 {
         return Ok(p);
     }
@@ -179,11 +179,97 @@ async fn sync_device_users(st: &AppState, account_id: Uuid, profile_id: Uuid) ->
 
 // ── OS user → person linking (enrollment, heartbeat, startup backfill) ───────
 
+/// Which of a device's OS logins belongs to its declared owner — settled
+/// once, at enrollment. Exactly one login (or none) is ever the owner's; every
+/// other login on the computer is its own person.
+///
+/// 1. The installer said so (`chosen`: the person at the keyboard picked it
+///    when `ost enroll` asked "which login is Mia's?").
+/// 2. There is only one login.
+/// 3. The owner is a **parent** ("this is my computer"): the login the install
+///    ran from. Never a guess between several — a child's login linked to a
+///    parent could ask for that parent's sign-in codes.
+/// 4. The owner is a **person** (a child's computer): the login with their
+///    name. Not "the one that isn't the installer's": a parent installing
+///    from the child's own session would then hand their admin login to the
+///    child.
+///
+/// Otherwise nobody: every login becomes a person of its own, managed as a
+/// child until a parent says who is who (Devices).
+pub fn pick_owner_login(
+    owner_is_parent: bool,
+    owner_name: &str,
+    logins: &[String],
+    installer: Option<&str>,
+    chosen: Option<&str>,
+) -> Option<String> {
+    let known = |l: &str| logins.iter().any(|x| x == l);
+    if let Some(c) = chosen.filter(|c| known(c)) {
+        return Some(c.to_string());
+    }
+    if logins.len() == 1 {
+        return Some(logins[0].clone());
+    }
+    if owner_is_parent {
+        return installer.filter(|i| known(i)).map(str::to_string);
+    }
+    let name = owner_name.trim().to_lowercase();
+    let first = name.split_whitespace().next().unwrap_or("").to_string();
+    logins
+        .iter()
+        .find(|l| !name.is_empty() && (l.to_lowercase() == name || l.to_lowercase() == first))
+        .cloned()
+}
+
+/// Settle `devices.owner_os_username` at enrollment (see [`pick_owner_login`]).
+/// A value already there (set before) is kept.
+pub async fn settle_owner_login(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_id: Uuid,
+    logins: &[String],
+    installer: Option<&str>,
+    chosen: Option<&str>,
+) -> AppResult<()> {
+    let row: Option<(Option<Uuid>, Option<String>)> =
+        sqlx::query_as("SELECT owner_account_id, owner_os_username FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_optional(db)
+            .await?;
+    let Some((Some(owner), None)) = row else {
+        return Ok(());
+    };
+    let acct = get_account(db, owner, tenant_id).await?;
+    if let Some(login) = pick_owner_login(acct.4 != "member", &acct.2, logins, installer, chosen) {
+        sqlx::query(
+            "UPDATE devices SET owner_os_username = $2 WHERE id = $1 AND owner_os_username IS NULL",
+        )
+        .bind(device_id)
+        .bind(login)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Link one OS login on a device to a person, creating the person if nobody
-/// matches. Order: an existing link wins; else an account in the tenant whose
-/// display name equals the OS display name or the username
-/// (case-insensitive); else the device's `owner_account_id` (the "this is
-/// Mia's laptop" enroll intent); else a brand-new member (bracket `kid`).
+/// matches. Order:
+///
+/// 1. an existing link wins (a parent may have re-pointed it by hand);
+/// 2. the device owner's login (`devices.owner_os_username`) → the owner;
+/// 3. a **member** whose name is the login's name or display name — never a
+///    parent: the agent declares these names, and a login linked to a parent
+///    can ask for that parent's sign-in codes;
+/// 4. a new person of their own, named after the login, marked **unsorted**
+///    (`device_users.unsorted`: the Family page asks a parent to sort it
+///    under Devices → Who's who). On a child's computer they get a child's
+///    rules until a parent says otherwise (fail closed: an unknown login on
+///    a managed computer is never quietly unmanaged). On a parent's own
+///    computer — or re-linked by the startup backfill — they get the adult
+///    rules, which enforce nothing: that login may well be the parent's own,
+///    and a parent is never locked out of their computer by a guess. A parent
+///    assigns child rules deliberately.
+///
 /// Always leaves `device_users.profile_id` equal to the person's rules.
 pub async fn link_os_user(
     db: &sqlx::PgPool,
@@ -191,6 +277,27 @@ pub async fn link_os_user(
     device_id: Uuid,
     os_username: &str,
     os_display_name: Option<&str>,
+) -> AppResult<Uuid> {
+    link_os_user_as(
+        db,
+        tenant_id,
+        device_id,
+        os_username,
+        os_display_name,
+        false,
+    )
+    .await
+}
+
+/// [`link_os_user`]; `backfill`: re-linking a login that lost its person
+/// (startup), whose new person never gets enforcing rules by default.
+async fn link_os_user_as(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_id: Uuid,
+    os_username: &str,
+    os_display_name: Option<&str>,
+    backfill: bool,
 ) -> AppResult<Uuid> {
     let os_username = os_username.trim();
     if os_username.is_empty() {
@@ -209,67 +316,85 @@ pub async fn link_os_user(
     .bind(os_username)
     .fetch_optional(db)
     .await?;
-    let linked = existing.flatten();
 
-    let account: AccountRow = match linked {
+    // `None`: keep whatever the row says; `Some`: this call decided it.
+    let mut unsorted: Option<bool> = None;
+    let account: AccountRow = match existing.flatten() {
         Some(id) => get_account(db, id, tenant_id).await?,
         None => {
-            // 2. Name match — MEMBERS ONLY. The agent declares these names, and a
-            //    rooted device that could name-link an OS user to a parent would
-            //    then hold a login that can vouch for (or approve) a parent
-            //    session. Hub accounts get linked only by an admin's hand
-            //    (assign-account) or the device's declared owner below.
-            let by_name: Option<AccountRow> = sqlx::query_as(&format!(
-                "SELECT {ACCOUNT_COLS} FROM admins
-                  WHERE tenant_id = $1
-                    AND role = 'member'
-                    AND (lower(display_name) = lower($2) OR lower(display_name) = lower($3))
-                  ORDER BY created_at LIMIT 1"
-            ))
-            .bind(tenant_id)
-            .bind(display)
+            // 2. The owner's login.
+            let owner: Option<Uuid> = sqlx::query_scalar(
+                "SELECT owner_account_id FROM devices
+                  WHERE id = $1 AND lower(owner_os_username) = lower($2)",
+            )
+            .bind(device_id)
             .bind(os_username)
             .fetch_optional(db)
-            .await?;
-            match by_name {
-                Some(a) => a,
+            .await?
+            .flatten();
+            // 3. A member by name.
+            let by_name: Option<AccountRow> = match owner {
+                Some(_) => None,
                 None => {
-                    // 3. The device's declared owner.
-                    let owner: Option<Option<Uuid>> =
-                        sqlx::query_scalar("SELECT owner_account_id FROM devices WHERE id = $1")
-                            .bind(device_id)
-                            .fetch_optional(db)
-                            .await?;
-                    match owner.flatten() {
-                        Some(id) => get_account(db, id, tenant_id).await?,
-                        // 4. A new member.
-                        None => {
-                            let bracket = AgeBracket::Kid;
-                            let pid = create_profile_for(db, tenant_id, bracket, display).await?;
-                            let id: Uuid = sqlx::query_scalar(
-                                "INSERT INTO admins (tenant_id, display_name, role, age_bracket, profile_id)
-                                 VALUES ($1, $2, 'member', $3, $4) RETURNING id",
-                            )
-                            .bind(tenant_id)
-                            .bind(display)
-                            .bind(bracket.id())
-                            .bind(pid)
-                            .fetch_one(db)
-                            .await?;
-                            let _ = events::insert(
-                                db,
-                                tenant_id,
-                                Some(device_id),
-                                None,
-                                "member",
-                                "info",
-                                json!({ "action": "auto_created", "account_id": id,
-                                        "display_name": display, "os_username": os_username }),
-                            )
-                            .await;
-                            get_account(db, id, tenant_id).await?
-                        }
-                    }
+                    sqlx::query_as(&format!(
+                        "SELECT {ACCOUNT_COLS} FROM admins
+                          WHERE tenant_id = $1
+                            AND role = 'member'
+                            AND (lower(display_name) = lower($2) OR lower(display_name) = lower($3))
+                          ORDER BY created_at LIMIT 1"
+                    ))
+                    .bind(tenant_id)
+                    .bind(display)
+                    .bind(os_username)
+                    .fetch_optional(db)
+                    .await?
+                }
+            };
+            unsorted = Some(owner.is_none() && by_name.is_none());
+            match (owner, by_name) {
+                (Some(id), _) => get_account(db, id, tenant_id).await?,
+                (None, Some(a)) => a,
+                // 4. A person of their own.
+                (None, None) => {
+                    let parents_computer: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM devices d
+                                          JOIN admins a ON a.id = d.owner_account_id
+                                         WHERE d.id = $1 AND a.role <> 'member')",
+                    )
+                    .bind(device_id)
+                    .fetch_one(db)
+                    .await?;
+                    let bracket = if backfill || parents_computer {
+                        AgeBracket::Adult
+                    } else {
+                        AgeBracket::Kid
+                    };
+                    let pid = create_profile_for(db, tenant_id, bracket, display).await?;
+                    let id: Uuid = sqlx::query_scalar(
+                        "INSERT INTO admins (tenant_id, display_name, role, age_bracket,
+                                             self_managed, profile_id)
+                         VALUES ($1, $2, 'member', $3, $4, $5) RETURNING id",
+                    )
+                    .bind(tenant_id)
+                    .bind(display)
+                    .bind(bracket.id())
+                    .bind(!bracket.is_managed())
+                    .bind(pid)
+                    .fetch_one(db)
+                    .await?;
+                    let _ = events::insert(
+                        db,
+                        tenant_id,
+                        Some(device_id),
+                        None,
+                        "member",
+                        "info",
+                        json!({ "action": "auto_created", "account_id": id,
+                                "display_name": display, "os_username": os_username,
+                                "age_bracket": bracket.id() }),
+                    )
+                    .await;
+                    get_account(db, id, tenant_id).await?
                 }
             }
         }
@@ -277,11 +402,13 @@ pub async fn link_os_user(
 
     let profile_id = ensure_profile(db, &account).await?;
     sqlx::query(
-        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO device_users (device_id, os_username, display_name, profile_id, account_id,
+                                   unsorted)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6, false))
          ON CONFLICT (device_id, os_username)
          DO UPDATE SET account_id = $5,
                        profile_id = $4,
+                       unsorted = COALESCE($6, device_users.unsorted),
                        display_name = COALESCE(device_users.display_name, EXCLUDED.display_name)",
     )
     .bind(device_id)
@@ -289,6 +416,7 @@ pub async fn link_os_user(
     .bind(os_display_name)
     .bind(profile_id)
     .bind(account.0)
+    .bind(unsorted)
     .execute(db)
     .await?;
     Ok(account.0)
@@ -304,7 +432,9 @@ pub async fn backfill_links(db: &sqlx::PgPool) -> AppResult<()> {
     .fetch_all(db)
     .await?;
     for (tenant_id, device_id, user, display) in rows {
-        if let Err(e) = link_os_user(db, tenant_id, device_id, &user, display.as_deref()).await {
+        if let Err(e) =
+            link_os_user_as(db, tenant_id, device_id, &user, display.as_deref(), true).await
+        {
             tracing::warn!(error = %e, %device_id, %user, "could not link OS user to an account");
         }
     }
@@ -535,6 +665,13 @@ pub async fn patch_member(
         sync_device_users(&st, id, pid).await?;
     }
 
+    // A parent has looked at this person and decided something: their logins
+    // are sorted.
+    sqlx::query("UPDATE device_users SET unsorted = false WHERE account_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+
     let row = get_account(&st.db, id, admin.tenant_id).await?;
     Ok(Json(json!({ "member": account_json(&row) })))
 }
@@ -573,6 +710,21 @@ pub async fn delete_member(
     ] {
         sqlx::query(q).bind(id).execute(&st.db).await?;
     }
+    // A computer set up for them that never joined ("Tmp's computer", still
+    // waiting for its install line — acceptance round 5) goes with them: no
+    // agent holds a token for it, no login or day is on it, and without its
+    // person it is nobody's. A computer that joined stays, under its own
+    // removal rules (Computers → Remove: its day kept, its agent retired).
+    let unfinished = sqlx::query(
+        "DELETE FROM devices
+          WHERE owner_account_id = $1 AND tenant_id = $2
+            AND status = 'pending' AND device_token IS NULL",
+    )
+    .bind(id)
+    .bind(admin.tenant_id)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
     sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(admin.tenant_id)
@@ -595,10 +747,122 @@ pub async fn delete_member(
         None,
         "member",
         "info",
-        json!({ "action": "deleted", "account_id": id, "display_name": row.2, "by": admin.admin_id }),
+        json!({
+            "action": "deleted",
+            "account_id": id,
+            "display_name": row.2,
+            "by": admin.admin_id,
+            "unfinished_computers_removed": unfinished,
+        }),
     )
     .await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Who's who moved a login away from `account_id`. If that leaves a person the
+/// server made up for an unsorted login (the `auto_created` trail) with no
+/// login and no computer anywhere — and nobody has touched them since: same
+/// name, same bracket, their rules as created, no email, face, birthday,
+/// goal or theme, never signed in — they are removed: they were only ever a
+/// guess about who that login was ("philip", Kid, once the `philip` login
+/// turned out to be Philip). Anyone else is kept; Family shows them with no
+/// computer. Returns whether the person was removed.
+pub async fn drop_if_leftover(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    account_id: Uuid,
+) -> AppResult<bool> {
+    let still_here: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM device_users WHERE account_id = $1)
+             OR EXISTS (SELECT 1 FROM devices WHERE owner_account_id = $1)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if still_here {
+        return Ok(false);
+    }
+    let Ok(acct) = get_account(db, account_id, tenant_id).await else {
+        return Ok(false);
+    };
+    if acct.4 != "member" {
+        return Ok(false);
+    }
+    let trail: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM events
+          WHERE tenant_id = $1 AND type = 'member'
+            AND payload->>'action' = 'auto_created' AND payload->>'account_id' = $2
+          ORDER BY created_at LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(account_id.to_string())
+    .fetch_optional(db)
+    .await?;
+    let Some(trail) = trail else {
+        return Ok(false);
+    };
+    let as_made = trail["display_name"].as_str() == Some(acct.2.as_str())
+        && trail["age_bracket"].as_str() == Some(acct.5.as_str())
+        && acct.3.is_none()
+        && acct.6.is_none()
+        && acct.7.is_none()
+        && acct.11.is_none()
+        && acct.12.is_none();
+    if !as_made {
+        return Ok(false);
+    }
+    let rules_as_made: bool = match acct.9 {
+        None => true,
+        Some(pid) => sqlx::query_scalar(
+            "SELECT policy = $2::jsonb AND NOT EXISTS (
+                        SELECT 1 FROM admins WHERE profile_id = $1 AND id <> $3)
+               FROM profiles WHERE id = $1",
+        )
+        .bind(pid)
+        .bind(presets::policy_for(bracket_of(&acct)))
+        .bind(acct.0)
+        .fetch_optional(db)
+        .await?
+        .unwrap_or(false),
+    };
+    let signed_in: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM webauthn_credentials WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admin_sessions WHERE admin_id = $1)
+             OR EXISTS (SELECT 1 FROM admins WHERE id = $1 AND blocked_at IS NOT NULL)",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+    if !rules_as_made || signed_in {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM admins WHERE id = $1 AND tenant_id = $2")
+        .bind(account_id)
+        .bind(tenant_id)
+        .execute(db)
+        .await?;
+    if let Some(pid) = acct.9 {
+        sqlx::query(
+            "DELETE FROM profiles WHERE id = $1 AND NOT is_preset
+               AND NOT EXISTS (SELECT 1 FROM device_users WHERE profile_id = $1)
+               AND NOT EXISTS (SELECT 1 FROM admins WHERE profile_id = $1)",
+        )
+        .bind(pid)
+        .execute(db)
+        .await?;
+    }
+    events::insert(
+        db,
+        tenant_id,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "removed_leftover", "account_id": account_id,
+                "display_name": acct.2 }),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// `POST /api/members/{id}/block` — members only. A parent Danger-Zone action:
@@ -739,7 +1003,18 @@ async fn policy_for_account(db: &sqlx::PgPool, acct: &AccountRow) -> AppResult<P
         .unwrap_or_default())
 }
 
-type TodayRow = (Uuid, Uuid, String, String, bool, i32, i32);
+type TodayRow = (
+    Uuid,          // du.id
+    Uuid,          // d.id
+    String,        // d.name
+    String,        // d.status
+    bool,          // d.locked
+    i32,           // used_seconds today
+    i32,           // earned_seconds today
+    Option<i32>,   // d.utc_offset_secs
+    String,        // du.os_username
+    Option<Value>, // d.last_state (the overrides it runs)
+);
 
 /// `GET /api/me/today` — the person's own day, across every device they use.
 pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
@@ -747,24 +1022,46 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     let bracket = bracket_of(&acct);
     let policy = policy_for_account(&st.db, &acct).await?;
 
-    let rows: Vec<TodayRow> = sqlx::query_as(
+    // "Today" is each device's own local day — the day its agent enforces.
+    let rows: Vec<TodayRow> = sqlx::query_as(&format!(
         "SELECT du.id, d.id, d.name, d.status, d.locked,
-                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0)
+                COALESCE(l.used_seconds, 0), COALESCE(l.earned_seconds, 0), d.utc_offset_secs,
+                du.os_username, d.last_state
            FROM device_users du
            JOIN devices d ON d.id = du.device_id
-           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = CURRENT_DATE
+           LEFT JOIN screen_time_ledger l ON l.device_user_id = du.id AND l.day = {}
           WHERE du.account_id = $1 AND d.tenant_id = $2
           ORDER BY d.name",
-    )
+        crate::ledger::DEVICE_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let used: i64 = rows.iter().map(|r| i64::from(r.5)).sum::<i64>() / 60;
-    let earned: i64 = rows.iter().map(|r| i64::from(r.6)).sum::<i64>() / 60;
+    // …and today on computers that were removed: still their day.
+    let kept = crate::ledger::kept_today(&st.db, acct.1, Some(acct.0))
+        .await?
+        .remove(&acct.0)
+        .unwrap_or_default();
+    let used_secs: i64 = rows.iter().map(|r| i64::from(r.5)).sum::<i64>() + kept.used_secs;
+    let earned_secs: i64 = rows.iter().map(|r| i64::from(r.6)).sum::<i64>() + kept.earned_secs;
+    let used = used_secs / 60;
+    let earned = earned_secs / 60;
     let limit = limit_minutes(&policy);
-    let left = limit.map(|l| (l + earned - used).max(0));
+    let offset = rows.iter().find_map(|r| r.7).or(kept.utc_offset_secs);
+    // Time left, the number their computer shows: the same rules function
+    // with the same inputs (their day, the override a computer of theirs
+    // reports), on the computer's clock.
+    let now = Utc::now();
+    let override_until = rows
+        .iter()
+        .filter_map(|r| crate::ledger::reported_override(r.9.as_ref(), &r.8, now))
+        .max();
+    let day =
+        crate::ledger::console_day(&policy, used_secs, earned_secs, offset, override_until, now);
+    let left = day.left_minutes;
+    let rules = day.rules;
     let locked = rows.iter().any(|r| r.4);
     let du_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let pending: Option<i32> = sqlx::query_scalar(
@@ -775,11 +1072,20 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
     .await?;
 
     // Dedupe devices (one person can have two logins on one machine).
+    // Someone who sets their own rules also hears what a computer of theirs
+    // can't do right now (`last_state.gaps`: no website filter on a desktop
+    // without a resolver) — their page must not promise a block it can't
+    // keep. A child's page doesn't advertise the gap.
+    let own_rules = manages_self(&acct);
     let mut devices = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for r in &rows {
         if seen.insert(r.1) {
-            devices.push(json!({ "id": r.1, "name": r.2, "status": r.3, "locked": r.4 }));
+            let mut d = json!({ "id": r.1, "name": r.2, "status": r.3, "locked": r.4 });
+            if own_rules {
+                d["gaps"] = json!(standing_gaps(&r.3, r.9.as_ref()));
+            }
+            devices.push(d);
         }
     }
 
@@ -788,6 +1094,11 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "earned_minutes": earned,
         "limit_minutes": limit,
         "left_minutes": left,
+        // When screens stop by the rules (limit, bedtime or window end,
+        // whichever first) — the agent's own rules function.
+        "rules": rules,
+        // The computer's clock: focus hours and the week are its day.
+        "utc_offset_secs": offset,
         "locked": locked,
         "devices": devices,
         "blocks": policy.blocks,
@@ -801,6 +1112,14 @@ pub async fn today(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Js
         "display_name": acct.2,
         // The person's own goal (minutes/day), distinct from the parent cap.
         "goal_minutes": acct.12,
+        // They set their own rules (/api/me/rules): the hub for themselves,
+        // an adult, or someone who manages themselves.
+        "self_managed": manages_self(&acct),
+        // What a parent sees of their day beyond the minutes — the very rule
+        // `/api/usage/where` enforces, so "What can a parent see?" is true.
+        "parent_sees": crate::usage::parent_sees(bracket, acct.8),
+        // Sites they block for themselves and the hours those hold.
+        "focus": { "hours": policy.focus.hours, "sites": policy.focus.sites },
     })))
 }
 
@@ -828,6 +1147,187 @@ pub async fn set_goal(
     Ok(Json(json!({ "goal_minutes": goal })))
 }
 
+// ── my rules (self-control) ─────────────────────────────────────────────────
+//
+// An adult keeps time for themselves: their own daily limit, their focus
+// hours, the sites they block for themselves. The hub has the same page for
+// their own computer. These are the person's rules, stored as their own
+// policy and enforced by the agent like any other — and nobody else sees or
+// changes them (profiles::private_profile_ids).
+
+/// Whether a person sets their own rules: the hub for themselves, or a member
+/// who is an adult or manages themselves. Everyone else's rules are a
+/// parent's.
+pub fn manages_self(acct: &AccountRow) -> bool {
+    sets_own_rules(&acct.4, bracket_of(acct), acct.8)
+}
+
+/// What an online computer says it can't do right now (the `gaps` of its
+/// last `state` frame). An offline one says nothing: what it said last is
+/// "offline", shown elsewhere.
+pub fn standing_gaps(status: &str, last_state: Option<&Value>) -> Vec<String> {
+    if status != "online" {
+        return Vec::new();
+    }
+    last_state
+        .and_then(|s| s.get("gaps"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// [`manages_self`] from the account's parts — the one rule, shared with
+/// `profiles::private_profile_ids` (whose rules nobody else may read or edit).
+pub fn sets_own_rules(role: &str, bracket: AgeBracket, self_managed: bool) -> bool {
+    role != "member" || !bracket.is_managed() || self_managed
+}
+
+fn rules_are_a_parents() -> AppError {
+    AppError::ForbiddenForMember("your rules are set by a parent".into())
+}
+
+/// The person's own profile, never a shared one: a preset, or a profile
+/// another account also uses, is copied first. Their logins end up on it.
+async fn own_profile(st: &AppState, acct: &AccountRow) -> AppResult<Uuid> {
+    let mut pid = ensure_profile(&st.db, acct).await?;
+    let (is_preset, shared): (bool, bool) = sqlx::query_as(
+        "SELECT p.is_preset,
+                EXISTS (SELECT 1 FROM admins o WHERE o.profile_id = p.id AND o.id <> $2)
+           FROM profiles p WHERE p.id = $1",
+    )
+    .bind(pid)
+    .bind(acct.0)
+    .fetch_one(&st.db)
+    .await?;
+    if is_preset || shared {
+        pid = sqlx::query_scalar(
+            "INSERT INTO profiles (tenant_id, name, kind, is_preset, policy)
+             SELECT tenant_id, $2, kind, false, policy FROM profiles WHERE id = $1
+             RETURNING id",
+        )
+        .bind(pid)
+        .bind(format!("{}'s rules", acct.2))
+        .fetch_one(&st.db)
+        .await?;
+        sqlx::query("UPDATE admins SET profile_id = $2 WHERE id = $1")
+            .bind(acct.0)
+            .bind(pid)
+            .execute(&st.db)
+            .await?;
+    }
+    // Every login of theirs on their own rules (a copy above, or a login a
+    // parent once pointed elsewhere).
+    let stray: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM device_users WHERE account_id = $1 AND profile_id <> $2)",
+    )
+    .bind(acct.0)
+    .bind(pid)
+    .fetch_one(&st.db)
+    .await?;
+    if stray {
+        sync_device_users(st, acct.0, pid).await?;
+    }
+    Ok(pid)
+}
+
+/// The three rules a person sets for themselves, read from their policy.
+fn my_rules_json(p: &Policy) -> Value {
+    json!({
+        "daily_limit_minutes": limit_minutes(p).unwrap_or(0),
+        "focus_hours": p.focus.hours,
+        "sites": p.focus.sites,
+    })
+}
+
+/// `GET /api/me/rules` — my daily limit, my focus hours, the sites I block
+/// for myself. 403 for a person whose rules are a parent's.
+pub async fn my_rules(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
+    let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
+    if !manages_self(&acct) {
+        return Err(rules_are_a_parents());
+    }
+    let policy = policy_for_account(&st.db, &acct).await?;
+    Ok(Json(my_rules_json(&policy)))
+}
+
+#[derive(Deserialize)]
+struct MyRulesReq {
+    /// 0 = no limit.
+    #[serde(default)]
+    daily_limit_minutes: i64,
+    /// None = the sites are blocked all day.
+    #[serde(default)]
+    focus_hours: Option<openscreentime_policy::Window>,
+    #[serde(default)]
+    sites: Vec<String>,
+}
+
+/// `PUT /api/me/rules` — replace my rules (the same shape `GET` returns).
+/// Validated with the shared rules semantics; the person's devices re-pull.
+pub async fn set_my_rules(
+    State(st): State<AppState>,
+    admin: AuthAdmin,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let req: MyRulesReq = serde_json::from_value(body)
+        .map_err(|e| AppError::BadRequest(format!("those rules don't read: {e}")))?;
+    let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
+    if !manages_self(&acct) {
+        return Err(rules_are_a_parents());
+    }
+    if req.daily_limit_minutes < 0 {
+        return Err(AppError::BadRequest(
+            "the daily limit can't be negative — 0 means no limit".into(),
+        ));
+    }
+    let limit = u32::try_from(req.daily_limit_minutes).unwrap_or(u32::MAX);
+    let pid = own_profile(&st, &acct).await?;
+
+    let mut tx = st.db.begin().await?;
+    let stored: Value = sqlx::query_scalar("SELECT policy FROM profiles WHERE id = $1 FOR UPDATE")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut p: Policy = serde_json::from_value(stored).unwrap_or_default();
+    p.screen_time.daily_limit_minutes = limit;
+    p.screen_time.enabled =
+        limit > 0 || !p.screen_time.schedule.is_empty() || p.screen_time.bedtime.is_some();
+    p.focus = openscreentime_policy::Focus {
+        sites: req.sites,
+        hours: req.focus_hours,
+    };
+    let normalized = crate::profiles::normalize_policy(
+        serde_json::to_value(&p).map_err(|e| AppError::Internal(e.into()))?,
+    )?;
+    let devices = crate::profiles::write_policy(&mut tx, pid, &normalized).await?;
+    tx.commit().await?;
+    crate::profiles::notify_devices(&st, devices).await?;
+
+    let saved: Policy = serde_json::from_value(normalized).unwrap_or_default();
+    // The trail says that it changed, never what: the hub reads events, and
+    // these rules are the person's own.
+    events::insert(
+        &st.db,
+        acct.1,
+        None,
+        None,
+        "member",
+        "info",
+        json!({ "action": "own_rules_changed", "account_id": acct.0,
+                "daily_limit": limit_minutes(&saved).is_some(),
+                "focus_hours": saved.focus.hours.is_some(),
+                "sites": saved.focus.sites.len() }),
+    )
+    .await?;
+    Ok(Json(my_rules_json(&saved)))
+}
+
 /// `GET /api/me/history` — the last 14 days summed across the person's
 /// devices, plus where today's minutes went, device by device. The /me page
 /// draws its week from this: knowing what you actually did is the floor of
@@ -835,29 +1335,46 @@ pub async fn set_goal(
 pub async fn history(State(st): State<AppState>, admin: AuthAdmin) -> AppResult<Json<Value>> {
     let acct = get_account(&st.db, admin.admin_id, admin.tenant_id).await?;
 
-    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
-        "SELECT l.day, SUM(l.used_seconds)::bigint, SUM(l.earned_seconds)::bigint
-           FROM screen_time_ledger l
-           JOIN device_users du ON du.id = l.device_user_id
-           JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2
-            AND l.day > CURRENT_DATE - 14
-          GROUP BY l.day ORDER BY l.day",
-    )
+    // Computers that were removed count too (`retired_usage`): the minutes
+    // were spent all the same.
+    let days: Vec<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(&format!(
+        "SELECT day, SUM(used)::bigint, SUM(earned)::bigint
+           FROM (SELECT l.day, l.used_seconds AS used, l.earned_seconds AS earned
+                   FROM screen_time_ledger l
+                   JOIN device_users du ON du.id = l.device_user_id
+                   JOIN devices d ON d.id = du.device_id
+                  WHERE du.account_id = $1 AND d.tenant_id = $2
+                    AND l.day > {} - 14
+                 UNION ALL
+                 SELECT r.day, r.used_seconds, r.earned_seconds
+                   FROM retired_usage r
+                  WHERE r.account_id = $1 AND r.tenant_id = $2
+                    AND r.day > {} - 14) t
+          GROUP BY day ORDER BY day",
+        crate::ledger::DEVICE_TODAY_SQL,
+        crate::ledger::RETIRED_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
     .await?;
 
-    let today_by_device: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT d.name, SUM(l.used_seconds)::bigint
-           FROM screen_time_ledger l
-           JOIN device_users du ON du.id = l.device_user_id
-           JOIN devices d ON d.id = du.device_id
-          WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = CURRENT_DATE
-          GROUP BY d.name HAVING SUM(l.used_seconds) > 0
-          ORDER BY SUM(l.used_seconds) DESC",
-    )
+    let today_by_device: Vec<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT name, SUM(used)::bigint
+           FROM (SELECT d.name, l.used_seconds AS used
+                   FROM screen_time_ledger l
+                   JOIN device_users du ON du.id = l.device_user_id
+                   JOIN devices d ON d.id = du.device_id
+                  WHERE du.account_id = $1 AND d.tenant_id = $2 AND l.day = {}
+                 UNION ALL
+                 SELECT r.device_name, r.used_seconds
+                   FROM retired_usage r
+                  WHERE r.account_id = $1 AND r.tenant_id = $2 AND r.day = {}) t
+          GROUP BY name HAVING SUM(used) > 0
+          ORDER BY SUM(used) DESC",
+        crate::ledger::DEVICE_TODAY_SQL,
+        crate::ledger::RETIRED_TODAY_SQL
+    ))
     .bind(acct.0)
     .bind(acct.1)
     .fetch_all(&st.db)
@@ -1014,9 +1531,9 @@ pub fn member_allowed(path: &str) -> bool {
         || path == "/api/me/history"
         || path == "/api/me/where"
         || path == "/api/me/goal"
+        || path == "/api/me/rules"
         || path == "/api/me/ask"
         || path == "/api/catalog"
-        || path.starts_with("/api/me/2fa")
         || path.starts_with("/api/auth/")
 }
 
@@ -1069,16 +1586,114 @@ mod tests {
         assert!(member_allowed("/api/me"));
         assert!(member_allowed("/api/me/today"));
         assert!(member_allowed("/api/me/ask"));
+        // An adult member keeps their own rules (the handler says no to a
+        // child).
+        assert!(member_allowed("/api/me/rules"));
         assert!(member_allowed("/api/catalog"));
         assert!(member_allowed("/api/auth/logout"));
-        assert!(member_allowed("/api/auth/stepup/verify"));
-        assert!(member_allowed("/api/me/2fa/totp/start"));
+        assert!(member_allowed("/api/auth/confirm"));
+        assert!(!member_allowed("/api/me/2fa"));
         // The hub's side, including routes nobody has written yet.
         assert!(!member_allowed("/api/family"));
         assert!(!member_allowed("/api/devices"));
         assert!(!member_allowed("/api/members"));
         assert!(!member_allowed("/api/me/passkeys"));
         assert!(!member_allowed("/api/something/new"));
+    }
+
+    fn logins(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_parents_computer_links_only_the_login_it_was_installed_from() {
+        let l = logins(&["philip", "leo"]);
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("philip"), None).as_deref(),
+            Some("philip")
+        );
+        // Several logins and no installer: never guess a parent.
+        assert_eq!(pick_owner_login(true, "Philip", &l, None, None), None);
+        // Not even by name — a child could name their login after the parent.
+        assert_eq!(pick_owner_login(true, "Leo", &l, None, None), None);
+        // An installer that isn't one of the logins (root, a system account)
+        // counts for nothing.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("root"), None),
+            None
+        );
+        // One login on a computer the parent calls theirs is theirs.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &logins(&["phil"]), None, None).as_deref(),
+            Some("phil")
+        );
+        // The person at the keyboard said so.
+        assert_eq!(
+            pick_owner_login(true, "Philip", &l, Some("leo"), Some("philip")).as_deref(),
+            Some("philip")
+        );
+    }
+
+    #[test]
+    fn a_childs_computer_never_hands_the_parents_login_to_the_child() {
+        // The parent installed from their admin login; her login's name gives
+        // nothing away → nobody is linked to her by guesswork.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("dad"),
+                None
+            ),
+            None
+        );
+        // …the same when the parent installed from HER session: "dad" must
+        // not become hers just because it isn't the installer.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("minecraftqueen"),
+                None
+            ),
+            None
+        );
+        // Asked at install time: the answer wins.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia",
+                &logins(&["dad", "minecraftqueen"]),
+                Some("dad"),
+                Some("minecraftqueen")
+            )
+            .as_deref(),
+            Some("minecraftqueen")
+        );
+        // An answer that isn't one of the logins counts for nothing.
+        assert_eq!(
+            pick_owner_login(false, "Mia", &logins(&["dad", "x"]), None, Some("root")),
+            None
+        );
+        // By name, whoever installed.
+        assert_eq!(
+            pick_owner_login(
+                false,
+                "Mia Ludwig",
+                &logins(&["dad", "mia", "guest"]),
+                Some("mia"),
+                None
+            )
+            .as_deref(),
+            Some("mia")
+        );
+        // Her only login.
+        assert_eq!(
+            pick_owner_login(false, "Mia", &logins(&["m2011"]), None, None).as_deref(),
+            Some("m2011")
+        );
     }
 
     #[test]

@@ -11,13 +11,16 @@ const UNIT: &str = include_str!("../systemd/openscreentime-agent.service");
 const WATCHDOG_SERVICE: &str = include_str!("../systemd/openscreentime-watchdog.service");
 const WATCHDOG_TIMER: &str = include_str!("../systemd/openscreentime-watchdog.timer");
 const TRAY_UNIT: &str = include_str!("../systemd/openscreentime-tray.service");
-/// App-grid launcher for `ost app` (the on-device window) and its icon. Only
-/// installed on a GUI build — a headless agent has no window to launch.
+/// App-grid launcher for `ost app` (the on-device window) and its icons —
+/// the brand's app icon and its single-colour symbolic version, straight from
+/// brand/. Only installed on a GUI build: a headless agent has no window.
 const DESKTOP_ENTRY: &str = include_str!("../desktop/openscreentime.desktop");
-const DESKTOP_ICON: &str = include_str!("../desktop/openscreentime.svg");
-/// Autostart entry (opens `ost app` on login, so the device is never silent —
-/// GNOME has no usable tray). Distinct from the app-grid launcher above.
-const DESKTOP_AUTOSTART: &str = include_str!("../desktop/openscreentime-autostart.desktop");
+const DESKTOP_ICON: &str = include_str!("../../brand/app-icon.svg");
+const DESKTOP_ICON_SYMBOLIC: &str = include_str!("../../brand/app-icon-symbolic.svg");
+/// The companion's autostart: every desktop login, with or without a systemd
+/// user session (the tray user unit covers the ones with). Tray build only.
+const COMPANION_AUTOSTART: &str = include_str!("../desktop/openscreentime-companion.desktop");
+const COMPANION_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-companion.desktop";
 
 /// The unit names, defined once. They are referenced by the self-updater
 /// (restart after swapping the binary) and by tamper level 3 (masking
@@ -36,8 +39,12 @@ const TRAY_UNIT_PATH: &str = "/etc/systemd/user/openscreentime-tray.service";
 /// anything to open their own window.
 const DESKTOP_ENTRY_PATH: &str = "/usr/share/applications/openscreentime.desktop";
 const DESKTOP_ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/apps/openscreentime.svg";
-/// System-wide autostart (every user's session), so the window opens on login.
-const DESKTOP_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-app.desktop";
+const DESKTOP_ICON_SYMBOLIC_PATH: &str =
+    "/usr/share/icons/hicolor/symbolic/apps/openscreentime-symbolic.svg";
+/// Where older versions opened the window at every login. The companion is
+/// the always-on piece now; the window opens from the launcher, from a
+/// notification, and once on first run — so this entry is removed.
+const RETIRED_APP_AUTOSTART_PATH: &str = "/etc/xdg/autostart/openscreentime-app.desktop";
 
 pub const BIN_TARGET: &str = "/usr/local/bin/openscreentime";
 /// Short alias, symlinked next to the binary. `ost time` is what a person (or
@@ -157,13 +164,17 @@ fn install_desktop_entry(exec: &Exec) {
         tracing::warn!("could not install app launcher {DESKTOP_ENTRY_PATH}: {e}");
         return;
     }
-    if let Err(e) = exec.write_file(DESKTOP_ICON_PATH, DESKTOP_ICON) {
-        tracing::warn!("could not install app icon {DESKTOP_ICON_PATH}: {e}");
+    for (path, body) in [
+        (DESKTOP_ICON_PATH, DESKTOP_ICON),
+        (DESKTOP_ICON_SYMBOLIC_PATH, DESKTOP_ICON_SYMBOLIC),
+    ] {
+        if let Err(e) = exec.write_file(path, body) {
+            tracing::warn!("could not install app icon {path}: {e}");
+        }
     }
-    // Autostart: open the window on login so the device shows something without
-    // the child having to hunt for it in the app grid.
-    if let Err(e) = exec.write_file(DESKTOP_AUTOSTART_PATH, DESKTOP_AUTOSTART) {
-        tracing::warn!("could not install app autostart {DESKTOP_AUTOSTART_PATH}: {e}");
+    // The window is no longer opened at every login (the companion is).
+    if !exec.dry_run() {
+        let _ = std::fs::remove_file(RETIRED_APP_AUTOSTART_PATH);
     }
     // Refresh the desktop database + icon cache so the entry shows up without a
     // relogin. Both are optional tools; a miss just means it appears next login.
@@ -176,10 +187,317 @@ fn install_desktop_entry(exec: &Exec) {
 }
 
 /// Remove the app-grid launcher and icon (called by `uninstall`).
-fn remove_desktop_entry() {
-    let _ = std::fs::remove_file(DESKTOP_ENTRY_PATH);
-    let _ = std::fs::remove_file(DESKTOP_ICON_PATH);
-    let _ = std::fs::remove_file(DESKTOP_AUTOSTART_PATH);
+fn remove_desktop_entry(exec: &Exec) {
+    for path in [
+        DESKTOP_ENTRY_PATH,
+        DESKTOP_ICON_PATH,
+        DESKTOP_ICON_SYMBOLIC_PATH,
+        RETIRED_APP_AUTOSTART_PATH,
+        COMPANION_AUTOSTART_PATH,
+    ] {
+        let _ = exec.remove_file(path);
+    }
+}
+
+/// The graphical lock: its unprivileged user, its unit, its PAM session and
+/// `cage`. GUI build only. Nothing here is fatal: without any of it the agent
+/// draws the text lock instead.
+fn install_lock(exec: &Exec) {
+    ensure_lock_user(exec);
+    for (path, body) in [
+        (crate::lock::UNIT_TEMPLATE_PATH, crate::lock::UNIT_TEMPLATE),
+        (crate::lock::PAM_PATH, crate::lock::PAM_BODY),
+    ] {
+        if let Err(e) = exec.write_file(path, body) {
+            tracing::warn!("could not install {path}: {e} (the text lock will be used)");
+        }
+    }
+    ensure_cage(exec);
+}
+
+/// `ost-lock`: a system account (below uid 1000, so it is never listed as a
+/// person on this computer), no home, no shell, no password.
+fn ensure_lock_user(exec: &Exec) {
+    let name = crate::lock::LOCK_USER;
+    if users::get_user_by_name(name).is_some() {
+        return;
+    }
+    let nologin = ["/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/nologin"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("/bin/false");
+    match exec.run(
+        "useradd",
+        &[
+            "--system",
+            "--user-group",
+            "--no-create-home",
+            "--home-dir",
+            "/nonexistent",
+            "--shell",
+            nologin,
+            "--comment",
+            "OpenScreenTime lock screen",
+            name,
+        ],
+    ) {
+        Ok(_) => tracing::info!("created the {name} system user (the lock screen runs as it)"),
+        Err(e) => tracing::warn!("could not create {name}: {e} (the text lock will be used)"),
+    }
+}
+
+/// Install `cage` (the lock's kiosk compositor) where the distro packages it.
+/// Missing cage is not an error: the lock falls back to text mode.
+fn ensure_cage(exec: &Exec) {
+    if crate::lock::which("cage") {
+        return;
+    }
+    match install_packages(exec, &["cage"]) {
+        Some(true) => tracing::info!("installed cage (the graphical lock's compositor)"),
+        Some(false) => {
+            tracing::warn!("could not install cage; the lock will use its text mode")
+        }
+        None => tracing::info!(
+            "no apt/pacman/dnf here: install `cage` for the graphical lock (the text lock works without it)"
+        ),
+    }
+}
+
+/// The package manager here, and its non-interactive install command.
+fn package_manager(exec: &Exec) -> Option<(&'static str, Vec<&'static str>)> {
+    let managers: [(&str, &[&str]); 4] = [
+        // Waits for a running unattended-upgrade instead of failing on its lock.
+        (
+            "apt-get",
+            &[
+                "-o",
+                "DPkg::Lock::Timeout=180",
+                "install",
+                "-y",
+                "--no-install-recommends",
+            ],
+        ),
+        ("dnf", &["install", "-y"]),
+        ("pacman", &["-S", "--noconfirm", "--needed"]),
+        ("zypper", &["--non-interactive", "install"]),
+    ];
+    managers
+        .into_iter()
+        .find(|(tool, _)| exec.has(tool))
+        .map(|(tool, args)| (tool, args.to_vec()))
+}
+
+/// Install distro packages without asking. `None`: no known package manager.
+fn install_packages(exec: &Exec, pkgs: &[&str]) -> Option<bool> {
+    let (tool, mut args) = package_manager(exec)?;
+    args.extend_from_slice(pkgs);
+    if exec.dry_run() {
+        return Some(exec.run(tool, &args).is_ok());
+    }
+    let run = |args: &[&str]| {
+        std::process::Command::new(tool)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    // A fresh apt box may have no package lists yet.
+    Some(run(&args) || (tool == "apt-get" && run(&["update"]) && run(&args)))
+}
+
+fn installed_marker() -> String {
+    crate::paths::state("installed-packages")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The packages `install-service` installed here (not ones the computer
+/// already had).
+pub fn installed_by_us(exec: &Exec) -> Vec<String> {
+    exec.read_file(&installed_marker())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The enforcement packages this computer lacks. The dnsmasq *service*
+/// serves the website rules — not merely the program, which a Debian or
+/// Ubuntu desktop carries in NetworkManager's `dnsmasq-base` with no service
+/// (so the installer used to install nothing there, and nothing filtered);
+/// nft loads the firewall. A stock desktop has neither — without them a
+/// computer is screen-time-only, which it reports as degraded rather than
+/// pretending. The package names are the same for apt (Debian, Ubuntu),
+/// dnf (Fedora), pacman (Arch) and zypper (openSUSE).
+fn missing_enforcement_deps(exec: &Exec) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !crate::enforce::dns::resolver_installed(exec) {
+        missing.push("dnsmasq");
+    }
+    if !exec.has("nft") {
+        missing.push("nftables");
+    }
+    missing
+}
+
+/// Make the dnsmasq that is here read the agent's rules: on a distro whose
+/// dnsmasq reads no config directory (Arch), name ours in dnsmasq.conf. The
+/// agent's sandbox can't; this runs as root outside it.
+fn wire_resolver(exec: &Exec) {
+    if !crate::enforce::dns::resolver_installed(exec) {
+        return;
+    }
+    if let Err(e) = crate::enforce::dns::wire_main_conf(exec) {
+        tracing::warn!("could not make dnsmasq read the website rules: {e}");
+    }
+}
+
+/// Where dnsmasq is here to serve the website rules, /etc/resolv.conf has to
+/// be a file the agent can pin — not systemd-resolved's link, which the
+/// agent can't replace from inside its sandbox and whose file resolved swaps
+/// out on every network change (see `dns::own_resolv_conf`). Returns whether
+/// it changed anything.
+fn own_resolv_conf(exec: &Exec) -> bool {
+    if !crate::enforce::dns::resolver_installed(exec) {
+        return false;
+    }
+    crate::enforce::dns::own_resolv_conf(exec).unwrap_or_else(|e| {
+        tracing::warn!("could not make /etc/resolv.conf a file the filter can pin: {e:#}");
+        false
+    })
+}
+
+/// Install what the network rules need. Returns whether anything was
+/// installed. Never fatal: the agent reports what is still missing.
+fn ensure_enforcement_deps(exec: &Exec) -> bool {
+    let missing = missing_enforcement_deps(exec);
+    if missing.is_empty() {
+        wire_resolver(exec);
+        return false;
+    }
+    if missing.contains(&"dnsmasq") {
+        // The package starts dnsmasq at once; give it a config that can start
+        // next to systemd-resolved and reads the agent's rules.
+        if let Err(e) = crate::enforce::dns::preseed(exec) {
+            tracing::warn!("could not prepare dnsmasq's config: {e}");
+        }
+    }
+    let list = missing.join(" and ");
+    match install_packages(exec, &missing) {
+        Some(true) => {
+            // dnf and pacman leave a new service disabled (and Arch's
+            // dnsmasq reads no directory until told to).
+            if missing.contains(&"dnsmasq") {
+                let _ = exec.run("systemctl", &["enable", "dnsmasq"]);
+            }
+            wire_resolver(exec);
+            // Remembered, so a retired computer switches off what only we
+            // brought (crate::retire) instead of leaving a resolver running.
+            let mut ours = installed_by_us(exec);
+            ours.extend(missing.iter().map(|p| p.to_string()));
+            ours.sort();
+            ours.dedup();
+            let _ = exec.write_file(&installed_marker(), &(ours.join("\n") + "\n"));
+            println!("Installed {list} (for this computer's website and firewall rules).");
+            true
+        }
+        failed => {
+            let why = if failed.is_none() {
+                "no apt, dnf, pacman or zypper here"
+            } else {
+                "the package install failed"
+            };
+            println!(
+                "Could not install {list} ({why}). Screen time works; websites and the \
+                 firewall are not filtered on this computer until {list} are installed — \
+                 the console says so."
+            );
+            false
+        }
+    }
+}
+
+/// Logins with a desktop open right now (people, not the greeter).
+fn graphical_users(exec: &Exec) -> Vec<String> {
+    session_users(exec, true)
+}
+
+/// People signed in right now (uid 1000 and up, not the greeter) — with a
+/// desktop only, or in any session.
+fn session_users(exec: &Exec, graphical_only: bool) -> Vec<String> {
+    let mut users = Vec::new();
+    for line in exec
+        .probe("loginctl", &["list-sessions", "--no-legend"])
+        .lines()
+    {
+        let mut cols = line.split_whitespace();
+        let (Some(id), Some(uid), Some(user)) = (cols.next(), cols.next(), cols.next()) else {
+            continue;
+        };
+        let person = uid.parse::<u32>().is_ok_and(|u| (1000..65534).contains(&u));
+        if !person || users.iter().any(|u| u == user) {
+            continue;
+        }
+        let kind = || exec.probe("loginctl", &["show-session", id, "-p", "Type", "--value"]);
+        if !graphical_only || matches!(kind().trim(), "wayland" | "x11") {
+            users.push(user.to_string());
+        }
+    }
+    users
+}
+
+/// What the companion (and the app window) run as, on a command line:
+/// the installed binary or its `ost` alias, then `tray` or `app`. Matched
+/// against the whole command line (`pkill -f`).
+const COMPANION_COMMAND: &str = "^(/usr/local/bin/)?(openscreentime|ost) (tray|app)( |$)";
+
+/// Stop the companion and any app window for everyone signed in: their user
+/// unit where a systemd user manager runs it, and whatever else started one
+/// — a desktop's autostart (GNOME runs it outside that unit), the agent's
+/// start in a running session, a window someone opened. One left running
+/// after its files are gone keeps showing what it last showed.
+fn stop_companions(exec: &Exec) {
+    for user in session_users(exec, false) {
+        let _ = exec.run(
+            "systemctl",
+            &["--user", "-M", &format!("{user}@"), "stop", TRAY_UNIT_NAME],
+        );
+    }
+    // No match is pkill's exit 1: nothing to stop.
+    let _ = exec.run("pkill", &["-TERM", "-f", COMPANION_COMMAND]);
+}
+
+/// Start the companion (warnings, "You're back") for everyone already signed
+/// in to a desktop. Its autostart only fires at the next login, so a computer
+/// set up while a child is using it would otherwise give no warning before
+/// the first stop. The companion keeps a single instance, so a second start
+/// is harmless.
+fn start_companions(exec: &Exec) {
+    for user in graphical_users(exec) {
+        let machine = format!("{user}@");
+        let _ = exec.run("systemctl", &["--user", "-M", &machine, "daemon-reload"]);
+        if exec
+            .run(
+                "systemctl",
+                &["--user", "-M", &machine, "start", TRAY_UNIT_NAME],
+            )
+            .is_ok()
+        {
+            tracing::info!("started the companion for {user}");
+            continue;
+        }
+        // No systemd user manager to ask: start it in their session directly.
+        if exec.dry_run() {
+            continue;
+        }
+        match crate::logincode::spawn_in_session(&user, &["tray"]) {
+            Ok(()) => tracing::info!("started the companion in {user}'s session"),
+            Err(e) => tracing::warn!("could not start the companion for {user}: {e}"),
+        }
+    }
 }
 
 pub fn install_parent_sudo(exec: &Exec) -> Result<()> {
@@ -284,9 +602,152 @@ fn link_aliases(exec: &Exec) {
     }
 }
 
+/// The unit files whose installed copies must follow the binary.
+const MANAGED_UNITS: [(&str, &str); 4] = [
+    (UNIT_PATH, UNIT),
+    (WATCHDOG_SVC_PATH, WATCHDOG_SERVICE),
+    (WATCHDOG_TIMER_PATH, WATCHDOG_TIMER),
+    (TRAY_UNIT_PATH, TRAY_UNIT),
+];
+
+/// Installed units that differ from the ones this build carries. A unit that
+/// was never installed here (a manual `run`, no `install-service`) is left
+/// alone — this only ever refreshes, it never installs.
+fn stale_units() -> Vec<(&'static str, &'static str)> {
+    MANAGED_UNITS
+        .into_iter()
+        .filter(|(path, body)| matches!(std::fs::read_to_string(path), Ok(cur) if cur != *body))
+        .collect()
+}
+
+/// What a desktop build needs beyond the units `install-service` wrote before
+/// the lock existed: the lock's user, unit and PAM session (GUI build) and the
+/// companion's autostart (tray build). A self-updated device gets them here,
+/// so the new lock and the warnings arrive with the update — no reinstall.
+/// Only on a device `install-service` set up.
+fn desktop_setup_missing() -> bool {
+    if !std::path::Path::new(UNIT_PATH).exists() {
+        return false;
+    }
+    let differs =
+        |path: &str, body: &str| std::fs::read_to_string(path).ok().as_deref() != Some(body);
+    let lock = cfg!(feature = "gui")
+        && (users::get_user_by_name(crate::lock::LOCK_USER).is_none()
+            || differs(crate::lock::UNIT_TEMPLATE_PATH, crate::lock::UNIT_TEMPLATE)
+            || differs(crate::lock::PAM_PATH, crate::lock::PAM_BODY));
+    let companion =
+        cfg!(feature = "tray") && differs(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART);
+    // The launcher and its icons as this build carries them (and no window
+    // opening at every login) — on a device that has the launcher at all.
+    let app = cfg!(feature = "gui")
+        && std::path::Path::new(DESKTOP_ENTRY_PATH).exists()
+        && (differs(DESKTOP_ENTRY_PATH, DESKTOP_ENTRY)
+            || differs(DESKTOP_ICON_PATH, DESKTOP_ICON)
+            || differs(DESKTOP_ICON_SYMBOLIC_PATH, DESKTOP_ICON_SYMBOLIC)
+            || std::path::Path::new(RETIRED_APP_AUTOSTART_PATH).exists());
+    lock || companion || app
+}
+
+/// `ost __refresh-units` (hidden): rewrite the stale units, set up what the
+/// desktop build is missing, reload systemd. Runs in a transient unit (see
+/// [`refresh_units_if_stale`]), outside the agent's sandbox.
+pub fn refresh_units() -> Result<()> {
+    let stale = stale_units();
+    for (path, body) in &stale {
+        std::fs::write(path, body).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+    }
+    let exec = Exec::new(AgentCtx::new(false, false, 1));
+    // A computer installed before the installer brought dnsmasq/nftables.
+    // Restart the agent below only if that actually changed something — a
+    // package manager that "succeeds" without providing the program must
+    // not become a restart loop.
+    let missing_before = missing_enforcement_deps(&exec).len();
+    let unwired_before = crate::enforce::dns::needs_wiring(&exec);
+    let installed = ensure_enforcement_deps(&exec);
+    let deps = (installed && missing_enforcement_deps(&exec).len() < missing_before)
+        || (unwired_before && !crate::enforce::dns::needs_wiring(&exec));
+    let deps = own_resolv_conf(&exec) || deps;
+    let companion_new = cfg!(feature = "tray")
+        && std::fs::read_to_string(COMPANION_AUTOSTART_PATH)
+            .ok()
+            .as_deref()
+            != Some(COMPANION_AUTOSTART);
+    if desktop_setup_missing() {
+        if cfg!(feature = "gui") {
+            install_lock(&exec);
+            if std::path::Path::new(DESKTOP_ENTRY_PATH).exists() {
+                install_desktop_entry(&exec);
+            }
+        }
+        if cfg!(feature = "tray") {
+            if let Err(e) = exec.write_file(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART) {
+                tracing::warn!("could not install {COMPANION_AUTOSTART_PATH}: {e}");
+            }
+        }
+        println!("set up the lock screen, the launcher and the companion for this desktop build");
+    }
+    if companion_new {
+        start_companions(&exec);
+    }
+    if !stale.is_empty() {
+        let ok = std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        anyhow::ensure!(ok, "systemctl daemon-reload failed");
+        println!("refreshed {} systemd unit(s)", stale.len());
+    }
+    if deps {
+        // The agent's sandbox only sees /etc/dnsmasq.d if it existed when the
+        // agent started: start it again, now that it does.
+        let _ = exec.run("systemctl", &["restart", AGENT_UNIT]);
+    }
+    Ok(())
+}
+
+/// A self-update replaces the binary, but the units were written once by
+/// `install-service` — so unit fixes (like the watchdog that rolls a bad
+/// update back) would never reach an installed fleet. A freshly started agent
+/// calls this: if the installed units differ from the ones it carries, it
+/// rewrites them through `systemd-run`, because its own sandbox
+/// (ProtectSystem=strict) cannot write /etc/systemd. Takes effect at the next
+/// restart; nothing is restarted here.
+pub fn refresh_units_if_stale(exec: &Exec) {
+    if exec.dry_run()
+        || !crate::config::is_root()
+        || (stale_units().is_empty()
+            && !desktop_setup_missing()
+            && missing_enforcement_deps(exec).is_empty()
+            && !crate::enforce::dns::needs_wiring(exec)
+            && !crate::enforce::dns::resolv_conf_is_a_link(exec))
+    {
+        return;
+    }
+    match exec.run(
+        "systemd-run",
+        &[
+            "--quiet",
+            "--collect",
+            "--unit=openscreentime-refresh-units",
+            BIN_TARGET,
+            "__refresh-units",
+        ],
+    ) {
+        Ok(_) => tracing::info!(
+            "setting up what this build needs (its units, the desktop pieces, dnsmasq/nftables)"
+        ),
+        Err(e) => tracing::warn!("could not refresh the systemd units: {e}"),
+    }
+}
+
 pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     ctx.require_root_for_enforcement()?;
-    let exec = Exec::new(ctx.clone());
+    install_service_with(&Exec::new(ctx))
+}
+
+fn install_service_with(exec: &Exec) -> Result<()> {
+    let exec = exec.clone();
 
     // Before anything else: never leave the old agent running alongside the new
     // one, and never let an upgrade start from an empty usage ledger.
@@ -304,6 +765,12 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     }
     link_aliases(&exec);
 
+    // What the website and firewall rules need, before the agent (re)starts:
+    // its sandbox sees /etc/dnsmasq.d only if it exists at start, and can
+    // pin /etc/resolv.conf only if it is a file.
+    ensure_enforcement_deps(&exec);
+    own_resolv_conf(&exec);
+
     exec.write_file(UNIT_PATH, UNIT)?;
     exec.write_file(WATCHDOG_SVC_PATH, WATCHDOG_SERVICE)?;
     exec.write_file(WATCHDOG_TIMER_PATH, WATCHDOG_TIMER)?;
@@ -320,6 +787,14 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     // headless agent's `app` subcommand just bails.
     if cfg!(feature = "gui") {
         install_desktop_entry(&exec);
+        install_lock(&exec);
+    }
+    // The companion (warnings, "You're back") starts on every desktop login,
+    // with or without a systemd user session.
+    if cfg!(feature = "tray") {
+        if let Err(e) = exec.write_file(COMPANION_AUTOSTART_PATH, COMPANION_AUTOSTART) {
+            tracing::warn!("could not install {COMPANION_AUTOSTART_PATH}: {e}");
+        }
     }
     tamper::install_polkit(&exec, 1)?;
     // sudo on this machine asks for the parent code (CONTRACT-0.4 §8). A
@@ -329,7 +804,12 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
     }
 
     exec.run("systemctl", &["daemon-reload"])?;
-    exec.run("systemctl", &["enable", "--now", AGENT_UNIT])?;
+    exec.run("systemctl", &["enable", AGENT_UNIT])?;
+    // `restart`, not `enable --now`: re-running the one-liner (a new enroll
+    // token, a computer moved to another person) has to reach the agent that
+    // is already running — `--now` leaves a running unit alone, still holding
+    // the old, removed device's token. restart also starts a stopped one.
+    exec.run("systemctl", &["restart", AGENT_UNIT])?;
     exec.run("systemctl", &["enable", "--now", WATCHDOG_TIMER_UNIT])?;
     // `--global` writes the enable symlink into /etc/systemd/user/…wants, so it
     // applies to every user session without one being active during install.
@@ -340,12 +820,43 @@ pub fn install_service(ctx: Arc<AgentCtx>) -> Result<()> {
         } else {
             tracing::info!("tray unit enabled globally (starts in each graphical session)");
         }
+        // …and now, for whoever is already signed in.
+        start_companions(&exec);
     }
 
     tracing::info!("hardened unit + watchdog + polkit installed and enabled");
     println!("Installed openscreentime-agent.service (hardened) + watchdog timer.");
     println!("Try `ost time` to see today's screen time.");
     Ok(())
+}
+
+/// What `install-service` put on this computer besides the binary: the
+/// units (the companion stopped for whoever is signed in), the lock's unit,
+/// user and PAM session, the launcher and autostart, the unlock-code sudo.
+/// The agent's own units are stopped by the caller first.
+pub fn remove_installed(exec: &Exec) {
+    stop_companions(exec);
+    let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
+    let _ = exec.run(
+        "systemctl",
+        &["stop", &crate::lock::unit_name(crate::lock::LOCK_VT)],
+    );
+    for p in [
+        UNIT_PATH,
+        WATCHDOG_SVC_PATH,
+        WATCHDOG_TIMER_PATH,
+        TRAY_UNIT_PATH,
+        crate::lock::UNIT_TEMPLATE_PATH,
+        crate::lock::PAM_PATH,
+    ] {
+        let _ = exec.remove_file(p);
+    }
+    remove_desktop_entry(exec);
+    if users::get_user_by_name(crate::lock::LOCK_USER).is_some() {
+        let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
+    }
+    remove_parent_sudo(exec);
+    let _ = exec.run("systemctl", &["daemon-reload"]);
 }
 
 /// `ost uninstall`: stop and remove the units, the sudo/PAM hook and the group.
@@ -356,20 +867,7 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
     let exec = Exec::new(ctx);
     let _ = exec.run("systemctl", &["disable", "--now", WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["disable", "--now", AGENT_UNIT]);
-    let _ = exec.run("systemctl", &["--global", "disable", TRAY_UNIT_NAME]);
-    if !exec.dry_run() {
-        for p in [
-            UNIT_PATH,
-            WATCHDOG_SVC_PATH,
-            WATCHDOG_TIMER_PATH,
-            TRAY_UNIT_PATH,
-        ] {
-            let _ = std::fs::remove_file(p);
-        }
-        remove_desktop_entry();
-    }
-    remove_parent_sudo(&exec);
-    let _ = exec.run("systemctl", &["daemon-reload"]);
+    remove_installed(&exec);
     println!("Removed the OpenScreenTime units and the parent-code sudo hook.");
     println!(
         "Enrollment config ({}) and state were kept.",
@@ -476,6 +974,108 @@ mod tests {
         let p = pam_service_body();
         assert!(p.contains("auth     required   pam_exec.so expose_authtok quiet /usr/local/bin/openscreentime pam-auth"));
         assert!(p.contains("account  required   pam_permit.so"));
+    }
+
+    fn pos(log: &[String], entry: &str) -> usize {
+        log.iter()
+            .position(|l| l == entry)
+            .unwrap_or_else(|| panic!("{entry:?} not in {log:#?}"))
+    }
+
+    /// Re-running the one-liner on a computer whose agent is running must
+    /// restart it (the new token), install what enforcement needs first, and
+    /// start the companion for whoever is signed in right now.
+    #[test]
+    fn install_restarts_the_agent_after_bringing_its_tools() {
+        let exec = Exec::simulated(
+            &["dnsmasq", "nft", "dnf", "pacman", "zypper"],
+            &[
+                (
+                    "loginctl list-sessions --no-legend",
+                    "c1 120 Debian-gdm seat0 tty1\n2 1000 mia seat0 tty2\n3 1001 philip - pts/0\n",
+                ),
+                ("loginctl show-session c1 -p Type --value", "wayland\n"),
+                ("loginctl show-session 2 -p Type --value", "wayland\n"),
+                ("loginctl show-session 3 -p Type --value", "tty\n"),
+            ],
+        );
+        install_service_with(&exec).unwrap();
+        let log = exec.log();
+        let restart = pos(&log, "run systemctl restart openscreentime-agent.service");
+        assert!(!log
+            .iter()
+            .any(|l| l.contains("--now openscreentime-agent.service")));
+        let apt = pos(
+            &log,
+            "run apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends dnsmasq nftables",
+        );
+        // dnsmasq's first start finds a config it can start with.
+        assert!(pos(&log, "write /etc/dnsmasq.d/00-openscreentime.conf") < apt);
+        assert!(apt < restart);
+        // What it brought is remembered (a retired computer switches it off).
+        pos(&log, "write /var/lib/openscreentime/installed-packages");
+        if cfg!(feature = "tray") {
+            // Only mia has a desktop open (the greeter and an ssh login don't).
+            let started = pos(
+                &log,
+                "run systemctl --user -M mia@ start openscreentime-tray.service",
+            );
+            assert!(started > restart);
+            assert!(!log
+                .iter()
+                .any(|l| l.contains("Debian-gdm@") || l.contains("philip@")));
+        }
+    }
+
+    #[test]
+    fn nothing_is_installed_when_the_tools_are_there() {
+        let exec = Exec::simulated(&[], &[]);
+        assert!(missing_enforcement_deps(&exec).is_empty());
+        assert!(!ensure_enforcement_deps(&exec));
+        assert!(exec.log().is_empty());
+        let bare = Exec::simulated(&["nft", "apt-get", "dnf", "pacman", "zypper"], &[]);
+        assert_eq!(missing_enforcement_deps(&bare), vec!["nftables"]);
+        assert!(
+            !ensure_enforcement_deps(&bare),
+            "no package manager: nothing installed"
+        );
+    }
+
+    /// Acceptance round 2: Debian 12 GNOME has /usr/sbin/dnsmasq from
+    /// `dnsmasq-base` (a NetworkManager dependency) and no dnsmasq service.
+    /// The installer saw the program and installed nothing — no website
+    /// rules, no focus hours, and re-running it didn't help. It installs
+    /// the service's package, after preparing a config that starts next to
+    /// systemd-resolved, and enables it.
+    #[test]
+    fn nm_s_dnsmasq_base_is_not_the_resolver_the_rules_need() {
+        let exec = Exec::simulated(
+            &["dnf", "pacman", "zypper"],
+            &[(
+                "systemctl show -p LoadState --value dnsmasq.service",
+                "not-found\n",
+            )],
+        );
+        assert_eq!(missing_enforcement_deps(&exec), vec!["dnsmasq"]);
+        assert!(ensure_enforcement_deps(&exec));
+        let log = exec.log();
+        let apt = pos(
+            &log,
+            "run apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends dnsmasq",
+        );
+        assert!(pos(&log, "write /etc/dnsmasq.d/00-openscreentime.conf") < apt);
+        assert!(apt < pos(&log, "run systemctl enable dnsmasq"));
+        // Arch's dnsmasq reads no directory: dnsmasq.conf names ours.
+        let arch = Exec::simulated(
+            &[],
+            &[(
+                "read /etc/dnsmasq.conf",
+                "# Configuration file for dnsmasq.\n#conf-dir=/etc/dnsmasq.d/,*.conf\n",
+            )],
+        );
+        assert!(crate::enforce::dns::needs_wiring(&arch));
+        assert!(!ensure_enforcement_deps(&arch), "nothing to install");
+        assert_eq!(arch.log(), ["write /etc/dnsmasq.conf"]);
     }
 
     #[test]

@@ -166,6 +166,74 @@ pub async fn create_request(
 // Admin side
 // ---------------------------------------------------------------------------
 
+/// Add granted minutes to a login's ledger row for `day` (the device-local
+/// day the agent will credit them to).
+async fn credit_ledger(
+    db: &sqlx::PgPool,
+    device_user_id: Uuid,
+    day: chrono::NaiveDate,
+    minutes: i32,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (device_user_id, day)
+         DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
+                       + EXCLUDED.earned_seconds",
+    )
+    .bind(device_user_id)
+    .bind(day)
+    .bind(minutes * 60)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Giving someone time answers what they asked: every request of theirs still
+/// pending — on any of their logins — is settled as approved (the grant that
+/// did it credits the time once; the rows only stop waiting). Without this an
+/// ask stayed "pending" on the console after the parent had pressed Give 15,
+/// and the child's window kept saying "waiting for a parent". The agent that
+/// gets the `credit_time` tells the child. `except`: a row already decided by
+/// the caller. Returns the ids settled here.
+async fn settle_pending_asks(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    device_user_id: Uuid,
+    except: Option<Uuid>,
+    by: &Value,
+) -> AppResult<Vec<Uuid>> {
+    let settled: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "UPDATE earn_requests er SET status = 'approved', decided_at = now()
+          WHERE er.tenant_id = $1 AND er.status = 'pending'
+            AND er.id IS DISTINCT FROM $3
+            AND er.device_user_id IN (
+                SELECT du.id FROM device_users du
+                 WHERE du.id = $2
+                    OR (du.account_id IS NOT NULL
+                        AND du.account_id = (SELECT account_id FROM device_users WHERE id = $2)))
+      RETURNING er.id, er.device_id, er.device_user_id",
+    )
+    .bind(tenant_id)
+    .bind(device_user_id)
+    .bind(except)
+    .fetch_all(db)
+    .await?;
+    for (id, device_id, du) in &settled {
+        events::insert(
+            db,
+            tenant_id,
+            Some(*device_id),
+            Some(*du),
+            "earn_request",
+            "info",
+            json!({ "action": "approved", "request_id": id, "answered_by_grant": true, "by": by }),
+        )
+        .await?;
+    }
+    Ok(settled.into_iter().map(|r| r.0).collect())
+}
+
 #[derive(Deserialize)]
 pub struct CreditTimeReq {
     pub minutes: i32,
@@ -201,24 +269,18 @@ pub async fn credit_time(
     let (device_id, os_username) =
         owner.ok_or_else(|| AppError::NotFound("device user not found".into()))?;
 
-    // Credit the ledger for today (upsert on (device_user_id, day)).
-    sqlx::query(
-        "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
-         VALUES ($1, CURRENT_DATE, $2)
-         ON CONFLICT (device_user_id, day)
-         DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
-                       + EXCLUDED.earned_seconds",
-    )
-    .bind(device_user_id)
-    .bind(req.minutes * 60)
-    .execute(&st.db)
-    .await?;
+    // Credit the ledger for the device's own today (upsert on
+    // (device_user_id, day)); the command carries that day so a device that
+    // only hears about it tomorrow doesn't credit the wrong day.
+    let day = crate::ledger::device_local_day(&st.db, device_id).await?;
+    credit_ledger(&st.db, device_user_id, day, req.minutes).await?;
 
     enqueue_command(
         &st,
         device_id,
         "credit_time",
-        json!({ "os_username": os_username, "minutes": req.minutes, "request_id": null }),
+        json!({ "os_username": os_username, "minutes": req.minutes, "request_id": null,
+                "day": day }),
     )
     .await?;
 
@@ -232,8 +294,18 @@ pub async fn credit_time(
         json!({ "action": "granted", "minutes": req.minutes, "by": admin.admin_id }),
     )
     .await?;
+    let answered = settle_pending_asks(
+        &st.db,
+        admin.tenant_id,
+        device_user_id,
+        None,
+        &json!({ "admin_id": admin.admin_id }),
+    )
+    .await?;
 
-    Ok(Json(json!({ "ok": true, "minutes": req.minutes })))
+    Ok(Json(
+        json!({ "ok": true, "minutes": req.minutes, "answered": answered }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -338,18 +410,9 @@ pub async fn decide(
     };
 
     if approve {
-        // Credit the ledger for today (upsert on (device_user_id, day)).
-        sqlx::query(
-            "INSERT INTO screen_time_ledger (device_user_id, day, earned_seconds)
-             VALUES ($1, CURRENT_DATE, $2)
-             ON CONFLICT (device_user_id, day)
-             DO UPDATE SET earned_seconds = screen_time_ledger.earned_seconds
-                           + EXCLUDED.earned_seconds",
-        )
-        .bind(device_user_id)
-        .bind(minutes * 60)
-        .execute(&st.db)
-        .await?;
+        // Credit the ledger for the device's own today (see `credit_time`).
+        let day = crate::ledger::device_local_day(&st.db, device_id).await?;
+        credit_ledger(&st.db, device_user_id, day, minutes).await?;
 
         let os_username: String =
             sqlx::query_scalar("SELECT os_username FROM device_users WHERE id = $1")
@@ -360,9 +423,12 @@ pub async fn decide(
             &st,
             device_id,
             "credit_time",
-            json!({ "os_username": os_username, "minutes": minutes, "request_id": id }),
+            json!({ "os_username": os_username, "minutes": minutes, "request_id": id,
+                    "day": day }),
         )
         .await?;
+        // One answer settles every ask they had waiting.
+        settle_pending_asks(&st.db, tenant_id, device_user_id, Some(id), &by).await?;
     } else {
         // Mirror of the approve path: tell the agent about the denial so it
         // can clear its once-per-day dedupe (the teen may re-ask) and replace

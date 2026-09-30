@@ -6,8 +6,8 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 
 // Registers the shared module mocks; must be imported before the store.
 import { apiCalls, apiImpl, resetApiMock } from "../test/mockApi";
-import { useFamily, familyChanged, resetFamily, minutesLeft, minutesTotal } from "./family";
-import type { FamilyChild, FamilyResponse } from "../types";
+import { useFamily, familyChanged, resetFamily, minutesLeft, minutesTotal, pollDelay } from "./family";
+import type { Device, FamilyChild, FamilyResponse } from "../types";
 
 function child(over: Partial<FamilyChild> = {}): FamilyChild {
   return {
@@ -62,6 +62,48 @@ describe("minutes maths", () => {
     expect(minutesTotal(child({ earned_minutes: 15 }))).toBe(75);
     // Over budget clamps at zero rather than showing "-20 min left".
     expect(minutesLeft(child({ used_minutes: 80 }))).toBe(0);
+  });
+
+  test("the server's left_minutes wins — it is the number the device uses", () => {
+    // 29:30 used of 60: the device (seconds, rounded up) says 31, not 30.
+    expect(minutesLeft(child({ used_minutes: 29, left_minutes: 31 }))).toBe(31);
+    expect(minutesLeft(child({ left_minutes: -3 }))).toBe(0);
+    // No limit stays no limit, whatever else is sent.
+    expect(minutesLeft(child({ limit_minutes: null, left_minutes: null }))).toBeNull();
+  });
+});
+
+// Acceptance round 2: after each minute ticked, the console was up to 30 s
+// behind the computer — and said "1 min left" for ~20 s after she was
+// locked. The computer reports every 30 s; the console at least doesn't add
+// 20 s of its own while someone is about to stop.
+describe("how often the wall refreshes", () => {
+  const now = Date.parse("2026-09-25T03:20:00Z");
+  const stopsIn = (mins: number): FamilyChild =>
+    child({
+      rules: {
+        allowed: true,
+        reason: "limit",
+        minutes_left: mins,
+        stop_at: new Date(now + mins * 60_000).toISOString(),
+        resume_at: null,
+      },
+    });
+
+  test("every 20 s on a calm day", () => {
+    expect(pollDelay({ devices: [], children: [child(), stopsIn(30)] }, now)).toBe(20_000);
+  });
+
+  test("every 5 s while someone's screen stops within five minutes", () => {
+    expect(pollDelay({ devices: [], children: [child(), stopsIn(4)] }, now)).toBe(5_000);
+    expect(pollDelay({ devices: [], children: [stopsIn(1)] }, now)).toBe(5_000);
+    // …not for someone already paused.
+    expect(pollDelay({ devices: [], children: [{ ...stopsIn(1), locked: true }] }, now)).toBe(20_000);
+  });
+
+  test("a pause on its way still wins", () => {
+    const pending = { id: "d", lock_pending: true } as unknown as Device;
+    expect(pollDelay({ devices: [pending], children: [stopsIn(1)] }, now)).toBe(4_000);
   });
 });
 

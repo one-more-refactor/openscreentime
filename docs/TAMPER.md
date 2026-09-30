@@ -1,4 +1,4 @@
-# Tamper Resistance & Remote Access
+# Tamper resistance
 
 ## Threat model & honesty
 
@@ -17,8 +17,14 @@ system to the person being managed.
 
 ## Levels
 
-Configured per device via `devices.tamper_level`. Default **1**. **3** is opt-in per device,
-toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can force a floor.
+Per computer, `devices.tamper_level`: **1** (the default) or **3** (opt-in). There is
+no level 2. The console has no control for it; it is set through the API
+(`PATCH /api/devices/:id { tamper_level }`), which sends `set_tamper_level`.
+Level 3 needs `ost --tamper-max` on the computer itself, which raises its ceiling
+to 3. Without the flag a request for 3 — from the server or `agent.toml` — is
+capped at 1 and said so: the command's ack carries `capped: true` with the level
+asked for, and a `tamper_level_capped` event reaches the console
+(`client/src/tamper.rs` `clamp_tamper_level`).
 
 ### Level 1 — Strong deterrence + alerting (DEFAULT)
 
@@ -30,23 +36,28 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 - **Watchdog:** a separate `openscreentime-watchdog.timer` runs every 30 s and restarts the agent if
   its heartbeat file (`/run/openscreentime/heartbeat`, touched every enforcement tick) is missing or
   older than 90 s. Killing the agent process buys at most ~30 s.
-- **Power-control masking:** a polkit rule (`/etc/polkit-1/rules.d/49-openscreentime.rules`) denies
-  `org.freedesktop.login1` power-off / reboot / halt / suspend / hibernate / suspend-then-hibernate
-  (and their `-multiple-sessions` variants) to everyone except root and the `ost-admin`
-  recovery account. The physical power key and Magic SysRq are kernel/firmware levers a polkit
-  rule cannot reach — see "What OpenScreenTime does not do".
+- **Power-off, reboot and suspend are never blocked.** The day's time lives in the ledger on
+  disk and who is stopped in `freeze_state.json`, so a restart or a suspend comes back to the
+  same day and the same stop — it isn't a way around one. (Earlier builds denied them to every
+  non-root user, parents included, and kept laptops from sleeping; the agent removes that
+  polkit rule on its next start.)
 - **DNS pinning:** `/etc/resolv.conf` points at the local filtering resolver; every 10 s tick
-  re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event.
+  re-checks it and re-pins on drift, emitting a `resolv_conf_drift` (warn) tamper event — once
+  per incident, and only while that resolver is running. Pinning to a resolver that isn't there
+  takes the computer offline, so without one the agent never pins, takes an earlier pin off
+  and gives the computer its own DNS back (reported as `enforcement_degraded`, not tamper).
 - **Firewall self-repair (fail-closed):** if the openscreentime nftables table disappears (e.g.
   `nft flush ruleset`), the tick emits an `nft_flush` (critical) event **and rebuilds the
   table from the effective policy** — a flush buys seconds of open network, not a session.
 - **NetworkManager guard:** each tick polls `nmcli` for overall state; if NetworkManager
-  reports disconnected, the agent runs `nmcli networking on` (best-effort) and emits an
-  `nm_disconnect` (warn) event. This is a 10-second poll, not a D-Bus subscription — see
+  reports disconnected **and there is no default route** (NetworkManager says "disconnected"
+  on a computer whose network it doesn't run), the agent runs `nmcli networking on`
+  (best-effort) and emits an `nm_disconnect` (warn) event, once per incident. This is a 10-second poll, not a D-Bus subscription — see
   "What OpenScreenTime does not do".
-- **Clock-skew detection:** the enforcement tick runs on a monotonic timer, so wall-clock is
-  expected to advance ~10 s per tick. A jump of more than an hour (the classic "set the clock
-  back to dodge bedtime" move) emits a `clock_skew` (warn) event.
+- **The clock can't be used against it:** every decision reads the trusted clock (NTP, else
+  the server's time, else boottime from the last anchor — `client/src/clock.rs`), so setting the
+  clock back or forward changes nothing. A wall-clock jump of more than an hour is still
+  reported as a `clock_skew` (warn) event.
 - **Boot persistence:** the unit is `WantedBy=multi-user.target` with
   `After/Wants=network-online.target`; policy is pulled and re-applied at startup.
 - **Config at rest:** `/etc/openscreentime/agent.toml` (device token inside) is root-owned and
@@ -61,17 +72,28 @@ toggled by the `set_tamper_level` command; the agent's `--tamper-max` flag can f
 
 Everything in level 1 **plus**:
 
-- The polkit rule additionally denies `stop` / `disable` / `mask` of
-  `openscreentime-agent.service` **and** `openscreentime-watchdog.service` / `openscreentime-watchdog.timer`
-  (the recovery net) via `systemctl` for everyone except root and `ost-admin`.
+- A polkit rule (`/etc/polkit-1/rules.d/49-openscreentime.rules`, present at level 3 only) denies
+  `stop` / `disable` / `mask` of `openscreentime-agent.service` **and**
+  `openscreentime-watchdog.service` / `openscreentime-watchdog.timer` (the recovery net) via
+  `systemctl` for everyone except root and `ost-admin`.
 - A logind drop-in (`/etc/systemd/logind.conf.d/50-openscreentime.conf`) sets `ReserveVT=0` and
   `KillUserProcesses=yes`, cutting off the spare-VT escape and killing leftover user
   processes at logout. `ost-admin` can revert it.
 - A `boot_guidance` advisory event tells the admin to set a GRUB password, a BIOS/UEFI admin
   password, and disable USB boot. **These are recommendations** — bootloader and firmware are
   physical mitigations software can only advise on, never enforce.
-- **Danger:** level 3 can lock the admin out of their own machine too. The UI requires an
-  explicit confirm; keep the `ost-admin` account working before enabling.
+- **Danger:** level 3 can lock you out of your own machine too. Keep a root shell or an
+  `ost-admin` account working before enabling it.
+
+## Verify, then stop
+
+One signal is enough to put things back; only one is enough to stop every screen. The agent's
+own nftables table deleted again on consecutive ticks (with a 120 s boot grace) means something
+with root is removing it faster than it can be rebuilt. Then the agent stops every screen —
+"Stopped until a parent checks this computer" — and sends a critical event. The unlock code
+(at the lock, `ost unlock`) or a console Resume lifts it. Everything else (resolv.conf drift,
+NetworkManager disconnects, clock jumps) is repaired and reported, never punished: suspend,
+roaming and DHCP look exactly like tampering.
 
 ## Offline behavior (fail-closed)
 
@@ -79,27 +101,35 @@ Losing sight of the server never opens the network:
 
 - **Grace window** (default 900 s, `OST_OFFLINE_GRACE_SECS`): past it, the agent emits a
   `network_offline` event, keeps the last-known policy enforced, and re-asserts DNS + firewall
-  aggressively every tick until contact resumes (`network_online`).
-- **Offline hard-lockdown** (per-policy `lockdown.offline_lockdown_days`, `0` = disabled): a
-  device that hasn't reached the server for N *days* freezes all managed users like an admin
-  lock. The clock survives reboots — last contact is persisted as a wall-clock timestamp in
-  `/var/lib/openscreentime/last_contact` — so "keep it powered off for a week, then use it offline
-  forever" doesn't work. The parent code still unlocks.
+  every tick until contact resumes (`network_online`). Screen time carries on as normal.
+- **Offline lockdown** (per-policy `lockdown.offline_lockdown_days`, `0` = off, off in every
+  preset): a computer that hasn't reached the server for N days (at least 3) stops every
+  managed user like a pause. Last contact is persisted (`/var/lib/openscreentime/last_contact`),
+  so it survives reboots. It engages only while the local network is up — a laptop on holiday
+  with no network isn't punished — and only if the computer holds an offline way back in
+  (recovery codes or a backup code); otherwise it reports `offline_lockdown_no_credential` and
+  doesn't lock.
 
 ## The escape hatches that always work
 
 Deterrence must never become a hostage situation. At every level:
 
-- **Parent code** (a per-device authenticator secret — TOTP, verified offline, single-use,
-  with a wrong-attempt lockout; the old recovery PIN remains only as the *backup code*, argon2-
-  hashed and reported when used): typed into the lockout overlay (grants 30 minutes), dropped
-  via the root-only file `/run/openscreentime/unlock_pin.<user>`, used with the `ost unlock`
-  CLI, or typed at `sudo` on the managed machine (PAM). Verification **fails closed** — no secret
-  and no backup hash configured means no unlock. See `AGENT.md` → Parent code.
-- **`ost-admin`**: a local account by this name is exempt from every polkit denial
-  (power controls, and the level-3 unit-stop mask).
-- Root can always stop the agent (`systemctl stop` at level 1; at level 3 root remains
-  exempt from the polkit mask). That is by design — see the threat model.
+- **The unlock code** — a per-computer TOTP the agent verifies offline (single-use, with a
+  wrong-code back-off), or a one-time recovery code, or a legacy profile backup code
+  (argon2). Typed at the lock (30 minutes; the agent checks it, the lock holds nothing), with
+  `ost unlock`, or at `sudo` on a managed computer (PAM). No secret configured means no unlock —
+  it fails closed. See `AGENT.md` → Unlock code.
+- **The lock never takes the keyboard.** It runs in its own session on its own VT (cage as
+  `ost-lock`, or the agent's text lock), so the code can always be typed, and the stopped
+  person's session is never frozen — only their apps are — so it comes back working. Agent
+  restarts don't take it down; if no lock can be shown, nobody is frozen behind a blank
+  screen. See `AGENT.md` → The lock.
+- **`ost recover`** (as root): masks the agent, stops the watchdog and tears enforcement down in
+  one go, for when you need the machine back now.
+- **`ost-admin`**: a local account by this name is exempt from the level-3 unit-stop rule — it
+  can stop, disable or mask the openscreentime units without a password. The rule grants it
+  nothing else. The agent doesn't create it; make one if you want that door.
+- Root can always stop the agent. That is by design — see the threat model.
 
 ## What OpenScreenTime does not do
 
@@ -115,13 +145,28 @@ Claims you might expect from this category of product that we deliberately do no
 - **No "recovery shell killing".** Level 3 disables VT switching and surfaces bootloader
   guidance; it does not (and cannot meaningfully) remove `init=/bin/bash`-style escapes —
   that's what the GRUB/BIOS password guidance is for.
+- **No remote shell and no network scanning.** Both existed once and were removed (0.4 and
+  migration 0013); historical `ssh` events stay readable. The agent opens no listener.
+- **A stop freezes apps, not the whole session.** The lock's own VT is what keeps a stopped
+  person out: their session gets no keyboard, no mouse and no screen while it holds. The
+  freeze stops their apps (see `AGENT.md` → Screen time) and leaves the session's own
+  plumbing running — the compositor with its GNOME Shell extensions, the session manager,
+  the session bus, the sound server, the keyring, and anything placed in `session.slice`.
+  So a stopped person who *prepared* for it can keep something going: an extension, or a
+  unit they put in `session.slice` themselves, keeps running — it can play sound, or even
+  thaw their own app units (the user manager's cgroups are delegated to them). Every tick
+  freezes again what it finds running, and a stop that doesn't hold after that is reported
+  (`enforcement_degraded` `freeze_ineffective:<user>`, once a day); no minute counts while
+  they are stopped, and they still have no screen and no input. An app a timer starts in
+  `app.slice` runs until the next tick (≤ 10 s). This is the price of a session that comes
+  back working: freezing the whole session broke logging in and GDM's way back into it.
 - **Physical access + root wins eventually.** The design goal is that it can't win *silently*:
   the attempt costs real effort, generates tamper events on the way, and the end state is a
   loudly visible gone-dark device in the console — not a quietly green one.
 - **Browser DNS-over-HTTPS to an arbitrary IP is not fully stopped.** Whenever a policy blocks
-  anything, the agent forces plaintext DNS through its own resolver and drops DoT plus the
-  known public DoH provider IPs (`lockdown.force_dns`/`block_doh`/`block_dot`, applied
-  automatically when blocks exist). That closes plaintext alt-resolvers and the common
+  anything, the agent forces plaintext DNS through its own resolver (`force_dns` is switched on
+  automatically when blocks exist), and every preset under 18 also drops DoT and the known
+  public DoH provider IPs (`lockdown.block_doh`/`block_dot`). That closes plaintext alt-resolvers and the common
   one-click DoH toggles. It does **not** stop a determined user who points a browser at a DoH
   endpoint on an IP not in our list, pinned so its bootstrap never hits the local resolver —
   the query rides ordinary HTTPS/443, indistinguishable from any other. The enforcement-honesty
@@ -130,34 +175,26 @@ Claims you might expect from this category of product that we deliberately do no
   goes" is the signal a parent actually has** for this. Truly closing it needs egress
   443-to-approved-only (a future maximum-lockdown option), which breaks too much to be a default.
 
-## Zero-trust enforcement primitives (Linux)
+## Enforcement primitives (Linux)
 
-- **DNS:** a local `dnsmasq` instance; under `default_deny` it answers only allowlisted names
-  (wildcards supported), forwards them to the policy's `upstream` (must be a literal IP —
-  enforced server-side), and returns NXDOMAIN for everything else. `/etc/resolv.conf` is
-  pinned and guarded (see above).
-- **Firewall:** an `nftables` table, default-deny, allowing only policy ports +
-  established/related + loopback + the server + the DNS upstream. Applied atomically (one
-  `nft -f` transaction — a malformed rule can't leave the box with *no* table) and rebuilt
-  on drift.
-- **Screen time:** per-user session accounting from logind (seat-active sessions only; idle
-  sessions — `IdleHint=yes` — don't burn budget). At zero balance: warnings beforehand, a
-  60-second save-your-work grace, then the user's processes are frozen via the cgroup v2
-  freezer. Screen-time freezes never fall back to killing the session; only an explicit
-  admin lock may terminate as a last resort.
-
-## Remote shell — removed
-
-OpenScreenTime used to include a server-brokered, disclosed remote shell (a root PTY bridged from
-the agent to a browser terminal). It was removed in v0.4: **there is no remote shell at
-all anymore** — everything an admin can do goes through the UI, and the agent still never
-opens an inbound listener (it only dials out, preserving default-deny inbound). Historical
-`ssh` events remain in the event log as the audit record of past sessions. A possible
-replacement — a secure reverse tunnel carrying native SSH+RDP — was considered and deferred.
-
-## Device discovery — removed
-
-The agent used to accept a `discover` command that swept its local subnet and reported
-hosts as a `discovery_result` event. It was removed (migration 0013) along with the
-command type, the event type and both API routes. A screen-time app has no business
-port-scanning the household network, and nothing in the product ever consumed the results.
+- **DNS:** a local `dnsmasq` forwards everything to the policy's `upstream` (a literal IP —
+  enforced server-side), sinkholes blocked domains (`0.0.0.0` / `::`), and rewrites the big
+  search and video sites to safe mode. `/etc/resolv.conf` is pinned and guarded (above). A
+  legacy `default_deny` profile would answer only allowlisted names; the server opens those
+  at startup, so none ship.
+- **Firewall:** one `inet openscreentime` nftables table, base policy accept, with targeted
+  drops for the bypasses the policy turns on (stray DNS, DoH, DoT, Tor, VPN ports). Applied
+  atomically (one `nft -f` transaction — a malformed rule can't leave the box with *no* table)
+  and rebuilt on drift.
+- **Apps:** a blocked app's processes are closed for the user who blocks it (exact process
+  name, never root, never another user).
+- **Screen time:** only the foreground seat session with input or sound in the last 5 minutes
+  counts. Every stop is announced at 15, 5 and 1 minute; an unannounced stop gets a
+  save-your-work countdown; then the lock goes up on its own VT and the user's apps are
+  frozen with the cgroup v2 freezer — everything their user manager runs outside
+  `session.slice` (session plumbing GNOME 43 keeps in `app.slice` excepted), apps D-Bus
+  started inside the session bus (filed into scopes of their own first) and their text/SSH
+  logins; a legacy desktop living inside its login scope gets the whole user slice frozen.
+  A desktop still starting is left alone for its first minute. A screen-time freeze never
+  falls back to killing the session; only a pause may end a session, and only if the freezer
+  isn't there.

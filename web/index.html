@@ -1,28 +1,35 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <meta name="theme-color" content="#000000" />
+    <meta name="theme-color" content="#f4f2ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171614" media="(prefers-color-scheme: dark)" />
     <script>
-      // Set the theme before first paint so a dark-mode OS never flashes the
-      // dark UI on the way to the warm light default. Mirrors lib/theme.initTheme.
+      // The theme before first paint, so nothing flashes on the way in.
+      // Mirrors lib/theme.ts: light by default, "system" follows the OS.
       try {
-        var t = localStorage.getItem("openscreentime-theme");
-        document.documentElement.setAttribute(
-          "data-theme",
-          t === "dark" || t === "light" ? t : "light",
-        );
+        var m = localStorage.getItem("openscreentime-theme");
+        var t =
+          m === "dark" || m === "light"
+            ? m
+            : m === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        document.documentElement.setAttribute("data-theme", t);
+        var metas = document.querySelectorAll('meta[name="theme-color"]');
+        for (var i = 0; i < metas.length; i++)
+          metas[i].setAttribute("content", t === "dark" ? "#171614" : "#f4f2ee");
       } catch (e) {}
     </script>
     <title>OpenScreenTime</title>
-    <meta name="description" content="Screen time for the whole family — glanceable, honest, and yours. Runs on your hardware: no cloud, no accounts, no telemetry." />
+    <meta name="description" content="Set it once. It keeps time. Screen time for the whole family, on a server you own." />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="OpenScreenTime" />
-    <meta property="og:description" content="Screen time for the whole family — on your hardware. No cloud, no accounts, no telemetry." />
+    <meta property="og:description" content="Set it once. It keeps time. Screen time for the whole family, on a server you own." />
     <meta property="og:image" content="/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
   </head>

@@ -23,6 +23,17 @@ pub struct EnrollRequest {
     pub os: String,
     pub agent_version: String,
     pub os_users: Vec<OsUser>,
+    /// The login the install ran from (`SUDO_USER`), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installer: Option<String>,
+    /// The login the person at the keyboard picked as the owner's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_login: Option<String>,
+    /// Which machine this is, for this household only (`enroll::machine_hash`):
+    /// enrolling it again folds its older record in, so a day isn't counted
+    /// twice. Never the raw machine-id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,10 +42,51 @@ pub struct EnrollResponse {
     pub device_token: String,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
+    /// Who each OS login turned out to be.
+    #[serde(default)]
+    pub users: Vec<EnrolledUser>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnrolledUser {
+    pub os_username: String,
+    pub person: String,
+    #[serde(default)]
+    pub parent: bool,
+}
+
+/// Whose computer an enroll token is for (`/agent/enroll/preview`).
+#[derive(Debug, Default, Deserialize)]
+pub struct EnrollPreview {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub owner_is_parent: bool,
+    /// The household's key for the machine identity (servers from 0.7).
+    #[serde(default)]
+    pub machine_salt: Option<String>,
 }
 
 fn default_poll() -> u64 {
     30
+}
+
+/// POST /agent/enroll/preview — whose computer this is, without using the
+/// token up. Older servers don't have it; the caller treats any error as
+/// "don't ask".
+pub async fn enroll_preview(base_url: &str, token: &str) -> Result<EnrollPreview> {
+    let base = base_url.trim_end_matches('/');
+    let http = reqwest::Client::builder()
+        .user_agent(format!("openscreentime/{AGENT_VERSION}"))
+        .build()?;
+    let resp = http
+        .post(format!("{base}/agent/enroll/preview"))
+        .json(&json!({ "enroll_token": token }))
+        .send()
+        .await
+        .context("POST /agent/enroll/preview")?
+        .error_for_status()?;
+    Ok(resp.json().await?)
 }
 
 /// POST /agent/enroll — consumes the one-time enroll token, returns identity.
@@ -65,9 +117,39 @@ pub struct HeartbeatResponse {
     pub commands: Vec<Command>,
     #[serde(default)]
     pub policy_version: String,
+    /// The person's day on their other computers (see `PersonDay`).
+    #[serde(default)]
+    pub usage: Vec<crate::protocol::PersonDay>,
+    /// The server's clock — a time source the agent trusts.
+    #[serde(default)]
+    pub server_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub use crate::protocol::UsageReport;
+
+/// The server said this computer was removed from its household: `410
+/// device_retired` with `"retired": true`, from the configured server. The
+/// one answer on which the agent takes itself off the computer — never a
+/// plain 401, a network error, or an answer from anywhere else.
+#[derive(Debug, thiserror::Error)]
+#[error("this computer was removed from its household")]
+pub struct Retired;
+
+/// Is this error the server retiring this computer?
+pub fn is_retired(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<Retired>().is_some())
+}
+
+/// The retirement answer, exactly: status 410, from the configured server's
+/// origin, with the flag set in a JSON body.
+fn retirement_answer(status: u16, same_origin: bool, body: &[u8]) -> bool {
+    status == 410
+        && same_origin
+        && serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("retired").and_then(Value::as_bool))
+            == Some(true)
+}
 
 /// `POST /agent/earn-request` response (CONTRACT-PROD.md §4).
 #[derive(Debug, Deserialize)]
@@ -88,6 +170,24 @@ pub struct ServerClient {
     http: reqwest::Client,
     base: String,
     token: String,
+}
+
+impl ServerClient {
+    /// `error_for_status`, except that the retirement answer becomes
+    /// [`Retired`]. Only an answer whose final URL (after any redirect) is
+    /// on the configured server counts.
+    async fn checked(&self, resp: reqwest::Response) -> Result<reqwest::Response> {
+        if resp.status() == reqwest::StatusCode::GONE {
+            let same_origin = reqwest::Url::parse(&self.base)
+                .is_ok_and(|base| base.origin() == resp.url().origin());
+            let body = resp.bytes().await.unwrap_or_default();
+            if retirement_answer(410, same_origin, &body) {
+                return Err(Retired.into());
+            }
+            anyhow::bail!("server answered 410 Gone");
+        }
+        Ok(resp.error_for_status()?)
+    }
 }
 
 impl ServerClient {
@@ -126,6 +226,7 @@ impl ServerClient {
             "public_ip": public_ip,
             "os_users": os_users,
             "usage": usage,
+            "features": crate::protocol::FEATURES,
         });
         let resp = self
             .http
@@ -134,8 +235,8 @@ impl ServerClient {
             .json(&body)
             .send()
             .await
-            .context("POST /agent/heartbeat")?
-            .error_for_status()?;
+            .context("POST /agent/heartbeat")?;
+        let resp = self.checked(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -166,42 +267,17 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
-    /// POST /agent/login-decision — the human at this machine answered a
-    /// web sign-in prompt (CONTRACT-0.6 client-first login). `code` is the
-    /// number they tapped (number-matching); `None` = "not me". The server
-    /// decides approve vs deny by matching it to the real code.
-    pub async fn post_login_decision(
-        &self,
-        request_id: &str,
-        code: Option<&str>,
-        os_username: &str,
-    ) -> Result<()> {
-        let body = json!({
-            "request_id": request_id,
-            "code": code,
-            "os_username": os_username,
-        });
-        self.http
-            .post(format!("{}/agent/login-decision", self.base))
-            .header("Authorization", self.bearer())
-            .json(&body)
-            .send()
-            .await
-            .context("POST /agent/login-decision")?
-            .error_for_status()?;
-        Ok(())
-    }
-
     /// POST /agent/usage — where-the-time-goes slices (CONTRACT-0.6 §3).
     pub async fn post_usage_slices(&self, slices: &[serde_json::Value]) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .post(format!("{}/agent/usage", self.base))
             .header("Authorization", self.bearer())
             .json(&json!({ "slices": slices }))
             .send()
             .await
-            .context("POST /agent/usage")?
-            .error_for_status()?;
+            .context("POST /agent/usage")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
@@ -213,8 +289,8 @@ impl ServerClient {
             .header("Authorization", self.bearer())
             .send()
             .await
-            .context("GET /agent/policy")?
-            .error_for_status()?;
+            .context("GET /agent/policy")?;
+        let resp = self.checked(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -258,20 +334,22 @@ impl ServerClient {
         if events.is_empty() {
             return Ok(());
         }
-        self.http
+        let resp = self
+            .http
             .post(format!("{}/agent/events", self.base))
             .header("Authorization", self.bearer())
             .json(&json!({ "events": events }))
             .send()
             .await
-            .context("POST /agent/events")?
-            .error_for_status()?;
+            .context("POST /agent/events")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
     /// POST /agent/commands/:id/ack
     pub async fn ack_command(&self, ack: &CommandAck) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .post(format!(
                 "{}/agent/commands/{}/ack",
                 self.base, ack.command_id
@@ -280,8 +358,8 @@ impl ServerClient {
             .json(&json!({ "status": ack.status, "result": ack.result }))
             .send()
             .await
-            .context("POST command ack")?
-            .error_for_status()?;
+            .context("POST command ack")?;
+        self.checked(resp).await?;
         Ok(())
     }
 
@@ -296,10 +374,29 @@ impl ServerClient {
         request
             .headers_mut()
             .insert("Authorization", self.bearer().parse()?);
-        let (stream, _resp) = tokio_tungstenite::connect_async(request)
-            .await
-            .context("ws connect")?;
-        Ok(stream)
+        // Bounded like every HTTP call: a blackholed server must not park the
+        // reconnect loop forever.
+        let connected = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .context("ws connect timed out")?;
+        match connected {
+            Ok((stream, _resp)) => Ok(stream),
+            // The upgrade is refused with the same answer as any other call;
+            // the handshake goes to the configured URL itself (no redirects).
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+                if retirement_answer(
+                    resp.status().as_u16(),
+                    true,
+                    resp.body().as_deref().unwrap_or_default(),
+                ) =>
+            {
+                Err(Retired.into())
+            }
+            Err(e) => Err(anyhow::Error::from(e).context("ws connect")),
+        }
     }
 }
 
@@ -312,5 +409,35 @@ pub fn server_host(base_url: &str) -> Option<String> {
         None
     } else {
         Some(host.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the exact retirement answer from the configured server retires
+    /// the computer: not a 401 (a hiccup, a proxy, a bad token), not a 410
+    /// without the flag, not a 410 from somewhere a redirect led.
+    #[test]
+    fn only_the_servers_retirement_answer_counts() {
+        let retired = br#"{"error":{"code":"device_retired","message":"x"},"retired":true}"#;
+        assert!(retirement_answer(410, true, retired));
+        assert!(!retirement_answer(410, false, retired), "another origin");
+        assert!(
+            !retirement_answer(401, true, retired),
+            "a 401 never retires"
+        );
+        assert!(!retirement_answer(
+            410,
+            true,
+            br#"{"error":{"code":"code_expired"}}"#
+        ));
+        assert!(!retirement_answer(410, true, br#"{"retired":"yes"}"#));
+        assert!(!retirement_answer(410, true, b"<html>Gone</html>"));
+        assert!(is_retired(
+            &anyhow::Error::from(Retired).context("GET /agent/policy")
+        ));
+        assert!(!is_retired(&anyhow::anyhow!("401 Unauthorized")));
     }
 }

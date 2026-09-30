@@ -29,3 +29,7 @@ Containerfile
 compose.yaml
 .containerignore
 .dockerignore
+
+# Database dumps and the .env copy next to them — never into an image.
+backups/
+.update.lock

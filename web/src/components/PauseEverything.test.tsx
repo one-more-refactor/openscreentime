@@ -7,7 +7,7 @@ import { render, screen, waitFor, act, cleanup, fireEvent } from "@testing-libra
 
 import type { Device } from "../types";
 // Registers the shared module mocks; must be imported before the component.
-import { ApiError, apiCalls, apiImpl, toasts, armChangeMode, resetApiMock, resetUiMocks } from "../test/mockApi";
+import { ApiError, apiCalls, apiImpl, toasts, armConfirm, resetApiMock, resetUiMocks } from "../test/mockApi";
 
 const { PauseEverything } = await import("./PauseEverything");
 const { ConfirmProvider } = await import("../lib/confirm");
@@ -34,7 +34,7 @@ beforeEach(() => {
   resetApiMock();
   resetUiMocks();
   // Change mode is on for these — the pause itself is what's under test.
-  armChangeMode();
+  armConfirm();
 });
 
 afterEach(cleanup);
@@ -65,6 +65,14 @@ describe("pause everything", () => {
     await new Promise((r) => setTimeout(r, 120));
     // The whole point of the hold: an accidental tap must not freeze the house.
     expect(apiCalls.locked).toHaveLength(0);
+  });
+
+  test("the hint says press and hold, and claims no duration it doesn't keep", () => {
+    setup([device("a"), device("b")]);
+    const hint = screen.getByText(/Press and hold/);
+    expect(hint.textContent).toBe("Stops all 2 computers at once. Press and hold to pause.");
+    // The hold is 600 ms: "for a second" was a promise the button didn't keep.
+    expect(hint.textContent).not.toMatch(/second/);
   });
 
   test("holding past the threshold pauses every device", async () => {
@@ -125,7 +133,8 @@ describe("pause everything", () => {
   test("an untrusted session gets the confirm dialog — and cancelling is silent", async () => {
     // Trust lives at login now; a trusted session pauses with no ceremony.
     // Only when the server itself asks for proof (428) does a dialog appear.
-    apiImpl.getChangeMode = () => Promise.resolve({ armed_until: null, extended: false });
+    apiImpl.getConfirmStatus = () =>
+      Promise.resolve({ armed_until: null, passkey: false, computer: true });
     apiImpl.lockDevice = () =>
       Promise.reject(new ApiError("step_up_required", "prove it's you", 428));
     const { button } = setup([device("a")]);

@@ -5,8 +5,8 @@
 //! it. They read the *current* 6-digit code off the OpenScreenTime console
 //! (after proving it's them), and this agent — which received the same secret
 //! in the policy bundle (`parent_code.totp_secret`, cached root-only) —
-//! verifies what gets typed with no server round-trip: the lockout overlay's
-//! parent field, `ost unlock`, and the PAM helper that gates `sudo` on a
+//! verifies what gets typed with no server round-trip: a code typed at the
+//! lock screen, `ost unlock`, and the PAM helper that gates `sudo` on a
 //! managed machine all go through [`Verifier::verify`].
 //!
 //! Rules (docs/CONTRACT-0.4.md §4, CONTRACT-0.5.md §1):
@@ -95,6 +95,13 @@ impl Verdict {
     }
 }
 
+/// Wrong codes left before a wait, or the wait itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tries {
+    Left(u32),
+    Wait(u64),
+}
+
 /// Persisted replay / lockout state.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -178,7 +185,7 @@ pub fn totp_at(key: &[u8], counter: u64) -> String {
 }
 
 /// The recovery-code MAC: hex HMAC-SHA256 over the 8 ASCII digits, keyed by
-/// the decoded TOTP secret. Must equal the server's `stepup::recovery_mac`
+/// the decoded TOTP secret. Must equal the server's `unlock_code::recovery_mac`
 /// byte for byte (shared test vector below). Only the server *produces* MACs;
 /// the agent only ever checks them (`recovery_matches`, constant-time), which
 /// is why this lives in the tests.
@@ -277,10 +284,27 @@ impl Verifier {
             .count()
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_state_path(mut self, p: PathBuf) -> Self {
+    /// Keep the replay counter and wrong-code lockout somewhere else.
+    pub fn with_state_path(mut self, p: PathBuf) -> Self {
         self.state_path = p;
         self
+    }
+
+    /// How many more wrong codes before a wait — or how long the wait is.
+    /// What the lock screen shows under its code field.
+    pub fn tries(&self) -> Tries {
+        self.tries_at(chrono::Utc::now())
+    }
+
+    fn tries_at(&self, now: chrono::DateTime<chrono::Utc>) -> Tries {
+        let st = State::load_from(&self.state_path);
+        if let Some(until) = st.locked_until {
+            if until > now {
+                return Tries::Wait((until - now).num_seconds().max(1) as u64);
+            }
+        }
+        // Past the first lockout every wrong code locks again, so "1" is honest.
+        Tries::Left(FAILURES_BEFORE_LOCKOUT.saturating_sub(st.failures).max(1))
     }
 
     pub fn configured(&self) -> bool {
@@ -369,7 +393,7 @@ impl Verifier {
 /// The audit event for a verification attempt: `parent_code_ok` /
 /// `parent_code_backup_used` (warn; carries `recovery_id` when a recovery
 /// code was spent, so the server retires it) / `parent_code_failed` (warn).
-/// `via` is where it was typed: `"overlay"`, `"unlock"`, `"tray"`, `"pam"`.
+/// `via` is where it was typed: `"lock_screen"`, `"unlock"`, `"pam"`.
 pub fn event(verdict: &Verdict, via: &str, user: &str) -> Event {
     let (kind, sev, detail) = match verdict {
         Verdict::Ok => (EV_PARENT_CODE_OK, SEV_INFO, "unlock code accepted"),
@@ -492,6 +516,24 @@ mod tests {
         assert!(st.locked_until.is_none());
     }
 
+    #[test]
+    fn tries_count_down_then_wait() {
+        let v = Verifier::new(Some(RFC_SECRET_B32.into()), None).with_state_path(tmp("tries.json"));
+        let now = chrono::Utc::now();
+        assert_eq!(v.tries_at(now), Tries::Left(5));
+        v.verify_at("000000", 5, now);
+        v.verify_at("000000", 5, now);
+        assert_eq!(v.tries_at(now), Tries::Left(3));
+        v.verify_at("000000", 5, now);
+        v.verify_at("000000", 5, now);
+        v.verify_at("000000", 5, now);
+        assert_eq!(v.tries_at(now), Tries::Wait(60));
+        assert_eq!(
+            v.tries_at(now + chrono::Duration::seconds(61)),
+            Tries::Left(1)
+        );
+    }
+
     fn tmp_existing(name: &str) -> PathBuf {
         std::env::temp_dir()
             .join(format!("ost-parentcode-{}", std::process::id()))
@@ -515,10 +557,13 @@ mod tests {
             EV_PARENT_CODE_BACKUP_USED
         );
         assert_eq!(event(&Verdict::Ok, "pam", "kid").ev_type, EV_PARENT_CODE_OK);
-        assert_eq!(event(&Verdict::Wrong, "overlay", "kid").severity, SEV_WARN);
+        assert_eq!(
+            event(&Verdict::Wrong, "lock_screen", "kid").severity,
+            SEV_WARN
+        );
     }
 
-    /// Shared with the server (`stepup::recovery_mac` test): both sides must
+    /// Shared with the server (`unlock_code::recovery_mac` test): both sides must
     /// produce this exact MAC or no recovery code would ever open a door.
     #[test]
     fn recovery_mac_matches_the_shared_vector() {
