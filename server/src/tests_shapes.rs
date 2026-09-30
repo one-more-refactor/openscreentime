@@ -115,6 +115,11 @@ fn diff(path: &str, was: &Value, now: &Value, out: &mut Vec<String>) {
                 out.push(format!("{path}: {was} → {now}"));
             }
         }
+        // A field that is `null` in one snapshot and a value in the other is
+        // one nullable field, not a change of shape: `rules.resume_at` is null
+        // or a time depending on the hour the test runs (CI at 22:10 UTC saw a
+        // string where the snapshot, taken by day, had null).
+        _ if was == "null" || now == "null" => {}
         _ if was != now => out.push(format!("{path}: {was} → {now}")),
         _ => {}
     }
@@ -316,6 +321,31 @@ async fn the_person_page_reads_what_the_server_sends() {
          mock, then rewrite {SHAPES} with `OST_WRITE_SHAPES=1 cargo test shapes`:\n  {}",
         changed.join("\n  ")
     );
+}
+
+#[test]
+fn a_nullable_field_is_not_a_change_of_shape() {
+    let mut out = Vec::new();
+    diff(
+        "x",
+        &json!({"resume_at": "null"}),
+        &json!({"resume_at": "string"}),
+        &mut out,
+    );
+    diff(
+        "x",
+        &json!({"resume_at": "string"}),
+        &json!({"resume_at": "null"}),
+        &mut out,
+    );
+    assert!(out.is_empty(), "{out:?}");
+    diff(
+        "x",
+        &json!({"n": "number"}),
+        &json!({"n": "string"}),
+        &mut out,
+    );
+    assert_eq!(out, vec!["x.n: \"number\" → \"string\"".to_string()]);
 }
 
 #[test]

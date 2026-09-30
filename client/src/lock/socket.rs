@@ -231,6 +231,12 @@ mod tests {
     #[tokio::test]
     async fn peer_credentials_gate_the_socket() {
         let me = users::get_current_uid();
+        if me == 0 {
+            // Root is never the lock user (see `authorized`), so "we are the
+            // lock user" can't be staged from a root test run (a container).
+            eprintln!("peer_credentials_gate_the_socket: skipped as root");
+            return;
+        }
         // Allowed: we are "the lock user".
         let at = tmp_sock("allowed.sock");
         let listener = bind(&at, None).unwrap();
