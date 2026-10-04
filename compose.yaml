@@ -31,7 +31,7 @@ services:
       - ost_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openscreentime} -d ${POSTGRES_DB:-openscreentime}"]
-      interval: 5s
+      interval: 30s
       timeout: 5s
       retries: 10
 
