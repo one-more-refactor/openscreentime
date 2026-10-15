@@ -1,5 +1,12 @@
 <div align="center">
 
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/brand/mark-dark.svg">
+  <img src=".github/brand/mark-light.svg" alt="" width="32" height="32">
+</picture></p>
+
+<p align="center"><img src=".github/brand/kind-app.svg" alt="kind: app" height="20">&nbsp;<img src=".github/brand/status-paused.svg" alt="status: paused" height="20"></p>
+
 <img src="docs/assets/deploy-demo.gif" alt="Set up the OpenScreenTime server, then a computer, and see it online" width="820">
 
 ### Set it once. It keeps time.
