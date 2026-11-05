@@ -355,7 +355,7 @@ and never with a plain 401. On that answer, from its configured server and
 confirmed by a second request, the agent thaws everyone, takes the lock down,
 removes its nft table, the resolv.conf pin (the computer's previous DNS comes
 back — systemd-resolved's link included), its dnsmasq include, the polkit
-rule, the unlock-code sudo and its cached secrets; then (`ost __retire`,
+rule, any retired unlock-code sudo hook and its cached secrets; then (`ost __retire`,
 outside the sandbox) it disables and removes its units, stops the companion
 and any app window for everyone signed in, and removes the rest of it: the
 config and enrollment, the state (ledger, unlock-code state), the runtime

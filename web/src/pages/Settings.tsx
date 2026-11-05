@@ -295,7 +295,7 @@ function Passkeys() {
 
 /**
  * Each computer's unlock code — the 6-digit code that unlocks its screen,
- * gives time back and allows `sudo` there, checked on the computer itself
+ * gives time back there (it is not a sudo password), checked on the computer itself
  * with no internet. Read it here when you need it; recovery codes are the
  * spare keys.
  */

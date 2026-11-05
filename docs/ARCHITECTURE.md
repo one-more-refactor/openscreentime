@@ -121,7 +121,8 @@ watchdog timer). `runner.rs` orchestrates:
   arrive as HMACs. Codes typed at the graphical lock reach the agent over
   `/run/openscreentime/lock.sock`, which answers only `ost-lock`
   (`SO_PEERCRED`); the lock holds no secret. The same code opens `ost unlock`
-  and `sudo` on a managed computer (`pam.rs`).
+  (root only). It does not answer `sudo`: the old PAM hook (`pam.rs`) now
+  refuses every token and the agent removes its sudoers drop-in.
 - **Block** — DNS: a local dnsmasq forwarding to the filtering upstream,
   blocked domains sinkholed, safe-search rewrites, `resolv.conf` pinned and
   made immutable (`enforce/dns.rs`). Firewall: one `inet openscreentime`

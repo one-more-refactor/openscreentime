@@ -213,7 +213,7 @@ As root on the computer:
 
 ```sh
 ost recover       # tears enforcement down: the nft table, the resolv.conf pin, frozen users
-ost uninstall     # the units, the lock and its ost-lock user, the sudo/PAM hook, the companion
+ost uninstall     # the units, the lock and its ost-lock user, any retired sudo/PAM hook, the companion
 rm -f /etc/polkit-1/rules.d/49-openscreentime.rules \
       /etc/systemd/logind.conf.d/50-openscreentime.conf
 rm -f /usr/local/bin/ost /usr/local/bin/openscreentime /usr/local/bin/openscreentime.bak

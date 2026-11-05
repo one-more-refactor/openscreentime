@@ -160,8 +160,16 @@ open your rules; a child's view never can.)
    **unlock code** at the lock (30 minutes, even offline), or you give time
    or resume from the console.
 
-The unlock code also answers `sudo` on a child's computer, so you can
-administer it and they can't.
+The unlock code is **not** a password for anything else. Type it only at the
+OpenScreenTime lock screen — never into a terminal, and never into `sudo` in
+a child's session (a child controls everything in their own session and can
+capture what you type there). To administer a child's computer, use your own
+admin account on it (log in as yourself, or `su - <you>` from a terminal you
+trust), or `sudo ost unlock` from that admin account if the computer is
+offline and stuck.
+
+Versions before this change also let a child's account use `sudo` with the
+unlock code as the password. That is gone; updating the agent removes it.
 
 ## Honest limits
 

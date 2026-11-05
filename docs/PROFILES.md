@@ -75,7 +75,7 @@ shared test vectors both sides check, are in
 | `gamification.earn_time` | `{enabled, tasks: [{id, label, reward_minutes}]}`. | Rules → Earning time |
 | `gamification.lockout` | **Dead.** `unlock_challenge` (`math` / `wait` / `parent_pin`) is read by nothing; the lock always takes the unlock code. | — |
 | `focus` | A self-managed person's own site blocks: `{sites, hours}` — blocked inside the focus hours, all day with none. Omitted when empty. | Me → My focus hours, Sites I block for myself |
-| `parent_pin_hash` | Argon2 hash of a legacy **backup code**. Still accepted at the lock, `ost unlock` and `sudo`; nothing in the console sets it. Omitted when unset. | — |
+| `parent_pin_hash` | Argon2 hash of a legacy **backup code**. Still accepted at the lock and `ost unlock` (root); nothing in the console sets it. Omitted when unset. | — |
 
 `lockdown`, `blocks`, `focus` and `parent_pin_hash` are left out of the JSON
 when empty, so a preset round-trips byte-for-byte through the `Policy` type;

@@ -6,8 +6,8 @@
 //! (after proving it's them), and this agent — which received the same secret
 //! in the policy bundle (`parent_code.totp_secret`, cached root-only) —
 //! verifies what gets typed with no server round-trip: a code typed at the
-//! lock screen, `ost unlock`, and the PAM helper that gates `sudo` on a
-//! managed machine all go through [`Verifier::verify`].
+//! lock screen and `ost unlock` (root only) go through [`Verifier::verify`].
+//! It is never a `sudo` password (the PAM hook that did that is retired).
 //!
 //! Rules (docs/CONTRACT-0.4.md §4, CONTRACT-0.5.md §1):
 //! * SHA1, 6 digits, 30 s steps, ±1 step of clock drift.

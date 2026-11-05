@@ -117,7 +117,9 @@ Deterrence must never become a hostage situation. At every level:
 - **The unlock code** — a per-computer TOTP the agent verifies offline (single-use, with a
   wrong-code back-off), or a one-time recovery code, or a legacy profile backup code
   (argon2). Typed at the lock (30 minutes; the agent checks it, the lock holds nothing), with
-  `ost unlock`, or at `sudo` on a managed computer (PAM). No secret configured means no unlock —
+  `ost unlock` (run by someone who is already root). It is deliberately **not** accepted by
+`sudo`: versions up to 0.6 did that through PAM, which made the code a root password on the
+child's own account; the hook is removed on upgrade. No secret configured means no unlock —
   it fails closed. See `AGENT.md` → Unlock code.
 - **The lock never takes the keyboard.** It runs in its own session on its own VT (cage as
   `ost-lock`, or the agent's text lock), so the code can always be typed, and the stopped

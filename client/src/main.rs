@@ -171,7 +171,7 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         minutes: u64,
     },
-    /// Remove the systemd units, the sudo/PAM unlock-code hook and the
+    /// Remove the systemd units, any retired sudo/PAM unlock-code hook and the
     /// `ost-managed` group. Leaves the enrollment config in place. Requires root.
     Uninstall,
 }
@@ -217,15 +217,11 @@ fn rpassword_prompt() -> anyhow::Result<String> {
 async fn main() -> Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
 
-    // PAM helper (`pam_exec … openscreentime pam-auth`): runs inside sudo's
-    // PAM conversation, must stay quiet on stderr (it's the user's terminal)
-    // and must never parse the rest of argv like a normal subcommand.
+    // Retired PAM helper (`pam_exec … openscreentime pam-auth`): refuses every
+    // token (see pam.rs). Handled before anything else, quietly — it may still
+    // be called by a stale /etc/pam.d file until the agent removes it.
     if raw_args.get(1).map(String::as_str) == Some("pam-auth") {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
-            .with_target(false)
-            .init();
-        return pam::run().await;
+        return pam::run();
     }
 
     init_tracing();

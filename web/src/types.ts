@@ -581,7 +581,7 @@ export interface WhereData {
 
 // ---- Unlock codes (per device, owned by the server) ---------------------------
 // The 6-digit code a parent types on a child's computer — to unlock the
-// screen, reopen time, or `sudo` — is verified offline by the device, but the
+// screen or reopen time (never sudo) — is verified offline by the device, but the
 // secret never leaves the server and the agent. The console shows the CURRENT
 // code (a sensitive read: step-up gated), never the secret, never a QR.
 
