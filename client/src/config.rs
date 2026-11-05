@@ -159,18 +159,30 @@ pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("tmp.new");
-        // create_new fails if a stale temp exists (or is a symlink) — clear it.
-        let _ = std::fs::remove_file(&tmp);
+        // A temp name unique to this process and call: with one fixed name,
+        // two concurrent writers removed each other's temp file and one of
+        // them failed ("could not persist …"), silently dropping its update.
+        // create_new still refuses an existing file or symlink.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".tmp.{}.{seq}", std::process::id()));
+        let tmp = path.with_file_name(name);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&tmp)?;
-        f.write_all(body)?;
-        f.sync_all().ok();
+        let written = f.write_all(body);
+        if written.is_ok() {
+            f.sync_all().ok();
+        }
         drop(f);
-        std::fs::rename(&tmp, path)
+        let done = written.and_then(|()| std::fs::rename(&tmp, path));
+        if done.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        done
     }
     #[cfg(not(unix))]
     {

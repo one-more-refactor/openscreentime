@@ -144,6 +144,48 @@ impl State {
     }
 }
 
+/// An exclusive `flock` on `<state>.lock`, held for one whole
+/// read-check-write of the replay / lockout state.
+///
+/// Without it, parallel verifiers (the lock screen, `ost unlock`, and — before
+/// it was retired — one `pam-auth` per `sudo`) each loaded the state, passed
+/// the `locked_until` check and saved their own copy: N parallel guesses per
+/// lockout window instead of one, and a stale save could roll `last_counter`
+/// back and reopen a just-used code. The lock is released when the guard (the
+/// descriptor) is dropped, and by the kernel if the process dies.
+struct StateLock {
+    _file: std::fs::File,
+}
+
+impl StateLock {
+    fn acquire(state: &Path) -> std::io::Result<StateLock> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        if let Some(dir) = state.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let path = PathBuf::from(format!("{}.lock", state.display()));
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        loop {
+            // SAFETY: flock on a descriptor we own; no memory is shared.
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(StateLock { _file: f });
+            }
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                return Err(e);
+            }
+        }
+    }
+}
+
 /// Decode RFC 4648 base32 (the `otpauth://` secret alphabet). Case-insensitive,
 /// padding and whitespace ignored. `None` on any other character.
 pub fn base32_decode(s: &str) -> Option<Vec<u8>> {
@@ -320,11 +362,30 @@ impl Verifier {
         if !self.configured() {
             return Verdict::NotConfigured;
         }
+        // Serialize the whole read-check-write against every other verifier on
+        // this device. If the lock can't be taken at all (it lives in the
+        // root-only state dir, so a child can't cause that) carry on unlocked
+        // rather than refuse the parent at the lock: never a hostage situation.
+        let _lock = match StateLock::acquire(&self.state_path) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::warn!("could not lock parent-code state, verifying unlocked: {e}");
+                None
+            }
+        };
         let mut st = State::load_from(&self.state_path);
         if let Some(until) = st.locked_until {
             if until > now {
                 return Verdict::LockedOut((until - now).num_seconds().max(1) as u64);
             }
+        }
+        // Count this attempt as a failure *before* the checks (the backup
+        // code's argon2 is slow): a verifier killed mid-check has still spent
+        // a try. The real outcome below overwrites it.
+        {
+            let mut pending = st.clone();
+            pending.failures = pending.failures.saturating_add(1);
+            pending.save_to(&self.state_path);
         }
 
         let code = code.trim().replace(' ', "");
@@ -531,6 +592,35 @@ mod tests {
         assert_eq!(
             v.tries_at(now + chrono::Duration::seconds(61)),
             Tries::Left(1)
+        );
+    }
+
+    /// Parallel wrong guesses must be counted one by one: with the state
+    /// lock, eight concurrent wrong codes reach the lockout after exactly
+    /// five, not "whatever the last writer saw".
+    #[test]
+    fn parallel_wrong_codes_are_all_counted() {
+        let path = tmp("race.json");
+        let now = chrono::Utc::now();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    Verifier::new(Some(RFC_SECRET_B32.into()), None)
+                        .with_state_path(p)
+                        .verify_at("000000", 5, now)
+                })
+            })
+            .collect();
+        let verdicts: Vec<Verdict> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let st = State::load_from(&path);
+        // The first five are counted (the fifth locks), the rest are refused
+        // by the lockout without being verified at all.
+        assert_eq!(st.failures, FAILURES_BEFORE_LOCKOUT);
+        assert!(st.locked_until.is_some());
+        assert_eq!(
+            verdicts.iter().filter(|v| **v == Verdict::Wrong).count(),
+            (FAILURES_BEFORE_LOCKOUT - 1) as usize
         );
     }
 
