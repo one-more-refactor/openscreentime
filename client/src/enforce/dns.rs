@@ -404,6 +404,9 @@ fn clean_domain(raw: &str) -> Option<String> {
 /// happens to filter is not in here: that isn't this computer's rule, and
 /// it isn't ours to name ("mozilla.org is blocked" was Firefox's background
 /// `ads.mozilla.org`, filtered upstream — mozilla.org itself worked).
+/// `block_doh`'s names ([`DOH_HOSTS`], the Firefox canary) are left out on
+/// purpose: browsers look them up in the background, and "cloudflare-dns.com
+/// is blocked" is not a site anyone visited.
 pub fn block_rules(
     dns: &DnsPolicy,
     lockdown: &NetworkLockdown,
@@ -440,6 +443,48 @@ pub fn blocking_rule<'a>(name: &str, rules: &'a [String]) -> Option<&'a str> {
         .max_by_key(|r| r.len())
         .map(String::as_str)
 }
+
+/// Hostnames of well-known public DNS-over-HTTPS endpoints, sinkholed while
+/// `block_doh` is on. The firewall's IP drops (`firewall::DOH_RESOLVERS`)
+/// only catch the resolvers' anycast addresses; a browser pointed at
+/// `https://mozilla.cloudflare-dns.com/dns-query` connects to other addresses
+/// of the same provider, so the *name* has to fail to resolve too. Each entry
+/// covers itself and every name under it (dnsmasq `address=/d/`), e.g.
+/// `cloudflare-dns.com` also covers `mozilla.`/`chrome.`/`family.`.
+///
+/// NEEDS REVIEW: compiled from memory of the providers' documentation, not
+/// checked against a maintained list. This is a deterrent for the browsers'
+/// built-in provider menus and the common public resolvers, not a complete
+/// list — a self-hosted or obscure DoH server is not on it (the browser
+/// policies in `browserpolicy` are what turn DoH off in the browsers).
+pub const DOH_HOSTS: &[&str] = &[
+    "cloudflare-dns.com", // Cloudflare (Firefox's and Chrome's default entry)
+    "dns.google", // Google
+    "dns.google.com", // Google (legacy name)
+    "dns.quad9.net", // Quad9, and its filter variants below
+    "dns9.quad9.net",
+    "dns10.quad9.net",
+    "dns11.quad9.net",
+    "dns.nextdns.io", // NextDNS (per-profile names live under it)
+    "doh.opendns.com", // OpenDNS / Cisco Umbrella
+    "doh.familyshield.opendns.com",
+    "dns.adguard.com", // AdGuard (old name)
+    "dns.adguard-dns.com", // AdGuard
+    "doh.mullvad.net", // Mullvad (old name)
+    "dns.mullvad.net", // Mullvad (base./adblock./family. under it)
+    "doh.cleanbrowsing.org",
+    "doh.dns.sb",
+    "dns.controld.com",
+    "freedns.controld.com",
+    "dns0.eu",
+    "odvr.nic.cz",
+];
+
+/// Firefox's canary domain: when it does NOT resolve, Firefox keeps its
+/// automatic ("default") DoH rollout off on this network. Answered NXDOMAIN
+/// while `block_doh` is on. It does not stop DoH a user turned on by hand —
+/// the browser policy does that.
+pub const FIREFOX_DOH_CANARY: &str = "use-application-dns.net";
 
 /// The family resolver a malformed upstream falls back to (malware + adult).
 const FALLBACK_UPSTREAM: &str = "1.1.1.3";
@@ -575,6 +620,19 @@ fn render_rules(
         out.push_str("# block_tor: Tor hidden services + bootstrap domains\n");
         out.push_str("address=/onion/0.0.0.0\n");
         out.push_str("address=/torproject.org/0.0.0.0\n");
+    }
+
+    if lockdown.block_doh {
+        // block_doh at the name level (the firewall drops the resolvers'
+        // well-known addresses): the public DoH endpoints don't resolve, and
+        // Firefox's canary answers NXDOMAIN so its automatic DoH stays off.
+        out.push_str("# block_doh: public DNS-over-HTTPS endpoints + Firefox canary\n");
+        for h in DOH_HOSTS {
+            out.push_str(&format!("address=/{h}/0.0.0.0\naddress=/{h}/::\n"));
+        }
+        // An empty answer is NXDOMAIN (the same form as default-deny's
+        // catch-all) — what the canary check needs, not 0.0.0.0.
+        out.push_str(&format!("address=/{FIREFOX_DOH_CANARY}/\n"));
     }
 
     let mut unavailable = Vec::new();
@@ -1188,6 +1246,54 @@ mod tests {
         let conf = render_dnsmasq(&dns, &lockdown, None, &[], &SafeSearch::default());
         assert!(conf.contains("address=/onion/0.0.0.0"));
         assert!(conf.contains("address=/torproject.org/0.0.0.0"));
+    }
+
+    /// block_doh: the DoH endpoints' names are sinkholed (v4 and v6) and
+    /// Firefox's canary is NXDOMAIN — in allow-all and default-deny alike —
+    /// and none of it appears without block_doh.
+    #[test]
+    fn block_doh_sinkholes_doh_hosts_and_the_firefox_canary() {
+        let open = DnsPolicy {
+            mode: "allow_all".into(),
+            allowlist: vec!["*".into()],
+            blocklist: vec![],
+            safe_search: false,
+            upstream: "1.1.1.2".into(),
+        };
+        let deny = DnsPolicy {
+            mode: "default_deny".into(),
+            allowlist: vec!["wikipedia.org".into()],
+            ..open.clone()
+        };
+        let on = NetworkLockdown {
+            block_doh: true,
+            ..Default::default()
+        };
+        for dns in [&open, &deny] {
+            let conf = render_dnsmasq(dns, &on, None, &[], &SafeSearch::default());
+            assert!(conf.contains(
+                "address=/cloudflare-dns.com/0.0.0.0\naddress=/cloudflare-dns.com/::\n"
+            ));
+            assert!(conf.contains("address=/dns.google/0.0.0.0\n"));
+            assert!(conf.contains("address=/use-application-dns.net/\n"));
+            assert!(!conf.contains("address=/use-application-dns.net/0.0.0.0"));
+        }
+        // Every entry is a clean domain (it is interpolated into the config).
+        for h in DOH_HOSTS {
+            assert_eq!(clean_domain(h).as_deref(), Some(*h));
+        }
+        let off = render_dnsmasq(
+            &open,
+            &NetworkLockdown::default(),
+            None,
+            &[],
+            &SafeSearch::default(),
+        );
+        assert!(!off.contains("cloudflare-dns.com"));
+        assert!(!off.contains("use-application-dns.net"));
+        // Background lookups of DoH names are never told as a blocked site.
+        let rules = block_rules(&open, &on, &[]);
+        assert_eq!(blocking_rule("mozilla.cloudflare-dns.com", &rules), None);
     }
 
     /// Acceptance round 5: the block self-check resolved the first blocked

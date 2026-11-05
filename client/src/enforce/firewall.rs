@@ -20,6 +20,13 @@ pub(crate) const LEGACY_NFT_TABLE: &str = "sentinel";
 /// the configured `dns_upstream`, see below.
 ///
 /// Entries may be CIDRs; they are interpolated straight into `ip daddr`.
+///
+/// NEEDS REVIEW: these addresses (and the v6 list below) are hand-kept and
+/// have not been re-checked against the providers' current documentation.
+/// They only catch the anycast resolver addresses: a provider's DoH
+/// *hostname* can resolve to other addresses, which is why `block_doh` also
+/// sinkholes the names (`dns::DOH_HOSTS`) and sets the browsers' policies
+/// (`browserpolicy`).
 const DOH_RESOLVERS: &[&str] = &[
     "1.1.1.1",
     "1.0.0.1",

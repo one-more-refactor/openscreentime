@@ -236,6 +236,13 @@ async fn main() -> Result<()> {
         return service::refresh_units();
     }
 
+    // Hidden: set / remove the browsers' DNS-over-HTTPS-off policies
+    // (enforce/browserpolicy.rs). Spawned via systemd-run by the agent, whose
+    // sandbox can't write /etc/firefox or /etc/opt/chrome.
+    if raw_args.get(1).map(String::as_str) == Some("__browser-policy") {
+        return enforce::browserpolicy::run_helper(raw_args.get(2).map(String::as_str));
+    }
+
     // Hidden: finish taking OpenScreenTime off a computer that was removed
     // from its household (retire.rs). Spawned via systemd-run by the agent.
     if raw_args.get(1).map(String::as_str) == Some("__retire") {

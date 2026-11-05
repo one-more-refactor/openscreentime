@@ -760,6 +760,10 @@ pub fn remove_installed(exec: &Exec) {
         let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
     }
     remove_parent_sudo(exec);
+    // The browsers' DoH-off policies (block_doh), where still ours.
+    if !exec.dry_run() {
+        crate::enforce::browserpolicy::apply(exec, false);
+    }
     let _ = exec.run("systemctl", &["daemon-reload"]);
 }
 

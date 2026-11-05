@@ -118,6 +118,7 @@ Some subcommands are intentionally hidden — not in `--help`, not real
 | `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock (on VT 14). |
 | `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" / "snooze" over `/run/openscreentime/lock.sock`; holds no secret. |
 | `pam-auth` | Nothing any more (a stale `/etc/pam.d/openscreentime-parent` from ≤ 0.6) | **Retired.** Drains stdin and exits 1 for every token. Kept so a stale PAM file can never accept a code in the window between a self-update and the cleanup. See [Parent sudo](#parent-sudo-pam--retired). |
+| `__browser-policy on\|off` | The agent, via `systemd-run`, when the browser policies on disk don't match `block_doh` (at most once per 10 min per state); `uninstall` / `__retire` call the same code with `off` | Writes or removes `/etc/firefox/policies/policies.json` → `DNSOverHTTPS {Enabled:false, Locked:true}` (merged into an existing file, removed only if still exactly ours) and `openscreentime-doh.json` (`DnsOverHttpsMode: "off"`) in the Chromium/Chrome/Brave/Edge managed-policy dirs. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
 
 ### Machine-readable output
@@ -358,8 +359,10 @@ explicit `default_deny` firewall mode makes it `drop`, with
 allowing the DNS upstream and (if it's a literal IP) the enrolled server. `NetworkLockdown` toggles add **drop**
 rules ahead of those generic accepts (nftables is first-match-wins):
 `block_dot` (853), `force_dns` (non-upstream port 53), `block_doh` (a
-hardcoded list of public DoH resolver IPs, excluding the configured
-upstream), `block_vpn` (WireGuard/OpenVPN/IPsec ports), `block_tor`
+hardcoded list of public DoH resolver IPs, the configured upstream
+included — and, outside nftables, the DoH hostnames sinkholed in dnsmasq,
+`use-application-dns.net` answered NXDOMAIN, and the Firefox/Chromium
+managed policies that turn DoH off, see `enforce/browserpolicy.rs`), `block_vpn` (WireGuard/OpenVPN/IPsec ports), `block_tor`
 (OR/directory/SOCKS ports). A missing table is detected every tick
 (`table_missing`) and immediately re-applied with the last effective
 policy.

@@ -174,8 +174,13 @@ unlock code as the password. That is gone; updating the agent removes it.
 ## Honest limits
 
 - **Blocking is at DNS.** Anti-bypass rules (forced DNS, DNS-over-HTTPS and
-  -TLS, Tor) are on for everyone under 18, but a determined teenager with a
-  hotspot or a VPN you haven't blocked can still get around a block. A blocked
+  -TLS, Tor) are on for everyone under 18. For DNS-over-HTTPS that means the
+  well-known public DoH servers are blocked by address and by name, and
+  Firefox, Chrome, Chromium, Brave and Edge get a managed policy that turns
+  their "secure DNS" setting off and locks it — for every account on that
+  computer, yours included. A Flatpak browser, a portable browser in their
+  home folder, a DoH server that isn't on the list, a hotspot or a VPN you
+  haven't blocked can still get around a block. A blocked
   site looks like a site that won't load; there's no explainer page.
 - **An offline computer** keeps today's rules and counts time, but a pause
   you send lands when it's back.

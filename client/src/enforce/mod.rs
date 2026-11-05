@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod apps;
+pub mod browserpolicy;
 pub mod dns;
 pub mod firewall;
 pub mod safesearch;
@@ -106,6 +107,10 @@ pub fn apply_network_policy(
         fw_lockdown.force_dns = false;
     }
     let mut gaps: Vec<Gap> = dns_gaps.into_iter().map(Gap::Dns).collect();
+    // The browsers' own DoH switched off (and locked) while block_doh is on:
+    // DoH resolves past every DNS rule above. Outside the sandbox, via a
+    // transient unit, and only when the files on disk don't match already.
+    browserpolicy::sync(exec, policy.lockdown.block_doh);
 
     // 2 + 3. The firewall, then its lockdown rules. Firewall before the
     // tunnel (with the tunnel's accepts in place) — bringing a wg/ovpn unit
