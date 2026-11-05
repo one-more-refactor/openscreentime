@@ -285,10 +285,60 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
-  # ── 5. CI gate ─────────────────────────────────────────────
+  # ── 5. Console journeys (Playwright) ───────────────────────
+  # The main journeys in a real browser, desktop and phone, against the
+  # console's bundled sample household (VITE_USE_MOCK=1) — no server needed.
+  e2e:
+    name: "🎭 Console journeys — Playwright"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install console dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm install --no-audit --no-fund --no-package-lock
+
+      - name: Cache browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('e2e/package.json') }}
+
+      - name: Install Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Run journeys
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
+  # ── 6. CI gate ─────────────────────────────────────────────
   ci-ok:
     name: "✅ CI gate"
-    needs: [policy, server, client, web]
+    needs: [policy, server, client, web, e2e]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -298,11 +348,13 @@ jobs:
           echo "server: ${{ needs.server.result }}"
           echo "client: ${{ needs.client.result }}"
           echo "web:    ${{ needs.web.result }}"
+          echo "e2e:    ${{ needs.e2e.result }}"
 
           if [[ "${{ needs.policy.result }}" != "success" || \
                 "${{ needs.server.result }}" != "success" || \
                 "${{ needs.client.result }}" != "success" || \
-                "${{ needs.web.result }}"    != "success" ]]; then
+                "${{ needs.web.result }}"    != "success" || \
+                "${{ needs.e2e.result }}"    != "success" ]]; then
             echo "::error::One or more CI jobs failed."
             exit 1
           fi
@@ -315,3 +367,4 @@ jobs:
           echo "| 🖥️ Server | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "| 🤖 Client | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "| 🌐 Web    | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎭 E2E    | ✅ |" >> $GITHUB_STEP_SUMMARY
