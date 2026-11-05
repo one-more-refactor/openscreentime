@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: openscreentime
       POSTGRES_DB: openscreentime
     ports:
-      - "5432:5432"
+      # Dev only, and on loopback only: this password is in the repo.
+      - "127.0.0.1:5432:5432"
     volumes:
       - ost_pgdata:/var/lib/postgresql/data
     healthcheck:

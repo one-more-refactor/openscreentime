@@ -30,3 +30,12 @@ deploy/test/.gnome/
 # Server deploy state (deploy/backup.sh, deploy/update.sh)
 /backups/
 /.update.lock
+
+# Python bytecode (brand/gen.py, docs/assets/gen_demo.py)
+__pycache__/
+*.pyc
+
+# Playwright (e2e/, media/)
+test-results/
+playwright-report/
+blob-report/
