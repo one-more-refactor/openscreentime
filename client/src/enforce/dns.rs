@@ -459,19 +459,19 @@ pub fn blocking_rule<'a>(name: &str, rules: &'a [String]) -> Option<&'a str> {
 /// policies in `browserpolicy` are what turn DoH off in the browsers).
 pub const DOH_HOSTS: &[&str] = &[
     "cloudflare-dns.com", // Cloudflare (Firefox's and Chrome's default entry)
-    "dns.google", // Google
-    "dns.google.com", // Google (legacy name)
-    "dns.quad9.net", // Quad9, and its filter variants below
+    "dns.google",         // Google
+    "dns.google.com",     // Google (legacy name)
+    "dns.quad9.net",      // Quad9, and its filter variants below
     "dns9.quad9.net",
     "dns10.quad9.net",
     "dns11.quad9.net",
-    "dns.nextdns.io", // NextDNS (per-profile names live under it)
+    "dns.nextdns.io",  // NextDNS (per-profile names live under it)
     "doh.opendns.com", // OpenDNS / Cisco Umbrella
     "doh.familyshield.opendns.com",
-    "dns.adguard.com", // AdGuard (old name)
+    "dns.adguard.com",     // AdGuard (old name)
     "dns.adguard-dns.com", // AdGuard
-    "doh.mullvad.net", // Mullvad (old name)
-    "dns.mullvad.net", // Mullvad (base./adblock./family. under it)
+    "doh.mullvad.net",     // Mullvad (old name)
+    "dns.mullvad.net",     // Mullvad (base./adblock./family. under it)
     "doh.cleanbrowsing.org",
     "doh.dns.sb",
     "dns.controld.com",
@@ -1271,9 +1271,8 @@ mod tests {
         };
         for dns in [&open, &deny] {
             let conf = render_dnsmasq(dns, &on, None, &[], &SafeSearch::default());
-            assert!(conf.contains(
-                "address=/cloudflare-dns.com/0.0.0.0\naddress=/cloudflare-dns.com/::\n"
-            ));
+            assert!(conf
+                .contains("address=/cloudflare-dns.com/0.0.0.0\naddress=/cloudflare-dns.com/::\n"));
             assert!(conf.contains("address=/dns.google/0.0.0.0\n"));
             assert!(conf.contains("address=/use-application-dns.net/\n"));
             assert!(!conf.contains("address=/use-application-dns.net/0.0.0.0"));

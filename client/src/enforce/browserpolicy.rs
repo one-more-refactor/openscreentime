@@ -258,7 +258,10 @@ mod tests {
 
     #[test]
     fn chromium_policy_is_our_own_file() {
-        assert_eq!(chromium_plan(None, true), Action::Write(CHROMIUM_BODY.to_string()));
+        assert_eq!(
+            chromium_plan(None, true),
+            Action::Write(CHROMIUM_BODY.to_string())
+        );
         assert_eq!(chromium_plan(Some(CHROMIUM_BODY), true), Action::Keep);
         assert!(matches!(chromium_plan(Some("{}"), true), Action::Write(_)));
         assert_eq!(chromium_plan(Some(CHROMIUM_BODY), false), Action::Remove);
