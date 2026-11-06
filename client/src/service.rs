@@ -55,107 +55,22 @@ pub const BIN_ALIAS: &str = "/usr/local/bin/ost";
 /// memory — keeps working.
 pub const LEGACY_BIN: &str = "/usr/local/bin/sentinel-agent";
 
-/// PAM service that makes `sudo` on a managed machine ask for the unlock code
-/// (docs/CONTRACT-0.4.md §8). `pam_exec` runs our `pam-auth` helper with the
-/// typed token on stdin; it verifies it offline against the device's
-/// unlock-code secret / recovery codes / backup code.
-pub const PAM_SERVICE_NAME: &str = "openscreentime-parent";
+/// RETIRED. Versions up to 0.6 installed a PAM service and a sudoers drop-in
+/// that gave every *managed* (child) OS user unrestricted root sudo, with the
+/// unlock code, a recovery code or the backup code as the "password". That made
+/// a code meant for "30 more minutes" a root password on the child's own
+/// account (a code read out over the phone, a static 4-digit backup code, or a
+/// parent typing the code into a shell the child controls). The grant is gone:
+/// the unlock code is accepted only at the lock screen and by `ost unlock`
+/// run by someone who is already root. These paths are kept only so upgrades
+/// and `ost uninstall` can delete what older versions left behind.
 pub const PAM_SERVICE_PATH: &str = "/etc/pam.d/openscreentime-parent";
-/// The sudoers drop-in that routes the *managed* OS users through that PAM
-/// service and grants them `sudo` — so a parent can administer the machine by
-/// typing their code, and the child cannot (they don't have it). The agent
-/// rewrites it on every policy apply with the current managed user list.
+/// The retired sudoers drop-in (see [`PAM_SERVICE_PATH`]). Removed on every
+/// policy apply, on install and after a self-update.
 pub const SUDOERS_PATH: &str = "/etc/sudoers.d/10-openscreentime";
-/// Staging name while validating. sudo ignores files whose name contains a
-/// dot, so a half-written or invalid drop-in is never parsed.
+/// The staging name older versions used while validating the drop-in.
 const SUDOERS_TMP: &str = "/etc/sudoers.d/.10-openscreentime.tmp";
 
-fn pam_service_body() -> String {
-    format!(
-        "# Managed by openscreentime — do not edit. Removed by `ost uninstall`.\n\
-         # sudo for managed users authenticates with the UNLOCK CODE\n\
-         # (read off the OpenScreenTime console, or a recovery code),\n\
-         # verified offline by the agent.\n\
-         auth     required   pam_exec.so expose_authtok quiet {BIN_TARGET} pam-auth\n\
-         account  required   pam_permit.so\n\
-         session  required   pam_permit.so\n"
-    )
-}
-
-/// The sudoers drop-in for a set of managed OS users. Empty list → a file
-/// with only comments (valid, inert). Usernames are validated to the POSIX
-/// portable set so nothing can smuggle sudoers syntax in through a username.
-pub fn sudoers_body(managed_users: &[String]) -> String {
-    let mut users: Vec<&str> = managed_users
-        .iter()
-        .map(String::as_str)
-        .filter(|u| {
-            !u.is_empty()
-                && u.len() <= 32
-                && u.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-                && !u.starts_with('-')
-        })
-        .collect();
-    users.sort_unstable();
-    users.dedup();
-    let mut out = String::from(
-        "# Managed by openscreentime — rewritten on every policy apply, do not edit.\n\
-         # Managed users may sudo, but the password asked for is the UNLOCK CODE\n\
-         # (from the OpenScreenTime console). Removed by `ost uninstall`.\n",
-    );
-    if users.is_empty() {
-        out.push_str("# (no managed users on this device right now)\n");
-        return out;
-    }
-    let list = users.join(",");
-    out.push_str(&format!(
-        "Defaults:{list} pam_service={PAM_SERVICE_NAME}, timestamp_timeout=0\n\
-         Defaults:{list} passprompt=\"Unlock code (OpenScreenTime console): \"\n\
-         {list} ALL=(ALL:ALL) ALL\n"
-    ));
-    out
-}
-
-/// Write the sudoers drop-in safely: stage under a dot-name (ignored by sudo),
-/// validate with `visudo -c -f`, then rename into place. Never leaves a broken
-/// file behind — a syntax error in /etc/sudoers.d locks *everyone* out of sudo.
-fn write_sudoers(exec: &Exec, body: &str) -> Result<()> {
-    if exec.dry_run() {
-        tracing::info!(target: "dry_run", "WOULD WRITE {SUDOERS_PATH}:\n{body}");
-        return Ok(());
-    }
-    if std::fs::read_to_string(SUDOERS_PATH).ok().as_deref() == Some(body) {
-        return Ok(()); // unchanged
-    }
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::remove_file(SUDOERS_TMP);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o440)
-            .open(SUDOERS_TMP)?;
-        f.write_all(body.as_bytes())?;
-    }
-    match exec.try_probe("visudo", &["-c", "-f", SUDOERS_TMP]) {
-        Some(out) if out.contains("parsed OK") => {}
-        Some(out) => {
-            let _ = std::fs::remove_file(SUDOERS_TMP);
-            anyhow::bail!(
-                "sudoers drop-in did not validate, not installed: {}",
-                out.trim()
-            );
-        }
-        // No visudo on this box: the body is static and unit-tested; install it.
-        None => tracing::warn!("visudo not found — sudoers drop-in installed unvalidated"),
-    }
-    std::fs::rename(SUDOERS_TMP, SUDOERS_PATH)?;
-    Ok(())
-}
-
-/// Install the PAM service and an (initially empty) sudoers drop-in.
 /// Install the app-grid launcher for `ost app` and its icon, system-wide.
 /// Best-effort: a device without a working window (or a distro that keeps
 /// applications elsewhere) still enforces perfectly; it just lacks the shortcut.
@@ -500,46 +415,32 @@ fn start_companions(exec: &Exec) {
     }
 }
 
-pub fn install_parent_sudo(exec: &Exec) -> Result<()> {
-    exec.write_file(PAM_SERVICE_PATH, &pam_service_body())?;
-    write_sudoers(exec, &sudoers_body(&[]))?;
-    tracing::info!("parent-code sudo installed ({SUDOERS_PATH}, {PAM_SERVICE_PATH})");
-    Ok(())
-}
-
-/// Remove the PAM service and sudoers drop-in.
+/// Remove the retired unlock-code sudo hook (PAM service + sudoers drop-in)
+/// that older versions installed. Idempotent and best-effort: a file that is
+/// not there is fine. Inside the agent's sandbox /etc/sudoers.d is writable
+/// (ReadWritePaths) but /etc/pam.d is not — the sudoers drop-in is the part
+/// that grants anything, and the PAM file left behind is inert (nothing routes
+/// to it, and `pam-auth` refuses every token). The PAM file goes at the next
+/// install or self-update (`__refresh-units`, outside the sandbox).
 pub fn remove_parent_sudo(exec: &Exec) {
     if exec.dry_run() {
         tracing::info!(target: "dry_run", "WOULD REMOVE {SUDOERS_PATH}, {PAM_SERVICE_PATH}");
         return;
     }
-    let _ = std::fs::remove_file(SUDOERS_PATH);
-    let _ = std::fs::remove_file(SUDOERS_TMP);
-    let _ = std::fs::remove_file(PAM_SERVICE_PATH);
-}
-
-/// Is this profile kind under enforcement (→ its OS user's sudo asks for the
-/// parent code)? Adults are not; everything else — including the legacy
-/// `kids`/`teen` presets and `custom` — is.
-pub fn kind_is_managed(profile_kind: &str) -> bool {
-    !matches!(profile_kind, "adult" | "default")
-}
-
-/// Re-render the sudoers drop-in for the current managed users. Called on
-/// every policy apply. Skipped entirely if `install-service` never ran here
-/// (no PAM service → nothing to route through).
-pub fn sync_managed_sudoers(exec: &Exec, users_by_kind: &[(String, String)]) {
-    if !exec.dry_run() && !std::path::Path::new(PAM_SERVICE_PATH).exists() {
-        return;
+    for path in [SUDOERS_PATH, SUDOERS_TMP, PAM_SERVICE_PATH] {
+        match std::fs::remove_file(path) {
+            Ok(()) => tracing::warn!("removed the retired unlock-code sudo hook: {path}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::debug!("could not remove {path}: {e}"),
+        }
     }
-    let managed: Vec<String> = users_by_kind
+}
+
+/// Is any piece of the retired sudo hook still on this computer?
+fn legacy_sudo_hook_present() -> bool {
+    [SUDOERS_PATH, SUDOERS_TMP, PAM_SERVICE_PATH]
         .iter()
-        .filter(|(_, kind)| kind_is_managed(kind))
-        .map(|(u, _)| u.clone())
-        .collect();
-    if let Err(e) = write_sudoers(exec, &sudoers_body(&managed)) {
-        tracing::warn!("could not update {SUDOERS_PATH}: {e}");
-    }
+        .any(|p| std::path::Path::new(p).exists())
 }
 
 /// Units installed under the previous product name.
@@ -652,11 +553,14 @@ fn desktop_setup_missing() -> bool {
 /// desktop build is missing, reload systemd. Runs in a transient unit (see
 /// [`refresh_units_if_stale`]), outside the agent's sandbox.
 pub fn refresh_units() -> Result<()> {
+    let exec = Exec::new(AgentCtx::new(false, false, 1));
+    // First, and before anything that can fail: the retired unlock-code sudo
+    // hook (the PAM file is only writable from out here, not from the agent).
+    remove_parent_sudo(&exec);
     let stale = stale_units();
     for (path, body) in &stale {
         std::fs::write(path, body).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
     }
-    let exec = Exec::new(AgentCtx::new(false, false, 1));
     // A computer installed before the installer brought dnsmasq/nftables.
     // Restart the agent below only if that actually changed something — a
     // package manager that "succeeds" without providing the program must
@@ -717,6 +621,7 @@ pub fn refresh_units_if_stale(exec: &Exec) {
     if exec.dry_run()
         || !crate::config::is_root()
         || (stale_units().is_empty()
+            && !legacy_sudo_hook_present()
             && !desktop_setup_missing()
             && missing_enforcement_deps(exec).is_empty()
             && !crate::enforce::dns::needs_wiring(exec)
@@ -797,11 +702,9 @@ fn install_service_with(exec: &Exec) -> Result<()> {
         }
     }
     tamper::install_polkit(&exec, 1)?;
-    // sudo on this machine asks for the parent code (CONTRACT-0.4 §8). A
-    // failure here must not abort the install of enforcement itself.
-    if let Err(e) = install_parent_sudo(&exec) {
-        tracing::warn!("parent-code sudo not installed: {e}");
-    }
+    // Older versions gave managed users sudo with the unlock code as the
+    // password. Never again: remove the hook if this is an upgrade.
+    remove_parent_sudo(&exec);
 
     exec.run("systemctl", &["daemon-reload"])?;
     exec.run("systemctl", &["enable", AGENT_UNIT])?;
@@ -832,7 +735,8 @@ fn install_service_with(exec: &Exec) -> Result<()> {
 
 /// What `install-service` put on this computer besides the binary: the
 /// units (the companion stopped for whoever is signed in), the lock's unit,
-/// user and PAM session, the launcher and autostart, the unlock-code sudo.
+/// user and PAM session, the launcher and autostart, and any unlock-code
+/// sudo hook an older version left behind.
 /// The agent's own units are stopped by the caller first.
 pub fn remove_installed(exec: &Exec) {
     stop_companions(exec);
@@ -856,10 +760,14 @@ pub fn remove_installed(exec: &Exec) {
         let _ = exec.run("userdel", &[crate::lock::LOCK_USER]);
     }
     remove_parent_sudo(exec);
+    // The browsers' DoH-off policies (block_doh), where still ours.
+    if !exec.dry_run() {
+        crate::enforce::browserpolicy::apply(exec, false);
+    }
     let _ = exec.run("systemctl", &["daemon-reload"]);
 }
 
-/// `ost uninstall`: stop and remove the units, the sudo/PAM hook and the group.
+/// `ost uninstall`: stop and remove the units, any retired sudo/PAM hook and the group.
 /// The enrollment config and state are left alone (re-running `install-service`
 /// picks them right back up); the binary is left in place too.
 pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
@@ -868,7 +776,7 @@ pub fn uninstall(ctx: Arc<AgentCtx>) -> Result<()> {
     let _ = exec.run("systemctl", &["disable", "--now", WATCHDOG_TIMER_UNIT]);
     let _ = exec.run("systemctl", &["disable", "--now", AGENT_UNIT]);
     remove_installed(&exec);
-    println!("Removed the OpenScreenTime units and the parent-code sudo hook.");
+    println!("Removed the OpenScreenTime units.");
     println!(
         "Enrollment config ({}) and state were kept.",
         crate::config::CONFIG_PATH
@@ -951,29 +859,15 @@ pub fn status_json() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    /// The sudoers drop-in is load-bearing for every sudo on the box: pin its
-    /// shape so a stray edit cannot ship a file visudo would reject.
+    /// The retired sudo hook must never come back: nothing in this module may
+    /// write a sudoers rule or the parent PAM service again.
     #[test]
-    fn sudoers_and_pam_bodies_are_what_we_mean() {
-        let s = sudoers_body(&[
-            "vali".into(),
-            "kid".into(),
-            "vali".into(),
-            "bad name".into(),
-            "-x".into(),
-        ]);
-        assert!(
-            s.contains("Defaults:kid,vali pam_service=openscreentime-parent, timestamp_timeout=0")
-        );
-        assert!(s.contains("kid,vali ALL=(ALL:ALL) ALL"));
-        assert!(!s.contains("bad name") && !s.contains("-x"));
-        assert!(s.lines().all(|l| !l.ends_with(' ')));
-        // nobody managed → comments only, still a valid file
-        let empty = sudoers_body(&[]);
-        assert!(empty.lines().all(|l| l.starts_with('#')));
-        let p = pam_service_body();
-        assert!(p.contains("auth     required   pam_exec.so expose_authtok quiet /usr/local/bin/openscreentime pam-auth"));
-        assert!(p.contains("account  required   pam_permit.so"));
+    fn no_sudo_grant_is_ever_written() {
+        let src = include_str!("service.rs");
+        let needle = ["ALL=(ALL:ALL)", " ALL"].concat();
+        assert!(!src.contains(&needle));
+        let pam_line = ["pam_exec.so expose_authtok", " quiet"].concat();
+        assert!(!src.contains(&pam_line));
     }
 
     fn pos(log: &[String], entry: &str) -> usize {
@@ -1076,22 +970,5 @@ mod tests {
         assert!(crate::enforce::dns::needs_wiring(&arch));
         assert!(!ensure_enforcement_deps(&arch), "nothing to install");
         assert_eq!(arch.log(), ["write /etc/dnsmasq.conf"]);
-    }
-
-    #[test]
-    fn adults_are_not_managed_everyone_else_is() {
-        assert!(!kind_is_managed("adult"));
-        assert!(!kind_is_managed("default"));
-        for k in [
-            "little",
-            "kid",
-            "younger_teen",
-            "older_teen",
-            "kids",
-            "teen",
-            "custom",
-        ] {
-            assert!(kind_is_managed(k), "{k}");
-        }
     }
 }

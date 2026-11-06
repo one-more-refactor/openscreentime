@@ -117,7 +117,9 @@ Deterrence must never become a hostage situation. At every level:
 - **The unlock code** — a per-computer TOTP the agent verifies offline (single-use, with a
   wrong-code back-off), or a one-time recovery code, or a legacy profile backup code
   (argon2). Typed at the lock (30 minutes; the agent checks it, the lock holds nothing), with
-  `ost unlock`, or at `sudo` on a managed computer (PAM). No secret configured means no unlock —
+  `ost unlock` (run by someone who is already root). It is deliberately **not** accepted by
+`sudo`: versions up to 0.6 did that through PAM, which made the code a root password on the
+child's own account; the hook is removed on upgrade. No secret configured means no unlock —
   it fails closed. See `AGENT.md` → Unlock code.
 - **The lock never takes the keyboard.** It runs in its own session on its own VT (cage as
   `ost-lock`, or the agent's text lock), so the code can always be typed, and the stopped
@@ -166,8 +168,16 @@ Claims you might expect from this category of product that we deliberately do no
 - **Browser DNS-over-HTTPS to an arbitrary IP is not fully stopped.** Whenever a policy blocks
   anything, the agent forces plaintext DNS through its own resolver (`force_dns` is switched on
   automatically when blocks exist), and every preset under 18 also drops DoT and the known
-  public DoH provider IPs (`lockdown.block_doh`/`block_dot`). That closes plaintext alt-resolvers and the common
-  one-click DoH toggles. It does **not** stop a determined user who points a browser at a DoH
+  public DoH provider IPs (`lockdown.block_doh`/`block_dot`). With `block_doh` on, the agent also
+  sinkholes the known public DoH hostnames in its resolver (`dns::DOH_HOSTS` — a hand-kept list
+  that needs review, not a maintained feed), answers Firefox's canary `use-application-dns.net`
+  with NXDOMAIN, and installs the browsers' managed policies that switch DoH off and lock the
+  setting (`/etc/firefox/policies/policies.json` `DNSOverHTTPS {Enabled:false, Locked:true}`;
+  `DnsOverHttpsMode: "off"` for Chromium, Chrome, Brave, Edge). Those policies are written by a
+  transient root helper (`ost __browser-policy`), because the agent's sandbox can't write there.
+  That closes plaintext alt-resolvers and the browsers' DoH settings. It does **not** cover
+  Flatpak browsers (they don't read the host's policy dirs), a portable browser or DoH client the
+  user runs from their home, or a determined user who points such a client at a DoH
   endpoint on an IP not in our list, pinned so its bootstrap never hits the local resolver —
   the query rides ordinary HTTPS/443, indistinguishable from any other. The enforcement-honesty
   probe checks the *system* resolver path (`getent`), so it can report the DNS block healthy

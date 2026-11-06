@@ -141,7 +141,7 @@ One word per concept, on the console and on the computer alike.
 | A managed human | **person**, or their name | member, user, kid (as the generic) |
 | The parent's daily cap | **limit** | budget, allowance, quota |
 | Remaining time | **time left** | remaining |
-| The 6-digit code that opens a stopped computer and `sudo` | **unlock code** | parent code, PIN, backup code |
+| The 6-digit code that opens a stopped computer | **unlock code** | parent code, PIN, backup code |
 | The one-time spare keys | **recovery code** | — |
 | Asking a parent | **Ask for more time** | request more time, earn more |
 | Connected to the server | **Online** | connected |

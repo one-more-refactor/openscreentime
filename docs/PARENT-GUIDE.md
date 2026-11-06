@@ -160,14 +160,27 @@ open your rules; a child's view never can.)
    **unlock code** at the lock (30 minutes, even offline), or you give time
    or resume from the console.
 
-The unlock code also answers `sudo` on a child's computer, so you can
-administer it and they can't.
+The unlock code is **not** a password for anything else. Type it only at the
+OpenScreenTime lock screen — never into a terminal, and never into `sudo` in
+a child's session (a child controls everything in their own session and can
+capture what you type there). To administer a child's computer, use your own
+admin account on it (log in as yourself, or `su - <you>` from a terminal you
+trust), or `sudo ost unlock` from that admin account if the computer is
+offline and stuck.
+
+Versions before this change also let a child's account use `sudo` with the
+unlock code as the password. That is gone; updating the agent removes it.
 
 ## Honest limits
 
 - **Blocking is at DNS.** Anti-bypass rules (forced DNS, DNS-over-HTTPS and
-  -TLS, Tor) are on for everyone under 18, but a determined teenager with a
-  hotspot or a VPN you haven't blocked can still get around a block. A blocked
+  -TLS, Tor) are on for everyone under 18. For DNS-over-HTTPS that means the
+  well-known public DoH servers are blocked by address and by name, and
+  Firefox, Chrome, Chromium, Brave and Edge get a managed policy that turns
+  their "secure DNS" setting off and locks it — for every account on that
+  computer, yours included. A Flatpak browser, a portable browser in their
+  home folder, a DoH server that isn't on the list, a hotspot or a VPN you
+  haven't blocked can still get around a block. A blocked
   site looks like a site that won't load; there's no explainer page.
 - **An offline computer** keeps today's rules and counts time, but a pause
   you send lands when it's back.

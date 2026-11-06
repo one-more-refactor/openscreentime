@@ -2,7 +2,7 @@
 // UnlockCodePanel — one computer's keys, owned by the console.
 //
 // On a child's computer the parent's 6-digit unlock code unlocks the screen,
-// reopens time and allows `sudo`. It is verified on the device, offline — but
+// and reopens time (never `sudo`). It is verified on the device, offline — but
 // the secret behind it never leaves the server and the agent. There is no QR
 // to scan, no authenticator entry to keep: when a parent needs the code they
 // open this (on their phone, usually), confirm it's them (a passkey, or a code

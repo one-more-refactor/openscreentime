@@ -108,7 +108,7 @@ Subcommands:
 | `pair` | `--server <URL>` `--token <TOKEN>` | Stores a scoped **parent access token** (minted in the web console → Settings → Parent access) at `~/.config/openscreentime/parent.toml` (`0600`). Enables the tray's parent mode. Runs as the desktop user, never root. |
 | `tray` | — | *(feature `tray` only)* Per-user tray companion — see [Build features matrix](#build-features-matrix). With a `pair`ed token it also shows and approves time requests. Runs as the desktop user, never root. |
 | `unlock` | `--code <CODE>` `--minutes <N>` (default 60) | Parent recovery: verifies the **unlock code** (the 6 digits the console shows, a one-time recovery code, or a profile backup code) fully offline, then suspends enforcement (removes the nft table, un-pins `resolv.conf`, un-freezes every login user) for `N` minutes. Omit `--code` and it is read from the terminal (`--pin` is a hidden alias). Requires root. See [Parent code](#parent-code). |
-| `uninstall` | — | Disables and removes the systemd units, the sudo/PAM unlock-code hook and nothing else (enrollment config, state and the binary stay). Requires root. |
+| `uninstall` | — | Disables and removes the systemd units, any retired sudo/PAM unlock-code hook and nothing else (enrollment config, state and the binary stay). Requires root. |
 
 Some subcommands are intentionally hidden — not in `--help`, not real
 `clap::Subcommand` variants, invoked only by the agent itself:
@@ -117,7 +117,8 @@ Some subcommands are intentionally hidden — not in `--help`, not real
 |---|---|---|
 | `__lock-session` | `openscreentime-lock@<vt>.service`, as `ost-lock` (`gui` build) | Starts `cage` (no `-s`) hosting `__lockscreen`; if cage exits within 6 s (a GPU wlroots can't drive) it is run once more with `WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1`. Fails if cage is missing or both fail — the agent then draws the text lock (on VT 14). |
 | `__lockscreen` | `cage`, inside the lock unit (`gui` build) | The graphical lock window. Shows what the agent publishes and sends typed codes / "ask" / "snooze" over `/run/openscreentime/lock.sock`; holds no secret. |
-| `pam-auth` | `pam_exec.so` from `/etc/pam.d/openscreentime-parent` (i.e. `sudo` on a managed machine) | Reads the typed token from stdin, verifies it as an unlock code offline, posts a `parent_code_*` event (5 s bound, best-effort), exits 0/1. See [Parent sudo](#parent-sudo-pam). |
+| `pam-auth` | Nothing any more (a stale `/etc/pam.d/openscreentime-parent` from ≤ 0.6) | **Retired.** Drains stdin and exits 1 for every token. Kept so a stale PAM file can never accept a code in the window between a self-update and the cleanup. See [Parent sudo](#parent-sudo-pam--retired). |
+| `__browser-policy on\|off` | The agent, via `systemd-run`, when the browser policies on disk don't match `block_doh` (at most once per 10 min per state); `uninstall` / `__retire` call the same code with `off` | Writes or removes `/etc/firefox/policies/policies.json` → `DNSOverHTTPS {Enabled:false, Locked:true}` (merged into an existing file, removed only if still exactly ours) and `openscreentime-doh.json` (`DnsOverHttpsMode: "off"`) in the Chromium/Chrome/Brave/Edge managed-policy dirs. |
 | `__resume-enforcement <secs>` | `ost unlock`, detached | Sleeps out the suspend window from `unlock`, then re-applies the cached policy once and exits. |
 
 ### Machine-readable output
@@ -213,10 +214,10 @@ Run as root (`sudo ost login`) the CLI mints directly with `SUDO_USER`.
 | `/usr/local/bin/.openscreentime.download.$$` | root : — | `install.sh` (transient) | Staging path for the initial download; renamed atomically into place, cleaned up by a trap on any exit. |
 | `/etc/openscreentime/agent.toml` | root : **0600** | `enroll` | Persisted identity: `server_url`, `device_id`, `device_token`, `poll_interval_secs`, `tamper_level`, `auto_update`. See [Config fields](#config-fields). |
 | `/etc/openscreentime/policy_cache.json` | root : **0600** | `run` (after every applied policy bundle) | Last-applied effective `Policy`, JSON. Not read by enforcement itself (that's in-memory); exists only so `unlock` knows what to tear down without a live agent process. |
-| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code` (TOTP secret + unused recovery-code MACs). The boot fallback when the server is unreachable, and what `unlock` / `pam-auth` / the agent (for codes typed at the lock) verify unlock codes against. |
-| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run` (codes typed at the lock), `unlock`, `pam-auth` | Unlock-code replay counter (last accepted TOTP step — a code is single-use), the ids of recovery codes already spent on this device, and the wrong-attempt counter / lockout deadline. |
-| `/etc/pam.d/openscreentime-parent` | root : default | `install-service` | PAM service: `auth required pam_exec.so expose_authtok quiet /usr/local/bin/openscreentime pam-auth`. Removed by `uninstall`. |
-| `/etc/sudoers.d/10-openscreentime` | root : **0440** | `install-service`, then `run` on every policy apply (staged under a dot-name, `visudo -c -f` validated, renamed into place) | `Defaults:<managed users> pam_service=openscreentime-parent, timestamp_timeout=0` + `<managed users> ALL=(ALL:ALL) ALL`. Managed = every OS user whose profile kind is not `adult`/`default`. Removed by `uninstall`. |
+| `/etc/openscreentime/policy_bundle.json` | root : **0600** | `run` (after every applied policy bundle) | The whole last bundle, verbatim — per-user policies, VPN profile and the device's `parent_code` (TOTP secret + unused recovery-code MACs). The boot fallback when the server is unreachable, and what `unlock` and the agent (for codes typed at the lock) verify unlock codes against. |
+| `/var/lib/openscreentime/parent_code.json` | root : **0600** | `run` (codes typed at the lock), `unlock` | Unlock-code replay counter (last accepted TOTP step — a code is single-use), the ids of recovery codes already spent on this device, and the wrong-attempt counter / lockout deadline. |
+| `/etc/pam.d/openscreentime-parent` | — | **Retired** (≤ 0.6 wrote it) | Deleted by `install-service`, `__refresh-units` (after a self-update) and `uninstall`. |
+| `/etc/sudoers.d/10-openscreentime` | — | **Retired** (≤ 0.6 wrote it) | Deleted by `run` on every policy apply, `install-service`, `__refresh-units` and `uninstall`. Never written. |
 | `/etc/openscreentime/dnsmasq.d/openscreentime.conf` | root : default | `run` (DNS enforcement) | Rendered dnsmasq ruleset realizing the DNS policy. |
 | `/etc/resolv.conf` | root : default, **immutable (`chattr +i`)** | `run` (DNS enforcement) | Pinned to `nameserver 127.0.0.1`; the immutable bit stops a managed user from repointing it. Re-asserted every tick if it drifts. |
 | `/etc/wireguard/openscreentime.conf` | root : **0600** | `run` (VPN enforcement) | The device's WireGuard client config, verbatim as uploaded in the console (it contains the private key — hence 0600, and dry-run logs withhold its contents). Present only while a `wireguard` profile is set; runs as `wg-quick@openscreentime`. |
@@ -358,8 +359,10 @@ explicit `default_deny` firewall mode makes it `drop`, with
 allowing the DNS upstream and (if it's a literal IP) the enrolled server. `NetworkLockdown` toggles add **drop**
 rules ahead of those generic accepts (nftables is first-match-wins):
 `block_dot` (853), `force_dns` (non-upstream port 53), `block_doh` (a
-hardcoded list of public DoH resolver IPs, excluding the configured
-upstream), `block_vpn` (WireGuard/OpenVPN/IPsec ports), `block_tor`
+hardcoded list of public DoH resolver IPs, the configured upstream
+included — and, outside nftables, the DoH hostnames sinkholed in dnsmasq,
+`use-application-dns.net` answered NXDOMAIN, and the Firefox/Chromium
+managed policies that turn DoH off, see `enforce/browserpolicy.rs`), `block_vpn` (WireGuard/OpenVPN/IPsec ports), `block_tor`
 (OR/directory/SOCKS ports). A missing table is detected every tick
 (`table_missing`) and immediately re-applied with the last effective
 policy.
@@ -676,26 +679,31 @@ never sent. A match is `Verdict::Recovery(id)`: the id is remembered in
 profile-level **backup code** (`parent_pin_hash`, argon2) still opens the
 door, reported as `parent_code_backup_used` without an id. Every attempt emits
 `parent_code_ok` / `parent_code_failed` / `parent_code_backup_used` with
-payload `{ via: lock_screen|unlock|pam, user, detail[, recovery_id] }`.
+payload `{ via: lock_screen|unlock, user, detail[, recovery_id] }` (`pam`
+appears only in events from agents ≤ 0.6).
 
-Where it is asked for: the lock's code field, `ost unlock`, and `sudo` on a
-managed machine (below). Secrets never leave the agent: the lock only
+Where it is asked for: the lock's code field and `ost unlock` (root). Not
+`sudo` (below). Secrets never leave the agent: the lock only
 forwards what was typed.
 
-### Parent sudo (PAM)
+### Parent sudo (PAM) — retired
 
-`install-service` writes `/etc/pam.d/openscreentime-parent` and a sudoers
-drop-in, `/etc/sudoers.d/10-openscreentime`, that the agent rewrites on every
-policy apply with the current **managed** OS users (any profile kind except
-`adult`/`default`): `Defaults:<users> pam_service=openscreentime-parent,
-timestamp_timeout=0` and `<users> ALL=(ALL:ALL) ALL`. Effect: a child typing
-`sudo` is asked for the unlock code (verified by the hidden
-`pam-auth` helper via `pam_exec expose_authtok`), so the parent can
-administer the machine without a local password and the child cannot.
-Adults' sudo is untouched. The drop-in is staged under a dot-name (sudo
-ignores those), validated with `visudo -c -f`, and only then renamed into
-place — a broken sudoers.d file would lock everyone out, so one is never
-left behind. `ost uninstall` removes both files.
+Up to 0.6, `install-service` wrote `/etc/pam.d/openscreentime-parent` and a
+sudoers drop-in, `/etc/sudoers.d/10-openscreentime`, that gave every managed
+OS user full root `sudo` with the unlock code (or a recovery code, or the
+static backup code) as the password. That made a code meant for "30 more
+minutes" a root password on the child's own account — and a parent typing it
+into `sudo` inside the child's session could have it captured by an alias.
+It is removed:
+
+- The agent deletes the sudoers drop-in on every policy apply (its sandbox
+  can write `/etc/sudoers.d`), so an upgraded device drops it within one
+  policy apply — no reinstall needed.
+- `install-service` and `__refresh-units` (spawned after a self-update,
+  outside the sandbox) also delete the PAM file.
+- `pam-auth` refuses every token, so even a leftover file grants nothing.
+
+Parents administer a child's computer from their own admin account.
 
 ### App & category blocks
 

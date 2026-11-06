@@ -1215,13 +1215,10 @@ impl Agent {
         let parent_code = bundle.parent_code.unwrap_or_default();
         self.parent_totp_secret = Some(parent_code.totp_secret).filter(|s| !s.is_empty());
         self.parent_recovery = parent_code.recovery_codes;
-        // sudo on this machine: managed users authenticate with the unlock code.
-        let users_by_kind: Vec<(String, String)> = self
-            .kinds
-            .iter()
-            .map(|(u, k)| (u.clone(), k.clone()))
-            .collect();
-        crate::service::sync_managed_sudoers(&self.exec, &users_by_kind);
+        // Older versions gave managed users root sudo with the unlock code as
+        // the password. Remove that drop-in wherever it is still present, on
+        // every apply, so an upgraded device drops it without a reinstall.
+        crate::service::remove_parent_sudo(&self.exec);
         // DNS/nftables are host-global: apply the most restrictive effective
         // policy. A computer that can't filter the network (no dnsmasq, no
         // nftables) still gets everything else: the rules are held, cached,

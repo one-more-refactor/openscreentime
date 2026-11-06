@@ -141,8 +141,9 @@ OpenScreenTime.
 - **Getting more time**: choose **Ask for more time** (Kid and teens), or a
   parent types the unlock code at the lock (30 minutes), or gives time or
   resumes from the console.
-- **The unlock code** also answers `sudo` on this computer. You can't use
-  `sudo` without it; a parent can.
+- **The unlock code** works only at the lock screen (and for a parent's own
+  admin account with `ost unlock`). It is not a password for `sudo` or
+  anything else on your account.
 - **Offline**, the computer keeps today's rules and your time. If a parent
   turned on offline lockdown, a computer that can't reach the server for
   several days stops until it does — the unlock code still opens it.

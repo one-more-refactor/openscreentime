@@ -217,6 +217,12 @@ Agent:
 
 ## 8. PAM: parent sudo on a managed machine
 
+> **Retired (security).** This section granted managed users full root sudo
+> authenticated by the unlock code, which made the code a root password on
+> the child's account. The agent now removes both files and `pam-auth`
+> refuses every token; see `AGENT.md` → Parent sudo (PAM) — retired. Kept
+> below as the historical contract only.
+
 - New hidden subcommand `openscreentime pam-auth`: reads the authtok from
   stdin (pam_exec `expose_authtok`), verifies it as a parent code (§4), emits
   the event, exits 0/1. `PAM_USER`/`PAM_SERVICE` go in the event payload.
