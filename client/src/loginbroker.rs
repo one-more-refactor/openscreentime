@@ -52,7 +52,7 @@ pub async fn request_url(user: &str) -> Result<String> {
         .with_context(|| format!("could not write {}", req.display()))?;
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if let Ok(url) = std::fs::read_to_string(&ans) {
+        if let Some(url) = read_own_answer(&ans) {
             let _ = std::fs::remove_file(&ans);
             let url = url.trim().to_string();
             if url.starts_with("error:") {
@@ -63,6 +63,37 @@ pub async fn request_url(user: &str) -> Result<String> {
     }
     let _ = std::fs::remove_file(&req);
     anyhow::bail!("the agent didn't answer in time — is it running? (`systemctl status openscreentime-agent`)")
+}
+
+/// Read the agent's answer only if it is really the agent's answer to US.
+///
+/// The drop-box is world-writable (sticky), so another local user can plant
+/// `<us>.url` first — with a phishing link — and we can't even delete it. The
+/// agent's real answer is a regular file chowned to our uid with mode 0600;
+/// anything else (someone else's file, a group/world-readable one, a symlink:
+/// `O_NOFOLLOW`) is ignored, and the agent's rename replaces it.
+fn read_own_answer(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = f.metadata().ok()?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    if !meta.is_file() || meta.uid() != me || meta.mode() & 0o077 != 0 {
+        tracing::warn!(
+            "ignoring {}: not a private file of ours (uid {}, mode {:o})",
+            path.display(),
+            meta.uid(),
+            meta.mode() & 0o7777
+        );
+        return None;
+    }
+    let mut body = String::new();
+    f.take(64 * 1024).read_to_string(&mut body).ok()?;
+    Some(body)
 }
 
 /// The agent-side half: a small loop that answers requests. Runs as root.
@@ -143,4 +174,37 @@ fn write_private(d: &Path, user: &str, uid: u32, body: &str) -> Result<()> {
     std::os::unix::fs::chown(&tmp, Some(uid), None)?;
     std::fs::rename(&tmp, d.join(format!("{user}.url")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_private_answer_of_ours_is_trusted() {
+        let d = std::env::temp_dir().join(format!("ost-loginbroker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        let ours = d.join("me.url");
+        std::fs::write(&ours, "https://ost.example/#v=1").unwrap();
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_own_answer(&ours).as_deref(),
+            Some("https://ost.example/#v=1")
+        );
+
+        // Planted the way another user would: readable by others.
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_own_answer(&ours), None);
+
+        // A symlink to a private file of ours is not followed.
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.join("link.url");
+        std::os::unix::fs::symlink(&ours, &link).unwrap();
+        assert_eq!(read_own_answer(&link), None);
+
+        assert_eq!(read_own_answer(&d.join("missing.url")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
