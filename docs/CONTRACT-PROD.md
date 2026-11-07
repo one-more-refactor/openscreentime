@@ -109,19 +109,23 @@ Env config (all optional; feature off unless all three set):
 - `GET /api/auth/oidc/start` → 302 to authorize URL. `state` = random token stored in-memory
   (10-min TTL) mapped to a redirect-back path.
 - `GET /api/auth/oidc/callback?code&state` → exchanges code at token endpoint (client_secret
-  in POST body), fetches userinfo endpoint with the access token; requires verified `email`.
-  - If an admin with that email exists in ANY tenant → create session, redirect `/`.
-  - If NO admin exists at all (fresh install) → bootstrap tenant + admin (same path as first
-    passkey registration), session, redirect `/`.
-  - If admins exist but email unknown → redirect `/login?error=sso_unknown_account` (no
-    auto-provisioning of extra admins — this is a family server).
+  in POST body, plus the PKCE verifier), fetches userinfo endpoint with the access token;
+  requires `sub`. (Superseded 2026-11: identity is `(issuer, sub)`, never the email claim.)
+  - If an admin is bound to that `(issuer, sub)` → create session, redirect `/`.
+  - `start?link=1` (signed-in session, confirm window open) → bind the identity to that
+    account, redirect `/settings?sso=linked` (`?sso=in_use` if another account has it).
+  - If NO admin exists at all (fresh install) → park the verified email + `sub`, pick a
+    username on `/welcome`, then bootstrap tenant + admin bound to the identity.
+  - Otherwise → redirect `/login?error=sso_not_linked` (no auto-provisioning of extra
+    admins — this is a family server).
 - Redirect URI: `<OST_PUBLIC_URL>/api/auth/oidc/callback`; new env
   `OST_PUBLIC_URL` (falls back to RP origin already configured for WebAuthn).
 
 ## 7. Passkey management
 
 - `DELETE /api/me/passkeys/:id` → `{ "ok": true }`. Refuse (409, error envelope) to delete the
-  **last** credential of an admin **unless** OIDC is enabled (they'd lock themselves out).
+  **last** credential of an admin **unless** OIDC is enabled and linked to that admin (they'd
+  lock themselves out).
 - Web Settings gets delete buttons with confirm modal.
 
 ## 8. Dead-code and stub removals (decided)

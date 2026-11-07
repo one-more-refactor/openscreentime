@@ -701,7 +701,8 @@ pub async fn passkey_add_finish(
 }
 
 /// Delete one of the admin's passkeys. Refuses to delete the last credential
-/// unless OIDC is enabled (the admin would lock themselves out).
+/// unless SSO is enabled AND linked to this account (the admin would lock
+/// themselves out otherwise: SSO only signs in a bound identity).
 pub async fn delete_passkey(
     State(st): State<AppState>,
     admin: AuthAdmin,
@@ -720,9 +721,14 @@ pub async fn delete_passkey(
             .bind(admin.admin_id)
             .fetch_one(&st.db)
             .await?;
-    if total <= 1 && st.oidc.is_none() {
+    let sso_linked: bool =
+        sqlx::query_scalar("SELECT oidc_subject IS NOT NULL FROM admins WHERE id = $1")
+            .bind(admin.admin_id)
+            .fetch_one(&st.db)
+            .await?;
+    if total <= 1 && (st.oidc.is_none() || !sso_linked) {
         return Err(AppError::Conflict(
-            "cannot delete the last passkey while SSO is disabled".into(),
+            "cannot delete the last passkey unless SSO is linked to this account".into(),
         ));
     }
 

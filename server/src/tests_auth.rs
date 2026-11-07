@@ -1371,6 +1371,131 @@ async fn attack_sso_cannot_claim_a_fresh_server_without_the_setup_code() {
     env.drop_db().await;
 }
 
+/// Audit H3 (2026-11): SSO matched the IdP's email claim against every
+/// account, so anyone who could set a parent's address as their (verified)
+/// email at the IdP signed in as that parent. Only a bound (issuer, sub)
+/// signs in now; the email never does.
+#[tokio::test]
+async fn attack_sso_email_claim_is_not_an_identity() {
+    use crate::auth_oidc::{resolve_identity, Resolved};
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    sqlx::query("UPDATE admins SET email = 'philip@example.com' WHERE id = $1")
+        .bind(philip)
+        .execute(&env.st.db)
+        .await
+        .unwrap();
+    let iss = "https://idp.test";
+
+    // A stranger at the IdP (whatever email they claim): refused.
+    assert_eq!(
+        resolve_identity(&env.st.db, iss, "stranger-sub", None)
+            .await
+            .unwrap(),
+        Resolved::NotLinked
+    );
+
+    // Philip links his IdP identity from inside his own session...
+    assert_eq!(
+        resolve_identity(&env.st.db, iss, "philip-sub", Some(philip))
+            .await
+            .unwrap(),
+        Resolved::Linked
+    );
+    // ...and from then on that identity, and only it, signs him in.
+    assert_eq!(
+        resolve_identity(&env.st.db, iss, "philip-sub", None)
+            .await
+            .unwrap(),
+        Resolved::SignIn {
+            admin_id: philip,
+            tenant_id: tenant
+        }
+    );
+    // Same subject at another issuer is a different identity.
+    assert_eq!(
+        resolve_identity(&env.st.db, "https://other.test", "philip-sub", None)
+            .await
+            .unwrap(),
+        Resolved::NotLinked
+    );
+    // Another account can't take over a bound identity by linking it.
+    let other = env.member(tenant, "Mia").await;
+    assert_eq!(
+        resolve_identity(&env.st.db, iss, "philip-sub", Some(other))
+            .await
+            .unwrap(),
+        Resolved::LinkedElsewhere
+    );
+    env.drop_db().await;
+}
+
+/// Linking is a sensitive act: it needs a session with an open confirm
+/// window, like adding a passkey.
+#[tokio::test]
+async fn sso_link_needs_a_confirmed_session() {
+    let Some(env) = Env::new().await else { return };
+    let (tenant, philip) = env.household("Philip").await;
+    assert!(matches!(
+        crate::auth_oidc::link_requester(&env.st, &CookieJar::new()).await,
+        Err(AppError::Unauthorized(_))
+    ));
+    let (jar, _) = session_for(&env, philip, tenant).await;
+    assert!(matches!(
+        crate::auth_oidc::link_requester(&env.st, &jar).await,
+        Err(AppError::StepUpRequired(_))
+    ));
+    open_confirm_window(&env, &jar).await;
+    assert_eq!(
+        crate::auth_oidc::link_requester(&env.st, &jar)
+            .await
+            .unwrap(),
+        philip
+    );
+    env.drop_db().await;
+}
+
+/// The first-run SSO signup binds the IdP identity to the account it makes,
+/// and with accounts present a new identity is no longer a first run.
+#[tokio::test]
+async fn sso_first_run_binds_the_identity() {
+    use crate::auth_oidc::{resolve_identity, Resolved};
+    let Some(mut env) = Env::with_setup_code(None).await else {
+        return;
+    };
+    let (oidc, parked) = crate::auth_oidc::Oidc::parked_for_test("first@example.com").await;
+    let iss = oidc.issuer().to_string();
+    assert_eq!(
+        resolve_identity(&env.st.db, &iss, "sub-of-the-first-parent", None)
+            .await
+            .unwrap(),
+        Resolved::FirstRun
+    );
+    env.st.oidc = Some(oidc);
+    let req = serde_json::from_value(serde_json::json!({ "username": "first" })).unwrap();
+    let _signed_in = crate::auth_oidc::setup_finish(
+        State(env.st.clone()),
+        CookieJar::new(),
+        axum::extract::Path(parked),
+        Json(req),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        resolve_identity(&env.st.db, &iss, "sub-of-the-first-parent", None)
+            .await
+            .unwrap(),
+        Resolved::SignIn { .. }
+    ));
+    assert_eq!(
+        resolve_identity(&env.st.db, &iss, "someone-else", None)
+            .await
+            .unwrap(),
+        Resolved::NotLinked
+    );
+    env.drop_db().await;
+}
+
 /// Finding 5c (LOW): an agent from before sign-in codes doesn't know the
 /// command. It is never sent one (a decoy answers, as for anyone with no
 /// computer to show it on), and one it gets anyway can't wedge its queue.
