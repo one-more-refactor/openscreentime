@@ -85,7 +85,11 @@ export function Login() {
   const [sentAt, setSentAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(() =>
-    params.get("error") ? "That sign-in didn't work. Try again." : null,
+    params.get("error") === "sso_not_linked"
+      ? "That SSO account isn't linked to anyone here. Sign in another way, then link it in Settings."
+      : params.get("error")
+        ? "That sign-in didn't work. Try again."
+        : null,
   );
 
   useEffect(() => {

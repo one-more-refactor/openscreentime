@@ -165,7 +165,9 @@ function Security() {
 }
 
 function Passkeys() {
-  const recovered = (useLocation().state as { recovered?: boolean } | null)?.recovered === true;
+  const location = useLocation();
+  const recovered = (location.state as { recovered?: boolean } | null)?.recovered === true;
+  const ssoResult = new URLSearchParams(location.search).get("sso");
   const authConfig = useAsync<AuthConfig>(getAuthConfig, []);
   const passkeys = useAsync<Passkey[]>(listPasskeys, []);
   const [confirmDelete, setConfirmDelete] = useState<Passkey | null>(null);
@@ -259,7 +261,24 @@ function Passkeys() {
           <div className="row-main">
             <div className="settings-add">
               <PasskeyButton label="Add a passkey" onActivate={add} block={false} />
+              {oidc && (
+                <Button
+                  variant="quiet"
+                  onClick={() => {
+                    window.location.href = "/api/auth/oidc/start?link=1";
+                  }}
+                >
+                  Link {authConfig.data?.oidc_name ?? "SSO"} sign-in
+                </Button>
+              )}
             </div>
+            {ssoResult && !status && (
+              <p className="hint" data-error={ssoResult !== "linked"} role="status">
+                {ssoResult === "linked"
+                  ? `${authConfig.data?.oidc_name ?? "SSO"} sign-in is linked to your account.`
+                  : `That ${authConfig.data?.oidc_name ?? "SSO"} account is already linked to someone else.`}
+              </p>
+            )}
             {status && (
               <p className="hint" data-error={status.error} role="status">
                 {status.msg}
