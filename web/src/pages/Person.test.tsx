@@ -236,7 +236,9 @@ describe("today", () => {
     apiImpl.getFamily = () => Promise.resolve(f);
     setup("/child/mia");
     const hero = await screen.findByRole("region", { name: "Today" });
-    expect(within(hero).getByText(/^Unlocked until \d\d:\d\d\.$/)).toBeTruthy();
+    // "tomorrow at" when the 29 minutes cross midnight (in UTC, the ISO
+    // string's offset), as they did in a CI run at 23:59.
+    expect(within(hero).getByText(/^Unlocked until (tomorrow at )?\d\d:\d\d\.$/)).toBeTruthy();
     const ring = within(hero).getByRole("img");
     expect(ring.getAttribute("data-state")).not.toBe("full");
     expect(ring.getAttribute("aria-label")).toMatch(/29 min left/);
