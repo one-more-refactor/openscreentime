@@ -8,8 +8,11 @@
 //!
 //! Flow: `GET /api/auth/oidc/start` 302s to the authorize URL with a random
 //! `state` held in-memory (10-min TTL); `GET /api/auth/oidc/callback` exchanges
-//! the code, fetches userinfo, matches the verified email against existing
-//! admins (fresh installs bootstrap a tenant + admin) and issues a session.
+//! the code (PKCE-bound), fetches userinfo and signs in the account bound to
+//! the IdP's `(issuer, sub)`. The email claim is never an identity: an account
+//! is bound by the first-run SSO signup, or by "Link SSO" started from inside a
+//! signed-in, confirmed session (`/api/auth/oidc/start?link=1`). A fresh
+//! install bootstraps a tenant + admin.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,8 +24,10 @@ use axum::{
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::{create_session, create_tenant_with_admin, gen_token, session_cookie};
@@ -58,6 +63,11 @@ struct PendingState {
     created: Instant,
     /// Path (relative to the public URL) to send the browser to after login.
     redirect_to: String,
+    /// PKCE verifier; its S256 challenge went out with the authorize request.
+    pkce_verifier: String,
+    /// Set when a signed-in, confirmed account started the flow to LINK this
+    /// IdP identity to itself, rather than to sign in.
+    link_admin: Option<Uuid>,
 }
 
 /// A verified first-run SSO identity, parked while the person chooses their
@@ -67,6 +77,8 @@ struct PendingSignup {
     created: Instant,
     /// The IdP-verified email, kept to stamp on the account they create.
     email: String,
+    /// The IdP `sub`, bound (with the issuer) to the account they create.
+    subject: String,
     /// A friendly starting point for the username field (email local-part).
     suggested_username: String,
     /// The IdP `name` claim (or the local-part), for the display name.
@@ -76,6 +88,8 @@ struct PendingSignup {
 /// Provider config (endpoints once discovered) + in-flight `state` store.
 pub struct Oidc {
     pub name: String,
+    /// The configured issuer (no trailing slash): half of every SSO binding.
+    issuer: String,
     client_id: String,
     client_secret: String,
     /// Filled by the background discovery; empty while the IdP is unreachable.
@@ -117,6 +131,7 @@ pub fn init_from_env(public_url: &str) -> anyhow::Result<Option<Arc<Oidc>>> {
         .build()?;
     let oidc = Arc::new(Oidc {
         name,
+        issuer: issuer.trim_end_matches('/').to_string(),
         client_id,
         client_secret,
         endpoints: std::sync::OnceLock::new(),
@@ -138,8 +153,26 @@ impl Oidc {
     /// An SSO config with no provider behind it, holding one first-run
     /// identity parked the way `callback` parks it. Returns the /welcome token.
     pub(crate) async fn parked_for_test(email: &str) -> (Arc<Oidc>, String) {
-        let oidc = Arc::new(Oidc {
+        let oidc = Self::unconfigured_for_test();
+        let token = gen_token();
+        oidc.pending_signups.lock().await.insert(
+            token.clone(),
+            PendingSignup {
+                created: Instant::now(),
+                email: email.into(),
+                subject: "sub-of-the-first-parent".into(),
+                suggested_username: "someone".into(),
+                suggested_name: "Someone".into(),
+            },
+        );
+        (oidc, token)
+    }
+
+    /// An SSO config with no provider behind it (issuer `https://idp.test`).
+    pub(crate) fn unconfigured_for_test() -> Arc<Oidc> {
+        Arc::new(Oidc {
             name: "SSO".into(),
+            issuer: "https://idp.test".into(),
             client_id: "test".into(),
             client_secret: "test".into(),
             endpoints: std::sync::OnceLock::new(),
@@ -147,18 +180,11 @@ impl Oidc {
             http: reqwest::Client::new(),
             states: tokio::sync::Mutex::new(HashMap::new()),
             pending_signups: tokio::sync::Mutex::new(HashMap::new()),
-        });
-        let token = gen_token();
-        oidc.pending_signups.lock().await.insert(
-            token.clone(),
-            PendingSignup {
-                created: Instant::now(),
-                email: email.into(),
-                suggested_username: "someone".into(),
-                suggested_name: "Someone".into(),
-            },
-        );
-        (oidc, token)
+        })
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
     }
 }
 
@@ -213,8 +239,11 @@ impl Oidc {
         }
     }
 
-    async fn issue_state(&self, redirect_to: String) -> String {
+    /// Returns `(state, pkce_challenge)`.
+    async fn issue_state(&self, redirect_to: String, link_admin: Option<Uuid>) -> (String, String) {
         let token = gen_token();
+        let pkce_verifier = gen_token();
+        let challenge = pkce_challenge(&pkce_verifier);
         let mut states = self.states.lock().await;
         states.retain(|_, s| s.created.elapsed() < STATE_TTL);
         states.insert(
@@ -222,18 +251,24 @@ impl Oidc {
             PendingState {
                 created: Instant::now(),
                 redirect_to,
+                pkce_verifier,
+                link_admin,
             },
         );
-        token
+        (token, challenge)
     }
 
-    async fn take_state(&self, token: &str) -> Option<String> {
+    async fn take_state(&self, token: &str) -> Option<PendingState> {
         let mut states = self.states.lock().await;
         states.retain(|_, s| s.created.elapsed() < STATE_TTL);
-        states.remove(token).map(|s| s.redirect_to)
+        states.remove(token)
     }
 
-    async fn exchange_code(&self, code: &str) -> anyhow::Result<TokenResponse> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        pkce_verifier: &str,
+    ) -> anyhow::Result<TokenResponse> {
         Ok(self
             .http
             .post(&self.endpoints()?.token_endpoint)
@@ -243,6 +278,7 @@ impl Oidc {
                 ("redirect_uri", self.redirect_uri.as_str()),
                 ("client_id", self.client_id.as_str()),
                 ("client_secret", self.client_secret.as_str()),
+                ("code_verifier", pkce_verifier),
             ])
             .send()
             .await?
@@ -288,8 +324,52 @@ pub async fn auth_config(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// RFC 7636 S256: base64url(sha256(verifier)), unpadded.
+fn pkce_challenge(verifier: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+#[derive(Deserialize)]
+pub struct StartQuery {
+    /// `?link=1`: bind the IdP identity to the signed-in account instead of
+    /// signing in. Needs a session with an open confirm window.
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+/// The account behind the session cookie, for a link request. Needs the
+/// confirm window open (`confirm::require_window`): binding a sign-in method
+/// is as durable a foothold as adding a passkey.
+pub(crate) async fn link_requester(st: &AppState, jar: &CookieJar) -> AppResult<Uuid> {
+    crate::confirm::require_window(st, jar).await?;
+    let cookie = jar
+        .get(crate::state::SESSION_COOKIE)
+        .ok_or_else(|| AppError::Unauthorized("no session".into()))?;
+    let row: Option<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT s.admin_id, a.blocked_at FROM admin_sessions s
+         JOIN admins a ON a.id = s.admin_id
+         WHERE (s.token_hash = $1
+                OR (s.prev_token_hash = $1 AND s.prev_valid_until > now()))
+           AND s.expires_at > now()",
+    )
+    .bind(crate::auth::hash_token(cookie.value()))
+    .fetch_optional(&st.db)
+    .await?;
+    match row {
+        None => Err(AppError::Unauthorized("no session".into())),
+        Some((_, Some(_paused))) => Err(AppError::ForbiddenForMember(
+            "this account is paused — a parent has to lift it first".into(),
+        )),
+        Some((admin_id, None)) => Ok(admin_id),
+    }
+}
+
 /// GET /api/auth/oidc/start — 302 to the provider's authorize URL.
-pub async fn start(State(st): State<AppState>, jar: CookieJar) -> AppResult<(CookieJar, Redirect)> {
+pub async fn start(
+    State(st): State<AppState>,
+    jar: CookieJar,
+    Query(q): Query<StartQuery>,
+) -> AppResult<(CookieJar, Redirect)> {
     let oidc = st
         .oidc
         .as_ref()
@@ -297,7 +377,16 @@ pub async fn start(State(st): State<AppState>, jar: CookieJar) -> AppResult<(Coo
     let endpoints = oidc.endpoints().map_err(|_| {
         AppError::NotFound("sso is not reachable right now — try again in a minute".into())
     })?;
-    let state = oidc.issue_state("/".to_string()).await;
+    let link_admin = match q.link.as_deref() {
+        Some("1") | Some("true") => Some(link_requester(&st, &jar).await?),
+        _ => None,
+    };
+    let redirect_to = if link_admin.is_some() {
+        "/settings?sso=linked"
+    } else {
+        "/"
+    };
+    let (state, challenge) = oidc.issue_state(redirect_to.to_string(), link_admin).await;
 
     let mut url = url::Url::parse(&endpoints.authorization_endpoint)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("bad authorization endpoint: {e}")))?;
@@ -306,7 +395,9 @@ pub async fn start(State(st): State<AppState>, jar: CookieJar) -> AppResult<(Coo
         .append_pair("client_id", &oidc.client_id)
         .append_pair("redirect_uri", &oidc.redirect_uri)
         .append_pair("scope", "openid email profile")
-        .append_pair("state", &state);
+        .append_pair("state", &state)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256");
     // Bind the flow to this browser: the callback requires this cookie to equal
     // the returned `state`.
     let jar = jar.add(state_cookie(state, st.cookie_secure));
@@ -328,6 +419,9 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 struct UserInfo {
+    /// The IdP's stable subject identifier: with the issuer, THE identity.
+    #[serde(default)]
+    sub: Option<String>,
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -339,7 +433,7 @@ struct UserInfo {
 /// GET /api/auth/oidc/callback — code exchange + userinfo + session.
 ///
 /// Failures redirect back to the login page (`?error=sso_failed`, or
-/// `?error=sso_unknown_account` for an email no admin owns) instead of
+/// `?error=sso_not_linked` for an IdP identity no account is bound to) instead of
 /// surfacing a JSON error to a mid-redirect browser.
 pub async fn callback(
     State(st): State<AppState>,
@@ -369,12 +463,13 @@ pub async fn callback(
         tracing::warn!("oidc callback state does not match the browser cookie");
         return Ok(fail(jar, "sso_failed"));
     }
-    let Some(redirect_to) = oidc.take_state(&state).await else {
+    let Some(pending) = oidc.take_state(&state).await else {
         return Ok(fail(jar, "sso_failed"));
     };
 
-    // Exchange the code (client_secret in the POST body, per Authentik).
-    let token = match oidc.exchange_code(&code).await {
+    // Exchange the code (client_secret in the POST body, per Authentik; the
+    // PKCE verifier proves this server started the flow).
+    let token = match oidc.exchange_code(&code, &pending.pkce_verifier).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, "oidc code exchange failed");
@@ -390,42 +485,47 @@ pub async fn callback(
         }
     };
 
-    let Some(email) = info.email.filter(|e| !e.trim().is_empty()) else {
+    let Some(subject) = info.sub.filter(|s| !s.trim().is_empty()) else {
+        tracing::warn!("oidc userinfo has no `sub`");
         return Ok(fail(jar, "sso_failed"));
     };
-    // Require a positively verified email. An IdP that omits the claim entirely
-    // (email_verified: None) must NOT be trusted to prove ownership — otherwise a
-    // user who can set an arbitrary unverified email at the IdP could claim the
-    // admin's address and take over the account.
-    if info.email_verified != Some(true) {
-        return Ok(fail(jar, "sso_failed"));
-    }
 
-    // SSO keys the verified email as the account username (identity moved off the
-    // email column, which is being retired). Match case-insensitively.
-    let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, tenant_id FROM admins
-              WHERE lower(username) = lower($1) OR lower(email) = lower($1)",
-    )
-    .bind(&email)
-    .fetch_optional(&st.db)
-    .await?;
-
-    let (admin_id, tenant_id) = match existing {
-        Some((admin_id, tenant_id)) => (admin_id, tenant_id),
-        None => {
-            let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
-                .fetch_one(&st.db)
-                .await?;
-            if admins > 0 {
-                // Family server: no auto-provisioning of extra admins.
-                return Ok(fail(jar, "sso_unknown_account"));
+    match resolve_identity(&st.db, &oidc.issuer, &subject, pending.link_admin).await? {
+        Resolved::SignIn {
+            admin_id,
+            tenant_id,
+        } => {
+            let sid = create_session(&st.db, admin_id, tenant_id).await?;
+            let jar = jar.add(session_cookie(sid, st.cookie_secure));
+            let to = format!("{}{}", st.public_url, pending.redirect_to);
+            Ok((jar, Redirect::temporary(&to)))
+        }
+        Resolved::Linked => {
+            let to = format!("{}{}", st.public_url, pending.redirect_to);
+            Ok((jar, Redirect::temporary(&to)))
+        }
+        Resolved::LinkedElsewhere => {
+            let to = format!("{}/settings?sso=in_use", st.public_url);
+            Ok((jar, Redirect::temporary(&to)))
+        }
+        // Family server: no auto-provisioning of extra admins, and no
+        // matching on the email claim (anyone who can set their email at the
+        // IdP could otherwise become a parent here).
+        Resolved::NotLinked => Ok(fail(jar, "sso_not_linked")),
+        Resolved::FirstRun => {
+            let Some(email) = info.email.filter(|e| !e.trim().is_empty()) else {
+                return Ok(fail(jar, "sso_failed"));
+            };
+            // The first-run account is stamped with this email, so require a
+            // positively verified one (`email_verified: None` is not proof).
+            if info.email_verified != Some(true) {
+                return Ok(fail(jar, "sso_failed"));
             }
-            // Fresh install: the identity is verified, but the account is not
-            // created yet — the first parent gets to CHOOSE their username (the
-            // same as the passkey path), instead of one derived from their
-            // email. Park the identity and send them to the name-choosing page;
-            // no session is issued until they finish.
+            // The identity is verified, but the account is not created yet —
+            // the first parent gets to CHOOSE their username (the same as the
+            // passkey path), instead of one derived from their email. Park the
+            // identity and send them to the name-choosing page; no session is
+            // issued until they finish.
             let local = email.split('@').next().unwrap_or("user");
             let suggested_username = crate::auth::normalize_username(local)
                 .unwrap_or_else(|_| format!("user-{}", &gen_token()[..8]));
@@ -442,20 +542,89 @@ pub async fn callback(
                     PendingSignup {
                         created: Instant::now(),
                         email: email.clone(),
+                        subject,
                         suggested_username,
                         suggested_name,
                     },
                 );
             }
             let to = format!("{}/welcome?setup={token}", st.public_url);
-            return Ok((jar, Redirect::temporary(&to)));
+            Ok((jar, Redirect::temporary(&to)))
         }
-    };
+    }
+}
 
-    let sid = create_session(&st.db, admin_id, tenant_id).await?;
-    let jar = jar.add(session_cookie(sid, st.cookie_secure));
-    let to = format!("{}{redirect_to}", st.public_url);
-    Ok((jar, Redirect::temporary(&to)))
+/// What an IdP identity means here.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Resolved {
+    /// Bound to this account: sign it in.
+    SignIn { admin_id: Uuid, tenant_id: Uuid },
+    /// A link request: the identity is now bound to the requesting account.
+    Linked,
+    /// A link request, but the identity is already bound to another account.
+    LinkedElsewhere,
+    /// Nobody here has this identity, and accounts exist: refuse.
+    NotLinked,
+    /// Nobody exists yet: the first-run signup may claim the server.
+    FirstRun,
+}
+
+/// Map `(issuer, subject)` to an account — the ONLY identity SSO trusts.
+/// `link_admin` is the signed-in, confirmed account that asked to link
+/// (`start?link=1`); for a plain sign-in it is `None`.
+pub(crate) async fn resolve_identity(
+    db: &sqlx::PgPool,
+    issuer: &str,
+    subject: &str,
+    link_admin: Option<Uuid>,
+) -> AppResult<Resolved> {
+    let bound: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, tenant_id FROM admins WHERE oidc_issuer = $1 AND oidc_subject = $2",
+    )
+    .bind(issuer)
+    .bind(subject)
+    .fetch_optional(db)
+    .await?;
+
+    if let Some(me) = link_admin {
+        return match bound {
+            Some((owner, _)) if owner == me => Ok(Resolved::Linked),
+            Some(_) => Ok(Resolved::LinkedElsewhere),
+            None => {
+                // The unique index still refuses a concurrent double-bind.
+                let res = sqlx::query(
+                    "UPDATE admins SET oidc_issuer = $1, oidc_subject = $2 WHERE id = $3",
+                )
+                .bind(issuer)
+                .bind(subject)
+                .bind(me)
+                .execute(db)
+                .await;
+                match res {
+                    Ok(_) => Ok(Resolved::Linked),
+                    Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                        Ok(Resolved::LinkedElsewhere)
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+        };
+    }
+
+    if let Some((admin_id, tenant_id)) = bound {
+        return Ok(Resolved::SignIn {
+            admin_id,
+            tenant_id,
+        });
+    }
+    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM admins")
+        .fetch_one(db)
+        .await?;
+    Ok(if admins == 0 {
+        Resolved::FirstRun
+    } else {
+        Resolved::NotLinked
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -543,8 +712,10 @@ pub async fn setup_finish(
 
     let (tenant_id, admin_id) =
         create_tenant_with_admin(&st.db, None, &username, &display_name, true).await?;
-    sqlx::query("UPDATE admins SET email = $1 WHERE id = $2")
+    sqlx::query("UPDATE admins SET email = $1, oidc_issuer = $2, oidc_subject = $3 WHERE id = $4")
         .bind(&pending.email)
+        .bind(&oidc.issuer)
+        .bind(&pending.subject)
         .bind(admin_id)
         .execute(&st.db)
         .await?;

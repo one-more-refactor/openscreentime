@@ -42,7 +42,12 @@ not the same as having installed the server.
 2. **Sign in with a passkey.** One tap, no name first: passkeys are created as
    discoverable credentials and the passkey says whose it is.
 
-Plus **Sign in with SSO**, only when OIDC is configured (`OST_OIDC_*`).
+Plus **Sign in with SSO**, only when OIDC is configured (`OST_OIDC_*`). SSO
+signs in the account bound to the IdP's `(issuer, sub)` and nothing else; the
+email claim is never matched. An account gets bound by the first-run SSO
+signup, or by **Link SSO** in Settings (`/api/auth/oidc/start?link=1`), which
+needs a signed-in session with the confirm window open. An unbound identity
+lands on `/login?error=sso_not_linked`. The flow uses PKCE (S256).
 And `ost login` on an enrolled computer opens the console already signed in
 (a one-time voucher in the URL fragment, for the person behind that OS login;
 parents only from their own computer's owner login). A parent's voucher

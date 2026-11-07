@@ -21,7 +21,8 @@ anywhere.
 | id, tenant_id | uuid | |
 | display_name | text | |
 | username | text | sign-in name; unique (case-insensitive) where set |
-| email | text, nullable, unique | legacy; SSO still matches on it |
+| email | text, nullable, unique | legacy; stamped by the first-run SSO signup, never matched |
+| oidc_issuer, oidc_subject | text, nullable | the SSO identity bound to this account; unique together |
 | role | text | `owner` \| `parent` \| `member` |
 | age_bracket | text | `little` \| `kid` \| `younger_teen` \| `older_teen` \| `adult` |
 | birthdate | date, nullable | picks the bracket when given |
